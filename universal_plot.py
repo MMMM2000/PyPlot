@@ -5,19 +5,25 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 import matplotlib.ticker as mticker
+import os
 
 # ==============================================================================
 #                            USER CONFIGURATION
 #
-# 1) File-glob for your data files:
+# 1) Directory where your data lives (absolute or relative):
+#      e.g. DATA_DIR = "/Users/martin/Library/CloudStorage/GoogleDrive-.../python plot"
+#           or DATA_DIR = "data_files"
+#
+# 2) File-glob for your data files inside that folder:
 #      GLOB_PATTERN = "*.txt"
 #
-# 2) Pick which variables to plot (uncomment to enable):
+# 3) Pick which variables to plot (uncomment to enable):
 #      PLOT_SUM = True    # T1 + T2
 #      PLOT_DT  = True    # T2 – T1
 #      PLOT_T1  = True
 #      PLOT_T2  = True
 #
+DATA_DIR      = "/Users/martin/Library/CloudStorage/GoogleDrive-elias@rvmagnetics.com/My Drive/1 Projects/python plot"
 GLOB_PATTERN = "FeSiBP 188_1 s2b 68mA *.txt"
 
 PLOT_SUM = True
@@ -32,23 +38,23 @@ if PLOT_DT:  PLOT_VARS.append("dT")
 if PLOT_T1:  PLOT_VARS.append("T1")
 if PLOT_T2:  PLOT_VARS.append("T2")
 
-# 3) Raw‐data styling
+# 4) Raw‐data styling
 RAW_COLORS       = {"a": "C0", "b": "C1"}
 RAW_MARKER       = "o"
 RAW_MARKER_SIZE  = 0.3
 RAW_ALPHA        = 0.4
 
-# 4) Mean‐curve styling
+# 5) Mean‐curve styling
 MEAN_COLORS      = {"a": "red",   "b": "green"}
 MEAN_MARKER      = "o"
 MEAN_MARKER_SIZE = 8
 MEAN_LINEWIDTH   = 3
 
-# 5) Spread/cloud parameters
+# 6) Spread/cloud parameters
 OFFSET      = 0.5    # shift loading left, unloading right
 JITTER_SPAN = 0.5    # ± random jitter around each center
 
-# 6) Print counts per (dir,load)?
+# 7) Print counts per (dir,load)?
 PRINT_COUNTS = False
 # ==============================================================================
 #                       END USER CONFIGURATION
@@ -65,7 +71,7 @@ FNAME_RE = re.compile(
     r"(?P<dir>[ab])$"
 )
 
-# human‐readable axis labels
+# human-readable axis labels
 LABELS = {
     "T1":  "T1 (µs)",
     "T2":  "T2 (µs)",
@@ -82,10 +88,12 @@ def parse_metadata(stem):
     md["load"] = float(md["load"].replace(",", "."))
     return md
 
-def load_data(pattern):
-    files = sorted(glob.glob(pattern))
+def load_data(data_dir, pattern):
+    # Glob inside the specified directory
+    search = os.path.join(data_dir, pattern)
+    files = sorted(glob.glob(search))
     if not files:
-        raise FileNotFoundError(f"No files match {pattern!r}")
+        raise FileNotFoundError(f"No files match {search!r}")
     dfs = []
     for fn in files:
         md = parse_metadata(Path(fn).stem)
@@ -108,7 +116,7 @@ def plot_variable(df, var):
         df["anneal"].iat[0],
     )
 
-    # 1) compute raw‐point centers + jitter
+    # 1) compute raw-point centers + jitter
     df["x_center"] = df["load"] + df["dir"].map({"a": -OFFSET, "b": +OFFSET})
     np.random.seed(0)
     df["x"] = df["x_center"] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(df))
@@ -191,16 +199,17 @@ def plot_variable(df, var):
     plt.grid(True)
     plt.legend()
     plt.tight_layout()
-    # no plt.show() here; we'll show all at the end
+    # no plt.show() here; we'll call it once at the end
 
 def main():
-    data = load_data(GLOB_PATTERN)
+    # load from your chosen directory + pattern
+    data = load_data(DATA_DIR, GLOB_PATTERN)
     for var in PLOT_VARS:
         if var not in LABELS:
             print(f"⚠️ Unknown var '{var}', skipping.")
             continue
         plot_variable(data, var)
-    # finally pop up all figures
+    # finally pop up all figures at once
     plt.show()
 
 if __name__ == "__main__":
