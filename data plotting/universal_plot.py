@@ -11,10 +11,10 @@ import matplotlib.ticker as mticker
 #
 # 1) DATA_DIR: directory where your data lives (absolute or relative):
 #      e.g. "/path/to/folder"
-DATA_DIR            = "/Users/martin/Library/CloudStorage/GoogleDrive-elias@rvmagnetics.com/My Drive/1 Projects/python plot"
+DATA_DIR            = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/PyQt5_jednoduchy_VCP_logger"
 
 # 2) GLOB_PATTERN: pattern to match your .txt files inside DATA_DIR
-GLOB_PATTERN        = "FeSiBP 188_1 s2b 68mA *.txt"
+GLOB_PATTERN        = "FeSiBP 188_1 s2-1a 68mA *.txt"
 
 # 3) Which vars to plot (uncomment to enable)
 PLOT_SUM            = True    # T1 + T2
@@ -33,10 +33,10 @@ if PLOT_T2:  PLOT_VARS.append("T2")
 RAW_COLORS          = {"a": "#0072B2", "b": "#D55E00"}
 RAW_MARKER          = "o"
 RAW_MARKER_SIZE     = 0.3
-RAW_ALPHA           = 0.4
+RAW_ALPHA           = 1
 
 # 5) Mean‐curve styling
-MEAN_COLORS         = {"a": "#E01717", "b": "#7917AA"}
+MEAN_COLORS         = {"a": "#BA1111", "b": "#7917AA"}
 MEAN_MARKER         = "o"
 MEAN_MARKER_SIZE    = 8
 MEAN_LINEWIDTH      = 3
@@ -49,15 +49,15 @@ JITTER_SPAN         = 0.5     # ± random jitter around each center
 PRINT_COUNTS        = False
 
 # 8) Processed‐data overlay: median + moving average
-PLOT_PROCESSED      = True    # toggle processed data on/off
+PLOT_PROCESSED      = False    # toggle processed data on/off
 MEDIAN_WINDOW       = 5       # samples for median filter
 MOVING_AVG_WINDOW   = 20      # samples for moving-average
 
 # 9) Processed‐curve styling (markers only)
 PROCESSED_COLORS      = {"a": "#E69F00", "b": "#56B4E9"}
 PROCESSED_MARKER      = "s"
-PROCESSED_MARKER_SIZE = 0.3
-PROCESSED_ALPHA       = 0.8
+PROCESSED_MARKER_SIZE = 0.5
+PROCESSED_ALPHA       = 0.5
 # ==============================================================================
 #                       END USER CONFIGURATION
 
@@ -65,13 +65,13 @@ PROCESSED_ALPHA       = 0.8
 # Filename metadata regex: composition, title, sample_end, anneal,
 # load (with comma), dir (a/b)
 FNAME_RE = re.compile(
-    r"^(?P<composition>.+?)\s+"
-    r"(?P<title>\S+)\s+"
-    r"(?P<sample_end>s\d+[ab])\s+"
-    r"(?P<anneal>\S+)\s+"
-    r"(?P<load>\d+(?:,\d+)?)"
-    r"(?P<dir>[ab])$"
+    r"^(?P<composition>.+?)\s+"          # e.g. FeSiBP
+    r"(?P<title>\S+)\s+"               # e.g. 188_1
+    r"(?P<sample_end>s\d+(?:-\d+)?[ab])\s+"  # e.g. s2, s2a, s2-1b
+    r"(?P<anneal>\S+)\s+"              # e.g. 68mA
+    r"(?P<load>\d+(?:,\d+)?)(?P<dir>[ab])$"  # e.g. 10a, 2,5b
 )
+
 
 # human-readable axis labels
 LABELS = {
