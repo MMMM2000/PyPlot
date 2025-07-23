@@ -27,10 +27,10 @@ class MainWindow_prog(QtWidgets.QMainWindow):
         self.timer.start(10)
         
         self.f_name = None
-        self.f_out = None
+        self.log_file = None
         self.pocet_vzoriek = 1000
         self.vzorka_N = 0
-        self.zaznam_on = False
+        self.logging_on = False
         
         print("Číslo portu: COM" + str(self.cislo_portu))
         print("Baudrate: " + str(self.baudrate))
@@ -84,18 +84,18 @@ class MainWindow_prog(QtWidgets.QMainWindow):
         print("Baudrate: " + str(self.baudrate))
 
     def handle_ser_mcu_readyRead(self):
-        if(self.ser_mcu.canReadLine()):
+        if self.ser_mcu.canReadLine():
             self.zamok.lock()
-            self.odpoved_portu = str(self.ser_mcu.readLine(),'ascii')
-            if(self.zaznam_on == True):
-                self.f_out.write(self.odpoved_portu.strip(">"))
+            self.odpoved_portu = str(self.ser_mcu.readLine(), "ascii")
+            if self.logging_on:
+                self.log_file.write(self.odpoved_portu.strip(">"))
                 self.vzorka_N += 1
-                if(self.vzorka_N >= self.pocet_vzoriek):
-                    self.f_out.close()
-                    self.zaznam_on = False
+                if self.vzorka_N >= self.pocet_vzoriek:
+                    self.log_file.close()
+                    self.logging_on = False
                     self.ui.pushButton_log_zaznam.setEnabled(True)
             self.zamok.unlock()
-            #print(self.odpoved_portu)
+            # print(self.odpoved_portu)
                     
     def handle_update_label_odpoved_portu(self):
         self.ui.label_odpoved_portu.setText(self.odpoved_portu)
@@ -105,13 +105,20 @@ class MainWindow_prog(QtWidgets.QMainWindow):
         print('Poslaný príkaz: ' + self.prikaz_portu)
         self.ser_mcu.write(bytes(self.prikaz_portu, encoding='ascii'))
     
-    def handle_pushButton_log_zaznam_clicked(self):            
+    def handle_pushButton_log_zaznam_clicked(self):
         self.f_name = self.ui.lineEdit_log_subor.text()
-        self.f_out = open(self.f_name, "w")
+        self.log_file = open(self.f_name, "w")
         self.pocet_vzoriek = self.ui.spinBox_log_pocet_vzoriek.value()
         self.vzorka_N = 0
-        self.zaznam_on = True
+        self.logging_on = True
         self.ui.pushButton_log_zaznam.setEnabled(False)
+
+    def closeEvent(self, event):
+        if self.log_file and not self.log_file.closed:
+            self.log_file.close()
+        self.logging_on = False
+        self.ui.pushButton_log_zaznam.setEnabled(True)
+        super(MainWindow_prog, self).closeEvent(event)
 
 
 if __name__ == "__main__":
