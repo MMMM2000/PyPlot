@@ -49,9 +49,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.setCurrentIndex(0)  # highest bitrate
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
-        # default log file inside log_dir
-        default_path = os.path.join(self.log_dir, "log.txt")
-        self.ui.lineEdit_log_file.setText(default_path)
+        # show only the file name in the UI, but save inside log_dir
+        self.ui.lineEdit_log_file.setText("log.txt")
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
@@ -114,11 +113,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.serial.write(self.port_command.encode('ascii'))
 
     def start_logging(self):
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select log file", self.ui.lineEdit_log_file.text())
+        file_name = self.ui.lineEdit_log_file.text()
+        initial = os.path.join(self.log_dir, file_name)
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select log file", initial)
         if not path:
             return
-        self.ui.lineEdit_log_file.setText(path)
-        self.log_file = open(path, "w")
+        file_name = os.path.basename(path)
+        self.ui.lineEdit_log_file.setText(file_name)
+        full_path = os.path.join(self.log_dir, file_name)
+        try:
+            self.log_file = open(full_path, "w")
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to open {full_path}: {exc}")
+            return
         self.sample_count = self.ui.spinBox_log_sample_count.value()
         self.sample_idx = 0
         self.logging_on = True
