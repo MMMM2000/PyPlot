@@ -1,40 +1,46 @@
 # Python Plot
 
-This repository contains tools for logging and plotting measurement data.
+This repository contains simple tools for logging measurement data and plotting the resulting text files.
 
-## Usage
+## Plotting stress dependence data
 
-The script `data_plotting/universal_plot.py` plots the text files located in a data directory. By default the script looks in `./data`.
+`data_plotting/stress_dependence_plot.py` generates plots from a folder of measurement files.  The script does not provide command line options; instead edit the **USER CONFIGURATION** section at the top of the file to match your setup:
 
-You can specify a custom data directory with the `--data-dir` option or the `DATA_DIR` environment variable:
+- `DATA_DIR` – directory where your raw `.txt` files live
+- `OUTPUT_DIR` – directory in which to save generated plots
+- `GLOB_PATTERN` – wildcard pattern for selecting files
 
-```bash
-# using command-line argument
-python3 data_plotting/universal_plot.py --data-dir /path/to/my/files
+Measurement file names must follow:
 
-# or using environment variable
-DATA_DIR=/path/to/my/files python3 data_plotting/universal_plot.py
+```
+<composition> <title> <sample_end> <anneal> <load><dir>.txt
 ```
 
-The script uses the pattern defined by `GLOB_PATTERN` inside the data directory to select files and then shows the resulting plots.
+For example `FeSiBP 188_1 s4-2a 68mA 10a.txt`.
+
+Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  After editing the configuration simply run:
+
+```bash
+python3 data_plotting/stress_dependence_plot.py
+```
 
 ## Data logger
 
-The GUI logger in `data_logger/main.py` can save measurement output to a
-directory of your choice. At the top of the script there is a **USER
-CONFIGURATION** section where you can edit the `LOG_DIR` variable to point to
-your preferred folder. This location can still be overridden with the
-`--log-dir` command line option or the `LOG_DIR` environment variable:
+The GUI logger under `data_logger/main.py` records serial data to a file.  At the top of the script you can set the default `LOG_DIR` path.  This location can also be overridden via the `--log-dir` command line option or the `LOG_DIR` environment variable.
+
+Launch the logger with:
 
 ```bash
-# using command-line argument
-python3 data_logger/main.py --log-dir /path/to/save
-
-# or using environment variable
-LOG_DIR=/path/to/save python3 data_logger/main.py
+python3 data_logger/main.py
 ```
 
-Only the log file **name** is entered in the GUI.  The file is saved inside
-the directory specified by `LOG_DIR`.  When selecting a file via the "Record"
-button the dialog will start in this directory and only the chosen file name is
-shown in the text box.
+Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log inside `LOG_DIR`.
+
+## Requirements
+
+Both scripts require Python 3 with `numpy`, `pandas`, `matplotlib` and `PyQt5` installed:
+
+```bash
+pip install numpy pandas matplotlib PyQt5
+```
+
