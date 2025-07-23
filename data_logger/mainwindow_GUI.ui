@@ -94,7 +94,7 @@
       <number>1000000</number>
      </property>
      <property name="value">
-      <number>1000</number>
+      <number>2000</number>
      </property>
     </widget>
     <widget class="QPushButton" name="pushButton_record">
@@ -203,7 +203,7 @@
      <widget class="QLabel" name="label_baudrate">
       <property name="geometry">
        <rect>
-        <x>150</x>
+        <x>220</x>
         <y>20</y>
         <width>41</width>
         <height>16</height>
@@ -216,7 +216,7 @@
      <widget class="QComboBox" name="comboBox_baudrate">
       <property name="geometry">
        <rect>
-        <x>190</x>
+        <x>270</x>
         <y>20</y>
         <width>91</width>
         <height>22</height>

@@ -22,7 +22,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.start(10)
 
         self.log_file = None
-        self.sample_count = 1000
+        self.sample_count = 2000
         self.sample_idx = 0
         self.logging_on = False
 
