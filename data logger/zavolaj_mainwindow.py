@@ -16,9 +16,9 @@ class MainWindow_prog(QtWidgets.QMainWindow):
         self.odpoved_portu = ''
         self.prikaz_portu = ''
         self.pripojene = False
-        self.cislo_portu = self.ui.spinBox_cislo_portu.value()
+        self.cislo_portu = self.ui.spinBox_port_number.value()
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
-        self.ui.groupBox_prikazy_a_odpovede.setEnabled(False)
+        self.ui.groupBox_commands.setEnabled(False)
         self.ser_mcu = QtSerialPort.QSerialPort()
         self.zamok = QtCore.QMutex()
         self.timer = QtCore.QTimer()
@@ -36,11 +36,11 @@ class MainWindow_prog(QtWidgets.QMainWindow):
         print("Baudrate: " + str(self.baudrate))
         
         #prepojenie signalov a slotov
-        self.ui.pushButton_pripojPort.clicked.connect(self.handle_pushButton_pripojPort_clicked)
-        self.ui.spinBox_cislo_portu.valueChanged.connect(self.handle_spinBox_cislo_portu_valueChanged)
+        self.ui.pushButton_connect.clicked.connect(self.handle_pushButton_pripojPort_clicked)
+        self.ui.spinBox_port_number.valueChanged.connect(self.handle_spinBox_cislo_portu_valueChanged)
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.handle_comboBox_baudrate_currentIndexChanged)
-        self.ui.pushButton_posli_prikaz_portu.clicked.connect(self.handle_pushButton_posli_prikaz_portu_clicked)
-        self.ui.pushButton_log_zaznam.clicked.connect(self.handle_pushButton_log_zaznam_clicked)
+        self.ui.pushButton_send.clicked.connect(self.handle_pushButton_posli_prikaz_portu_clicked)
+        self.ui.pushButton_start_log.clicked.connect(self.handle_pushButton_log_zaznam_clicked)
         
         
         
@@ -63,8 +63,8 @@ class MainWindow_prog(QtWidgets.QMainWindow):
                     self.ser_mcu.clear()
                     self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
                     self.pripojene = True
-                    self.ui.pushButton_pripojPort.setText('Odpoj port')
-                    self.ui.groupBox_prikazy_a_odpovede.setEnabled(True)
+                    self.ui.pushButton_connect.setText('Odpoj port')
+                    self.ui.groupBox_commands.setEnabled(True)
             else:
                     print('Pripojenie portu zlyhalo')
 
@@ -72,11 +72,11 @@ class MainWindow_prog(QtWidgets.QMainWindow):
             print('Odpájam port')
             self.ser_mcu.close()
             self.pripojene = False
-            self.ui.pushButton_pripojPort.setText('Pripojiť sa k portu')
-            self.ui.groupBox_prikazy_a_odpovede.setEnabled(False)
+            self.ui.pushButton_connect.setText('Pripojiť sa k portu')
+            self.ui.groupBox_commands.setEnabled(False)
 
     def handle_spinBox_cislo_portu_valueChanged(self):
-        self.cislo_portu = self.ui.spinBox_cislo_portu.value()
+        self.cislo_portu = self.ui.spinBox_port_number.value()
         print("Číslo portu: COM" + str(self.cislo_portu))
             
     def handle_comboBox_baudrate_currentIndexChanged(self):
@@ -93,25 +93,25 @@ class MainWindow_prog(QtWidgets.QMainWindow):
                 if(self.vzorka_N >= self.pocet_vzoriek):
                     self.f_out.close()
                     self.zaznam_on = False
-                    self.ui.pushButton_log_zaznam.setEnabled(True)
+                    self.ui.pushButton_start_log.setEnabled(True)
             self.zamok.unlock()
             #print(self.odpoved_portu)
                     
     def handle_update_label_odpoved_portu(self):
-        self.ui.label_odpoved_portu.setText(self.odpoved_portu)
+        self.ui.label_response.setText(self.odpoved_portu)
 
     def handle_pushButton_posli_prikaz_portu_clicked(self):
-        self.prikaz_portu = self.ui.lineEdit_prikaz_portu.text() + "\n"
+        self.prikaz_portu = self.ui.lineEdit_command.text() + "\n"
         print('Poslaný príkaz: ' + self.prikaz_portu)
         self.ser_mcu.write(bytes(self.prikaz_portu, encoding='ascii'))
     
     def handle_pushButton_log_zaznam_clicked(self):            
-        self.f_name = self.ui.lineEdit_log_subor.text()
+        self.f_name = self.ui.lineEdit_logfile.text()
         self.f_out = open(self.f_name, "w")
-        self.pocet_vzoriek = self.ui.spinBox_log_pocet_vzoriek.value()
+        self.pocet_vzoriek = self.ui.spinBox_sample_count.value()
         self.vzorka_N = 0
         self.zaznam_on = True
-        self.ui.pushButton_log_zaznam.setEnabled(False)
+        self.ui.pushButton_start_log.setEnabled(False)
 
 
 if __name__ == "__main__":
