@@ -14,11 +14,7 @@
    <string>MainWindow</string>
   </property>
   <widget class="QWidget" name="centralWidget">
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
    <widget class="QGroupBox" name="groupBox_commands">
-=======
-   <widget class="QGroupBox" name="groupBox_commands">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
     <property name="geometry">
      <rect>
       <x>40</x>
@@ -30,17 +26,13 @@
     <property name="title">
      <string>Commands and Responses</string>
     </property>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QLabel" name="label_response">
-=======
     <widget class="QLabel" name="label_port_response">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>20</x>
        <y>60</y>
        <width>521</width>
-       <height>61</height>
+       <height>71</height>
       </rect>
      </property>
      <property name="text">
@@ -49,12 +41,11 @@
      <property name="alignment">
       <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
      </property>
+            <property name="wordWrap">
+              <bool>true</bool>
+            </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QLineEdit" name="lineEdit_command">
-=======
     <widget class="QLineEdit" name="lineEdit_port_command">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>20</x>
@@ -64,11 +55,7 @@
       </rect>
      </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QPushButton" name="pushButton_send">
-=======
     <widget class="QPushButton" name="pushButton_send_command">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>460</x>
@@ -81,11 +68,7 @@
       <string>Send</string>
      </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
     <widget class="QLabel" name="label_samples">
-=======
-    <widget class="QLabel" name="label_samples">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>500</x>
@@ -98,11 +81,7 @@
       <string>samples</string>
      </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QSpinBox" name="spinBox_sample_count">
-=======
     <widget class="QSpinBox" name="spinBox_log_sample_count">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>410</x>
@@ -118,11 +97,7 @@
       <number>1000</number>
      </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QPushButton" name="pushButton_start_log">
-=======
     <widget class="QPushButton" name="pushButton_record">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>310</x>
@@ -135,11 +110,7 @@
       <string>Record</string>
      </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QLineEdit" name="lineEdit_logfile">
-=======
     <widget class="QLineEdit" name="lineEdit_log_file">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>60</x>
@@ -152,11 +123,7 @@
       <string>log.txt</string>
      </property>
     </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QLabel" name="label_logfile">
-=======
     <widget class="QLabel" name="label_log_file">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>20</x>
@@ -170,11 +137,7 @@
      </property>
     </widget>
    </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-   <widget class="QPushButton" name="pushButton_connect">
-=======
    <widget class="QPushButton" name="pushButton_connect_port">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
     <property name="geometry">
      <rect>
       <x>60</x>
@@ -187,11 +150,7 @@
      <string>Connect to port</string>
     </property>
    </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-   <widget class="QFrame" name="frame_basic_port_settings">
-=======
    <widget class="QFrame" name="frame_serial_settings">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
     <property name="geometry">
      <rect>
       <x>30</x>
@@ -206,11 +165,7 @@
     <property name="frameShadow">
      <enum>QFrame::Raised</enum>
     </property>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-    <widget class="QGroupBox" name="groupBox_basic_port_settings">
-=======
     <widget class="QGroupBox" name="groupBox_serial_settings">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
      <property name="geometry">
       <rect>
        <x>10</x>
@@ -222,11 +177,7 @@
      <property name="title">
       <string>Serial port settings</string>
      </property>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
      <widget class="QLabel" name="label_port_number">
-=======
-     <widget class="QLabel" name="label_port_number">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
       <property name="geometry">
        <rect>
         <x>10</x>
@@ -239,11 +190,7 @@
        <string>Port:</string>
       </property>
      </widget>
-<<<<<<< HEAD:data logger/mainwindow_GUI.ui
-     <widget class="QSpinBox" name="spinBox_port_number">
-=======
      <widget class="QComboBox" name="comboBox_port">
->>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
       <property name="geometry">
        <rect>
         <x>70</x>
