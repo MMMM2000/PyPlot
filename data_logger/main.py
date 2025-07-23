@@ -1,11 +1,28 @@
 import sys
+import os
 from PyQt5 import QtCore, QtWidgets, QtSerialPort
 from PyQt5.QtSerialPort import QSerialPortInfo
 from mainwindow_GUI import Ui_MainWindow
 
+# ==============================================================================
+#                            USER CONFIGURATION
+#
+# 1) LOG_DIR: default directory where logged data will be stored. Modify this
+#    path to your preferred location. The value can still be overridden via
+#    the --log-dir command line option or the LOG_DIR environment variable.
+LOG_DIR = (
+    "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/"
+    "stress depencence/PyQt5_jednoduchy_VCP_logger"
+)
+# ==============================================================================
+
+DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
+
+
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self):
+    def __init__(self, log_dir=DEFAULT_LOG_DIR):
         super().__init__()
+        self.log_dir = log_dir
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
@@ -26,9 +43,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_idx = 0
         self.logging_on = False
 
+        os.makedirs(self.log_dir, exist_ok=True)
+
         self.populate_ports()
         self.ui.comboBox_baudrate.setCurrentIndex(0)  # highest bitrate
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
+
+        # default log file inside log_dir
+        default_path = os.path.join(self.log_dir, "log.txt")
+        self.ui.lineEdit_log_file.setText(default_path)
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
@@ -102,7 +125,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_record.setEnabled(False)
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Serial data logger")
+    parser.add_argument(
+        "--log-dir",
+        help="Directory to save logs [env: LOG_DIR]",
+    )
+    args = parser.parse_args()
+
+    log_dir = args.log_dir or DEFAULT_LOG_DIR
+
     app = QtWidgets.QApplication(sys.argv)
-    window = MainWindow()
+    window = MainWindow(log_dir)
     window.show()
     sys.exit(app.exec())
