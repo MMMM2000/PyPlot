@@ -33,3 +33,8 @@ python3 data_logger/main.py --log-dir /path/to/save
 # or using environment variable
 LOG_DIR=/path/to/save python3 data_logger/main.py
 ```
+
+Only the log file **name** is entered in the GUI.  The file is saved inside
+the directory specified by `LOG_DIR`.  When selecting a file via the "Record"
+button the dialog will start in this directory and only the chosen file name is
+shown in the text box.
