@@ -12,10 +12,10 @@ import matplotlib.ticker as mticker
 # 1) DATA_DIR: default directory where your data lives (absolute or relative):
 #      e.g. "/path/to/folder"
 #      can be overridden via command line or DATA_DIR env var
-DATA_DIR            = "./data"
+DATA_DIR            = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/PyQt5_jednoduchy_VCP_logger"
 
 # 2) GLOB_PATTERN: pattern to match your .txt files inside DATA_DIR
-GLOB_PATTERN        = "FeSiBP 188_1 s3-2b 68mA *.txt"
+GLOB_PATTERN        = "FeSiBP 188_1 s4-2a 68mA *.txt"
 
 # 3) Which vars to plot (uncomment to enable)
 PLOT_SUM            = True    # T1 + T2
