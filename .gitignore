@@ -1,4 +1,15 @@
+<<<<<<< HEAD
 __pycache__/
 *.pyc
 .DS_Store
+=======
+# Ignore Python bytecode and caches
+__pycache__/
+*.py[cod]
+
+# macOS metadata
+.DS_Store
+
+# VS Code settings
+>>>>>>> vncxeo-codex/improve-data-logger-script
 .vscode/

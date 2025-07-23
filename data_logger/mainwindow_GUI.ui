@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>639</width>
+    <height>513</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>MainWindow</string>
+  </property>
+  <widget class="QWidget" name="centralWidget">
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+   <widget class="QGroupBox" name="groupBox_commands">
+=======
+   <widget class="QGroupBox" name="groupBox_commands">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+    <property name="geometry">
+     <rect>
+      <x>40</x>
+      <y>290</y>
+      <width>561</width>
+      <height>181</height>
+     </rect>
+    </property>
+    <property name="title">
+     <string>Commands and Responses</string>
+    </property>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QLabel" name="label_response">
+=======
+    <widget class="QLabel" name="label_port_response">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>20</x>
+       <y>60</y>
+       <width>521</width>
+       <height>61</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Port response</string>
+     </property>
+     <property name="alignment">
+      <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QLineEdit" name="lineEdit_command">
+=======
+    <widget class="QLineEdit" name="lineEdit_port_command">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>20</x>
+       <y>29</y>
+       <width>431</width>
+       <height>21</height>
+      </rect>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QPushButton" name="pushButton_send">
+=======
+    <widget class="QPushButton" name="pushButton_send_command">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>460</x>
+       <y>30</y>
+       <width>81</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Send</string>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QLabel" name="label_samples">
+=======
+    <widget class="QLabel" name="label_samples">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>500</x>
+       <y>140</y>
+       <width>47</width>
+       <height>21</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>samples</string>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QSpinBox" name="spinBox_sample_count">
+=======
+    <widget class="QSpinBox" name="spinBox_log_sample_count">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>410</x>
+       <y>140</y>
+       <width>81</width>
+       <height>22</height>
+      </rect>
+     </property>
+     <property name="maximum">
+      <number>1000000</number>
+     </property>
+     <property name="value">
+      <number>1000</number>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QPushButton" name="pushButton_start_log">
+=======
+    <widget class="QPushButton" name="pushButton_record">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>310</x>
+       <y>140</y>
+       <width>91</width>
+       <height>23</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Record</string>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QLineEdit" name="lineEdit_logfile">
+=======
+    <widget class="QLineEdit" name="lineEdit_log_file">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>60</x>
+       <y>140</y>
+       <width>231</width>
+       <height>21</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>log.txt</string>
+     </property>
+    </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QLabel" name="label_logfile">
+=======
+    <widget class="QLabel" name="label_log_file">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>20</x>
+       <y>140</y>
+       <width>47</width>
+       <height>21</height>
+      </rect>
+     </property>
+     <property name="text">
+      <string>Log file:</string>
+     </property>
+    </widget>
+   </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+   <widget class="QPushButton" name="pushButton_connect">
+=======
+   <widget class="QPushButton" name="pushButton_connect_port">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+    <property name="geometry">
+     <rect>
+      <x>60</x>
+      <y>240</y>
+      <width>131</width>
+      <height>23</height>
+     </rect>
+    </property>
+    <property name="text">
+     <string>Connect to port</string>
+    </property>
+   </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+   <widget class="QFrame" name="frame_basic_port_settings">
+=======
+   <widget class="QFrame" name="frame_serial_settings">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+    <property name="geometry">
+     <rect>
+      <x>30</x>
+      <y>40</y>
+      <width>581</width>
+      <height>101</height>
+     </rect>
+    </property>
+    <property name="frameShape">
+     <enum>QFrame::StyledPanel</enum>
+    </property>
+    <property name="frameShadow">
+     <enum>QFrame::Raised</enum>
+    </property>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+    <widget class="QGroupBox" name="groupBox_basic_port_settings">
+=======
+    <widget class="QGroupBox" name="groupBox_serial_settings">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+     <property name="geometry">
+      <rect>
+       <x>10</x>
+       <y>10</y>
+       <width>561</width>
+       <height>81</height>
+      </rect>
+     </property>
+     <property name="title">
+      <string>Serial port settings</string>
+     </property>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+     <widget class="QLabel" name="label_port_number">
+=======
+     <widget class="QLabel" name="label_port_number">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+      <property name="geometry">
+       <rect>
+        <x>10</x>
+        <y>20</y>
+        <width>41</width>
+        <height>16</height>
+       </rect>
+      </property>
+      <property name="text">
+       <string>Port:</string>
+      </property>
+     </widget>
+<<<<<<< HEAD:data logger/mainwindow_GUI.ui
+     <widget class="QSpinBox" name="spinBox_port_number">
+=======
+     <widget class="QComboBox" name="comboBox_port">
+>>>>>>> vncxeo-codex/improve-data-logger-script:data_logger/mainwindow_GUI.ui
+      <property name="geometry">
+       <rect>
+        <x>70</x>
+        <y>20</y>
+        <width>100</width>
+        <height>22</height>
+       </rect>
+      </property>
+     </widget>
+     <widget class="QLabel" name="label_baudrate">
+      <property name="geometry">
+       <rect>
+        <x>150</x>
+        <y>20</y>
+        <width>41</width>
+        <height>16</height>
+       </rect>
+      </property>
+      <property name="text">
+       <string>Baud:</string>
+      </property>
+     </widget>
+     <widget class="QComboBox" name="comboBox_baudrate">
+      <property name="geometry">
+       <rect>
+        <x>190</x>
+        <y>20</y>
+        <width>91</width>
+        <height>22</height>
+       </rect>
+      </property>
+      <property name="currentText">
+       <string>115200</string>
+      </property>
+      <property name="currentIndex">
+       <number>2</number>
+      </property>
+      <item>
+       <property name="text">
+        <string>921600</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>460800</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>115200</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>57600</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>19200</string>
+       </property>
+      </item>
+      <item>
+       <property name="text">
+        <string>9600</string>
+       </property>
+      </item>
+     </widget>
+    </widget>
+   </widget>
+  </widget>
+  <widget class="QStatusBar" name="statusBar"/>
+ </widget>
+ <layoutdefault spacing="6" margin="11"/>
+ <resources/>
+ <connections/>
+</ui>
