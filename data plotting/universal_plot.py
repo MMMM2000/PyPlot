@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import re, glob, os
+import re, glob, os, argparse
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -9,9 +9,10 @@ import matplotlib.ticker as mticker
 # ==============================================================================
 #                            USER CONFIGURATION
 #
-# 1) DATA_DIR: directory where your data lives (absolute or relative):
+# 1) DATA_DIR: default directory where your data lives (absolute or relative):
 #      e.g. "/path/to/folder"
-DATA_DIR            = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/PyQt5_jednoduchy_VCP_logger"
+#      can be overridden via command line or DATA_DIR env var
+DATA_DIR            = "./data"
 
 # 2) GLOB_PATTERN: pattern to match your .txt files inside DATA_DIR
 GLOB_PATTERN        = "FeSiBP 188_1 s3-2b 68mA *.txt"
@@ -217,7 +218,15 @@ def plot_variable(df, var):
     plt.tight_layout()
 
 def main():
-    data = load_data(DATA_DIR, GLOB_PATTERN)
+    parser = argparse.ArgumentParser(description="Plot measurement data")
+    parser.add_argument(
+        "--data-dir",
+        help="Directory containing data files [env: DATA_DIR]",
+    )
+    args = parser.parse_args()
+
+    data_dir = args.data_dir or os.getenv("DATA_DIR", DATA_DIR)
+    data = load_data(data_dir, GLOB_PATTERN)
     for var in PLOT_VARS:
         if var not in LABELS:
             print(f"⚠️ Unknown var '{var}', skipping.")
