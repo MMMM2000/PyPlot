@@ -14,7 +14,7 @@ import matplotlib.ticker as mticker
 DATA_DIR            = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/PyQt5_jednoduchy_VCP_logger"
 
 # 2) GLOB_PATTERN: pattern to match your .txt files inside DATA_DIR
-GLOB_PATTERN        = "FeSiBP 188_1 s3-1a 68mA *.txt"
+GLOB_PATTERN        = "FeSiBP 188_1 s3-2b 68mA *.txt"
 
 # 3) Which vars to plot (uncomment to enable)
 PLOT_SUM            = True    # T1 + T2
@@ -104,7 +104,14 @@ def load_data(data_dir, pattern):
         if md is None:
             print(f"Skipping unrecognized name: {fn}")
             continue
-        df = pd.read_csv(fn, sep=";", header=None, names=["T1","T2","dT","sum"])
+        df = pd.read_csv(
+            fn,
+            sep=";",
+            header=None,
+            names=["T1","T2","dT","sum"],
+            engine='python',        # use Python engine allows skipping
+            on_bad_lines='skip'      # skip lines with wrong column count
+        )
         for k, v in md.items():
             df[k] = v
         dfs.append(df)
