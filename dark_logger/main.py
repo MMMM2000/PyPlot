@@ -2,8 +2,14 @@ import threading
 import os
 from pathlib import Path
 
-import serial
-from serial.tools import list_ports
+try:
+    import serial
+    from serial.tools import list_ports
+except ImportError as exc:  # pragma: no cover - only triggered if pyserial missing
+    raise SystemExit(
+        "Missing pyserial. Install with 'pip install pyserial' and try again'") from exc
+
+import darkdetect
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
@@ -16,7 +22,8 @@ class LoggerApp(ttk.Window):
     """Serial data logger with a dark mode GUI."""
 
     def __init__(self):
-        super().__init__(themename='darkly')
+        theme = 'darkly' if darkdetect.isDark() else ttk.DEFAULT_THEME
+        super().__init__(themename=theme)
         self.title('Dark Logger')
         self.serial = None
         self.logging = False

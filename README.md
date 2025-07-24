@@ -43,8 +43,8 @@ Use the drop-down boxes to select the serial port and baud rate, then press **Co
 ## Dark mode logger
 
 `dark_logger/main.py` implements a minimal logger using `ttkbootstrap` and
-`pyserial`.  It starts with the "darkly" theme so the interface follows a dark
-appearance.  Launch it with:
+`pyserial`.  The script selects a dark or light theme automatically using
+`darkdetect` so the interface follows your system appearance.  Launch it with:
 
 ```bash
 python3 dark_logger/main.py
@@ -56,10 +56,11 @@ standard Tk bindings.
 ## Requirements
 
 The plotting script depends on `numpy`, `pandas` and `matplotlib`.  The PyQt logger
-requires `PyQt5` while the dark-mode logger uses `pyserial` and `ttkbootstrap`.
+requires `PyQt5` while the dark-mode logger uses `pyserial`, `ttkbootstrap` and
+`darkdetect`.
 Install the dependencies with:
 
 ```bash
-pip install numpy pandas matplotlib PyQt5 pyserial ttkbootstrap
+pip install numpy pandas matplotlib PyQt5 pyserial ttkbootstrap darkdetect
 ```
 
