@@ -39,6 +39,16 @@ python3 data_logger/main.py
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log inside `LOG_DIR`.
+### PyQt6 logger
+
+`pyqt6_logger/main.py` provides the same functionality using PyQt6. The script defaults to the highest baud rate and preloads the command and log file fields.
+
+Launch it with:
+
+```bash
+python3 pyqt6_logger/main.py
+```
+
 
 ## Dark mode logger
 
@@ -55,12 +65,12 @@ standard Tk bindings.
 
 ## Requirements
 
-The plotting script depends on `numpy`, `pandas` and `matplotlib`.  The PyQt logger
-requires `PyQt5` while the dark-mode logger uses `pyserial`, `ttkbootstrap` and
-`darkdetect` (optional).
+The plotting script depends on `numpy`, `pandas` and `matplotlib`.  The original
+logger uses `PyQt5` while the new PyQt6 version requires `PyQt6`.  The dark-mode
+logger relies on `pyserial`, `ttkbootstrap` and `darkdetect` (optional).
 Install the dependencies with:
 
 ```bash
-pip install numpy pandas matplotlib PyQt5 pyserial ttkbootstrap darkdetect
+pip install numpy pandas matplotlib PyQt5 PyQt6 pyserial ttkbootstrap darkdetect
 ```
 
