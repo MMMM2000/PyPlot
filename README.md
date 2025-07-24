@@ -30,7 +30,8 @@ python3 data_plotting/stress_dependence_plot.py
 top of the script you can set the default `LOG_DIR` path as well as the
 pre-filled command string and suggested log file name.  `LOG_DIR` can also be
 overridden via the `--log-dir` command line option or the `LOG_DIR` environment
-variable.
+variable.  The interface uses a dark Fusion palette with rounded buttons for a
+modern look.
 
 Launch the logger with:
 

@@ -1,6 +1,7 @@
 import sys
 import os
 from PyQt6 import QtCore, QtGui, QtWidgets, QtSerialPort
+from PyQt6.QtGui import QFontDatabase
 from PyQt6.QtSerialPort import QSerialPortInfo
 from mainwindow_GUI import Ui_MainWindow
 
@@ -47,16 +48,54 @@ def apply_dark_palette(app: QtWidgets.QApplication) -> None:
     app.setPalette(palette)
 
 
+MODERN_STYLE = """
+QWidget {
+    font-size: 10pt;
+}
+QGroupBox {
+    font-weight: bold;
+    border: 1px solid #666;
+    margin-top: 20px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 3px;
+}
+QPushButton {
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+QPushButton:hover {
+    background-color: #3d7cf6;
+}
+QLineEdit, QComboBox, QSpinBox {
+    padding: 4px;
+    border-radius: 2px;
+}
+QPushButton#pushButton_connect_port {
+    background-color: #4a90e2;
+    color: white;
+}
+QPushButton#pushButton_connect_port:hover {
+    background-color: #5aa2f0;
+}
+"""
+
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_dir=DEFAULT_LOG_DIR):
         super().__init__()
         self.log_dir = log_dir
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        font = self.font()
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
         font.setPointSize(10)
         self.setFont(font)
-        self.setStyleSheet("QGroupBox { font-weight: bold; }")
+        self.ui.label_port_response.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.setStyleSheet(MODERN_STYLE)
 
         self.port_response = ""
         self.connected = False
