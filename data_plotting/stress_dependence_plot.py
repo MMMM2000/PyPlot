@@ -10,7 +10,7 @@ import matplotlib.ticker as mticker
 #                            USER CONFIGURATION
 #
 # 1) DATA_DIR: where your .txt files live
-DATA_DIR       = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/PyQt5_jednoduchy_VCP_logger"
+DATA_DIR       = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/data"
 
 # 2) OUTPUT_DIR: where to save plot images
 OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/plots/test"
@@ -20,7 +20,7 @@ OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/str
 #      <composition> <title> <sample_end> <anneal> <load><dir>.txt
 #    e.g. FeSiBP 188_1 s4-2a 68mA 10a.txt
 #         FeSiBP 188_1 s*-* 68mA *.txt
-GLOB_PATTERN   = "FeSiBP 188_1 s2-* 68mA *.txt"
+GLOB_PATTERN   = "FeSiB 85_10 s3-1b 47mA *.txt"
 
 # 4) Variables to plot
 PLOT_SUM       = True    # T1+T2

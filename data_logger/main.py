@@ -12,7 +12,7 @@ from mainwindow_GUI import Ui_MainWindow
 #    the --log-dir command line option or the LOG_DIR environment variable.
 LOG_DIR = (
     "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/"
-    "stress depencence/PyQt5_jednoduchy_VCP_logger"
+    "stress depencence/data"
 )
 # ==============================================================================
 
