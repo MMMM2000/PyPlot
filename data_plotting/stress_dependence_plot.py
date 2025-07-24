@@ -182,7 +182,19 @@ def plot_variable(df, var, save_flag, out_dir):
     ax.set_ylabel(LABELS[var])
     ax.set_title(f"{comp} {title} {samp} {anneal} — {LABELS[var]}")
     ax.grid(True)
-    ax.legend(loc='best')
+    legend = ax.legend(loc='best')
+    for text, handle in zip(legend.get_texts(), legend.legend_handles):
+        if hasattr(handle, 'get_color'):
+            color = handle.get_color()
+        elif hasattr(handle, 'get_facecolor'):
+            color = handle.get_facecolor()
+        else:
+            color = 'black'
+        if isinstance(color, np.ndarray):
+            # use the first color if multiple are returned
+            if color.ndim > 1:
+                color = color[0]
+        text.set_color(color)
     fig.tight_layout()
 
     if save_flag:
