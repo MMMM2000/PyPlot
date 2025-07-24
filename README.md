@@ -26,7 +26,11 @@ python3 data_plotting/stress_dependence_plot.py
 
 ## Data logger
 
-The GUI logger under `data_logger/main.py` records serial data to a file.  At the top of the script you can set the default `LOG_DIR` path.  This location can also be overridden via the `--log-dir` command line option or the `LOG_DIR` environment variable.
+The GUI logger under `data_logger/main.py` records serial data to a file.  At the
+top of the script you can set the default `LOG_DIR` path as well as the
+pre-filled command string and suggested log file name.  `LOG_DIR` can also be
+overridden via the `--log-dir` command line option or the `LOG_DIR` environment
+variable.
 
 Launch the logger with:
 
