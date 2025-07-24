@@ -20,7 +20,7 @@ OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/str
 #      <composition> <title> <sample_end> <anneal> <load><dir>.txt
 #    e.g. FeSiBP 188_1 s4-2a 68mA 10a.txt
 #         FeSiBP 188_1 s*-* 68mA *.txt
-GLOB_PATTERN   = "FeSiBP 156_2 s2-1b 74mA *.txt"
+GLOB_PATTERN   = "FeSiBP 156_2 s2-2b 74mA *.txt"
 
 # 4) Variables to plot
 PLOT_SUM       = True    # T1+T2
