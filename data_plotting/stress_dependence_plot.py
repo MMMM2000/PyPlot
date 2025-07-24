@@ -38,13 +38,13 @@ if PLOT_T2:   PLOT_VARS.append("T2")
 BASELINE_MODE  = 'first'  # options: 'first', 'min'
 
 # 6) Styling raw data
-RAW_COLORS     = {"a":"#0072B2","b":"#D55E00"}
+RAW_COLORS     = {"a":"#45A1D6","b":"#F09C67"}
 RAW_MARKER     = 'o'
 RAW_MARKER_SIZE= 0.3
 RAW_ALPHA      = 1.0
 
 # 7) Styling mean curves
-MEAN_COLORS    = {"a":"#BA1111","b":"#7917AA"}
+MEAN_COLORS    = {"a":"#00306E","b":"#965308"}
 MEAN_MARKER    = 'o'
 MEAN_MSIZE     = 8
 MEAN_LW        = 3
