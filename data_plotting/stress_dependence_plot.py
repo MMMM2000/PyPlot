@@ -184,6 +184,7 @@ def plot_variable(df, var, save_flag, out_dir):
     ax.grid(True)
     legend = ax.legend(loc='best')
     for text, handle in zip(legend.get_texts(), legend.legendHandles):
+    for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if hasattr(handle, 'get_color'):
             color = handle.get_color()
         elif hasattr(handle, 'get_facecolor'):
