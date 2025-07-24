@@ -2,7 +2,7 @@ import sys
 import os
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtSerialPort import QSerialPortInfo
-from .mainwindow_GUI import Ui_MainWindow
+from mainwindow_GUI import Ui_MainWindow
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -21,7 +21,7 @@ DEFAULT_PORT_COMMAND = ">2050;1270;1;"
 
 # 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
 #    only affects the default text shown in the GUI.
-DEFAULT_LOG_FILE_NAME = "FeSiB 85_10 s4-1a 47mA 2,5a.txt"
+DEFAULT_LOG_FILE_NAME = "FeSiBP 156_2 s2-1a 74mA 2,5a.txt"
 # =============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)

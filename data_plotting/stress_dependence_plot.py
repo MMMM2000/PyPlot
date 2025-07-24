@@ -13,14 +13,14 @@ import matplotlib.ticker as mticker
 DATA_DIR       = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/data"
 
 # 2) OUTPUT_DIR: where to save plot images
-OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/plots/test"
+OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/plots/85_10"
 
 # 3) GLOB_PATTERN: wildcard pattern to select your files
 #    Filenames must follow:
 #      <composition> <title> <sample_end> <anneal> <load><dir>.txt
 #    e.g. FeSiBP 188_1 s4-2a 68mA 10a.txt
 #         FeSiBP 188_1 s*-* 68mA *.txt
-GLOB_PATTERN   = "FeSiB 85_10 s4-1b+ 47mA *.txt"
+GLOB_PATTERN   = "FeSiBP 156_2 s2-1a 74mA *.txt"
 
 # 4) Variables to plot
 PLOT_SUM       = True    # T1+T2
