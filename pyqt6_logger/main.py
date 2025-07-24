@@ -1,7 +1,6 @@
 import sys
 import os
-from PyQt6 import QtCore, QtGui, QtWidgets, QtSerialPort
-from PyQt6.QtGui import QFontDatabase
+from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtSerialPort import QSerialPortInfo
 from mainwindow_GUI import Ui_MainWindow
 
@@ -22,65 +21,10 @@ DEFAULT_PORT_COMMAND = ">2050;1270;1;"
 
 # 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
 #    only affects the default text shown in the GUI.
-DEFAULT_LOG_FILE_NAME = "FeSiB 85_10 s4-1a 47mA 2,5a.txt"
+DEFAULT_LOG_FILE_NAME = "FeSiBP 156_2 s2-1a 74mA 2,5a.txt"
 # =============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
-
-
-def apply_dark_palette(app: QtWidgets.QApplication) -> None:
-    """Apply a dark color palette to *app* using the Fusion style."""
-    app.setStyle("Fusion")
-    palette = QtGui.QPalette()
-    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(53, 53, 53))
-    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtCore.Qt.GlobalColor.white)
-    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(35, 35, 35))
-    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(53, 53, 53))
-    palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtCore.Qt.GlobalColor.white)
-    palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtCore.Qt.GlobalColor.white)
-    palette.setColor(QtGui.QPalette.ColorRole.Text, QtCore.Qt.GlobalColor.white)
-    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(53, 53, 53))
-    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtCore.Qt.GlobalColor.white)
-    palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtCore.Qt.GlobalColor.red)
-    palette.setColor(QtGui.QPalette.ColorRole.Link, QtGui.QColor(42, 130, 218))
-    palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(42, 130, 218))
-    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtCore.Qt.GlobalColor.black)
-    app.setPalette(palette)
-
-
-MODERN_STYLE = """
-QWidget {
-    font-size: 10pt;
-}
-QGroupBox {
-    font-weight: bold;
-    border: 1px solid #666;
-    margin-top: 20px;
-}
-QGroupBox::title {
-    subcontrol-origin: margin;
-    left: 10px;
-    padding: 0 3px;
-}
-QPushButton {
-    padding: 6px 12px;
-    border-radius: 4px;
-}
-QPushButton:hover {
-    background-color: #3d7cf6;
-}
-QLineEdit, QComboBox, QSpinBox {
-    padding: 4px;
-    border-radius: 2px;
-}
-QPushButton#pushButton_connect_port {
-    background-color: #4a90e2;
-    color: white;
-}
-QPushButton#pushButton_connect_port:hover {
-    background-color: #5aa2f0;
-}
-"""
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -89,13 +33,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dir = log_dir
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
-        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
-        font.setPointSize(10)
-        self.setFont(font)
-        self.ui.label_port_response.setFont(
-            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
-        )
-        self.setStyleSheet(MODERN_STYLE)
 
         self.port_response = ""
         self.connected = False
@@ -213,7 +150,6 @@ def main():
     log_dir = args.log_dir or DEFAULT_LOG_DIR
 
     app = QtWidgets.QApplication(sys.argv)
-    apply_dark_palette(app)
     window = MainWindow(log_dir)
     window.show()
     sys.exit(app.exec())
