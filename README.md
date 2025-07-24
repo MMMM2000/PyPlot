@@ -26,7 +26,7 @@ python3 data_plotting/stress_dependence_plot.py
 
 ## Data logger
 
-The GUI logger under `data_logger/main.py` records serial data to a file.  At the
+`pyqt6_logger/main.py` records serial data to a file.  At the
 top of the script you can set the default `LOG_DIR` path as well as the
 pre-filled command string and suggested log file name.  `LOG_DIR` can also be
 overridden via the `--log-dir` command line option or the `LOG_DIR` environment
@@ -35,42 +35,18 @@ variable.
 Launch the logger with:
 
 ```bash
-python3 data_logger/main.py
-```
-
-Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log inside `LOG_DIR`.
-### PyQt6 logger
-
-`pyqt6_logger/main.py` provides the same functionality using PyQt6. The script defaults to the highest baud rate and preloads the command and log file fields.
-
-Launch it with:
-
-```bash
 python3 pyqt6_logger/main.py
 ```
 
-
-## Dark mode logger
-
-`dark_logger/main.py` implements a minimal logger using `ttkbootstrap` and
-`pyserial`.  The script attempts to match your system appearance by selecting a
-dark or light theme with `darkdetect` when available.  Launch it with:
-
-```bash
-python3 dark_logger/main.py
-```
-
-The script exposes the same basic options as the PyQt version but requires only
-standard Tk bindings.
+Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log inside `LOG_DIR`.
 
 ## Requirements
 
-The plotting script depends on `numpy`, `pandas` and `matplotlib`.  The original
-logger uses `PyQt5` while the new PyQt6 version requires `PyQt6`.  The dark-mode
-logger relies on `pyserial`, `ttkbootstrap` and `darkdetect` (optional).
+The plotting script depends on `numpy`, `pandas` and `matplotlib`.  The logger
+requires `PyQt6` and `pyserial`.
 Install the dependencies with:
 
 ```bash
-pip install numpy pandas matplotlib PyQt5 PyQt6 pyserial ttkbootstrap darkdetect
+pip install numpy pandas matplotlib PyQt6 pyserial
 ```
 

@@ -86,7 +86,7 @@ class Ui_MainWindow(object):
 
     def retranslateUi(self, MainWindow):
         _translate = QtCore.QCoreApplication.translate
-        MainWindow.setWindowTitle(_translate("MainWindow", "MainWindow"))
+        MainWindow.setWindowTitle(_translate("MainWindow", "Serial Data Logger"))
         self.groupBox_commands.setTitle(_translate("MainWindow", "Commands and Responses"))
         self.label_port_response.setText(_translate("MainWindow", "Port response"))
         self.pushButton_send_command.setText(_translate("MainWindow", "Send"))
