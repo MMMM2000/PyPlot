@@ -14,6 +14,14 @@ LOG_DIR = (
     "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/"
     "stress depencence/data"
 )
+
+# 2) DEFAULT_PORT_COMMAND: command pre-filled in the command box when the GUI
+#    starts. Adjust to match the most common command for your logger.
+DEFAULT_PORT_COMMAND = ">2050;1270;1;"
+
+# 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
+#    only affects the default text shown in the GUI.
+DEFAULT_LOG_FILE_NAME = "FeSiBP 188_1 s2-1a 68mA 2,5a.txt"
 # ==============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
@@ -50,7 +58,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
         # show only the file name in the UI, but save inside log_dir
-        self.ui.lineEdit_log_file.setText("log.txt")
+        self.ui.lineEdit_log_file.setText(DEFAULT_LOG_FILE_NAME)
+        self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
