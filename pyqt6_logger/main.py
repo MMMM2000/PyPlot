@@ -1,10 +1,11 @@
 import sys
 import os
-from PyQt5 import QtCore, QtWidgets, QtSerialPort
-from PyQt5.QtSerialPort import QSerialPortInfo
+from PyQt6 import QtCore, QtGui, QtWidgets, QtSerialPort
+from PyQt6.QtGui import QFontDatabase
+from PyQt6.QtSerialPort import QSerialPortInfo
 from mainwindow_GUI import Ui_MainWindow
 
-# ==============================================================================
+# =============================================================================
 #                            USER CONFIGURATION
 #
 # 1) LOG_DIR: default directory where logged data will be stored. Modify this
@@ -22,9 +23,64 @@ DEFAULT_PORT_COMMAND = ">2050;1270;1;"
 # 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
 #    only affects the default text shown in the GUI.
 DEFAULT_LOG_FILE_NAME = "FeSiB 85_10 s4-1a 47mA 2,5a.txt"
-# ==============================================================================
+# =============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
+
+
+def apply_dark_palette(app: QtWidgets.QApplication) -> None:
+    """Apply a dark color palette to *app* using the Fusion style."""
+    app.setStyle("Fusion")
+    palette = QtGui.QPalette()
+    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(53, 53, 53))
+    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(35, 35, 35))
+    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(53, 53, 53))
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorRole.Text, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(53, 53, 53))
+    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtCore.Qt.GlobalColor.white)
+    palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtCore.Qt.GlobalColor.red)
+    palette.setColor(QtGui.QPalette.ColorRole.Link, QtGui.QColor(42, 130, 218))
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(42, 130, 218))
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtCore.Qt.GlobalColor.black)
+    app.setPalette(palette)
+
+
+MODERN_STYLE = """
+QWidget {
+    font-size: 10pt;
+}
+QGroupBox {
+    font-weight: bold;
+    border: 1px solid #666;
+    margin-top: 20px;
+}
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 3px;
+}
+QPushButton {
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+QPushButton:hover {
+    background-color: #3d7cf6;
+}
+QLineEdit, QComboBox, QSpinBox {
+    padding: 4px;
+    border-radius: 2px;
+}
+QPushButton#pushButton_connect_port {
+    background-color: #4a90e2;
+    color: white;
+}
+QPushButton#pushButton_connect_port:hover {
+    background-color: #5aa2f0;
+}
+"""
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -33,9 +89,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dir = log_dir
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        font = QFontDatabase.systemFont(QFontDatabase.SystemFont.GeneralFont)
+        font.setPointSize(10)
+        self.setFont(font)
+        self.ui.label_port_response.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.setStyleSheet(MODERN_STYLE)
 
         self.port_response = ""
-        self.port_command = ""
         self.connected = False
         self.port_name = ""
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
@@ -57,11 +119,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.setCurrentIndex(0)  # highest bitrate
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
-        # show only the file name in the UI, but save inside log_dir
         self.ui.lineEdit_log_file.setText(DEFAULT_LOG_FILE_NAME)
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
-        # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
         self.ui.comboBox_port.currentIndexChanged.connect(self.update_port_name)
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.update_baudrate)
@@ -79,11 +139,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.connected:
             self.serial.setPortName(self.port_name)
             self.serial.setBaudRate(self.baudrate)
-            self.serial.setFlowControl(QtSerialPort.QSerialPort.NoFlowControl)
-            self.serial.setDataBits(QtSerialPort.QSerialPort.Data8)
-            self.serial.setParity(QtSerialPort.QSerialPort.NoParity)
-            self.serial.setStopBits(QtSerialPort.QSerialPort.OneStop)
-            if self.serial.open(QtCore.QIODevice.ReadWrite):
+            self.serial.setFlowControl(QtSerialPort.QSerialPort.FlowControl.NoFlowControl)
+            self.serial.setDataBits(QtSerialPort.QSerialPort.DataBits.Data8)
+            self.serial.setParity(QtSerialPort.QSerialPort.Parity.NoParity)
+            self.serial.setStopBits(QtSerialPort.QSerialPort.StopBits.OneStop)
+            if self.serial.open(QtCore.QIODeviceBase.OpenModeFlag.ReadWrite):
                 self.serial.clear()
                 self.serial.readyRead.connect(self.read_from_port)
                 self.connected = True
@@ -118,8 +178,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.label_port_response.setText(self.port_response)
 
     def send_command(self):
-        self.port_command = self.ui.lineEdit_port_command.text() + "\n"
-        self.serial.write(self.port_command.encode('ascii'))
+        self.serial.write((self.ui.lineEdit_port_command.text() + "\n").encode('ascii'))
 
     def start_logging(self):
         file_name = self.ui.lineEdit_log_file.text()
@@ -140,10 +199,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logging_on = True
         self.ui.pushButton_record.setEnabled(False)
 
-if __name__ == "__main__":
+
+def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Serial data logger")
+    parser = argparse.ArgumentParser(description="Serial data logger (PyQt6)")
     parser.add_argument(
         "--log-dir",
         help="Directory to save logs [env: LOG_DIR]",
@@ -153,6 +213,11 @@ if __name__ == "__main__":
     log_dir = args.log_dir or DEFAULT_LOG_DIR
 
     app = QtWidgets.QApplication(sys.argv)
+    apply_dark_palette(app)
     window = MainWindow(log_dir)
     window.show()
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
