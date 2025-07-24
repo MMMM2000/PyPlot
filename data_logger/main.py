@@ -21,7 +21,7 @@ DEFAULT_PORT_COMMAND = ">2050;1270;1;"
 
 # 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
 #    only affects the default text shown in the GUI.
-DEFAULT_LOG_FILE_NAME = "FeSiBP 188_1 s2-1a 68mA 2,5a.txt"
+DEFAULT_LOG_FILE_NAME = "FeSiB 85_10 s3-2a 47mA 2,5a.txt"
 # ==============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
