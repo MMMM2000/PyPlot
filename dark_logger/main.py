@@ -9,7 +9,10 @@ except ImportError as exc:  # pragma: no cover - only triggered if pyserial miss
     raise SystemExit(
         "Missing pyserial. Install with 'pip install pyserial' and try again'") from exc
 
-import darkdetect
+try:
+    import darkdetect
+except ImportError:  # pragma: no cover - optional dependency
+    darkdetect = None
 import ttkbootstrap as ttk
 from ttkbootstrap.constants import *
 
@@ -22,7 +25,7 @@ class LoggerApp(ttk.Window):
     """Serial data logger with a dark mode GUI."""
 
     def __init__(self):
-        theme = 'darkly' if darkdetect.isDark() else ttk.DEFAULT_THEME
+        theme = 'darkly' if darkdetect and darkdetect.isDark() else ttk.DEFAULT_THEME
         super().__init__(themename=theme)
         self.title('Dark Logger')
         self.serial = None
