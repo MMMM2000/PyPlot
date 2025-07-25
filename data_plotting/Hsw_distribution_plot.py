@@ -1,223 +1,240 @@
 #!/usr/bin/env python3
 """
-Switching‐Field Distribution with Robust Outlier Removal
-
-1) File picker for .txt data files
-2) GUI for plot selection, bin sizing, and outlier method/threshold
-3) Outlier removal (Z-score, IQR, or MAD) before any calculations
-4) Histogram (auto/manual), dp/dh, and plots
+Hsw distribution with Histogram‐Core filtering, optional trimmed display,
+and shared TT/HH bin counts.
 """
 
 import os, sys
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+# ─────────────────────────────────────────────
 # 1) File selection
+# ─────────────────────────────────────────────
 root = tk.Tk(); root.withdraw()
-file_paths = filedialog.askopenfilenames(
-    title="Select one or more .txt data files",
+paths = filedialog.askopenfilenames(
+    title="Select .txt data files",
     filetypes=[("Text files","*.txt"),("All files","*.*")]
 )
-if not file_paths:
+if not paths:
     sys.exit("No files selected.")
 root.destroy()
 
+# ─────────────────────────────────────────────
 # 2) Configuration GUI
+# ─────────────────────────────────────────────
 cfg_win = tk.Tk()
-cfg_win.title("Plot & Outlier Configuration")
+cfg_win.title("Hsw Distribution Settings")
 
-# Control variables (created after cfg_win exists)
 cfg = {
-    "raw":       tk.BooleanVar(master=cfg_win, value=True),
-    "hist":      tk.BooleanVar(master=cfg_win, value=True),
-    "ind_log":   tk.BooleanVar(master=cfg_win, value=True),
-    "comb_log":  tk.BooleanVar(master=cfg_win, value=True),
-    "bin_mode":  tk.StringVar(master=cfg_win, value="auto"),
-    "bin_width": tk.DoubleVar(master=cfg_win, value=1e-4),
-    "out_method":tk.StringVar(master=cfg_win, value="z-score"),
-    "out_threshold": tk.DoubleVar(master=cfg_win, value=3.0),
-    "highlight": tk.BooleanVar(master=cfg_win, value=False),
+    "raw":          tk.BooleanVar(cfg_win, True),
+    "show_trimmed": tk.BooleanVar(cfg_win, True),
+    "hist":         tk.BooleanVar(cfg_win, True),
+    "ind_log":      tk.BooleanVar(cfg_win, True),
+    "comb_log":     tk.BooleanVar(cfg_win, True),
+    "bin_mode":     tk.StringVar(cfg_win, "auto"),
+    "bin_width":    tk.DoubleVar(cfg_win, 1e-4),
+    "share_bins":   tk.BooleanVar(cfg_win, False),
+    "core_bins":    tk.IntVar(cfg_win, 50),
+    "core_min":     tk.IntVar(cfg_win, 3),
 }
 
-# Plot selection
-plots = [
-    ("Raw TT/HH vs Index", "raw"),
-    ("Counts Histogram",    "hist"),
-    ("Individual ln(dp/dh)", "ind_log"),
-    ("Combined ln(dp/dh)",   "comb_log"),
-]
-for i,(text,key) in enumerate(plots):
-    ttk.Checkbutton(cfg_win, text=text, variable=cfg[key])\
-       .grid(row=i, column=0, sticky="w", padx=5, pady=2)
+# Plot toggles
+ttk.Checkbutton(cfg_win, text="Raw TT/HH vs Index", variable=cfg["raw"])\
+    .grid(row=0, column=0, sticky="w", padx=5, pady=2)
+ttk.Checkbutton(cfg_win, text="Show trimmed data", variable=cfg["show_trimmed"])\
+    .grid(row=1, column=0, sticky="w", padx=5, pady=2)
+ttk.Checkbutton(cfg_win, text="Counts Histogram", variable=cfg["hist"])\
+    .grid(row=2, column=0, sticky="w", padx=5, pady=2)
+ttk.Checkbutton(cfg_win, text="Individual ln(dp/dh)", variable=cfg["ind_log"])\
+    .grid(row=3, column=0, sticky="w", padx=5, pady=2)
+ttk.Checkbutton(cfg_win, text="Combined ln(dp/dh)", variable=cfg["comb_log"])\
+    .grid(row=4, column=0, sticky="w", padx=5, pady=2)
 
-# Bin sizing
-bin_frame = ttk.LabelFrame(cfg_win, text="Bin Sizing")
+# Binning mode
+bin_frame = ttk.LabelFrame(cfg_win, text="Final Histogram Binning")
 bin_frame.grid(row=0, column=1, rowspan=3, padx=10, pady=5, sticky="n")
 ttk.Radiobutton(bin_frame, text="Automatic", variable=cfg["bin_mode"], value="auto")\
-    .grid(row=0, column=0, sticky="w", pady=2)
+    .grid(row=0, column=0, sticky="w")
 ttk.Radiobutton(bin_frame, text="Manual Δh =", variable=cfg["bin_mode"], value="manual")\
-    .grid(row=1, column=0, sticky="w", pady=2)
+    .grid(row=1, column=0, sticky="w")
 ttk.Entry(bin_frame, textvariable=cfg["bin_width"], width=8)\
-    .grid(row=1, column=1, sticky="w", pady=2)
-ttk.Label(bin_frame, text="(only if manual)").grid(row=1, column=2, sticky="w")
+    .grid(row=1, column=1, sticky="w")
+ttk.Checkbutton(bin_frame, text="Shared bins TT/HH", variable=cfg["share_bins"])\
+    .grid(row=2, column=0, columnspan=2, sticky="w", pady=2)
 
-# Outlier removal
-out_frame = ttk.LabelFrame(cfg_win, text="Outlier Removal")
-out_frame.grid(row=3, column=0, columnspan=2, padx=5, pady=5, sticky="we")
-ttk.Label(out_frame, text="Method:").grid(row=0, column=0, sticky="e")
-ttk.OptionMenu(out_frame, cfg["out_method"], cfg["out_method"].get(),
-               "z-score", "IQR", "MAD").grid(row=0, column=1, sticky="w", padx=5)
-ttk.Label(out_frame, text="Threshold:").grid(row=1, column=0, sticky="e")
-ttk.Entry(out_frame, textvariable=cfg["out_threshold"], width=8)\
-    .grid(row=1, column=1, sticky="w", padx=5)
-ttk.Checkbutton(out_frame, text="Highlight on raw plot",
-                variable=cfg["highlight"])\
-    .grid(row=2, column=0, columnspan=2, sticky="w")
+# Histogram‐Core params
+core_frame = ttk.LabelFrame(cfg_win, text="Histogram‐Core Filter")
+core_frame.grid(row=3, column=1, rowspan=2, padx=10, pady=5, sticky="n")
+ttk.Label(core_frame, text="n_bins:").grid(row=0, column=0, sticky="e")
+ttk.Entry(core_frame, textvariable=cfg["core_bins"], width=6)\
+    .grid(row=0, column=1, sticky="w")
+ttk.Label(core_frame, text="min_count:").grid(row=1, column=0, sticky="e")
+ttk.Entry(core_frame, textvariable=cfg["core_min"], width=6)\
+    .grid(row=1, column=1, sticky="w")
 
-# Run button
-def run_and_close():
+def on_run():
     cfg_win.destroy()
 
-ttk.Button(cfg_win, text="Run", command=run_and_close)\
+ttk.Button(cfg_win, text="Run", command=on_run)\
     .grid(row=5, column=0, columnspan=2, pady=10)
-
 cfg_win.mainloop()
 
-# 3) Load, normalize, and outlier‐filter
+# ─────────────────────────────────────────────
+# 3) Histogram‐Core filter function
+# ─────────────────────────────────────────────
+def core_mask(values, n_bins, min_count):
+    counts, edges = np.histogram(
+        values, bins=n_bins, range=(values.min(), values.max())
+    )
+    dense = np.flatnonzero(counts > min_count)
+    if dense.size == 0:
+        mask = np.ones_like(values, dtype=bool)
+    else:
+        lo, hi = dense[0], dense[-1]
+        idxs = np.minimum(np.searchsorted(edges, values) - 1, len(counts)-1)
+        mask = (idxs >= lo) & (idxs <= hi)
+    return mask, edges, counts
+
+# ─────────────────────────────────────────────
+# 4) Load → filter → re‐normalize
+# ─────────────────────────────────────────────
+raw_data = {}
 data = {}
-for path in file_paths:
-    df = pd.read_csv(path, sep=';', header=None, usecols=[0,1],
-                     names=['TT','HH'])
-    # Normalize
-    df['TT_norm'] = df['TT']/df['TT'].max()
-    df['HH_norm'] = df['HH']/df['HH'].max()
-    # Compute mask
-    method = cfg["out_method"].get()
-    thr    = cfg["out_threshold"].get()
-    mask = np.ones(len(df), dtype=bool)
+masks = {}
 
-    if method == "z-score":
-        for col in ['TT_norm','HH_norm']:
-            z = (df[col]-df[col].mean())/df[col].std()
-            mask &= np.abs(z) < thr
-
-    elif method == "IQR":
-        for col in ['TT_norm','HH_norm']:
-            q1,q3 = df[col].quantile([0.25,0.75])
-            iqr = q3 - q1
-            mask &= df[col].between(q1-thr*iqr, q3+thr*iqr)
-
-    elif method == "MAD":
-        for col in ['TT_norm','HH_norm']:
-            med = df[col].median()
-            mad = np.median(np.abs(df[col]-med))
-            z_mad = 0.6745*(df[col]-med)/(mad if mad>0 else 1e-9)
-            mask &= np.abs(z_mad) < thr
-
-    # Highlight mask stored, then drop outliers
-    data[path] = {"df": df[mask].copy(), "mask": mask}
-
-# 4) Build histograms & compute dp/dh
-hist = {}
-for path,info in data.items():
+for path in paths:
     name = os.path.splitext(os.path.basename(path))[0]
-    df   = info["df"]
+    raw = pd.read_csv(path, sep=';', header=None, usecols=[0,1],
+                      names=['TT','HH'])
+    raw['TTn0'] = raw['TT'] / raw['TT'].max()
+    raw['HHn0'] = raw['HH'] / raw['HH'].max()
+
+    n_bins = max(2, cfg["core_bins"].get())
+    min_ct = max(1, cfg["core_min"].get())
+
+    m_t, _, _ = core_mask(raw['TTn0'].values, n_bins, min_ct)
+    m_h, _, _ = core_mask(raw['HHn0'].values, n_bins, min_ct)
+    mask = m_t & m_h
+
+    filtered = raw.loc[mask, ['TT','HH']].reset_index(drop=True)
+    filtered['TTn'] = filtered['TT'] / filtered['TT'].max()
+    filtered['HHn'] = filtered['HH'] / filtered['HH'].max()
+
+    raw_data[name] = raw
+    data[name]     = filtered
+    masks[name]    = mask
+
+# ─────────────────────────────────────────────
+# 5) Helper to find auto bin count
+# ─────────────────────────────────────────────
+def find_auto_bins(vals):
+    hmin, hmax = vals.min(), vals.max()
+    N = len(vals)
+    for B in range(N, 1, -1):
+        cnts, _ = np.histogram(vals, bins=B, range=(hmin, hmax))
+        if np.all(cnts > 0):
+            return B
+    return max(2, min(50, N//2))
+
+# ─────────────────────────────────────────────
+# 6) Build histograms + dp/dh on filtered data
+# ─────────────────────────────────────────────
+hist = {}
+for name, df in data.items():
     hist[name] = {}
-    for col in ['TT_norm','HH_norm']:
-        vals = df[col].values
-        mn, mx = vals.min(), vals.max()
+    vals_tt = df['TTn'].values
+    vals_hh = df['HHn'].values
 
-        if cfg["bin_mode"].get()=="auto":
-            N = len(vals)
-            for nb in range(N,1,-1):
-                cnts, edges = np.histogram(vals, bins=nb, range=(mn,mx))
-                if np.all(cnts>0):
-                    counts, bins = cnts, edges
-                    break
-            else:
-                fb = min(50, N//2)
-                counts, bins = np.histogram(vals, bins=fb, range=(mn,mx))
+    # determine shared bin count if needed
+    share = cfg["share_bins"].get() and cfg["bin_mode"].get()=="auto"
+    if share:
+        B_tt = find_auto_bins(vals_tt)
+        B_hh = find_auto_bins(vals_hh)
+        B_shared = min(B_tt, B_hh)
+
+    for col, vals in [('TTn', vals_tt), ('HHn', vals_hh)]:
+        hmin, hmax = vals.min(), vals.max()
+
+        if cfg["bin_mode"].get() == "auto":
+            bins = B_shared if share else find_auto_bins(vals)
+            counts, edges = np.histogram(vals, bins=bins, range=(hmin, hmax))
+
         else:
-            Δh = cfg["bin_width"].get()
-            bins = np.arange(mn, mx+Δh, Δh)
-            counts, _ = np.histogram(vals, bins=bins)
+            dh = cfg["bin_width"].get()
+            edges = np.arange(hmin, hmax + dh, dh)
+            counts, _ = np.histogram(vals, bins=edges)
 
-        Δh = bins[1]-bins[0]
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        Δh = edges[1] - edges[0]
         Ni = np.cumsum(counts[::-1])[::-1]
-        hazard = counts/Ni
-        J = hazard.sum()
-        dpdh = (hazard/Δh)/J
-        centers = 0.5*(bins[:-1]+bins[1:])
+        hazard = counts / (Ni + 1e-12)
+        dp = (hazard / Δh) / (hazard.sum() + 1e-12)
 
         hist[name][col] = {
-            "centers":centers,
-            "counts": counts,
-            "dpdh":    dpdh,
-            "Δh":       Δh
+            "centers": centers,
+            "counts":  counts,
+            "dp":      dp,
+            "Δh":      Δh
         }
 
-# 5) Plot as requested
-for path,info in data.items():
-    name = os.path.splitext(os.path.basename(path))[0]
-    df   = info["df"]
-    orig_mask = info["mask"]
+# ─────────────────────────────────────────────
+# 7) Plot all requested figures
+# ─────────────────────────────────────────────
+for name, df in data.items():
+    mask = masks[name]
+    raw = raw_data[name]
 
     # Raw
     if cfg["raw"].get():
-        fig,(ax1,ax2) = plt.subplots(2,1,sharex=True,figsize=(6,4))
-        ax1.scatter(df.index+1, df['TT'], s=0.5, alpha=0.7, label="inlier")
-        if cfg["highlight"].get():
-            bad = ~orig_mask
-            ax1.scatter(np.where(bad)[0]+1, df['TT'][bad], s=10,
-                        c='r',marker='x', label="outlier")
-        ax1.set_ylabel("TT (raw)")
-        ax1.legend(loc="upper right",fontsize="x-small")
+        plt.figure(figsize=(6,3))
+        plt.scatter(df.index+1, df['TT'], s=2, label='TT inlier')
+        plt.scatter(df.index+1, df['HH'], s=2, label='HH inlier', color='C1')
+        if cfg["show_trimmed"].get():
+            trimmed = ~mask
+            plt.scatter(np.where(trimmed)[0]+1, raw['TT'][trimmed],
+                        s=20, c='r', marker='x', label='TT trimmed')
+            plt.scatter(np.where(trimmed)[0]+1, raw['HH'][trimmed],
+                        s=20, c='m', marker='x', label='HH trimmed')
+        plt.title(f"{name} — Raw with Histogram‐Core filter")
+        plt.xlabel("Index"); plt.ylabel("Switching Field")
+        plt.legend(fontsize='x-small'); plt.tight_layout()
 
-        ax2.scatter(df.index+1, df['HH'], s=0.5, alpha=0.7, color='C1', label="inlier")
-        if cfg["highlight"].get():
-            bad = ~orig_mask
-            ax2.scatter(np.where(bad)[0]+1, df['HH'][bad], s=10,
-                        c='r',marker='x', label="outlier")
-        ax2.set_ylabel("HH (raw)")
-        ax2.set_xlabel("Index")
-        ax2.legend(loc="upper right",fontsize="x-small")
-
-        fig.suptitle(name)
-        fig.tight_layout(rect=[0,0,1,0.95])
-
-    # Histogram
+    # Counts histogram
     if cfg["hist"].get():
-        for col,h in hist[name].items():
+        for col, h in hist[name].items():
             plt.figure()
-            plt.bar(h["centers"], h["counts"], width=h["Δh"],
-                    align="center",alpha=0.6,edgecolor='k')
-            plt.title(f"{name} — {col}: Counts vs H/Hsw,max")
-            plt.xlabel("H/Hsw,max"); plt.ylabel("Counts")
-            plt.grid(ls='--',alpha=0.3)
+            plt.bar(h["centers"], h["counts"],
+                    width=h["Δh"], edgecolor='k', alpha=0.6)
+            plt.title(f"{name} — {col}: counts")
+            plt.xlabel("h = H/Hsw,max"); plt.ylabel("Counts")
+            plt.grid(ls='--', alpha=0.3)
 
-    # Individual log
+    # Individual ln(dp/dh)
     if cfg["ind_log"].get():
-        for col,h in hist[name].items():
-            c, dp = h["centers"], h["dpdh"]
-            x = (1-c)**1.5; m = dp>0
+        for col, h in hist[name].items():
+            valid = h["dp"] > 0
+            x = (1 - h["centers"][valid]) ** 1.5
+            y = np.log(h["dp"][valid])
             plt.figure()
-            plt.plot(x[m], np.log(dp[m]), '-o',markersize=4)
+            plt.plot(x, y, '-o', markersize=4)
             plt.title(f"{name} — {col}: ln(dp/dh) vs h^(3/2)")
             plt.xlabel(r"$h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
-            plt.grid(ls='--',alpha=0.3)
+            plt.grid(ls='--', alpha=0.3)
 
-    # Combined log
+    # Combined ln(dp/dh)
     if cfg["comb_log"].get():
         plt.figure()
-        for col,h in hist[name].items():
-            c, dp = h["centers"], h["dpdh"]
-            x = (1-c)**1.5; m = dp>0
-            plt.plot(x[m], np.log(dp[m]), '-o',markersize=4,label=col)
-        plt.title(f"{name} — Combined ln(dp/dh) vs h^(3/2)")
+        for col, h in hist[name].items():
+            valid = h["dp"] > 0
+            plt.plot((1 - h["centers"][valid])**1.5,
+                     np.log(h["dp"][valid]), '-o',
+                     markersize=4, label=col)
+        plt.title(f"{name} — Combined ln(dp/dh)")
         plt.xlabel(r"$h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
-        plt.legend(); plt.grid(ls='--',alpha=0.3)
+        plt.legend(); plt.grid(ls='--', alpha=0.3)
 
 plt.show()
