@@ -4,7 +4,7 @@ from typing import Any, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtSerialPort import QSerialPortInfo
-from mainwindow_GUI import Ui_MainWindow
+from logger_ui import Ui_MainWindow
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -35,6 +35,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log_dir = log_dir
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        self.setWindowTitle("Data Logger")
+
+        self.ui.lineEdit_log_dir.setText(self.log_dir)
+        self.ui.pushButton_browse_dir.clicked.connect(self.choose_log_dir)
 
         # runtime state
         self.port_response = ""
@@ -117,6 +121,15 @@ class MainWindow(QtWidgets.QMainWindow):
         """Keep self.baudrate in sync with the combo box selection."""
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
+    def choose_log_dir(self):
+        """Prompt for a new directory in which to save log files."""
+        new_dir = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select log directory", self.log_dir
+        )
+        if new_dir:
+            self.log_dir = new_dir
+            self.ui.lineEdit_log_dir.setText(new_dir)
+
     def read_from_port(self):
         """
         Read a line from the serial port whenever data arrives.
@@ -163,13 +176,17 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         file_name = self.ui.lineEdit_log_file.text()
         initial   = os.path.join(self.log_dir, file_name)
-        path, _   = QtWidgets.QFileDialog.getSaveFileName(self, "Select log file", initial)
+        path, _   = QtWidgets.QFileDialog.getSaveFileName(
+            self, "Select log file", initial
+        )
         if not path:
             return
 
+        self.log_dir = os.path.dirname(path)
+        self.ui.lineEdit_log_dir.setText(self.log_dir)
         file_name = os.path.basename(path)
         self.ui.lineEdit_log_file.setText(file_name)
-        full_path = os.path.join(self.log_dir, file_name)
+        full_path = path
         try:
             self.log_file = open(full_path, "w")
         except OSError as exc:
