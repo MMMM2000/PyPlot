@@ -54,6 +54,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = 2000
         self.sample_idx   = 0
         self.logging_on   = False
+        self.ui.progressBar_logging.setMaximum(self.sample_count)
 
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -71,6 +72,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.update_baudrate)
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
+        self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
+
+        self.ui.progressBar_logging.setValue(0)
+        self.ui.pushButton_cancel.setEnabled(False)
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -130,11 +135,13 @@ class MainWindow(QtWidgets.QMainWindow):
             # strip leading '>' if present, then write
             self.log_file.write(self.port_response.lstrip(">"))
             self.sample_idx += 1
+            self.ui.progressBar_logging.setValue(self.sample_idx)
 
             if self.sample_idx >= self.sample_count:
                 self.log_file.close()
                 self.logging_on = False
                 self.ui.pushButton_record.setEnabled(True)
+                self.ui.pushButton_cancel.setEnabled(False)
 
         self.lock.unlock()
 
@@ -171,6 +178,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_idx   = 0
         self.logging_on   = True
         self.ui.pushButton_record.setEnabled(False)
+        self.ui.pushButton_cancel.setEnabled(True)
+        self.ui.progressBar_logging.setMaximum(self.sample_count)
+        self.ui.progressBar_logging.setValue(0)
+
+    def cancel_logging(self):
+        """Abort the current logging session."""
+        if not self.logging_on:
+            return
+
+        assert self.log_file is not None
+        self.log_file.close()
+        self.logging_on = False
+        self.ui.pushButton_record.setEnabled(True)
+        self.ui.pushButton_cancel.setEnabled(False)
 
 
 def main():
