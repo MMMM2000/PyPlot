@@ -4,7 +4,7 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ## Plotting stress dependence data
 
-`data_plotting/stress_dependence_plot.py` generates plots from a folder of measurement files.  The script does not provide command line options; instead edit the **USER CONFIGURATION** section at the top of the file to match your setup:
+`data_plotting/stress_dependence_plot.py` generates plots from a folder of measurement files.  The script now presents a Tk-based dialog to pick the input files and configure options interactively.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section at the top of the file and can be adjusted there.
 
 - `DATA_DIR` – directory where your raw `.txt` files live
 - `OUTPUT_DIR` – directory in which to save generated plots
@@ -30,8 +30,9 @@ python3 data_plotting/stress_dependence_plot.py
 top of the script you can set the default `LOG_DIR` path as well as the
 pre-filled command string and suggested log file name.  `LOG_DIR` can also be
 overridden via the `--log-dir` command line option or the `LOG_DIR` environment
-variable.  The interface uses a dark Fusion palette with rounded buttons for a
-modern look.
+variable.  Inside the GUI you can change the directory in which logs are stored
+using the **Browse** button next to the *Directory* field.  The interface uses a
+dark Fusion palette with rounded buttons for a modern look.
 
 Launch the logger with:
 
@@ -39,7 +40,7 @@ Launch the logger with:
 python3 pyqt6_logger/main.py
 ```
 
-Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log inside `LOG_DIR`.
+Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log in the directory shown in the *Directory* field.
 
 ## Requirements
 
