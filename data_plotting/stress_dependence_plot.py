@@ -24,7 +24,7 @@ OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/str
 #      <composition> <title> <sample_end> <anneal> <load><dir>.txt
 #    e.g. FeSiBP 188_1 s4-2a 68mA 10a.txt
 #         FeSiBP 188_1 s*-* 68mA *.txt
-GLOB_PATTERN   = "FeSiBP 156_2 s4-1b 74mA *.txt"
+GLOB_PATTERN   = "FeSiBP 156_2 s*-* 74mA *.txt"
 
 # 4) Variables to plot
 PLOT_SUM       = True    # T1+T2
@@ -71,7 +71,7 @@ PROC_ALPHA     = 0.5
 
 # 11) Output options
 SHOW_PLOTS     = True     # True = display interactively
-SAVE_PLOTS     = False    # True = save PNG files
+SAVE_PLOTS     = True     # True = save PNG files
 MAX_SHOW       = 8        # if total plots > MAX_SHOW, only show
 # ======================================================================
 
