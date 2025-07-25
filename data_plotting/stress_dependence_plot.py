@@ -13,12 +13,22 @@ from matplotlib.colors import to_hex
 # ======================================================================
 #                            USER CONFIGURATION
 #
+# 1) DATA_DIR: where your .txt files live
 DATA_DIR       = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/data"
+
+# 2) OUTPUT_DIR: where to save plot images
 OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/plots/FeSiBP 156_2 74mA"
+
+# 3) GLOB_PATTERN: wildcard pattern to select your files
+#    Filenames must follow:
+#      <composition> <title> <sample_end> <anneal> <load><dir>.txt
+#    e.g. FeSiBP 188_1 s4-2a 68mA 10a.txt
+#         FeSiBP 188_1 s*-* 68mA *.txt
 GLOB_PATTERN   = "FeSiBP 156_2 s2-1a 74mA *.txt"
 
-PLOT_SUM       = True
-PLOT_DT        = True
+# 4) Variables to plot
+PLOT_SUM       = True    # T1+T2
+PLOT_DT        = True    # T2–T1
 PLOT_T1        = True
 PLOT_T2        = True
 PLOT_VARS = []
@@ -27,23 +37,30 @@ if PLOT_DT:   PLOT_VARS.append("dT")
 if PLOT_T1:   PLOT_VARS.append("T1")
 if PLOT_T2:   PLOT_VARS.append("T2")
 
-BASELINE_MODE  = 'first'      # or 'min'
+# 5) Baseline mode: 'first' to zero first ascending load,
+#                  'min' to zero lowest ascending-load mean
+BASELINE_MODE  = 'first'  # options: 'first', 'min'
 
+# 6) Styling raw data
 RAW_COLORS     = {"a":"#45A1D6","b":"#F09C67"}
 RAW_MARKER     = 'o'
 RAW_MARKER_SIZE= 0.3
 RAW_ALPHA      = 1.0
 
+# 7) Styling mean curves
 MEAN_COLORS    = {"a":"#00306E","b":"#965308"}
 MEAN_MARKER    = 'o'
 MEAN_MSIZE     = 8
 MEAN_LW        = 3
 
+# 8) Cloud spread
 OFFSET         = 0.5
 JITTER_SPAN    = 0.5
 
+# 9) Print counts per (dir,load)?
 PRINT_COUNTS   = False
 
+# 10) Processed (median + moving avg)
 PLOT_PROCESSED = False
 MED_WINDOW     = 5
 MA_WINDOW      = 20
@@ -52,11 +69,13 @@ PROC_MARKER    = 's'
 PROC_MSIZE     = 0.5
 PROC_ALPHA     = 0.5
 
-SHOW_PLOTS     = True
-SAVE_PLOTS     = False
-MAX_SHOW       = 8
+# 11) Output options
+SHOW_PLOTS     = True     # True = display interactively
+SAVE_PLOTS     = False    # True = save PNG files
+MAX_SHOW       = 8        # if total plots > MAX_SHOW, only show
 # ======================================================================
 
+# Filename metadata regex
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<title>\S+)\s+"
@@ -109,6 +128,7 @@ def plot_variable(df, var, save_flag, out_dir):
         df['anneal'].iat[0],
     )
 
+    # baseline correction
     means = df.groupby(['dir','load'])[var].mean().reset_index()
     first = df['load'].min()
     if BASELINE_MODE == 'first':
@@ -116,6 +136,7 @@ def plot_variable(df, var, save_flag, out_dir):
     else:
         base = means.loc[means.dir=='a', var].min()
 
+    # jittered x positions
     df['x_center'] = df['load'] + df['dir'].map({'a':-OFFSET,'b':+OFFSET})
     np.random.seed(0)
     df['x'] = df['x_center'] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(df))
@@ -127,6 +148,8 @@ def plot_variable(df, var, save_flag, out_dir):
         print(df.groupby(['dir','load']).size().unstack(fill_value=0))
 
     fig, ax = plt.subplots(figsize=(9,5))
+
+    # raw scatter
     ax.scatter(df.loc[df.dir=='a','x'], df.loc[df.dir=='a','y'],
                c=RAW_COLORS['a'], marker=RAW_MARKER,
                s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw ↑')
@@ -134,6 +157,7 @@ def plot_variable(df, var, save_flag, out_dir):
                c=RAW_COLORS['b'], marker=RAW_MARKER,
                s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw ↓')
 
+    # optional processed line
     if PLOT_PROCESSED:
         desc = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
         for d in ('a','b'):
@@ -145,6 +169,7 @@ def plot_variable(df, var, save_flag, out_dir):
                        s=PROC_MSIZE, alpha=PROC_ALPHA,
                        label=f"{desc} {'↑' if d=='a' else '↓'}")
 
+    # mean curves
     ax.plot(means.loc[means.dir=='a','load'], means.loc[means.dir=='a','y'],
             MEAN_MARKER+'-', c=MEAN_COLORS['a'],
             markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean ↑')
@@ -152,12 +177,14 @@ def plot_variable(df, var, save_flag, out_dir):
             MEAN_MARKER+'-', c=MEAN_COLORS['b'],
             markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean ↓')
 
+    # annotate delta
     maxl  = df['load'].max()
     delta = means.loc[(means.dir=='a')&(means.load==maxl),'y'].iloc[0]
     ax.text(0.95, 0.05, f"Δ={delta:.2f}µs",
             transform=ax.transAxes, ha='right', va='bottom',
             fontsize=12, bbox=dict(facecolor='white', alpha=0.6))
 
+    # axis labels & styling
     ax.set_xticks(sorted(df['load'].unique()))
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x,pos: f"{x:g}"))
     ax.set_xlabel('Applied load (g)')
@@ -165,7 +192,7 @@ def plot_variable(df, var, save_flag, out_dir):
     ax.set_title(f"{comp} {title} {samp} {anneal} — {LABELS[var]}")
     ax.grid(True)
 
-    # legend with explicit isinstance + hex conversion, suppressing the arg-type warning
+    # legend text color matching handle color (Pylance‐safe)
     legend = ax.legend(loc='best')
     for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if isinstance(handle, Line2D):
@@ -177,7 +204,6 @@ def plot_variable(df, var, save_flag, out_dir):
         else:
             rawcol = 'black'
 
-        # Pylance will now be happy
         hexcol = to_hex(rawcol)  # type: ignore[arg-type]
         text.set_color(hexcol)
 

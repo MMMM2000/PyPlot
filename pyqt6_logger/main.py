@@ -5,14 +5,27 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 from mainwindow_GUI import Ui_MainWindow
 
 # =============================================================================
+#                            USER CONFIGURATION
+#
+# 1) LOG_DIR: default directory where logged data will be stored. Modify this
+#    path to your preferred location. The value can still be overridden via
+#    the --log-dir command line option or the LOG_DIR environment variable.
 LOG_DIR = (
     "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/"
     "stress depencence/data"
 )
-DEFAULT_PORT_COMMAND   = ">2050;1270;1;"
-DEFAULT_LOG_FILE_NAME  = "FeSiBP 156_2 s2-1a 74mA 2,5a.txt"
-DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
+
+# 2) DEFAULT_PORT_COMMAND: command pre-filled in the command box when the GUI
+#    starts. Adjust to match the most common command for your logger.
+DEFAULT_PORT_COMMAND = ">2050;1270;1;"
+
+# 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
+#    only affects the default text shown in the GUI.
+DEFAULT_LOG_FILE_NAME = "FeSiBP 156_2 s2-1a 74mA 2,5a.txt"
 # =============================================================================
+
+DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
+
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_dir=DEFAULT_LOG_DIR):
@@ -21,6 +34,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
 
+        # runtime state
         self.port_response = ""
         self.connected     = False
         self.port_name     = ""
@@ -30,25 +44,28 @@ class MainWindow(QtWidgets.QMainWindow):
         self.serial = QtSerialPort.QSerialPort()
         self.lock   = QtCore.QMutex()
 
+        # update the on-screen response label every 10 ms
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_response_label)
         self.timer.start(10)
 
-        # log_file starts as None, becomes a real file in start_logging()
-        self.log_file     = None
+        # logging state
+        self.log_file     = None   # will become an open file in start_logging()
         self.sample_count = 2000
         self.sample_idx   = 0
         self.logging_on   = False
 
         os.makedirs(self.log_dir, exist_ok=True)
 
+        # fill port list and set defaults
         self.populate_ports()
-        self.ui.comboBox_baudrate.setCurrentIndex(0)
+        self.ui.comboBox_baudrate.setCurrentIndex(0)  # highest bitrate
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
         self.ui.lineEdit_log_file.setText(DEFAULT_LOG_FILE_NAME)
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
+        # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
         self.ui.comboBox_port.currentIndexChanged.connect(self.update_port_name)
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.update_baudrate)
@@ -56,6 +73,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_record.clicked.connect(self.start_logging)
 
     def populate_ports(self):
+        """Scan available serial ports and populate the combo box."""
         self.ui.comboBox_port.clear()
         for info in QSerialPortInfo.availablePorts():
             self.ui.comboBox_port.addItem(info.portName())
@@ -63,6 +81,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.port_name = self.ui.comboBox_port.currentText()
 
     def toggle_connection(self):
+        """Open or close the serial port on button click."""
         if not self.connected:
             self.serial.setPortName(self.port_name)
             self.serial.setBaudRate(self.baudrate)
@@ -83,31 +102,36 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.groupBox_commands.setEnabled(False)
 
     def update_port_name(self):
+        """Keep self.port_name in sync with the combo box selection."""
         self.port_name = self.ui.comboBox_port.currentText()
 
     def update_baudrate(self):
+        """Keep self.baudrate in sync with the combo box selection."""
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
     def read_from_port(self):
+        """
+        Read a line from the serial port whenever data arrives.
+        Decode from ASCII, update the display, and log to file if active.
+        """
         if not self.serial.canReadLine():
             return
 
         self.lock.lock()
         raw = self.serial.readLine()
-        # PyQt6 gives a QByteArray here, but at runtime bytes(raw) works just fine.
+        # PyQt6 returns a QByteArray; at runtime bytes(raw) works fine.
         raw_bytes = bytes(raw)            # type: ignore[arg-type]
         self.port_response = raw_bytes.decode('ascii')
 
         if self.logging_on:
-            # <— assert to narrow type from Optional to file
+            # assert so Pylance knows log_file is not None here
             assert self.log_file is not None
 
-            # strip any leading '>' and write
+            # strip leading '>' if present, then write
             self.log_file.write(self.port_response.lstrip(">"))
             self.sample_idx += 1
 
             if self.sample_idx >= self.sample_count:
-                # <— same assert applies here
                 self.log_file.close()
                 self.logging_on = False
                 self.ui.pushButton_record.setEnabled(True)
@@ -115,16 +139,22 @@ class MainWindow(QtWidgets.QMainWindow):
         self.lock.unlock()
 
     def update_response_label(self):
+        """Refresh the on-screen label with the latest port_response."""
         self.ui.label_port_response.setText(self.port_response)
 
     def send_command(self):
+        """Send the text from the command line edit down the serial port."""
         cmd = self.ui.lineEdit_port_command.text() + "\n"
         self.serial.write(cmd.encode('ascii'))
 
     def start_logging(self):
+        """
+        Prompt the user for a log-file location, open the file,
+        and begin writing incoming samples to it.
+        """
         file_name = self.ui.lineEdit_log_file.text()
-        initial = os.path.join(self.log_dir, file_name)
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Select log file", initial)
+        initial   = os.path.join(self.log_dir, file_name)
+        path, _   = QtWidgets.QFileDialog.getSaveFileName(self, "Select log file", initial)
         if not path:
             return
 
@@ -142,17 +172,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logging_on   = True
         self.ui.pushButton_record.setEnabled(False)
 
+
 def main():
     import argparse
+
     parser = argparse.ArgumentParser(description="Serial data logger (PyQt6)")
-    parser.add_argument("--log-dir", help="Directory to save logs [env: LOG_DIR]")
+    parser.add_argument(
+        "--log-dir",
+        help="Directory to save logs [env: LOG_DIR]",
+    )
     args = parser.parse_args()
 
     log_dir = args.log_dir or DEFAULT_LOG_DIR
-    app     = QtWidgets.QApplication(sys.argv)
-    window  = MainWindow(log_dir)
+
+    app    = QtWidgets.QApplication(sys.argv)
+    window = MainWindow(log_dir)
     window.show()
     sys.exit(app.exec())
+
 
 if __name__ == "__main__":
     main()
