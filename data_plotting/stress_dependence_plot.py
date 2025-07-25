@@ -1,32 +1,31 @@
 #!/usr/bin/env python3
-import re, glob, os
+import os
+import re
+import sys
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 import matplotlib.ticker as mticker
+import tkinter as tk
+from tkinter import filedialog, ttk
 
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 
 # ======================================================================
-#                            USER CONFIGURATION
-#
-# 1) DATA_DIR: where your .txt files live
-DATA_DIR       = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/data"
+#                            DEFAULT CONFIGURATION
+# Values below are used to pre-fill the GUI and can be adjusted
+# interactively when running the script.
 
-# 2) OUTPUT_DIR: where to save plot images
-OUTPUT_DIR     = "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/stress depencence/plots/FeSiBP 156_2 74mA"
+# ======================================================================
+#                            DEFAULT CONFIGURATION
+# The variables below provide defaults for the GUI fields.
 
-# 3) GLOB_PATTERN: wildcard pattern to select your files
-#    Filenames must follow:
-#      <composition> <title> <sample_end> <anneal> <load><dir>.txt
-#    e.g. FeSiBP 188_1 s4-2a 68mA 10a.txt
-#         FeSiBP 188_1 s*-* 68mA *.txt
-GLOB_PATTERN   = "FeSiBP 156_2 s*-* 74mA *.txt"
+OUTPUT_DIR     = os.getcwd()  # output directory for saved plots
 
-# 4) Variables to plot
+# Variables to plot
 PLOT_SUM       = True    # T1+T2
 PLOT_DT        = True    # T2–T1
 PLOT_T1        = True
@@ -75,6 +74,76 @@ SAVE_PLOTS     = True     # True = save PNG files
 MAX_SHOW       = 8        # if total plots > MAX_SHOW, only show
 # ======================================================================
 
+def ask_user():
+    """Return (paths, cfg) gathered via Tk file dialog and options window."""
+    root = tk.Tk(); root.withdraw()
+    paths = filedialog.askopenfilenames(
+        title="Select measurement files",
+        filetypes=[("Text files", "*.txt"), ("All files", "*.*")]
+    )
+    if not paths:
+        sys.exit("No files selected.")
+    root.destroy()
+
+    win = tk.Tk()
+    win.title("Stress Dependence Settings")
+
+    cfg = {
+        "sum":         tk.BooleanVar(win, PLOT_SUM),
+        "dT":          tk.BooleanVar(win, PLOT_DT),
+        "T1":          tk.BooleanVar(win, PLOT_T1),
+        "T2":          tk.BooleanVar(win, PLOT_T2),
+        "baseline":    tk.StringVar(win, BASELINE_MODE),
+        "show":        tk.BooleanVar(win, SHOW_PLOTS),
+        "save":        tk.BooleanVar(win, SAVE_PLOTS),
+        "out_dir":     tk.StringVar(win, OUTPUT_DIR),
+        "processed":   tk.BooleanVar(win, PLOT_PROCESSED),
+        "med_window":  tk.IntVar(win, MED_WINDOW),
+        "ma_window":   tk.IntVar(win, MA_WINDOW),
+    }
+
+    ttk.Label(win, text="Variables to plot:").grid(row=0, column=0, sticky='w')
+    ttk.Checkbutton(win, text="T1+T2", variable=cfg["sum"]).grid(row=1, column=0, sticky='w', padx=5)
+    ttk.Checkbutton(win, text="T2–T1", variable=cfg["dT"]).grid(row=2, column=0, sticky='w', padx=5)
+    ttk.Checkbutton(win, text="T1", variable=cfg["T1"]).grid(row=3, column=0, sticky='w', padx=5)
+    ttk.Checkbutton(win, text="T2", variable=cfg["T2"]).grid(row=4, column=0, sticky='w', padx=5)
+
+    base = ttk.LabelFrame(win, text="Baseline")
+    base.grid(row=0, column=1, rowspan=2, padx=10, pady=5, sticky='n')
+    ttk.Radiobutton(base, text="First", variable=cfg["baseline"], value='first').grid(row=0, column=0, sticky='w')
+    ttk.Radiobutton(base, text="Min", variable=cfg["baseline"], value='min').grid(row=1, column=0, sticky='w')
+
+    out_frame = ttk.LabelFrame(win, text="Output")
+    out_frame.grid(row=2, column=1, rowspan=3, padx=10, pady=5, sticky='n')
+    ttk.Checkbutton(out_frame, text="Show plots", variable=cfg["show"]).grid(row=0, column=0, sticky='w')
+    ttk.Checkbutton(out_frame, text="Save plots", variable=cfg["save"]).grid(row=1, column=0, sticky='w')
+
+    def browse_out():
+        d = filedialog.askdirectory(title="Select output directory",
+                                    initialdir=cfg["out_dir"].get())
+        if d:
+            cfg["out_dir"].set(d)
+
+    ttk.Label(out_frame, text="Directory:").grid(row=2, column=0, sticky='w')
+    ttk.Entry(out_frame, textvariable=cfg["out_dir"], width=25).grid(row=3, column=0, sticky='w')
+    ttk.Button(out_frame, text="Browse", command=browse_out).grid(row=3, column=1, padx=2)
+
+    proc = ttk.LabelFrame(win, text="Processed curve")
+    proc.grid(row=5, column=0, columnspan=2, padx=5, pady=5, sticky='we')
+    ttk.Checkbutton(proc, text="Plot processed", variable=cfg["processed"]).grid(row=0, column=0, sticky='w')
+    ttk.Label(proc, text="Med window:").grid(row=1, column=0, sticky='e')
+    ttk.Entry(proc, textvariable=cfg["med_window"], width=6).grid(row=1, column=1, sticky='w')
+    ttk.Label(proc, text="MA window:").grid(row=1, column=2, sticky='e')
+    ttk.Entry(proc, textvariable=cfg["ma_window"], width=6).grid(row=1, column=3, sticky='w')
+
+    def on_run():
+        win.destroy()
+
+    ttk.Button(win, text="Run", command=on_run).grid(row=6, column=0, columnspan=2, pady=10)
+    win.mainloop()
+    return paths, cfg
+# ======================================================================
+
 # Filename metadata regex
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -99,11 +168,10 @@ def parse_metadata(stem):
     md['load'] = float(md['load'].replace(',', '.'))
     return md
 
-def load_data(data_dir, pattern):
-    search = os.path.join(data_dir, pattern)
-    files = sorted(glob.glob(search))
+def load_data(files):
+    files = sorted(files)
     if not files:
-        raise FileNotFoundError(f"No files match {search!r}")
+        raise FileNotFoundError("No files selected")
     dfs = []
     for fn in files:
         md = parse_metadata(Path(fn).stem)
@@ -216,8 +284,8 @@ def plot_variable(df, var, save_flag, out_dir):
 
     return fig
 
-def main():
-    data   = load_data(DATA_DIR, GLOB_PATTERN)
+def main(files):
+    data   = load_data(files)
     groups = data.groupby(['composition','title','sample_end','anneal'])
     total  = len(groups) * len(PLOT_VARS)
     do_show = SHOW_PLOTS and (total <= MAX_SHOW)
@@ -236,4 +304,25 @@ def main():
     print(f"Done: processed {total} plots.")
 
 if __name__ == '__main__':
-    main()
+    paths, cfg = ask_user()
+
+    # apply configuration
+    PLOT_VARS.clear()
+    if cfg['sum'].get():
+        PLOT_VARS.append('sum')
+    if cfg['dT'].get():
+        PLOT_VARS.append('dT')
+    if cfg['T1'].get():
+        PLOT_VARS.append('T1')
+    if cfg['T2'].get():
+        PLOT_VARS.append('T2')
+
+    BASELINE_MODE = cfg['baseline'].get()
+    SHOW_PLOTS    = cfg['show'].get()
+    SAVE_PLOTS    = cfg['save'].get()
+    OUTPUT_DIR    = cfg['out_dir'].get()
+    PLOT_PROCESSED= cfg['processed'].get()
+    MED_WINDOW    = cfg['med_window'].get()
+    MA_WINDOW     = cfg['ma_window'].get()
+
+    main(paths)
