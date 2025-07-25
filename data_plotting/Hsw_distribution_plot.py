@@ -222,7 +222,7 @@ for name, df in data.items():
             plt.figure()
             plt.plot(x, y, '-o', markersize=4)
             plt.title(f"{name} — {col}: ln(dp/dh) vs h^(3/2)")
-            plt.xlabel(r"$h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
+            plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
             plt.grid(ls='--', alpha=0.3)
 
     # Combined ln(dp/dh)
@@ -234,7 +234,7 @@ for name, df in data.items():
                      np.log(h["dp"][valid]), '-o',
                      markersize=4, label=col)
         plt.title(f"{name} — Combined ln(dp/dh)")
-        plt.xlabel(r"$h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
+        plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
         plt.legend(); plt.grid(ls='--', alpha=0.3)
 
 plt.show()
