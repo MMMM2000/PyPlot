@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Hsw distribution with Histogram‐Core filtering, optional trimmed display,
-and shared TT/HH bin counts.
+and shared TT/HH bin counts (fixed so `bins` is always defined).
 """
 
 import os, sys
@@ -14,7 +14,8 @@ from tkinter import filedialog, ttk
 # ─────────────────────────────────────────────
 # 1) File selection
 # ─────────────────────────────────────────────
-root = tk.Tk(); root.withdraw()
+root = tk.Tk()
+root.withdraw()
 paths = filedialog.askopenfilenames(
     title="Select .txt data files",
     filetypes=[("Text files","*.txt"),("All files","*.*")]
@@ -30,14 +31,14 @@ cfg_win = tk.Tk()
 cfg_win.title("Hsw Distribution Settings")
 
 cfg = {
-    "raw":          tk.BooleanVar(cfg_win, False),
-    "show_trimmed": tk.BooleanVar(cfg_win, False),
+    "raw":          tk.BooleanVar(cfg_win, True),
+    "show_trimmed": tk.BooleanVar(cfg_win, True),
     "hist":         tk.BooleanVar(cfg_win, True),
-    "ind_log":      tk.BooleanVar(cfg_win, False),
+    "ind_log":      tk.BooleanVar(cfg_win, True),
     "comb_log":     tk.BooleanVar(cfg_win, True),
     "bin_mode":     tk.StringVar(cfg_win, "auto"),
     "bin_width":    tk.DoubleVar(cfg_win, 1e-4),
-    "share_bins":   tk.BooleanVar(cfg_win, True),
+    "share_bins":   tk.BooleanVar(cfg_win, False),
     "core_bins":    tk.IntVar(cfg_win, 50),
     "core_min":     tk.IntVar(cfg_win, 3),
 }
@@ -108,8 +109,7 @@ masks = {}
 
 for path in paths:
     name = os.path.splitext(os.path.basename(path))[0]
-    raw = pd.read_csv(path, sep=';', header=None, usecols=[0,1],
-                      names=['TT','HH'])
+    raw = pd.read_csv(path, sep=';', header=None, usecols=[0,1], names=['TT','HH'])
     raw['TTn0'] = raw['TT'] / raw['TT'].max()
     raw['HHn0'] = raw['HH'] / raw['HH'].max()
 
@@ -149,18 +149,16 @@ for name, df in data.items():
     vals_tt = df['TTn'].values
     vals_hh = df['HHn'].values
 
-    # determine shared bin count if needed
-    share = cfg["share_bins"].get() and cfg["bin_mode"].get()=="auto"
-    if share:
-        B_tt = find_auto_bins(vals_tt)
-        B_hh = find_auto_bins(vals_hh)
-        B_shared = min(B_tt, B_hh)
-
     for col, vals in [('TTn', vals_tt), ('HHn', vals_hh)]:
         hmin, hmax = vals.min(), vals.max()
 
         if cfg["bin_mode"].get() == "auto":
-            bins = B_shared if share else find_auto_bins(vals)
+            if cfg["share_bins"].get():
+                B_tt = find_auto_bins(vals_tt)
+                B_hh = find_auto_bins(vals_hh)
+                bins = min(B_tt, B_hh)
+            else:
+                bins = find_auto_bins(vals)
             counts, edges = np.histogram(vals, bins=bins, range=(hmin, hmax))
 
         else:
@@ -221,7 +219,7 @@ for name, df in data.items():
             y = np.log(h["dp"][valid])
             plt.figure()
             plt.plot(x, y, '-o', markersize=4)
-            plt.title(f"{name} — {col}: ln(dp/dh) vs h^(3/2)")
+            plt.title(f"{name} — {col}: ln(dp/dh) vs Δh^(3/2)")
             plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
             plt.grid(ls='--', alpha=0.3)
 
