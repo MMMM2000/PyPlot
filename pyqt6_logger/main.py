@@ -1,5 +1,7 @@
 import sys
 import os
+from typing import Any, cast
+
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtSerialPort import QSerialPortInfo
 from mainwindow_GUI import Ui_MainWindow
@@ -50,11 +52,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.start(10)
 
         # logging state
-        self.log_file     = None   # will become an open file in start_logging()
+        self.log_file     = None  # will become an open file in start_logging()
         self.sample_count = 2000
         self.sample_idx   = 0
         self.logging_on   = False
-        self.ui.progressBar_logging.setMaximum(self.sample_count)
+
+        # set up progress bar (Pylance needs cast to know it exists)
+        cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
+        cast(Any, self.ui).pushButton_cancel.setEnabled(False)
+        cast(Any, self.ui).progressBar_logging.setValue(0)
 
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -73,9 +79,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
-
-        self.ui.progressBar_logging.setValue(0)
-        self.ui.pushButton_cancel.setEnabled(False)
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -129,13 +132,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.port_response = raw_bytes.decode('ascii')
 
         if self.logging_on:
-            # assert so Pylance knows log_file is not None here
             assert self.log_file is not None
 
             # strip leading '>' if present, then write
             self.log_file.write(self.port_response.lstrip(">"))
             self.sample_idx += 1
-            self.ui.progressBar_logging.setValue(self.sample_idx)
+            cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
 
             if self.sample_idx >= self.sample_count:
                 self.log_file.close()
@@ -177,22 +179,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = self.ui.spinBox_log_sample_count.value()
         self.sample_idx   = 0
         self.logging_on   = True
+
         self.ui.pushButton_record.setEnabled(False)
         self.ui.pushButton_cancel.setEnabled(True)
-        self.ui.progressBar_logging.setMaximum(self.sample_count)
-        self.ui.progressBar_logging.setValue(0)
+
+        cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
+        cast(Any, self.ui).progressBar_logging.setValue(0)
 
     def cancel_logging(self):
         """Abort the current logging session."""
         if not self.logging_on:
             return
-
         assert self.log_file is not None
+
         self.log_file.close()
         self.logging_on = False
         self.ui.pushButton_record.setEnabled(True)
         self.ui.pushButton_cancel.setEnabled(False)
-
 
 def main():
     import argparse
@@ -210,7 +213,6 @@ def main():
     window = MainWindow(log_dir)
     window.show()
     sys.exit(app.exec())
-
 
 if __name__ == "__main__":
     main()
