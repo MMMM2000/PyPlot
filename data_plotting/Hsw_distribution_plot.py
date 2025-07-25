@@ -30,14 +30,14 @@ cfg_win = tk.Tk()
 cfg_win.title("Hsw Distribution Settings")
 
 cfg = {
-    "raw":          tk.BooleanVar(cfg_win, True),
-    "show_trimmed": tk.BooleanVar(cfg_win, True),
+    "raw":          tk.BooleanVar(cfg_win, False),
+    "show_trimmed": tk.BooleanVar(cfg_win, False),
     "hist":         tk.BooleanVar(cfg_win, True),
-    "ind_log":      tk.BooleanVar(cfg_win, True),
+    "ind_log":      tk.BooleanVar(cfg_win, False),
     "comb_log":     tk.BooleanVar(cfg_win, True),
     "bin_mode":     tk.StringVar(cfg_win, "auto"),
     "bin_width":    tk.DoubleVar(cfg_win, 1e-4),
-    "share_bins":   tk.BooleanVar(cfg_win, False),
+    "share_bins":   tk.BooleanVar(cfg_win, True),
     "core_bins":    tk.IntVar(cfg_win, 50),
     "core_min":     tk.IntVar(cfg_win, 3),
 }
