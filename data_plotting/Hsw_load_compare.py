@@ -23,6 +23,32 @@ import tkinter as tk
 from tkinter import filedialog, ttk
 
 # ----------------------------------------------------------------------
+# Utility to robustly parse numbers with different grouping/decimal separators
+# ----------------------------------------------------------------------
+def parse_float_str(x: str) -> float:
+    s = x.strip().replace(" ", "")
+    comma_count = s.count(',')
+    dot_count = s.count('.')
+    # Both comma and dot present: decide which is decimal separator by last occurrence
+    if comma_count and dot_count:
+        if s.rfind(',') > s.rfind('.'):
+            decimal_sep, group_sep = ',', '.'
+        else:
+            decimal_sep, group_sep = '.', ','
+        # Remove grouping separators, then normalize decimal
+        s = s.replace(group_sep, '')
+        if decimal_sep != '.':
+            s = s.replace(decimal_sep, '.')
+    # Only comma present: assume decimal if single, grouping if multiple
+    elif comma_count == 1 and dot_count == 0:
+        s = s.replace(',', '.')
+    elif dot_count > 1 and comma_count == 0:
+        # multiple dots but no comma: assume grouping separators
+        s = s.replace('.', '')
+    # Otherwise: single dot decimal or no separators; leave as-is
+    return float(s)
+
+# ----------------------------------------------------------------------
 # Filename metadata (copied from stress_dependence_plot.py)
 # ----------------------------------------------------------------------
 FNAME_RE = re.compile(
@@ -105,8 +131,8 @@ def find_auto_bins(vals: np.ndarray) -> int:
 
 
 def build_histograms(df: pd.DataFrame) -> Dict[str, Dict[str, np.ndarray]]:
-    vals_tt = df["TTn"].values
-    vals_hh = df["HHn"].values
+    vals_tt = df["TTn"].to_numpy()
+    vals_hh = df["HHn"].to_numpy()
 
     B_tt = find_auto_bins(vals_tt)
     B_hh = find_auto_bins(vals_hh)
@@ -129,8 +155,8 @@ def build_histograms(df: pd.DataFrame) -> Dict[str, Dict[str, np.ndarray]]:
     pdf_hh = (haz_hh / dh) / (haz_hh.sum() + 1e-12)
 
     return {
-        "TT": {"centers": centers, "counts": cnt_tt, "pdf": pdf_tt, "dh": dh},
-        "HH": {"centers": centers, "counts": cnt_hh, "pdf": pdf_hh, "dh": dh},
+        "TT": {"centers": centers, "counts": cnt_tt, "dp": pdf_tt, "dh": dh},
+        "HH": {"centers": centers, "counts": cnt_hh, "dp": pdf_hh, "dh": dh},
     }
 
 
@@ -160,13 +186,18 @@ def load_file(path: str):
         usecols=[0, 1],
         engine="python",
         on_bad_lines="skip",
+        converters={
+            "TT": parse_float_str,
+            "HH": parse_float_str,
+        },
     )
+    raw.dropna(subset=["TT", "HH"], inplace=True)
 
     raw["TTn0"] = raw["TT"] / raw["TT"].max()
     raw["HHn0"] = raw["HH"] / raw["HH"].max()
 
-    m_t, _, _ = core_mask(raw["TTn0"].values, CORE_BINS, CORE_MIN)
-    m_h, _, _ = core_mask(raw["HHn0"].values, CORE_BINS, CORE_MIN)
+    m_t, _, _ = core_mask(raw["TTn0"].to_numpy(), CORE_BINS, CORE_MIN)
+    m_h, _, _ = core_mask(raw["HHn0"].to_numpy(), CORE_BINS, CORE_MIN)
     mask = m_t & m_h
 
     filtered = raw.loc[mask, ["TT", "HH"]].reset_index(drop=True)
@@ -203,45 +234,75 @@ def main() -> None:
     pdf_ymax = 0.0
     hist_ymax = 0.0
     raw_ymax = 0.0
-    for md, raw, filt, _ in records:
+    raw_ymin = float('inf')
+    for md, raw, filt, mask in records:
         load = md["load"]
         hist = build_histograms(filt)
         hist_data[load] = hist
-        pdf_ymax = max(pdf_ymax, hist["TT"]["pdf"].max(), hist["HH"]["pdf"].max())
+        pdf_ymax = max(pdf_ymax, hist["TT"]["dp"].max(), hist["HH"]["dp"].max())
         hist_ymax = max(hist_ymax, hist["TT"]["counts"].max(), hist["HH"]["counts"].max())
-        raw_ymax = max(raw_ymax, raw[["TT", "HH"]].to_numpy(dtype=float).max())
+        masked_vals = raw.loc[mask, ["TT", "HH"]].to_numpy(dtype=float)
+        raw_ymax = max(raw_ymax, masked_vals.max())
+        raw_ymin = min(raw_ymin, masked_vals.min())
 
     loads = sorted(hist_data.keys())
     nrows = len(loads)
 
+    # Global x-axis limits for histogram and log plots
+    all_centers = np.concatenate([h["centers"] for hist in hist_data.values() for h in hist.values()])
+    x_min, x_max = all_centers.min(), all_centers.max()
+
     # ------------------------------------------------------------------
-    # Probability density plots
+    # Log probability density plots (ln(dp/dh) vs reduced switching field)
     # ------------------------------------------------------------------
-    fig_pdf, ax_pdf = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+    fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+    fig_log.subplots_adjust(hspace=0)
     if nrows == 1:
-        ax_pdf = [ax_pdf]
-    for ax, load in zip(ax_pdf, loads):
-        data = hist_data[load]
-        if cfg["TT"].get():
-            ax.plot(data["TT"]["centers"], data["TT"]["pdf"], label="TT")
-        if cfg["HH"].get():
-            ax.plot(data["HH"]["centers"], data["HH"]["pdf"], label="HH")
-        ax.set_ylim(0, pdf_ymax * 1.05)
-        ax.set_xlim(0, 1)
+        ax_log = [ax_log]
+    # Compute global log-plot limits
+    log_x_vals = []
+    log_y_vals = []
+    for load in loads:
+        for col in ("TT", "HH"):
+            h = hist_data[load][col]
+            valid = h["dp"] > 0
+            log_x_vals.append((1 - h["centers"][valid])**1.5)
+            log_y_vals.append(np.log(h["dp"][valid]))
+    log_x_all = np.concatenate(log_x_vals)
+    log_y_all = np.concatenate(log_y_vals)
+    lx_min, lx_max = log_x_all.min(), log_x_all.max()
+    ly_min, ly_max = log_y_all.min(), log_y_all.max()
+    # add bottom padding so curves don't overlap the axis
+    ly_pad = (ly_max - ly_min) * 0.05
+    ly_lower = ly_min - ly_pad
+    for ax, load in zip(ax_log, loads):
+        for col in ("TT", "HH"):
+            if cfg[col].get():
+                h = hist_data[load][col]
+                valid = h["dp"] > 0
+                ax.plot((1 - h["centers"][valid])**1.5,
+                        np.log(h["dp"][valid]), '-o', markersize=4, label=col)
+        ax.set_xlim(lx_min, lx_max)
+        ax.set_ylim(ly_lower, ly_max)
         ax.grid(True, linestyle="--", alpha=0.3)
         ax.text(0.02, 0.85, f"{load:g} g", transform=ax.transAxes, va="top")
         if cfg["TT"].get() and cfg["HH"].get():
             ax.legend(fontsize="small")
-    ax_pdf[-1].set_xlabel("h = H/Hsw,max")
-    ax_pdf[0].set_ylabel("dp/dh")
-    ax_pdf[0].set_title("Hsw probability density vs load")
-    plt.tight_layout()
+    ax_log[-1].set_xlabel(r"$(1-h)^{3/2}$")
+    for ax in ax_log[:-1]:
+        ax.tick_params(labelbottom=False)
+    # Removed axis-level ylabel
+    # ax_log[0].set_ylabel(r"\ln(dp/dh)")
+    ax_log[0].set_title("Combined ln(dp/dh) vs reduced switching field")
+    fig_log.text(0.04, 0.5, "ln(dp/dh)", va='center', rotation='vertical')
+    plt.tight_layout(h_pad=0)
 
     # ------------------------------------------------------------------
     # Histogram plots
     # ------------------------------------------------------------------
     if cfg["hist"].get():
         fig_h, ax_h = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+        fig_h.subplots_adjust(hspace=0)
         if nrows == 1:
             ax_h = [ax_h]
         for ax, load in zip(ax_h, loads):
@@ -253,21 +314,26 @@ def main() -> None:
             if cfg["HH"].get():
                 ax.bar(centers + width / 2, data["HH"]["counts"], width=width, label="HH", alpha=0.6)
             ax.set_ylim(0, hist_ymax * 1.05)
-            ax.set_xlim(0, 1)
+            ax.set_xlim(x_min, x_max)
             ax.grid(True, linestyle="--", alpha=0.3)
             ax.text(0.02, 0.85, f"{load:g} g", transform=ax.transAxes, va="top")
             if cfg["TT"].get() and cfg["HH"].get():
                 ax.legend(fontsize="small")
         ax_h[-1].set_xlabel("h = H/Hsw,max")
-        ax_h[0].set_ylabel("Counts")
+        for ax in ax_h[:-1]:
+            ax.tick_params(labelbottom=False)
+        # Removed axis-level ylabel
+        # ax_h[0].set_ylabel("Counts")
         ax_h[0].set_title("Histogram of Hsw vs load")
-        plt.tight_layout()
+        fig_h.text(0.04, 0.5, "Counts", va='center', rotation='vertical')
+        plt.tight_layout(h_pad=0)
 
     # ------------------------------------------------------------------
     # Raw data plots
     # ------------------------------------------------------------------
     if cfg["raw"].get():
         fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+        fig_r.subplots_adjust(hspace=0)
         if nrows == 1:
             ax_r = [ax_r]
         for (md, raw, _, mask), ax in zip(records, ax_r):
@@ -279,15 +345,18 @@ def main() -> None:
             if trimmed.any():
                 ax.scatter(idx[trimmed], raw["TT"][trimmed], s=10, c="r", marker="x", label="TT trimmed")
                 ax.scatter(idx[trimmed], raw["HH"][trimmed], s=10, c="m", marker="x", label="HH trimmed")
-            ax.set_ylim(0, raw_ymax * 1.05)
+            # Removed y-limits setting to allow auto scaling
+            # ax.set_ylim(raw_ymin, raw_ymax * 1.05)
             ax.grid(True, linestyle="--", alpha=0.3)
             ax.text(0.02, 0.85, f"{load:g} g", transform=ax.transAxes, va="top")
             if cfg["TT"].get() and cfg["HH"].get():
                 ax.legend(fontsize="x-small")
         ax_r[-1].set_xlabel("Index")
-        ax_r[0].set_ylabel("Switching Field")
+        for ax in ax_r[:-1]:
+            ax.tick_params(labelbottom=False)
+        fig_r.text(0.04, 0.5, "Switching Field", va='center', rotation='vertical')
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
-        plt.tight_layout()
+        plt.tight_layout(h_pad=0)
 
     plt.show()
 
