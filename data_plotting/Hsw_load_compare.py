@@ -306,9 +306,13 @@ def main() -> None:
     log_y_all = np.concatenate(log_y_vals)
     lx_min, lx_max = 0.0, log_x_all.max()
     ly_min, ly_max = log_y_all.min(), log_y_all.max()
-    # add bottom padding so curves don't overlap the axis
+    # add some padding so curves don't hug the axes
+    lx_pad = (lx_max - lx_min) * 0.05
     ly_pad = (ly_max - ly_min) * 0.05
+    lx_lower = max(0.0, lx_min - lx_pad)
+    lx_upper = lx_max + lx_pad
     ly_lower = ly_min - ly_pad
+    ly_upper = ly_max + ly_pad
     for ax, load in zip(ax_log, loads):
         for col in ("TT", "HH"):
             if cfg[col].get():
@@ -316,10 +320,10 @@ def main() -> None:
                 valid = h["dp"] > 0
                 ax.plot((1 - h["centers"][valid])**1.5,
                         np.log(h["dp"][valid]), '-o', markersize=4, label=col)
-        ax.set_xlim(lx_min, lx_max)
-        ax.set_ylim(ly_lower, ly_max)
+        ax.set_xlim(lx_lower, lx_upper)
+        ax.set_ylim(ly_lower, ly_upper)
         ax.grid(True, linestyle="--", alpha=0.3)
-        ax.text(0.02, 0.85, f"{load:g} g", transform=ax.transAxes, va="top")
+        ax.text(0.02, 0.05, f"{load:g} g", transform=ax.transAxes, va="bottom")
         if cfg["TT"].get() and cfg["HH"].get():
             ax.legend(fontsize="small")
     ax_log[-1].set_xlabel(r"$(1-h)^{3/2}$")
