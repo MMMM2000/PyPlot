@@ -332,7 +332,7 @@ def main() -> None:
         ax.text(0.02, 0.05, f"{load:g} g", transform=ax.transAxes, va="bottom")
         if cfg["TT"].get() and cfg["HH"].get():
             ax.legend(fontsize="small")
-    ax_log[-1].set_xlabel(r"$(1-h)^{3/2}$")
+    ax_log[-1].set_xlabel(r"$\Delta h^{3/2}$")
     for ax in ax_log[:-1]:
         ax.tick_params(axis="x", bottom=False, labelbottom=False)
     ax_log[0].set_title("Combined ln(dp/dh) vs reduced switching field")
