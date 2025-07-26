@@ -49,12 +49,12 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int):
     x = np.arange(len(y))
 
     if PLOT_MODE in ("raw", "both"):
-        ax.scatter(x, y.values, s=MARKER_SIZE, label="raw")
+        ax.scatter(x, y.to_numpy(), s=MARKER_SIZE, label="raw")
 
     if PLOT_MODE in ("processed", "both"):
         med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
         proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-        ax.scatter(x, proc.values, s=MARKER_SIZE,
+        ax.scatter(x, proc.to_numpy(), s=MARKER_SIZE,
                    label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
 
     ax.set_xlabel("Sample index")
