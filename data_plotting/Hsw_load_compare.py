@@ -294,9 +294,9 @@ def main() -> None:
         ncols=1,
         sharex=True,
         figsize=(7, 2.0 * nrows),
-        constrained_layout=True,
         gridspec_kw={"hspace": 0},
     )
+    fig_log.subplots_adjust(hspace=0)
     if nrows == 1:
         ax_log = [ax_log]
     # Compute global log-plot limits
@@ -347,9 +347,9 @@ def main() -> None:
             ncols=1,
             sharex=True,
             figsize=(7, 2.0 * nrows),
-            constrained_layout=True,
             gridspec_kw={"hspace": 0},
         )
+        fig_h.subplots_adjust(hspace=0)
         if nrows == 1:
             ax_h = [ax_h]
         for ax, load in zip(ax_h, loads):
@@ -385,9 +385,9 @@ def main() -> None:
             ncols=1,
             sharex=True,
             figsize=(7, 2.0 * nrows),
-            constrained_layout=True,
             gridspec_kw={"hspace": 0},
         )
+        fig_r.subplots_adjust(hspace=0)
         if nrows == 1:
             ax_r = [ax_r]
         for (md, raw, _, mask), ax in zip(records, ax_r):
