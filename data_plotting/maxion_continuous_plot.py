@@ -20,7 +20,8 @@ from tkinter import filedialog, ttk
 OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
 SAVE_PLOTS = True
-PLOT_PROCESSED = False
+PLOT_MODE = "both"  # options: 'raw', 'processed', 'both'
+MARKER_SIZE = 0.5
 MED_WINDOW = 5
 MA_WINDOW = 20
 
@@ -45,12 +46,16 @@ def load_file(path: str) -> pd.DataFrame:
 def plot_channel(y: pd.Series, head: int, coils: int, ch: int):
     """Plot T1+T2 for a single channel."""
     fig, ax = plt.subplots(figsize=(9, 4))
-    ax.plot(y.values, label="raw", lw=0.5)
+    x = np.arange(len(y))
 
-    if PLOT_PROCESSED:
+    if PLOT_MODE in ("raw", "both"):
+        ax.scatter(x, y.values, s=MARKER_SIZE, label="raw")
+
+    if PLOT_MODE in ("processed", "both"):
         med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
         proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-        ax.plot(proc.values, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}", lw=1.0)
+        ax.scatter(x, proc.values, s=MARKER_SIZE,
+                   label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
 
     ax.set_xlabel("Sample index")
     ax.set_ylabel("T1+T2 (arb units)")
@@ -85,7 +90,8 @@ def ask_user():
         "show": tk.BooleanVar(win, SHOW_PLOTS),
         "save": tk.BooleanVar(win, SAVE_PLOTS),
         "out_dir": tk.StringVar(win, OUTPUT_DIR),
-        "processed": tk.BooleanVar(win, PLOT_PROCESSED),
+        "mode": tk.StringVar(win, PLOT_MODE),
+        "marker": tk.DoubleVar(win, MARKER_SIZE),
         "med_window": tk.IntVar(win, MED_WINDOW),
         "ma_window": tk.IntVar(win, MA_WINDOW),
     }
@@ -105,18 +111,28 @@ def ask_user():
 
     ttk.Button(out_frame, text="Browse", command=browse_out).grid(row=3, column=1, padx=2)
 
+    mode = ttk.LabelFrame(win, text="Data to plot")
+    mode.grid(row=0, column=1, padx=10, pady=5, sticky="n")
+    ttk.Radiobutton(mode, text="Raw", variable=cfg["mode"], value="raw").grid(row=0, column=0, sticky="w")
+    ttk.Radiobutton(mode, text="Processed", variable=cfg["mode"], value="processed").grid(row=1, column=0, sticky="w")
+    ttk.Radiobutton(mode, text="Both", variable=cfg["mode"], value="both").grid(row=2, column=0, sticky="w")
+
     proc = ttk.LabelFrame(win, text="Processed curve")
     proc.grid(row=1, column=0, padx=10, pady=5, sticky="we")
-    ttk.Checkbutton(proc, text="Plot processed", variable=cfg["processed"]).grid(row=0, column=0, sticky="w")
-    ttk.Label(proc, text="Med window:").grid(row=1, column=0, sticky="e")
-    ttk.Entry(proc, textvariable=cfg["med_window"], width=6).grid(row=1, column=1, sticky="w")
-    ttk.Label(proc, text="MA window:").grid(row=1, column=2, sticky="e")
-    ttk.Entry(proc, textvariable=cfg["ma_window"], width=6).grid(row=1, column=3, sticky="w")
+    ttk.Label(proc, text="Med window:").grid(row=0, column=0, sticky="e")
+    ttk.Entry(proc, textvariable=cfg["med_window"], width=6).grid(row=0, column=1, sticky="w")
+    ttk.Label(proc, text="MA window:").grid(row=0, column=2, sticky="e")
+    ttk.Entry(proc, textvariable=cfg["ma_window"], width=6).grid(row=0, column=3, sticky="w")
+
+    style = ttk.LabelFrame(win, text="Scatter")
+    style.grid(row=1, column=1, padx=10, pady=5, sticky="we")
+    ttk.Label(style, text="Marker size:").grid(row=0, column=0, sticky="e")
+    ttk.Entry(style, textvariable=cfg["marker"], width=6).grid(row=0, column=1, sticky="w")
 
     def on_run():
         win.destroy()
 
-    ttk.Button(win, text="Run", command=on_run).grid(row=2, column=0, pady=10)
+    ttk.Button(win, text="Run", command=on_run).grid(row=2, column=0, columnspan=2, pady=10)
     win.mainloop()
     return paths, cfg
 
@@ -143,7 +159,8 @@ if __name__ == "__main__":
     SHOW_PLOTS = cfg["show"].get()
     SAVE_PLOTS = cfg["save"].get()
     OUTPUT_DIR = cfg["out_dir"].get()
-    PLOT_PROCESSED = cfg["processed"].get()
+    PLOT_MODE = cfg["mode"].get()
+    MARKER_SIZE = cfg["marker"].get()
     MED_WINDOW = cfg["med_window"].get()
     MA_WINDOW = cfg["ma_window"].get()
 
