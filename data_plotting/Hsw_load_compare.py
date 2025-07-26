@@ -11,6 +11,7 @@ displayed.  TT and HH curves may be toggled individually.
 
 from __future__ import annotations
 
+import os
 import re
 import sys
 from pathlib import Path
@@ -63,6 +64,12 @@ FNAME_RE = re.compile(
 CORE_BINS = 50
 CORE_MIN = 3
 
+# Default output behaviour
+OUTPUT_DIR = Path.cwd()
+SHOW_PLOTS = True
+SAVE_PLOTS = False
+SAME_HIST_Y = True
+
 
 # ----------------------------------------------------------------------
 # GUI helpers
@@ -81,7 +88,7 @@ def ask_files() -> List[str]:
     return list(paths)
 
 
-def ask_options() -> Dict[str, tk.BooleanVar]:
+def ask_options() -> Dict[str, tk.Variable]:
     win = tk.Tk()
     win.title("Hsw Load Compare Settings")
 
@@ -90,16 +97,38 @@ def ask_options() -> Dict[str, tk.BooleanVar]:
         "HH": tk.BooleanVar(win, True),
         "raw": tk.BooleanVar(win, False),
         "hist": tk.BooleanVar(win, False),
+        "share_y": tk.BooleanVar(win, SAME_HIST_Y),
+        "show": tk.BooleanVar(win, SHOW_PLOTS),
+        "save": tk.BooleanVar(win, SAVE_PLOTS),
+        "out_dir": tk.StringVar(win, str(OUTPUT_DIR)),
     }
-    ttk.Checkbutton(win, text="Plot TT", variable=cfg["TT"]).grid(row=0, column=0, sticky="w", padx=5)
-    ttk.Checkbutton(win, text="Plot HH", variable=cfg["HH"]).grid(row=1, column=0, sticky="w", padx=5)
-    ttk.Checkbutton(win, text="Show raw", variable=cfg["raw"]).grid(row=2, column=0, sticky="w", padx=5)
-    ttk.Checkbutton(win, text="Show histograms", variable=cfg["hist"]).grid(row=3, column=0, sticky="w", padx=5)
+
+    plot_frame = ttk.LabelFrame(win, text="Plots")
+    plot_frame.grid(row=0, column=0, padx=10, pady=5, sticky="n")
+    ttk.Checkbutton(plot_frame, text="Plot TT", variable=cfg["TT"]).grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(plot_frame, text="Plot HH", variable=cfg["HH"]).grid(row=1, column=0, sticky="w")
+    ttk.Checkbutton(plot_frame, text="Show raw", variable=cfg["raw"]).grid(row=2, column=0, sticky="w")
+    ttk.Checkbutton(plot_frame, text="Show histograms", variable=cfg["hist"]).grid(row=3, column=0, sticky="w")
+    ttk.Checkbutton(plot_frame, text="Same hist Y", variable=cfg["share_y"]).grid(row=4, column=0, sticky="w")
+
+    out_frame = ttk.LabelFrame(win, text="Output")
+    out_frame.grid(row=0, column=1, padx=10, pady=5, sticky="n")
+    ttk.Checkbutton(out_frame, text="Show plots", variable=cfg["show"]).grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(out_frame, text="Save plots", variable=cfg["save"]).grid(row=1, column=0, sticky="w")
+    ttk.Label(out_frame, text="Directory:").grid(row=2, column=0, sticky="w")
+    ttk.Entry(out_frame, textvariable=cfg["out_dir"], width=25).grid(row=3, column=0, sticky="w")
+
+    def browse() -> None:
+        d = filedialog.askdirectory(title="Select output directory", initialdir=cfg["out_dir"].get())
+        if d:
+            cfg["out_dir"].set(d)
+
+    ttk.Button(out_frame, text="Browse", command=browse).grid(row=3, column=1, padx=2)
 
     def on_run() -> None:
         win.destroy()
 
-    ttk.Button(win, text="Run", command=on_run).grid(row=4, column=0, pady=10)
+    ttk.Button(win, text="Run", command=on_run).grid(row=1, column=0, columnspan=2, pady=10)
     win.mainloop()
     return cfg
 
@@ -215,6 +244,11 @@ def main() -> None:
     paths = ask_files()
     cfg = ask_options()
 
+    # pull frequently used options
+    cfg_show = cfg["show"].get()
+    cfg_save = cfg["save"].get()
+    cfg["out_dir"].set(Path(cfg["out_dir"].get()).expanduser().as_posix())
+
     records = []
     for p in paths:
         md, raw, filtered, mask = load_file(p)
@@ -255,7 +289,13 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Log probability density plots (ln(dp/dh) vs reduced switching field)
     # ------------------------------------------------------------------
-    fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+    fig_log, ax_log = plt.subplots(
+        nrows=nrows,
+        ncols=1,
+        sharex=True,
+        figsize=(7, 2.0 * nrows),
+        gridspec_kw={"hspace": 0},
+    )
     fig_log.subplots_adjust(hspace=0)
     if nrows == 1:
         ax_log = [ax_log]
@@ -270,11 +310,15 @@ def main() -> None:
             log_y_vals.append(np.log(h["dp"][valid]))
     log_x_all = np.concatenate(log_x_vals)
     log_y_all = np.concatenate(log_y_vals)
-    lx_min, lx_max = log_x_all.min(), log_x_all.max()
+    lx_min = -1e-5
+    lx_max = log_x_all.max()
     ly_min, ly_max = log_y_all.min(), log_y_all.max()
-    # add bottom padding so curves don't overlap the axis
+    # add some padding so curves don't hug the axes
+    lx_pad = (lx_max - lx_min) * 0.05
     ly_pad = (ly_max - ly_min) * 0.05
+    lx_upper = lx_max + lx_pad
     ly_lower = ly_min - ly_pad
+    ly_upper = ly_max + ly_pad
     for ax, load in zip(ax_log, loads):
         for col in ("TT", "HH"):
             if cfg[col].get():
@@ -282,26 +326,29 @@ def main() -> None:
                 valid = h["dp"] > 0
                 ax.plot((1 - h["centers"][valid])**1.5,
                         np.log(h["dp"][valid]), '-o', markersize=4, label=col)
-        ax.set_xlim(lx_min, lx_max)
-        ax.set_ylim(ly_lower, ly_max)
+        ax.set_xlim(lx_min, lx_upper)
+        ax.set_ylim(ly_lower, ly_upper)
         ax.grid(True, linestyle="--", alpha=0.3)
-        ax.text(0.02, 0.85, f"{load:g} g", transform=ax.transAxes, va="top")
+        ax.text(0.02, 0.05, f"{load:g} g", transform=ax.transAxes, va="bottom")
         if cfg["TT"].get() and cfg["HH"].get():
             ax.legend(fontsize="small")
-    ax_log[-1].set_xlabel(r"$(1-h)^{3/2}$")
+    ax_log[-1].set_xlabel(r"$\Delta h^{3/2}$")
     for ax in ax_log[:-1]:
-        ax.tick_params(labelbottom=False)
-    # Removed axis-level ylabel
-    # ax_log[0].set_ylabel(r"\ln(dp/dh)")
+        ax.tick_params(axis="x", bottom=False, labelbottom=False)
     ax_log[0].set_title("Combined ln(dp/dh) vs reduced switching field")
-    fig_log.text(0.04, 0.5, "ln(dp/dh)", va='center', rotation='vertical')
-    plt.tight_layout(h_pad=0)
+    fig_log.supylabel("ln(dp/dh)")
 
     # ------------------------------------------------------------------
     # Histogram plots
     # ------------------------------------------------------------------
     if cfg["hist"].get():
-        fig_h, ax_h = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+        fig_h, ax_h = plt.subplots(
+            nrows=nrows,
+            ncols=1,
+            sharex=True,
+            figsize=(7, 2.0 * nrows),
+            gridspec_kw={"hspace": 0},
+        )
         fig_h.subplots_adjust(hspace=0)
         if nrows == 1:
             ax_h = [ax_h]
@@ -313,7 +360,11 @@ def main() -> None:
                 ax.bar(centers - width / 2, data["TT"]["counts"], width=width, label="TT", alpha=0.6)
             if cfg["HH"].get():
                 ax.bar(centers + width / 2, data["HH"]["counts"], width=width, label="HH", alpha=0.6)
-            ax.set_ylim(0, hist_ymax * 1.05)
+            if cfg["share_y"].get():
+                ylim = hist_ymax
+            else:
+                ylim = max(data["TT"]["counts"].max(), data["HH"]["counts"].max())
+            ax.set_ylim(0, ylim * 1.05)
             ax.set_xlim(x_min, x_max)
             ax.grid(True, linestyle="--", alpha=0.3)
             ax.text(0.02, 0.85, f"{load:g} g", transform=ax.transAxes, va="top")
@@ -321,18 +372,21 @@ def main() -> None:
                 ax.legend(fontsize="small")
         ax_h[-1].set_xlabel("h = H/Hsw,max")
         for ax in ax_h[:-1]:
-            ax.tick_params(labelbottom=False)
-        # Removed axis-level ylabel
-        # ax_h[0].set_ylabel("Counts")
+            ax.tick_params(axis="x", bottom=False, labelbottom=False)
         ax_h[0].set_title("Histogram of Hsw vs load")
-        fig_h.text(0.04, 0.5, "Counts", va='center', rotation='vertical')
-        plt.tight_layout(h_pad=0)
+        fig_h.supylabel("Counts")
 
     # ------------------------------------------------------------------
     # Raw data plots
     # ------------------------------------------------------------------
     if cfg["raw"].get():
-        fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
+        fig_r, ax_r = plt.subplots(
+            nrows=nrows,
+            ncols=1,
+            sharex=True,
+            figsize=(7, 2.0 * nrows),
+            gridspec_kw={"hspace": 0},
+        )
         fig_r.subplots_adjust(hspace=0)
         if nrows == 1:
             ax_r = [ax_r]
@@ -353,12 +407,23 @@ def main() -> None:
                 ax.legend(fontsize="x-small")
         ax_r[-1].set_xlabel("Index")
         for ax in ax_r[:-1]:
-            ax.tick_params(labelbottom=False)
-        fig_r.text(0.04, 0.5, "Switching Field", va='center', rotation='vertical')
+            ax.tick_params(axis="x", bottom=False, labelbottom=False)
+        fig_r.supylabel("Switching Field")
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
-        plt.tight_layout(h_pad=0)
 
-    plt.show()
+    if cfg_save:
+        out = Path(cfg["out_dir"].get())
+        out.mkdir(parents=True, exist_ok=True)
+        fig_log.savefig(out / "log_compare.png", dpi=300)
+        if cfg["hist"].get():
+            fig_h.savefig(out / "hist_compare.png", dpi=300)
+        if cfg["raw"].get():
+            fig_r.savefig(out / "raw_compare.png", dpi=300)
+
+    if cfg_show:
+        plt.show()
+    else:
+        plt.close("all")
 
 
 if __name__ == "__main__":
