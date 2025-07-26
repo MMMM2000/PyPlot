@@ -289,8 +289,14 @@ def main() -> None:
     # ------------------------------------------------------------------
     # Log probability density plots (ln(dp/dh) vs reduced switching field)
     # ------------------------------------------------------------------
-    fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
-    fig_log.subplots_adjust(hspace=0)
+    fig_log, ax_log = plt.subplots(
+        nrows=nrows,
+        ncols=1,
+        sharex=True,
+        figsize=(7, 2.0 * nrows),
+        constrained_layout=True,
+        gridspec_kw={"hspace": 0},
+    )
     if nrows == 1:
         ax_log = [ax_log]
     # Compute global log-plot limits
@@ -304,12 +310,12 @@ def main() -> None:
             log_y_vals.append(np.log(h["dp"][valid]))
     log_x_all = np.concatenate(log_x_vals)
     log_y_all = np.concatenate(log_y_vals)
-    lx_min, lx_max = 0.0, log_x_all.max()
+    lx_min = -1e-5
+    lx_max = log_x_all.max()
     ly_min, ly_max = log_y_all.min(), log_y_all.max()
     # add some padding so curves don't hug the axes
     lx_pad = (lx_max - lx_min) * 0.05
     ly_pad = (ly_max - ly_min) * 0.05
-    lx_lower = max(0.0, lx_min - lx_pad)
     lx_upper = lx_max + lx_pad
     ly_lower = ly_min - ly_pad
     ly_upper = ly_max + ly_pad
@@ -320,7 +326,7 @@ def main() -> None:
                 valid = h["dp"] > 0
                 ax.plot((1 - h["centers"][valid])**1.5,
                         np.log(h["dp"][valid]), '-o', markersize=4, label=col)
-        ax.set_xlim(lx_lower, lx_upper)
+        ax.set_xlim(lx_min, lx_upper)
         ax.set_ylim(ly_lower, ly_upper)
         ax.grid(True, linestyle="--", alpha=0.3)
         ax.text(0.02, 0.05, f"{load:g} g", transform=ax.transAxes, va="bottom")
@@ -329,18 +335,21 @@ def main() -> None:
     ax_log[-1].set_xlabel(r"$(1-h)^{3/2}$")
     for ax in ax_log[:-1]:
         ax.tick_params(axis="x", bottom=False, labelbottom=False)
-    # Removed axis-level ylabel
-    # ax_log[0].set_ylabel(r"\ln(dp/dh)")
     ax_log[0].set_title("Combined ln(dp/dh) vs reduced switching field")
-    fig_log.text(0.04, 0.5, "ln(dp/dh)", va='center', rotation='vertical')
-    plt.tight_layout(h_pad=0)
+    fig_log.supylabel("ln(dp/dh)")
 
     # ------------------------------------------------------------------
     # Histogram plots
     # ------------------------------------------------------------------
     if cfg["hist"].get():
-        fig_h, ax_h = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
-        fig_h.subplots_adjust(hspace=0)
+        fig_h, ax_h = plt.subplots(
+            nrows=nrows,
+            ncols=1,
+            sharex=True,
+            figsize=(7, 2.0 * nrows),
+            constrained_layout=True,
+            gridspec_kw={"hspace": 0},
+        )
         if nrows == 1:
             ax_h = [ax_h]
         for ax, load in zip(ax_h, loads):
@@ -364,18 +373,21 @@ def main() -> None:
         ax_h[-1].set_xlabel("h = H/Hsw,max")
         for ax in ax_h[:-1]:
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
-        # Removed axis-level ylabel
-        # ax_h[0].set_ylabel("Counts")
         ax_h[0].set_title("Histogram of Hsw vs load")
-        fig_h.text(0.04, 0.5, "Counts", va='center', rotation='vertical')
-        plt.tight_layout(h_pad=0)
+        fig_h.supylabel("Counts")
 
     # ------------------------------------------------------------------
     # Raw data plots
     # ------------------------------------------------------------------
     if cfg["raw"].get():
-        fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows))
-        fig_r.subplots_adjust(hspace=0)
+        fig_r, ax_r = plt.subplots(
+            nrows=nrows,
+            ncols=1,
+            sharex=True,
+            figsize=(7, 2.0 * nrows),
+            constrained_layout=True,
+            gridspec_kw={"hspace": 0},
+        )
         if nrows == 1:
             ax_r = [ax_r]
         for (md, raw, _, mask), ax in zip(records, ax_r):
@@ -396,9 +408,8 @@ def main() -> None:
         ax_r[-1].set_xlabel("Index")
         for ax in ax_r[:-1]:
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
-        fig_r.text(0.04, 0.5, "Switching Field", va='center', rotation='vertical')
+        fig_r.supylabel("Switching Field")
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
-        plt.tight_layout(h_pad=0)
 
     if cfg_save:
         out = Path(cfg["out_dir"].get())
