@@ -28,8 +28,9 @@ python3 data_plotting/stress_dependence_plot.py
 
 `data_plotting/Hsw_load_compare.py` stacks probability density plots for a set of
 ascending measurement files.  A small options window lets you choose whether to
-display TT and/or HH curves as well as raw data and histograms.  Loads are
-sorted from lowest to highest and share common axes for easy comparison.
+display TT and/or HH curves as well as raw data and histograms.  Additional
+controls allow saving the generated figures and keeping histogram Y axes shared
+or independent.  Loads are sorted from lowest to highest for easy comparison.
 
 Run the script with:
 
