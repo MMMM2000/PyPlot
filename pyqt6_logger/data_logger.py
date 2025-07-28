@@ -232,7 +232,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_record.setEnabled(True)
         self.ui.pushButton_cancel.setEnabled(False)
 
-def main():
+def main(argv: list[str] | None = None) -> None:
+    """Launch the data logger window.
+
+    When called from another running Qt application (e.g. :class:`launcher.MasterLauncher`)
+    no additional :class:`~PyQt6.QtWidgets.QApplication` instance will be created
+    and control is returned immediately after showing the window. The caller's
+    event loop continues running in this case.
+    """
+
     import argparse
 
     parser = argparse.ArgumentParser(description="Serial data logger (PyQt6)")
@@ -240,13 +248,20 @@ def main():
         "--log-dir",
         help="Directory to save logs [env: LOG_DIR]",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     log_dir = args.log_dir or DEFAULT_LOG_DIR
 
-    app    = QtWidgets.QApplication(sys.argv)
     window = MainWindow(log_dir)
     window.show()
+
+    app = QtWidgets.QApplication.instance()
+    if app is not None:
+        # Another event loop is already running (e.g. from MasterLauncher)
+        return
+
+    # Standalone execution: create the application and run the event loop
+    app = QtWidgets.QApplication(sys.argv)
     sys.exit(app.exec())
 
 if __name__ == "__main__":
