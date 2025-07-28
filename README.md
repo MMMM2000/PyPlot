@@ -58,11 +58,11 @@ Use the drop-down boxes to select the serial port and baud rate, then press **Co
 
 ## Requirements
 
-The plotting script depends on `numpy`, `pandas` and `matplotlib`.  The logger
-requires `PyQt6` and `pyserial`.
+The plotting script depends on `numpy`, `pandas`, `matplotlib` and `tqdm` for
+displaying progress bars.  The logger requires `PyQt6` and `pyserial`.
 Install the dependencies with:
 
 ```bash
-pip install numpy pandas matplotlib PyQt6 pyserial
+pip install numpy pandas matplotlib tqdm PyQt6 pyserial
 ```
 

@@ -9,6 +9,7 @@ from pathlib import Path
 import matplotlib.ticker as mticker
 import tkinter as tk
 from tkinter import filedialog, ttk
+from tqdm import tqdm
 
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
@@ -292,9 +293,12 @@ def main(files):
     if SHOW_PLOTS and not do_show:
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
+    progress = tqdm(total=total, desc="Processing plots")
     for _, grp in groups:
         for var in PLOT_VARS:
             plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
+            progress.update()
+    progress.close()
 
     if do_show:
         plt.show()
