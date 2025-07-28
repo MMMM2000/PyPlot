@@ -5,8 +5,10 @@ from typing import List, Dict
 
 from PyQt6 import QtWidgets, QtCore
 
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from data_plotting import stress_dependence_plot as orig
-from .utils import apply_dark_theme
+from pyqt6_plotting.utils import apply_dark_theme
 
 
 def ask_user() -> tuple[List[str], Dict[str, object]]:

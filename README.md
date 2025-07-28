@@ -47,6 +47,34 @@ The PyQt6 version is started with:
 python3 pyqt6_plotting/hsw_load_compare.py
 ```
 
+## Plotting Maxion continuous measurements
+
+`data_plotting/maxion_continuous_plot.py` visualizes Maxion continuous
+measurement files and allows plotting raw and/or processed curves for all three
+channels.  Figures can be displayed and optionally saved.  A dark-themed PyQt6
+implementation is available at `pyqt6_plotting/maxion_continuous_plot.py`.
+
+Run the script with:
+```bash
+python3 data_plotting/maxion_continuous_plot.py
+```
+The PyQt6 version is started with:
+```bash
+python3 pyqt6_plotting/maxion_continuous_plot.py
+```
+
+## Hsw distribution analysis
+
+`data_plotting/Hsw_distribution_plot.py` applies a Histogram-Core filter to TT
+and HH measurements, then plots raw curves, count histograms and probability
+density curves.  The feature-complete PyQt6 rewrite lives in
+`pyqt6_plotting/hsw_distribution_plot.py`.
+
+Launch it with:
+```bash
+python3 pyqt6_plotting/hsw_distribution_plot.py
+```
+
 ## Data logger
 
 `pyqt6_logger/main.py` records serial data to a file.  At the
