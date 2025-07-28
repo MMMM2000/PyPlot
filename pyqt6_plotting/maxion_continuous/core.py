@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
-SAVE_PLOTS = True
+SAVE_PLOTS = False
 PLOT_MODE = "both"  # 'raw', 'processed', 'both'
 MARKER_SIZE = 0.1
 MED_WINDOW = 5

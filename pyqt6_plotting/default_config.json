@@ -6,7 +6,7 @@
     "PLOT_T1": true,
     "PLOT_T2": true,
     "SHOW_PLOTS": true,
-    "SAVE_PLOTS": true,
+    "SAVE_PLOTS": false,
     "PLOT_PROCESSED": false,
     "MED_WINDOW": 5,
     "MA_WINDOW": 20
