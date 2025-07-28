@@ -11,7 +11,7 @@ OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
 SAVE_PLOTS = True
 PLOT_MODE = "both"  # 'raw', 'processed', 'both'
-MARKER_SIZE = 0.3
+MARKER_SIZE = 0.1
 MED_WINDOW = 5
 MA_WINDOW = 20
 
