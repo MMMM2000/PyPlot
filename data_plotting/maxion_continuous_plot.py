@@ -13,6 +13,31 @@ import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+
+class ProgressDialog:
+    """Simple Tk progress window with Cancel button."""
+
+    def __init__(self, total: int):
+        self.root = tk.Tk()
+        self.root.title("Processing")
+        self.var = tk.IntVar(self.root, 0)
+        ttk.Label(self.root, text="Saving plots...").pack(padx=10, pady=(10, 0))
+        self.bar = ttk.Progressbar(self.root, maximum=total, variable=self.var, length=300)
+        self.bar.pack(padx=10, pady=5)
+        ttk.Button(self.root, text="Cancel", command=self.cancel).pack(pady=5)
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.cancelled = False
+        self.root.update()
+
+    def update(self):
+        self.var.set(self.var.get() + 1)
+        self.root.update()
+
+    def cancel(self):
+        self.cancelled = True
+        self.root.destroy()
+
+
 # ======================================================================
 #                            DEFAULT CONFIGURATION
 # These values pre-fill the GUI and can be adjusted interactively.
@@ -138,12 +163,26 @@ def ask_user():
 
 
 def main(files):
+    total = len(files) * 3
+    progress = ProgressDialog(total) if total else None
     for path in files:
         head, coils = parse_name(Path(path).stem)
         df = load_file(path)
         for ch in (1, 2, 3):
+            if progress and progress.cancelled:
+                break
             y = df[f"ch{ch}_t1"] + df[f"ch{ch}_t2"]
             plot_channel(y, head, coils, ch)
+            if progress:
+                progress.update()
+        if progress and progress.cancelled:
+            break
+    if progress and not progress.cancelled:
+        progress.root.destroy()
+    elif progress and progress.cancelled:
+        plt.close('all')
+        print("Cancelled.")
+        return
 
     if SHOW_PLOTS:
         plt.show()

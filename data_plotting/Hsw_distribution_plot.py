@@ -11,6 +11,30 @@ import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog, ttk
 
+
+class ProgressDialog:
+    """Simple Tk progress window with Cancel button."""
+
+    def __init__(self, total: int):
+        self.root = tk.Tk()
+        self.root.title("Processing")
+        self.var = tk.IntVar(self.root, 0)
+        ttk.Label(self.root, text="Saving plots...").pack(padx=10, pady=(10, 0))
+        self.bar = ttk.Progressbar(self.root, maximum=total, variable=self.var, length=300)
+        self.bar.pack(padx=10, pady=5)
+        ttk.Button(self.root, text="Cancel", command=self.cancel).pack(pady=5)
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.cancelled = False
+        self.root.update()
+
+    def update(self):
+        self.var.set(self.var.get() + 1)
+        self.root.update()
+
+    def cancel(self):
+        self.cancelled = True
+        self.root.destroy()
+
 # ─────────────────────────────────────────────
 # 1) File selection
 # ─────────────────────────────────────────────
@@ -182,7 +206,17 @@ for name, df in data.items():
 # ─────────────────────────────────────────────
 # 7) Plot all requested figures
 # ─────────────────────────────────────────────
+num_per = (
+    (1 if cfg["raw"].get() else 0)
+    + (2 if cfg["hist"].get() else 0)
+    + (2 if cfg["ind_log"].get() else 0)
+    + (1 if cfg["comb_log"].get() else 0)
+)
+total_plots = len(data) * num_per
+progress = ProgressDialog(total_plots) if total_plots else None
 for name, df in data.items():
+    if progress and progress.cancelled:
+        break
     mask = masks[name]
     raw = raw_data[name]
 
@@ -200,7 +234,13 @@ for name, df in data.items():
         plt.title(f"{name} — Raw with Histogram‐Core filter")
         plt.xlabel("Index"); plt.ylabel("Switching Field")
         plt.legend(fontsize='x-small'); plt.tight_layout()
+        if progress:
+            if progress.cancelled:
+                break
+            progress.update()
 
+    if progress and progress.cancelled:
+        break
     # Counts histogram
     if cfg["hist"].get():
         for col, h in hist[name].items():
@@ -210,7 +250,13 @@ for name, df in data.items():
             plt.title(f"{name} — {col}: counts")
             plt.xlabel("h = H/Hsw,max"); plt.ylabel("Counts")
             plt.grid(ls='--', alpha=0.3)
+            if progress:
+                if progress.cancelled:
+                    break
+                progress.update()
 
+    if progress and progress.cancelled:
+        break
     # Individual ln(dp/dh)
     if cfg["ind_log"].get():
         for col, h in hist[name].items():
@@ -222,7 +268,13 @@ for name, df in data.items():
             plt.title(f"{name} — {col}: ln(dp/dh) vs Δh^(3/2)")
             plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
             plt.grid(ls='--', alpha=0.3)
+            if progress:
+                if progress.cancelled:
+                    break
+                progress.update()
 
+    if progress and progress.cancelled:
+        break
     # Combined ln(dp/dh)
     if cfg["comb_log"].get():
         plt.figure()
@@ -234,5 +286,16 @@ for name, df in data.items():
         plt.title(f"{name} — Combined ln(dp/dh)")
         plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
         plt.legend(); plt.grid(ls='--', alpha=0.3)
+        if progress:
+            if progress.cancelled:
+                break
+            progress.update()
+
+if progress and not progress.cancelled:
+    progress.root.destroy()
+elif progress and progress.cancelled:
+    plt.close('all')
+    print("Cancelled.")
+    sys.exit(0)
 
 plt.show()
