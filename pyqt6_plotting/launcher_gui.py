@@ -33,7 +33,7 @@ class Launcher(QtWidgets.QDialog):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Plotting Launcher")
-        self.layout = QtWidgets.QVBoxLayout(self)
+        self.main_layout = QtWidgets.QVBoxLayout(self)
 
         self.list_widget = QtWidgets.QListWidget()
         for name in PLOTTERS:
@@ -43,8 +43,8 @@ class Launcher(QtWidgets.QDialog):
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
 
-        self.layout.addWidget(self.list_widget)
-        self.layout.addWidget(self.run_button)
+        self.main_layout.addWidget(self.list_widget)
+        self.main_layout.addWidget(self.run_button)
 
     def run_selected(self) -> None:
         item = self.list_widget.currentItem()
@@ -53,6 +53,7 @@ class Launcher(QtWidgets.QDialog):
             return
         name = item.text()
         func = PLOTTERS[name]
+        QtWidgets.QApplication.instance().setQuitOnLastWindowClosed(False)
         self.close()
         try:
             func()
