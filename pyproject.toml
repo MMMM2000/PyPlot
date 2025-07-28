@@ -1,0 +1,26 @@
+[project]
+name = "python-plot"
+version = "0.1.0"
+description = "PyQt6 data logging and plotting utilities"
+authors = [{name = "Unknown"}]
+dependencies = [
+    "PyQt6",
+    "matplotlib",
+    "numpy",
+    "pandas",
+]
+requires-python = ">=3.8"
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+launcher = "launcher:main"
+plot-cli = "pyqt6_plotting.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["pyqt6_logger", "pyqt6_plotting"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"

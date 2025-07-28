@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any
 
+from ..config import load_config
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -11,14 +13,17 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 
-# Default configuration values (used by the PyQt6 wrapper)
-OUTPUT_DIR = os.getcwd()
-PLOT_SUM = True
-PLOT_DT = True
-PLOT_T1 = True
-PLOT_T2 = True
-PLOT_VARS = [v for v,b in [("sum",PLOT_SUM),("dT",PLOT_DT),("T1",PLOT_T1),("T2",PLOT_T2)] if b]
-BASELINE_MODE = "first"  # 'first' or 'min'
+# Load default configuration
+_CFG = load_config().get("stress_dependence", {})
+OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
+PLOT_SUM = bool(_CFG.get("PLOT_SUM", True))
+PLOT_DT = bool(_CFG.get("PLOT_DT", True))
+PLOT_T1 = bool(_CFG.get("PLOT_T1", True))
+PLOT_T2 = bool(_CFG.get("PLOT_T2", True))
+PLOT_VARS = [
+    v for v, b in [("sum", PLOT_SUM), ("dT", PLOT_DT), ("T1", PLOT_T1), ("T2", PLOT_T2)] if b
+]
+BASELINE_MODE = str(_CFG.get("BASELINE_MODE", "first"))  # 'first' or 'min'
 RAW_COLORS = {"a": "#45A1D6", "b": "#F09C67"}
 RAW_MARKER = "o"
 RAW_MARKER_SIZE = 0.3
@@ -30,15 +35,15 @@ MEAN_LW = 3
 OFFSET = 0.5
 JITTER_SPAN = 0.5
 PRINT_COUNTS = False
-PLOT_PROCESSED = False
-MED_WINDOW = 5
-MA_WINDOW = 20
+PLOT_PROCESSED = bool(_CFG.get("PLOT_PROCESSED", False))
+MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
+MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 PROC_COLORS = {"a":"#E69F00","b":"#56B4E9"}
 PROC_MARKER = 's'
 PROC_MSIZE = 0.5
 PROC_ALPHA = 0.5
-SHOW_PLOTS = True
-SAVE_PLOTS = True
+SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
+SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", True))
 MAX_SHOW = 8
 
 
@@ -72,7 +77,20 @@ LABELS = {
     "sum": "T1+T2 (µs)",
 }
 
-def parse_metadata(stem: str):
+def parse_metadata(stem: str) -> Dict[str, Any] | None:
+    """Parse measurement metadata from a file name stem.
+
+    Parameters
+    ----------
+    stem:
+        File name without extension.
+
+    Returns
+    -------
+    dict | None
+        Dictionary with parsed fields or ``None`` if the pattern does not
+        match.
+    """
     m = FNAME_RE.match(stem)
     if not m:
         return None
@@ -81,6 +99,7 @@ def parse_metadata(stem: str):
     return md
 
 def load_data(files: List[str]) -> pd.DataFrame:
+    """Load measurement files into a single DataFrame."""
     files = sorted(files)
     if not files:
         raise FileNotFoundError("No files selected")
@@ -103,7 +122,8 @@ def load_data(files: List[str]) -> pd.DataFrame:
         dfs.append(df)
     return pd.concat(dfs, ignore_index=True)
 
-def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str):
+def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> plt.Figure:
+    """Plot a single variable and optionally save the figure."""
     comp, title, samp, anneal = (
         df['composition'].iat[0],
         df['title'].iat[0],
