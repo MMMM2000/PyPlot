@@ -7,7 +7,9 @@ from PyQt6 import QtWidgets
 import pathlib
 
 if __package__ is None or __package__ == "":
-    sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+    # When executed directly, prepend the repository root to ``sys.path`` so
+    # that absolute imports of the ``pyqt6_plotting`` package work correctly.
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from pyqt6_plotting.maxion_continuous import core as orig
     from pyqt6_plotting.utils import apply_dark_theme
 else:
