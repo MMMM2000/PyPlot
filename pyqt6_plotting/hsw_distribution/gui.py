@@ -10,7 +10,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 if __package__ is None or __package__ == "":
-    sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
+    # When executed directly, ensure the repository root is on sys.path so the
+    # ``pyqt6_plotting`` package can be imported correctly.
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from pyqt6_plotting.utils import apply_dark_theme
 else:
     from ..utils import apply_dark_theme
