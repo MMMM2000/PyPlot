@@ -4,7 +4,7 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ## Plotting stress dependence data
 
-`data_plotting/stress_dependence_plot.py` generates plots from a folder of measurement files.  The script now presents a Tk-based dialog to pick the input files and configure options interactively.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section at the top of the file and can be adjusted there.
+`data_plotting/stress_dependence_plot.py` generates plots from a folder of measurement files.  The script presents a Tk-based dialog to pick the input files and configure options interactively.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section at the top of the file and can be adjusted there.  A PyQt6 version with a dark theme is available at `pyqt6_plotting/stress_dependence_plot.py`.
 
 - `DATA_DIR` – directory where your raw `.txt` files live
 - `OUTPUT_DIR` – directory in which to save generated plots
@@ -23,6 +23,10 @@ Several flags control what variables are plotted and whether the plots are displ
 ```bash
 python3 data_plotting/stress_dependence_plot.py
 ```
+The PyQt6 version is started with:
+```bash
+python3 pyqt6_plotting/stress_dependence_plot.py
+```
 
 ## Comparing Hsw distributions by load
 
@@ -31,11 +35,16 @@ ascending measurement files.  A small options window lets you choose whether to
 display TT and/or HH curves as well as raw data and histograms.  Additional
 controls allow saving the generated figures and keeping histogram Y axes shared
 or independent.  Loads are sorted from lowest to highest for easy comparison.
+A PyQt6 variant with dark-mode UI lives in `pyqt6_plotting/hsw_load_compare.py`.
 
 Run the script with:
 
 ```bash
 python3 data_plotting/Hsw_load_compare.py
+```
+The PyQt6 version is started with:
+```bash
+python3 pyqt6_plotting/hsw_load_compare.py
 ```
 
 ## Data logger
