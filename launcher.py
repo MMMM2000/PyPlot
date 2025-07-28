@@ -88,7 +88,9 @@ class MasterLauncher(QtWidgets.QDialog):
         try:
             func()
         except SystemExit as exc:
-            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+            code = exc.code
+            if code not in (None, 0):
+                QtWidgets.QMessageBox.critical(self, "Error", str(code))
         except Exception as exc:  # pragma: no cover - unexpected errors
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
