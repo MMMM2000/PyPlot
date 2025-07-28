@@ -12,6 +12,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog, ttk
+from tqdm import tqdm
 
 # ======================================================================
 #                            DEFAULT CONFIGURATION
@@ -138,12 +139,16 @@ def ask_user():
 
 
 def main(files):
+    total = len(files) * 3
+    progress = tqdm(total=total, desc="Processing plots")
     for path in files:
         head, coils = parse_name(Path(path).stem)
         df = load_file(path)
         for ch in (1, 2, 3):
             y = df[f"ch{ch}_t1"] + df[f"ch{ch}_t2"]
             plot_channel(y, head, coils, ch)
+            progress.update()
+    progress.close()
 
     if SHOW_PLOTS:
         plt.show()

@@ -10,6 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import tkinter as tk
 from tkinter import filedialog, ttk
+from tqdm import tqdm
 
 # ─────────────────────────────────────────────
 # 1) File selection
@@ -182,6 +183,14 @@ for name, df in data.items():
 # ─────────────────────────────────────────────
 # 7) Plot all requested figures
 # ─────────────────────────────────────────────
+num_per = (
+    (1 if cfg["raw"].get() else 0)
+    + (2 if cfg["hist"].get() else 0)
+    + (2 if cfg["ind_log"].get() else 0)
+    + (1 if cfg["comb_log"].get() else 0)
+)
+total_plots = len(data) * num_per
+progress = tqdm(total=total_plots, desc="Processing plots") if total_plots else None
 for name, df in data.items():
     mask = masks[name]
     raw = raw_data[name]
@@ -200,6 +209,8 @@ for name, df in data.items():
         plt.title(f"{name} — Raw with Histogram‐Core filter")
         plt.xlabel("Index"); plt.ylabel("Switching Field")
         plt.legend(fontsize='x-small'); plt.tight_layout()
+        if progress:
+            progress.update()
 
     # Counts histogram
     if cfg["hist"].get():
@@ -210,6 +221,8 @@ for name, df in data.items():
             plt.title(f"{name} — {col}: counts")
             plt.xlabel("h = H/Hsw,max"); plt.ylabel("Counts")
             plt.grid(ls='--', alpha=0.3)
+            if progress:
+                progress.update()
 
     # Individual ln(dp/dh)
     if cfg["ind_log"].get():
@@ -222,6 +235,8 @@ for name, df in data.items():
             plt.title(f"{name} — {col}: ln(dp/dh) vs Δh^(3/2)")
             plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
             plt.grid(ls='--', alpha=0.3)
+            if progress:
+                progress.update()
 
     # Combined ln(dp/dh)
     if cfg["comb_log"].get():
@@ -234,5 +249,10 @@ for name, df in data.items():
         plt.title(f"{name} — Combined ln(dp/dh)")
         plt.xlabel(r"$\Delta h^{3/2}$"); plt.ylabel(r"$\ln(dp/dh)$")
         plt.legend(); plt.grid(ls='--', alpha=0.3)
+        if progress:
+            progress.update()
+
+if progress:
+    progress.close()
 
 plt.show()
