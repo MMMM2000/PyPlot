@@ -11,14 +11,6 @@ plotting tools. Select an item and press **Run** to launch it:
 python3 launcher.py
 ```
 
-## Plotting launcher
-
-`pyqt6_plotting/plotting_launcher.py` provides a GUI to launch only the
-plotters. Start it with:
-
-```bash
-python3 pyqt6_plotting/plotting_launcher.py
-```
 
 ## Plotting stress dependence data
 
@@ -89,8 +81,7 @@ The port list shows each device's full description to make selection easier.
 
 ## Requirements
 
-The plotting script depends on `numpy`, `pandas`, `matplotlib` and `tqdm` for
-displaying progress bars.  The logger requires `PyQt6` and `pyserial`.
+This project depends on `PyQt6`, `matplotlib`, `numpy` and `pandas`.
 Install the dependencies with:
 
 ```bash
