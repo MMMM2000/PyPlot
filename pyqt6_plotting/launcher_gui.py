@@ -65,6 +65,10 @@ class Launcher(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
             )
+        finally:
+            # Restore default behaviour and quit when all windows are closed
+            app_instance.setQuitOnLastWindowClosed(True)
+            app_instance.quit()
 
 
 def main() -> None:
