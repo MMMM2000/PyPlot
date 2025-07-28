@@ -30,7 +30,7 @@ def ask_files() -> List[str]:
     return list(paths)
 
 
-def ask_options() -> Dict[str, Any]:
+def ask_options() -> Dict[str, Any] | None:
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle("Hsw Distribution Settings")
     layout = QtWidgets.QGridLayout(dialog)
@@ -85,7 +85,7 @@ def ask_options() -> Dict[str, Any]:
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-        sys.exit(0)
+        return None
 
     return {
         "raw": raw_cb.isChecked(),
@@ -150,6 +150,8 @@ def find_auto_bins(vals: np.ndarray) -> int:
 def main() -> None:
     paths = ask_files()
     cfg = ask_options()
+    if cfg is None:
+        return
 
     labels = cfg.get("labels", ("TT", "HH"))
     raw_data: Dict[str, pd.DataFrame] = {}
@@ -273,7 +275,7 @@ def main() -> None:
     elif progress and progress.cancelled:
         plt.close('all')
         print("Cancelled.")
-        sys.exit(0)
+        return
 
     plt.show()
 
@@ -282,4 +284,3 @@ if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     apply_dark_theme(app)
     main()
-    sys.exit()

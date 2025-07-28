@@ -142,4 +142,3 @@ if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
     apply_dark_theme(app)
     main()
-    sys.exit()

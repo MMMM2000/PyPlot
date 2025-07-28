@@ -43,7 +43,7 @@ PROC_MARKER = 's'
 PROC_MSIZE = 0.5
 PROC_ALPHA = 0.5
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
-SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", True))
+SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 MAX_SHOW = 8
 
 
