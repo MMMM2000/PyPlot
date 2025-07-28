@@ -2,13 +2,22 @@
 
 This repository contains simple tools for logging measurement data and plotting the resulting text files.
 
-## Plotting launcher
+## Master launcher
 
-`pyqt6_plotting/launcher_gui.py` provides a small GUI that lets you choose one
-of the available plotters and launches it. Start it with:
+`launcher.py` starts a small GUI that groups all available loggers and
+plotting tools. Select an item and press **Run** to launch it:
 
 ```bash
-python3 pyqt6_plotting/launcher_gui.py
+python3 launcher.py
+```
+
+## Plotting launcher
+
+`pyqt6_plotting/plotting_launcher.py` provides a GUI to launch only the
+plotters. Start it with:
+
+```bash
+python3 pyqt6_plotting/plotting_launcher.py
 ```
 
 ## Plotting stress dependence data
@@ -61,7 +70,7 @@ python3 pyqt6_plotting/hsw_distribution/distribution_gui.py
 
 ## Data logger
 
-`pyqt6_logger/main.py` records serial data to a file.  At the
+`pyqt6_logger/data_logger.py` records serial data to a file.  At the
 top of the script you can set the default `LOG_DIR` path as well as the
 pre-filled command string and suggested log file name.  `LOG_DIR` can also be
 overridden via the `--log-dir` command line option or the `LOG_DIR` environment
@@ -72,7 +81,7 @@ dark Fusion palette with rounded buttons for a modern look.
 Launch the logger with:
 
 ```bash
-python3 pyqt6_logger/main.py
+python3 pyqt6_logger/data_logger.py
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
@@ -85,6 +94,6 @@ displaying progress bars.  The logger requires `PyQt6` and `pyserial`.
 Install the dependencies with:
 
 ```bash
-pip install numpy pandas matplotlib tqdm PyQt6 pyserial
+pip install -r requirements.txt
 ```
 
