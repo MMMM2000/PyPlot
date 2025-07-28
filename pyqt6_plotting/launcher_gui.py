@@ -53,7 +53,9 @@ class Launcher(QtWidgets.QDialog):
             return
         name = item.text()
         func = PLOTTERS[name]
-        QtWidgets.QApplication.instance().setQuitOnLastWindowClosed(False)
+        app_instance = QtWidgets.QApplication.instance()
+        assert isinstance(app_instance, QtWidgets.QApplication)
+        app_instance.setQuitOnLastWindowClosed(False)
         self.close()
         try:
             func()
