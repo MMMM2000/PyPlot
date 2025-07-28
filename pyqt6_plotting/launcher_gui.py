@@ -52,9 +52,16 @@ class Launcher(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "No selection", "Please select a plotting script")
             return
         name = item.text()
-        self.close()
         func = PLOTTERS[name]
-        func()
+        self.close()
+        try:
+            func()
+        except SystemExit as exc:
+            QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+        except Exception as exc:  # pragma: no cover - unexpected errors
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"{type(exc).__name__}: {exc}"
+            )
 
 
 def main() -> None:

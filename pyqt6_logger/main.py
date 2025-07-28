@@ -22,8 +22,9 @@ LOG_DIR = (
 DEFAULT_PORT_COMMAND = ">2050;1270;1;"
 
 # 3) DEFAULT_LOG_FILE_NAME: suggested file name for new recordings. This value
-#    only affects the default text shown in the GUI.
-DEFAULT_LOG_FILE_NAME = "FeSiBP 156_2 s2-1a 74mA 2,5a.txt"
+#    only affects the default text shown in the GUI. The ``.txt`` extension is
+#    added automatically when saving.
+DEFAULT_LOG_FILE_NAME = "FeSiBP 156_2 s2-1a 74mA 2,5a"
 # =============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
@@ -73,7 +74,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.setCurrentIndex(0)  # highest bitrate
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
+        # show only the base name without extension
         self.ui.lineEdit_log_file.setText(DEFAULT_LOG_FILE_NAME)
+        self.ui.lineEdit_log_file.returnPressed.connect(self.start_logging)
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
         # connect signals
@@ -177,18 +180,24 @@ class MainWindow(QtWidgets.QMainWindow):
         Prompt the user for a log-file location, open the file,
         and begin writing incoming samples to it.
         """
-        file_name = self.ui.lineEdit_log_file.text()
-        initial   = os.path.join(self.log_dir, file_name)
+        file_base = self.ui.lineEdit_log_file.text()
+        initial   = os.path.join(self.log_dir, f"{file_base}.txt")
         path, _   = QtWidgets.QFileDialog.getSaveFileName(
-            self, "Select log file", initial
+            self,
+            "Select log file",
+            initial,
+            "Text files (*.txt)"
         )
         if not path:
             return
 
+        if not path.endswith(".txt"):
+            path += ".txt"
+
         self.log_dir = os.path.dirname(path)
         self.ui.lineEdit_log_dir.setText(self.log_dir)
-        file_name = os.path.basename(path)
-        self.ui.lineEdit_log_file.setText(file_name)
+        file_base = os.path.splitext(os.path.basename(path))[0]
+        self.ui.lineEdit_log_file.setText(file_base)
         full_path = path
         try:
             self.log_file = open(full_path, "w")
