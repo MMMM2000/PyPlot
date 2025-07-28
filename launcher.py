@@ -84,7 +84,7 @@ class MasterLauncher(QtWidgets.QDialog):
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
         app_instance.setQuitOnLastWindowClosed(False)
-        self.close()
+        self.hide()
         try:
             func()
         except SystemExit as exc:
@@ -95,7 +95,7 @@ class MasterLauncher(QtWidgets.QDialog):
             )
         finally:
             app_instance.setQuitOnLastWindowClosed(True)
-            app_instance.quit()
+            self.show()
 
 
 def main() -> None:
