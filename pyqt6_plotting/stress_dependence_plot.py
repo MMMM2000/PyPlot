@@ -1,7 +1,7 @@
 from __future__ import annotations
 import sys
 import os
-from typing import List, Dict
+from typing import List, Dict, Any
 
 from PyQt6 import QtWidgets, QtCore
 
@@ -11,7 +11,7 @@ from data_plotting import stress_dependence_plot as orig
 from pyqt6_plotting.utils import apply_dark_theme
 
 
-def ask_user() -> tuple[List[str], Dict[str, object]]:
+def ask_user() -> tuple[List[str], Dict[str, Any]]:
     paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
         None,
         "Select measurement files",
@@ -69,8 +69,8 @@ def ask_user() -> tuple[List[str], Dict[str, object]]:
     proc_group = QtWidgets.QGroupBox("Processed curve")
     proc_layout = QtWidgets.QGridLayout(proc_group)
     proc_cb = QtWidgets.QCheckBox("Plot processed"); proc_cb.setChecked(orig.PLOT_PROCESSED)
-    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(orig.MED_WINDOW)
-    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(orig.MA_WINDOW)
+    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
+    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
     proc_layout.addWidget(proc_cb, 0, 0, 1, 4)
     proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
     proc_layout.addWidget(med_spin, 1, 1)
@@ -147,8 +147,8 @@ def main() -> None:
     orig.SAVE_PLOTS = cfg["save"]
     orig.OUTPUT_DIR = cfg["out_dir"]
     orig.PLOT_PROCESSED = cfg["processed"]
-    orig.MED_WINDOW = cfg["med_window"]
-    orig.MA_WINDOW = cfg["ma_window"]
+    orig.MED_WINDOW = int(cfg["med_window"])
+    orig.MA_WINDOW = int(cfg["ma_window"])
 
     orig.main(paths)
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 import sys
-from typing import List, Dict
+from typing import List, Dict, Any
 
 from PyQt6 import QtWidgets
 
@@ -22,7 +22,7 @@ def ask_files() -> List[str]:
     return list(paths)
 
 
-def ask_options() -> Dict[str, object]:
+def ask_options() -> Dict[str, Any]:
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle("Hsw Load Compare Settings")
     layout = QtWidgets.QGridLayout(dialog)

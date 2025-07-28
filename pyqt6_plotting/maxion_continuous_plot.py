@@ -1,7 +1,7 @@
 from __future__ import annotations
 import sys
 import os
-from typing import List, Dict
+from typing import List, Dict, Any
 
 from PyQt6 import QtWidgets
 
@@ -11,7 +11,7 @@ from data_plotting import maxion_continuous_plot as orig
 from pyqt6_plotting.utils import apply_dark_theme
 
 
-def ask_user() -> tuple[List[str], Dict[str, object]]:
+def ask_user() -> tuple[List[str], Dict[str, Any]]:
     paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
         None,
         "Select measurement files",
@@ -56,8 +56,8 @@ def ask_user() -> tuple[List[str], Dict[str, object]]:
 
     proc_group = QtWidgets.QGroupBox("Processed curve")
     proc_layout = QtWidgets.QGridLayout(proc_group)
-    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(orig.MED_WINDOW)
-    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(orig.MA_WINDOW)
+    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
+    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
     proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 0, 0)
     proc_layout.addWidget(med_spin, 0, 1)
     proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 0, 2)
@@ -65,7 +65,7 @@ def ask_user() -> tuple[List[str], Dict[str, object]]:
 
     style_group = QtWidgets.QGroupBox("Scatter")
     style_layout = QtWidgets.QGridLayout(style_group)
-    marker_spin = QtWidgets.QDoubleSpinBox(); marker_spin.setRange(0.1, 99.9); marker_spin.setSingleStep(0.1); marker_spin.setValue(orig.MARKER_SIZE)
+    marker_spin = QtWidgets.QDoubleSpinBox(); marker_spin.setRange(0.1, 99.9); marker_spin.setSingleStep(0.1); marker_spin.setValue(float(orig.MARKER_SIZE))
     style_layout.addWidget(QtWidgets.QLabel("Marker size:"), 0, 0)
     style_layout.addWidget(marker_spin, 0, 1)
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import sys
 import os
-from typing import List, Dict
+from typing import List, Dict, Any
 
 from PyQt6 import QtWidgets
 import numpy as np
@@ -25,7 +25,7 @@ def ask_files() -> List[str]:
     return list(paths)
 
 
-def ask_options() -> Dict[str, object]:
+def ask_options() -> Dict[str, Any]:
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle("Hsw Distribution Settings")
     layout = QtWidgets.QGridLayout(dialog)
