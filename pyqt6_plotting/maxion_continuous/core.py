@@ -15,6 +15,22 @@ MARKER_SIZE = 0.3
 MED_WINDOW = 5
 MA_WINDOW = 20
 
+
+class ProgressDialog:
+    """Fallback progress indicator when no GUI dialog is provided."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.count = 0
+        self.cancelled = False
+        self.root = self
+
+    def update(self) -> None:
+        self.count += 1
+
+    def destroy(self) -> None:
+        pass
+
 NAME_RE = re.compile(r"^(?P<head>[1-6])\s.*\s(?P<coils>[23])\s(?:coils|cievky)$", re.IGNORECASE)
 
 

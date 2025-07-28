@@ -41,6 +41,22 @@ SHOW_PLOTS = True
 SAVE_PLOTS = True
 MAX_SHOW = 8
 
+
+class ProgressDialog:
+    """Fallback progress indicator used when no GUI is provided."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.count = 0
+        self.cancelled = False
+        self.root = self
+
+    def update(self) -> None:
+        self.count += 1
+
+    def destroy(self) -> None:
+        pass
+
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<title>\S+)\s+"

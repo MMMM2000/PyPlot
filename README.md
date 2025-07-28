@@ -4,7 +4,7 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ## Plotting stress dependence data
 
-`pyqt6_plotting/stress_dependence/gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
+`pyqt6_plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
 
 - `DATA_DIR` – directory where your raw `.txt` files live
 - `OUTPUT_DIR` – directory in which to save generated plots
@@ -20,34 +20,34 @@ For example `FeSiBP 188_1 s4-2a 68mA 10a.txt`.
 
 Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  Run the plotter with:
 ```bash
-python3 pyqt6_plotting/stress_dependence/gui.py
+python3 pyqt6_plotting/stress_dependence/stress_gui.py
 ```
 
 ## Comparing Hsw distributions by load
 
-`pyqt6_plotting/hsw_load_compare/gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
+`pyqt6_plotting/hsw_load_compare/load_compare_gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/hsw_load_compare/gui.py
+python3 pyqt6_plotting/hsw_load_compare/load_compare_gui.py
 ```
 
 ## Plotting Maxion continuous measurements
 
-`pyqt6_plotting/maxion_continuous/gui.py` visualizes Maxion continuous measurement files and allows plotting raw and/or processed curves for all three channels.  Figures can be displayed and optionally saved.
+`pyqt6_plotting/maxion_continuous/maxion_gui.py` visualizes Maxion continuous measurement files and allows plotting raw and/or processed curves for all three channels.  Figures can be displayed and optionally saved.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/maxion_continuous/gui.py
+python3 pyqt6_plotting/maxion_continuous/maxion_gui.py
 ```
 
 ## Hsw distribution analysis
 
-`pyqt6_plotting/hsw_distribution/gui.py` applies a Histogram-Core filter to TT and HH (or T1 and T2) measurements, then plots raw curves, count histograms and probability density curves.  You can choose the column naming scheme in the options dialog.
+`pyqt6_plotting/hsw_distribution/distribution_gui.py` applies a Histogram-Core filter to TT and HH (or T1 and T2) measurements, then plots raw curves, count histograms and probability density curves.  You can choose the column naming scheme in the options dialog.
 
 Launch it with:
 ```bash
-python3 pyqt6_plotting/hsw_distribution/gui.py
+python3 pyqt6_plotting/hsw_distribution/distribution_gui.py
 ```
 
 ## Data logger
