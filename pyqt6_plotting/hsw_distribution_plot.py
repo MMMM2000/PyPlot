@@ -56,6 +56,13 @@ def ask_options() -> Dict[str, Any]:
     core_layout.addWidget(QtWidgets.QLabel("min_count:"), 1, 0)
     core_layout.addWidget(min_spin, 1, 1)
 
+    naming_group = QtWidgets.QGroupBox("Column naming")
+    naming_layout = QtWidgets.QVBoxLayout(naming_group)
+    tthh_rb = QtWidgets.QRadioButton("TT && HH"); tthh_rb.setChecked(True)
+    t1t2_rb = QtWidgets.QRadioButton("T1 && T2")
+    naming_layout.addWidget(tthh_rb)
+    naming_layout.addWidget(t1t2_rb)
+
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
@@ -68,6 +75,7 @@ def ask_options() -> Dict[str, Any]:
     layout.addWidget(opts_widget, 0, 0)
     layout.addWidget(bin_group, 0, 1)
     layout.addWidget(core_group, 1, 1)
+    layout.addWidget(naming_group, 1, 0)
     layout.addWidget(run_btn, 2, 0, 1, 2)
     dialog.setLayout(layout)
 
@@ -85,6 +93,7 @@ def ask_options() -> Dict[str, Any]:
         "share_bins": share_bins_cb.isChecked(),
         "core_bins": bins_spin.value(),
         "core_min": min_spin.value(),
+        "labels": ("TT", "HH") if tthh_rb.isChecked() else ("T1", "T2"),
     }
 
 
@@ -137,12 +146,14 @@ def main() -> None:
     paths = ask_files()
     cfg = ask_options()
 
+    labels = cfg.get("labels", ("TT", "HH"))
     raw_data: Dict[str, pd.DataFrame] = {}
     data: Dict[str, pd.DataFrame] = {}
     masks: Dict[str, np.ndarray] = {}
     for path in paths:
         name = os.path.splitext(os.path.basename(path))[0]
-        raw = pd.read_csv(path, sep=";", header=None, usecols=[0, 1], names=["TT", "HH"])
+        raw = pd.read_csv(path, sep=";", header=None, usecols=[0, 1], names=list(labels))
+        raw.columns = ["TT", "HH"]
         raw["TTn0"] = raw["TT"] / raw["TT"].max()
         raw["HHn0"] = raw["HH"] / raw["HH"].max()
 
@@ -165,7 +176,7 @@ def main() -> None:
         hist[name] = {}
         vals_tt = df["TTn"].values
         vals_hh = df["HHn"].values
-        for col, vals in [("TT", vals_tt), ("HH", vals_hh)]:
+        for col, vals in [(labels[0], vals_tt), (labels[1], vals_hh)]:
             hmin, hmax = vals.min(), vals.max()
             if cfg["bin_mode"] == "auto":
                 if cfg["share_bins"]:
@@ -203,12 +214,12 @@ def main() -> None:
 
         if cfg["raw"]:
             plt.figure(figsize=(6, 3))
-            plt.scatter(df.index + 1, df["TT"], s=2, label="TT inlier")
-            plt.scatter(df.index + 1, df["HH"], s=2, label="HH inlier", color="C1")
+            plt.scatter(df.index + 1, df["TT"], s=2, label=f"{labels[0]} inlier")
+            plt.scatter(df.index + 1, df["HH"], s=2, label=f"{labels[1]} inlier", color="C1")
             if cfg["show_trimmed"]:
                 trimmed = ~mask
-                plt.scatter(np.where(trimmed)[0] + 1, raw["TT"][trimmed], s=20, c="r", marker="x", label="TT trimmed")
-                plt.scatter(np.where(trimmed)[0] + 1, raw["HH"][trimmed], s=20, c="m", marker="x", label="HH trimmed")
+                plt.scatter(np.where(trimmed)[0] + 1, raw["TT"][trimmed], s=20, c="r", marker="x", label=f"{labels[0]} trimmed")
+                plt.scatter(np.where(trimmed)[0] + 1, raw["HH"][trimmed], s=20, c="m", marker="x", label=f"{labels[1]} trimmed")
             plt.title(f"{name} — Raw with Histogram-Core filter")
             plt.xlabel("Index"); plt.ylabel("Switching Field")
             plt.legend(fontsize="x-small"); plt.tight_layout()

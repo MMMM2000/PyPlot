@@ -88,9 +88,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Scan available serial ports and populate the combo box."""
         self.ui.comboBox_port.clear()
         for info in QSerialPortInfo.availablePorts():
-            self.ui.comboBox_port.addItem(info.portName())
+            label = info.portName()
+            if info.description():
+                label += f" - {info.description()}"
+            self.ui.comboBox_port.addItem(label, userData=info.portName())
         if self.ui.comboBox_port.count() > 0:
-            self.port_name = self.ui.comboBox_port.currentText()
+            self.port_name = self.ui.comboBox_port.currentData()
 
     def toggle_connection(self):
         """Open or close the serial port on button click."""
@@ -115,7 +118,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_port_name(self):
         """Keep self.port_name in sync with the combo box selection."""
-        self.port_name = self.ui.comboBox_port.currentText()
+        self.port_name = self.ui.comboBox_port.currentData()
 
     def update_baudrate(self):
         """Keep self.baudrate in sync with the combo box selection."""

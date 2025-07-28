@@ -1,13 +1,10 @@
 from __future__ import annotations
 import sys
-import os
 from typing import List, Dict, Any
 
 from PyQt6 import QtWidgets
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
-from data_plotting import maxion_continuous_plot as orig
+from . import maxion_continuous_core as orig
 from pyqt6_plotting.utils import apply_dark_theme
 
 
