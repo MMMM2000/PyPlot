@@ -4,7 +4,7 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ## Plotting stress dependence data
 
-`data_plotting/stress_dependence_plot.py` generates plots from a folder of measurement files.  The script now presents a Tk-based dialog to pick the input files and configure options interactively.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section at the top of the file and can be adjusted there.
+`pyqt6_plotting/stress_dependence/gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
 
 - `DATA_DIR` – directory where your raw `.txt` files live
 - `OUTPUT_DIR` – directory in which to save generated plots
@@ -18,24 +18,36 @@ Measurement file names must follow:
 
 For example `FeSiBP 188_1 s4-2a 68mA 10a.txt`.
 
-Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  After editing the configuration simply run:
-
+Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  Run the plotter with:
 ```bash
-python3 data_plotting/stress_dependence_plot.py
+python3 pyqt6_plotting/stress_dependence/gui.py
 ```
 
 ## Comparing Hsw distributions by load
 
-`data_plotting/Hsw_load_compare.py` stacks probability density plots for a set of
-ascending measurement files.  A small options window lets you choose whether to
-display TT and/or HH curves as well as raw data and histograms.  Additional
-controls allow saving the generated figures and keeping histogram Y axes shared
-or independent.  Loads are sorted from lowest to highest for easy comparison.
+`pyqt6_plotting/hsw_load_compare/gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
 
 Run the script with:
-
 ```bash
-python3 data_plotting/Hsw_load_compare.py
+python3 pyqt6_plotting/hsw_load_compare/gui.py
+```
+
+## Plotting Maxion continuous measurements
+
+`pyqt6_plotting/maxion_continuous/gui.py` visualizes Maxion continuous measurement files and allows plotting raw and/or processed curves for all three channels.  Figures can be displayed and optionally saved.
+
+Run the script with:
+```bash
+python3 pyqt6_plotting/maxion_continuous/gui.py
+```
+
+## Hsw distribution analysis
+
+`pyqt6_plotting/hsw_distribution/gui.py` applies a Histogram-Core filter to TT and HH (or T1 and T2) measurements, then plots raw curves, count histograms and probability density curves.  You can choose the column naming scheme in the options dialog.
+
+Launch it with:
+```bash
+python3 pyqt6_plotting/hsw_distribution/gui.py
 ```
 
 ## Data logger
@@ -55,6 +67,7 @@ python3 pyqt6_logger/main.py
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log in the directory shown in the *Directory* field.
+The port list shows each device's full description to make selection easier.
 
 ## Requirements
 
