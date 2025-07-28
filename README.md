@@ -2,6 +2,15 @@
 
 This repository contains simple tools for logging measurement data and plotting the resulting text files.
 
+## Plotting launcher
+
+`pyqt6_plotting/launcher_gui.py` provides a small GUI that lets you choose one
+of the available plotters and launches it. Start it with:
+
+```bash
+python3 pyqt6_plotting/launcher_gui.py
+```
+
 ## Plotting stress dependence data
 
 `pyqt6_plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
