@@ -88,3 +88,21 @@ Install the dependencies with:
 pip install -r requirements.txt
 ```
 
+Alternatively the project can be installed in editable mode to make all
+modules importable without modifying `sys.path`:
+
+```bash
+pip install -e .
+```
+
+The `plot-cli` command installed by the package provides a simple wrapper
+around the available plotting GUIs. List the supported tools with:
+
+```bash
+plot-cli --help
+```
+
+Default settings for the stress dependence plotter are stored in
+`pyqt6_plotting/default_config.json` and can be customized by providing a
+modified path to :func:`pyqt6_plotting.config.load_config`.
+
