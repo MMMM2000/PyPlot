@@ -75,7 +75,7 @@ Launch the logger with:
 python3 pyqt6_logger/main.py
 ```
 
-Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button prompts for a file name and stores the log in the directory shown in the *Directory* field.
+Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
 The port list shows each device's full description to make selection easier.
 
 ## Requirements
