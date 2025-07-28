@@ -9,11 +9,38 @@ from pathlib import Path
 import matplotlib.ticker as mticker
 import tkinter as tk
 from tkinter import filedialog, ttk
-from tqdm import tqdm
+
 
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
+
+
+class ProgressDialog:
+    """Simple Tk progress window with Cancel button."""
+
+    def __init__(self, total: int):
+        self.root = tk.Tk()
+        self.root.title("Processing")
+        self.var = tk.IntVar(self.root, 0)
+        ttk.Label(self.root, text="Saving plots...").pack(padx=10, pady=(10, 0))
+        self.bar = ttk.Progressbar(
+            self.root, maximum=total, variable=self.var, length=300
+        )
+        self.bar.pack(padx=10, pady=5)
+        ttk.Button(self.root, text="Cancel", command=self.cancel).pack(pady=5)
+        self.root.protocol("WM_DELETE_WINDOW", self.cancel)
+        self.cancelled = False
+        self.root.update()
+
+    def update(self):
+        self.var.set(self.var.get() + 1)
+        self.root.update()
+
+    def cancel(self):
+        self.cancelled = True
+        self.root.destroy()
+
 
 # ======================================================================
 #                            DEFAULT CONFIGURATION
@@ -293,12 +320,22 @@ def main(files):
     if SHOW_PLOTS and not do_show:
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
-    progress = tqdm(total=total, desc="Processing plots")
+    progress = ProgressDialog(total) if total else None
     for _, grp in groups:
         for var in PLOT_VARS:
+            if progress and progress.cancelled:
+                break
             plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
-            progress.update()
-    progress.close()
+            if progress:
+                progress.update()
+        if progress and progress.cancelled:
+            break
+    if progress and not progress.cancelled:
+        progress.root.destroy()
+    elif progress and progress.cancelled:
+        plt.close('all')
+        print("Cancelled.")
+        return
 
     if do_show:
         plt.show()
