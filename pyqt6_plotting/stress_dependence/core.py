@@ -131,6 +131,9 @@ def load_data(files: List[str]) -> pd.DataFrame:
             engine='python',
             on_bad_lines='skip',
         )
+        df[['T1', 'T2', 'dT', 'sum']] = df[['T1', 'T2', 'dT', 'sum']].apply(
+            pd.to_numeric, errors='coerce'
+        )
         for k,v in md.items():
             df[k] = v
         dfs.append(df)
