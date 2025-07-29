@@ -252,17 +252,17 @@ def main(argv: list[str] | None = None) -> None:
 
     log_dir = args.log_dir or DEFAULT_LOG_DIR
 
+    app = QtWidgets.QApplication.instance()
+    owns_app = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        owns_app = True
+
     window = MainWindow(log_dir)
     window.show()
 
-    app = QtWidgets.QApplication.instance()
-    if app is not None:
-        # Another event loop is already running (e.g. from MasterLauncher)
-        return
-
-    # Standalone execution: create the application and run the event loop
-    app = QtWidgets.QApplication(sys.argv)
-    sys.exit(app.exec())
+    if owns_app:
+        sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
