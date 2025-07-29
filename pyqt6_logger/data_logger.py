@@ -1,7 +1,7 @@
 import sys
 import os
 import pathlib
-from typing import Any, cast
+from typing import Any, cast, List
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtSerialPort import QSerialPortInfo
@@ -34,6 +34,10 @@ DEFAULT_LOG_FILE_NAME = "FeSiBP 156_2 s2-1a 74mA 2,5a"
 # =============================================================================
 
 DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
+
+# Keep references to windows created via :func:`main` to prevent them from
+# being garbage-collected when launched from another Qt application.
+WINDOWS: list[QtWidgets.QWidget] = []
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -232,8 +236,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_record.setEnabled(True)
         self.ui.pushButton_cancel.setEnabled(False)
 
-def main(argv: list[str] | None = None) -> None:
-    """Launch the data logger window.
+def main(argv: List[str] | None = None) -> QtWidgets.QWidget:
+    """Launch the data logger window and return the created widget.
 
     When called from another running Qt application (e.g. :class:`launcher.MasterLauncher`)
     no additional :class:`~PyQt6.QtWidgets.QApplication` instance will be created
@@ -261,8 +265,11 @@ def main(argv: list[str] | None = None) -> None:
     window = MainWindow(log_dir)
     window.show()
 
+    WINDOWS.append(window)
+
     if owns_app:
         sys.exit(app.exec())
+    return window
 
 if __name__ == "__main__":
     main()

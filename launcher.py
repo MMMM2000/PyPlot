@@ -41,6 +41,10 @@ class MasterLauncher(QtWidgets.QDialog):
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        # Keep references to launched windows so they stay open when
+        # the launcher calls their ``main`` functions.
+        self._open_windows = []
+
         self.tabs = QtWidgets.QTabWidget()
         self.log_tab = QtWidgets.QWidget()
         self.plot_tab = QtWidgets.QWidget()
@@ -86,7 +90,9 @@ class MasterLauncher(QtWidgets.QDialog):
         app_instance.setQuitOnLastWindowClosed(False)
         self.hide()
         try:
-            func()
+            result = func()
+            if result is not None:
+                self._open_windows.append(result)
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):
