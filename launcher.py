@@ -91,19 +91,25 @@ class MasterLauncher(QtWidgets.QDialog):
         self.hide()
         try:
             result = func()
-            if result is not None:
+            if isinstance(result, QtWidgets.QWidget):
                 self._open_windows.append(result)
+                result.destroyed.connect(self.show)
+                result.raise_()
+                result.activateWindow()
+            else:
+                self.show()
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):
                 QtWidgets.QMessageBox.critical(self, "Error", str(code))
+            self.show()
         except Exception as exc:  # pragma: no cover - unexpected errors
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
             )
+            self.show()
         finally:
             app_instance.setQuitOnLastWindowClosed(True)
-            self.show()
 
 
 def main() -> None:
