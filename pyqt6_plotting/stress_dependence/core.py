@@ -100,6 +100,18 @@ def parse_metadata(stem: str) -> Dict[str, Any] | None:
     md["load"] = float(md["load"].replace(",", "."))
     return md
 
+def format_sample_end(sample_end: str) -> str:
+    """Return a human readable representation of a sample end.
+
+    The trailing ``a`` or ``b`` is mapped to ``marked`` or ``unmarked`` end
+    respectively and shown in parentheses.  Other strings are returned as is.
+    """
+    if sample_end.endswith("a"):
+        return f"{sample_end[:-1]} (marked end)"
+    if sample_end.endswith("b"):
+        return f"{sample_end[:-1]} (unmarked end)"
+    return sample_end
+
 def load_data(files: List[str]) -> pd.DataFrame:
     """Load measurement files into a single DataFrame."""
     files = sorted(files)
@@ -186,7 +198,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{x:g}"))
     ax.set_xlabel('Applied load (g)')
     ax.set_ylabel(LABELS[var])
-    ax.set_title(f"{comp} {title} {samp} {anneal} — {LABELS[var]}")
+    ax.set_title(f"{comp} {title} {format_sample_end(samp)} {anneal} — {LABELS[var]}")
     ax.grid(True)
 
     legend = ax.legend(loc='best')
