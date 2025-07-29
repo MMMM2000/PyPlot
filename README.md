@@ -4,33 +4,49 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ## Installation
 
+The steps below assume no prior Python knowledge. **Commands** shown in fixed-width
+font should be typed into a terminal exactly as written and confirmed with the
+``Enter`` key.
+
 1. **Install Visual Studio Code**
-   - Download from [https://code.visualstudio.com](https://code.visualstudio.com) and follow the installer.
-   - After launching VS Code install the **Python** extension when prompted or via the *Extensions* sidebar.
+   - Download from [https://code.visualstudio.com](https://code.visualstudio.com) and run the installer.
+   - After launching VS Code install the **Python** extension when prompted or
+     open the *Extensions* sidebar and search for "Python".
 
 2. **Install Python 3**
-   - **Windows**: install from the Microsoft Store or download it from [https://www.python.org](https://www.python.org). Ensure that ``python`` is available in your ``PATH``.
-   - **macOS**: download the installer from [https://www.python.org](https://www.python.org) or install via Homebrew.
+   - Visit [https://www.python.org](https://www.python.org) and download the latest
+     Python **3** release.
+   - **Windows**: during installation enable the *Add python.exe to PATH* option so
+     ``python`` and ``pip`` work from a terminal.
+   - **macOS**: either run the installer downloaded above or install with Homebrew.
+   - Check the installation by running ``python --version`` in a terminal.
 
 3. **Open the project**
-   - Choose *File → Open Folder* in VS Code and select the cloned repository directory.
+   - Choose *File → Open Folder* in VS Code and select the repository directory
+     that contains this README.
    - Open a new terminal inside VS Code with *Terminal → New Terminal*.
 
 4. **Create and activate a virtual environment**
-   - ``python -m venv .venv``
+   - Run ``python -m venv .venv`` to create a folder named ``.venv``.
    - **Windows**:
-     - If activation fails due to execution policy restrictions, run ``Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`` in a PowerShell prompt.
+     - Activation may fail with an "execution policy" error. In that case run
+       ``Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`` in a
+       separate PowerShell window and try again.
      - Activate with ``.venv\Scripts\activate``.
-   - **macOS**: run ``source .venv/bin/activate``.
+   - **macOS** or Linux: run ``source .venv/bin/activate``.
+   - After activation the terminal prompt usually shows ``(.venv)`` at the start.
 
 5. **Install dependencies**
-   - ``pip install -r requirements.txt``
+   - First upgrade ``pip`` (Python's package installer) with ``python -m pip install --upgrade pip``.
+   - Install the required packages with ``pip install -r requirements.txt``. Make
+     sure you are in the repository folder so ``requirements.txt`` is found.
    - Alternatively run ``pip install -e .`` to install the project in editable mode.
 
 6. **Start the launcher**
-   - ``python launcher.py``
+   - Run ``python launcher.py`` to open the graphical tool window.
 
-Reactivate the virtual environment whenever you open a new terminal.
+Reactivate the virtual environment whenever you open a new terminal. Repeat the
+``activate`` command from step 4 before running ``python`` or ``pip`` again.
 
 ## Master launcher
 
@@ -148,4 +164,19 @@ dependencies isolated.  The steps in the *Installation* section show how
 to create and activate a virtual environment on both Windows and macOS.
 Once activated, install the requirements with ``pip`` and remember to
 activate ``.venv`` again whenever you open a new terminal.
+
+## Troubleshooting
+
+Even with the steps above things can occasionally go wrong. The following table
+lists the most common problems and how to solve them.
+
+| Problem | Cause | Solution |
+|---------|-------|----------|
+| ``'python' is not recognized`` | Python was not added to ``PATH`` during installation. | Reinstall Python and select *Add python.exe to PATH* or call it via its full path. |
+| ``No such file or directory: requirements.txt`` | The command was run from the wrong folder. | Change into the repository directory that contains ``requirements.txt`` before running ``pip``. |
+| ``PermissionError`` when activating ``.venv`` on Windows | PowerShell execution policy blocks scripts. | Run ``Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`` and then activate again. |
+| ``pip`` not found or very old | ``pip`` was not installed or is outdated. | Run ``python -m ensurepip --upgrade`` followed by ``python -m pip install --upgrade pip``. |
+
+If you still encounter issues, consider searching the exact error message online
+or ask someone familiar with Python for help.
 
