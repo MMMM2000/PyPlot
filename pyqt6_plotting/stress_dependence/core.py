@@ -1,7 +1,9 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+
+from PyQt6 import QtWidgets
 
 from ..config import load_config
 
@@ -122,7 +124,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
         dfs.append(df)
     return pd.concat(dfs, ignore_index=True)
 
-def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> plt.Figure:
+def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
     """Plot a single variable and optionally save the figure."""
     comp, title, samp, anneal = (
         df['composition'].iat[0],
@@ -200,11 +202,11 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(rawcol))
 
     fig.tight_layout()
+    fname = f"{comp} {title} {samp} {anneal} {var}.png"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fname = f"{comp} {title} {samp} {anneal} {var}.png"
         fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig
+    return fig, fname
 
 def main(files: List[str]):
     data = load_data(files)
@@ -215,11 +217,13 @@ def main(files: List[str]):
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
+    plots: List[Tuple[plt.Figure, str]] = []
     for _, grp in groups:
         for var in PLOT_VARS:
             if progress and getattr(progress, 'cancelled', False):
                 break
-            plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
+            fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
+            plots.append((fig, fname))
             if progress:
                 progress.update()
         if progress and getattr(progress, 'cancelled', False):
@@ -235,5 +239,19 @@ def main(files: List[str]):
         plt.show()
     else:
         plt.close('all')
+
+    if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
+        reply = QtWidgets.QMessageBox.question(
+            None,
+            "Save Plots",
+            "Save generated plots?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
+            if out:
+                os.makedirs(out, exist_ok=True)
+                for fig, fname in plots:
+                    fig.savefig(os.path.join(out, fname), dpi=300)
 
     print(f'Done: processed {total} plots.')
