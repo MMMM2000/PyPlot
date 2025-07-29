@@ -1,7 +1,9 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
+
+from PyQt6 import QtWidgets
 
 import numpy as np
 import pandas as pd
@@ -46,7 +48,7 @@ def load_file(path: str) -> pd.DataFrame:
     return pd.read_csv(path, sep=";", header=None, names=cols, engine="python", on_bad_lines="skip")
 
 
-def plot_channel(y: pd.Series, head: int, coils: int, ch: int):
+def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[plt.Figure, str]:
     fig, ax = plt.subplots(figsize=(9, 4))
     x = np.arange(len(y))
     if PLOT_MODE in ("raw", "both"):
@@ -61,16 +63,17 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int):
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
+    fname = f"head{head}_{coils}coils_CH{ch}_sum.png"
     if SAVE_PLOTS:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        fname = f"head{head}_{coils}coils_CH{ch}_sum.png"
         fig.savefig(os.path.join(OUTPUT_DIR, fname), dpi=300)
-    return fig
+    return fig, fname
 
 
 def main(files: List[str]):
     total = len(files) * 3
     progress = ProgressDialog(total) if total else None
+    plots: List[Tuple[plt.Figure, str]] = []
     for path in files:
         head, coils = parse_name(Path(path).stem)
         df = load_file(path)
@@ -78,7 +81,8 @@ def main(files: List[str]):
             if progress and getattr(progress, 'cancelled', False):
                 break
             y = df[f"ch{ch}_t1"] + df[f"ch{ch}_t2"]
-            plot_channel(y, head, coils, ch)
+            fig, fname = plot_channel(y, head, coils, ch)
+            plots.append((fig, fname))
             if progress:
                 progress.update()
         if progress and getattr(progress, 'cancelled', False):
@@ -93,4 +97,19 @@ def main(files: List[str]):
         plt.show()
     else:
         plt.close('all')
+
+    if (not SAVE_PLOTS) and plots and QtWidgets.QApplication.instance() is not None:
+        reply = QtWidgets.QMessageBox.question(
+            None,
+            "Save Plots",
+            "Save generated plots?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
+            if out:
+                os.makedirs(out, exist_ok=True)
+                for fig, fname in plots:
+                    fig.savefig(os.path.join(out, fname), dpi=300)
+
     print('Done.')

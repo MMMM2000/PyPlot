@@ -3,6 +3,8 @@ import re
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
+from PyQt6 import QtWidgets
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -158,6 +160,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
     x_min, x_max = all_centers.min(), all_centers.max()
     fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
     fig_log.subplots_adjust(hspace=0)
+    plots: List[Tuple[plt.Figure, str]] = [(fig_log, "log_compare.png")]
     if nrows == 1:
         ax_log = [ax_log]
     log_x_vals = []
@@ -222,6 +225,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         ax_h[0].set_title("Histogram of Hsw vs load")
         fig_h.supylabel("Counts")
+        plots.append((fig_h, "hist_compare.png"))
 
     if cfg["raw"]:
         fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
@@ -246,6 +250,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         fig_r.supylabel("Switching Field")
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
+        plots.append((fig_r, "raw_compare.png"))
 
     if cfg_save:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -259,3 +264,17 @@ def main(files: List[str], cfg: Dict[str, Any]):
         plt.show()
     else:
         plt.close("all")
+
+    if (not cfg_save) and plots and QtWidgets.QApplication.instance() is not None:
+        reply = QtWidgets.QMessageBox.question(
+            None,
+            "Save Plots",
+            "Save generated plots?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(out_dir))
+            if out:
+                os.makedirs(out, exist_ok=True)
+                for fig, fname in plots:
+                    fig.savefig(os.path.join(out, fname), dpi=300)
