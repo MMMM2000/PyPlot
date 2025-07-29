@@ -2,6 +2,36 @@
 
 This repository contains simple tools for logging measurement data and plotting the resulting text files.
 
+## Installation
+
+1. **Install Visual Studio Code**
+   - Download from [https://code.visualstudio.com](https://code.visualstudio.com) and follow the installer.
+   - After launching VS Code install the **Python** extension when prompted or via the *Extensions* sidebar.
+
+2. **Install Python 3**
+   - **Windows**: install from the Microsoft Store or download it from [https://www.python.org](https://www.python.org). Ensure that ``python`` is available in your ``PATH``.
+   - **macOS**: download the installer from [https://www.python.org](https://www.python.org) or install via Homebrew.
+
+3. **Open the project**
+   - Choose *File → Open Folder* in VS Code and select the cloned repository directory.
+   - Open a new terminal inside VS Code with *Terminal → New Terminal*.
+
+4. **Create and activate a virtual environment**
+   - ``python -m venv .venv``
+   - **Windows**:
+     - If activation fails due to execution policy restrictions, run ``Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`` in a PowerShell prompt.
+     - Activate with ``.venv\Scripts\activate``.
+   - **macOS**: run ``source .venv/bin/activate``.
+
+5. **Install dependencies**
+   - ``pip install -r requirements.txt``
+   - Alternatively run ``pip install -e .`` to install the project in editable mode.
+
+6. **Start the launcher**
+   - ``python launcher.py``
+
+Reactivate the virtual environment whenever you open a new terminal.
+
 ## Master launcher
 
 `launcher.py` starts a small GUI that groups all available loggers and
@@ -27,6 +57,11 @@ Measurement file names must follow:
 ```
 
 For example `FeSiBP 188_1 s4-2a 68mA 10a.txt`.
+
+The trailing ``a`` or ``b`` in the ``<sample_end>`` field denotes which end of
+the microwire was connected.  Throughout this project ``a`` is referred to as
+the *marked end* while ``b`` is the *unmarked end*.  Plot titles include these
+labels automatically.
 
 Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  Run the plotter with:
 ```bash
@@ -108,16 +143,9 @@ modified path to :func:`pyqt6_plotting.config.load_config`.
 
 ## Virtual environment
 
-It is recommended to install the dependencies inside a Python virtual
-environment to avoid interfering with system packages.  Create and
-activate one with:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
-```
-
-After activating the virtual environment install the requirements as
-shown above.  Reactivate the environment whenever you start a new
-terminal session.
+It is recommended to work inside a Python virtual environment to keep
+dependencies isolated.  The steps in the *Installation* section show how
+to create and activate a virtual environment on both Windows and macOS.
+Once activated, install the requirements with ``pip`` and remember to
+activate ``.venv`` again whenever you open a new terminal.
 
