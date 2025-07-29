@@ -30,7 +30,7 @@ PLOTTERS: Dict[str, Callable[[], None]] = {
     "Hsw Distribution": distribution_gui.main,
 }
 
-LOGGERS: Dict[str, Callable[[], None]] = {
+LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
     "Serial Data Logger": data_logger.main,
 }
 
