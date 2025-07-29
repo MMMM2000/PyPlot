@@ -88,28 +88,36 @@ class MasterLauncher(QtWidgets.QDialog):
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
         app_instance.setQuitOnLastWindowClosed(False)
-        self.hide()
+
+        existing_windows = set(app_instance.topLevelWidgets())
+
         try:
             result = func()
             if isinstance(result, QtWidgets.QWidget):
                 self._open_windows.append(result)
-                result.destroyed.connect(self.show)
-                result.raise_()
-                result.activateWindow()
-            else:
-                self.show()
+                result.destroyed.connect(lambda: self._open_windows.remove(result))
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):
                 QtWidgets.QMessageBox.critical(self, "Error", str(code))
-            self.show()
         except Exception as exc:  # pragma: no cover - unexpected errors
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
             )
-            self.show()
         finally:
             app_instance.setQuitOnLastWindowClosed(True)
+
+        new_windows = [
+            w for w in app_instance.topLevelWidgets() if w not in existing_windows
+        ]
+        if isinstance(result, QtWidgets.QWidget) and result not in new_windows:
+            new_windows.append(result)
+        for w in new_windows:
+            try:
+                w.raise_()
+                w.activateWindow()
+            except RuntimeError:
+                pass
 
 
 def main() -> None:
