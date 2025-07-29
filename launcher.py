@@ -91,6 +91,8 @@ class MasterLauncher(QtWidgets.QDialog):
 
         existing_windows = set(app_instance.topLevelWidgets())
 
+        result: QtWidgets.QWidget | None = None
+
         try:
             result = func()
             if isinstance(result, QtWidgets.QWidget):
