@@ -106,3 +106,18 @@ Default settings for the stress dependence plotter are stored in
 `pyqt6_plotting/default_config.json` and can be customized by providing a
 modified path to :func:`pyqt6_plotting.config.load_config`.
 
+## Virtual environment
+
+It is recommended to install the dependencies inside a Python virtual
+environment to avoid interfering with system packages.  Create and
+activate one with:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate  # On Windows use `.venv\Scripts\activate`
+```
+
+After activating the virtual environment install the requirements as
+shown above.  Reactivate the environment whenever you start a new
+terminal session.
+
