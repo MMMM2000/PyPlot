@@ -107,28 +107,39 @@ def load_data(files: List[str]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-def detect_outliers(df: pd.DataFrame, column: str = "sum", threshold: float = 5.0) -> pd.DataFrame:
+def detect_outliers(
+    df: pd.DataFrame,
+    column: str = "sum",
+    quantile: float = 0.9,
+    factor: float = 3.0,
+) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
-    Outliers are detected per file using the median absolute deviation (MAD)
-    which is more robust against noise than the interquartile range.  Values
-    whose robust z-score exceeds ``threshold`` are considered outliers.  Only
-    *column* is inspected.
+    Parameters are tuned to flag only extreme values.  Per file the *quantile*
+    range (``(1-quantile)/2`` to ``1-(1-quantile)/2``) is computed and expanded
+    by ``factor`` relative to the median.  Points lying farther than this
+    distance are considered outliers.
     """
 
+    if not (0 < quantile < 1):
+        raise ValueError("quantile must be between 0 and 1")
+
     out_rows = []
+    low_q = (1 - quantile) / 2
+    high_q = 1 - low_q
     for fname, grp in df.groupby("filename"):
         series = grp[column].dropna()
         if series.empty:
             continue
         med = series.median()
-        mad = np.median(np.abs(series - med))
-        if mad == 0:
+        q_low = series.quantile(low_q)
+        q_high = series.quantile(high_q)
+        rng = q_high - q_low
+        if rng <= 0:
             continue
-        robust_z = np.abs(series - med) / (1.4826 * mad)
-        mask = robust_z > threshold
+        mask = np.abs(series - med) > factor * rng
         if mask.any():
-            out_rows.append(grp[mask])
+            out_rows.append(grp.loc[mask])
 
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
