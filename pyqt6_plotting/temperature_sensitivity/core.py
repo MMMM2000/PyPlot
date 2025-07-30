@@ -1,0 +1,197 @@
+import os
+import re
+from pathlib import Path
+from typing import List, Dict, Any, Tuple
+
+from PyQt6 import QtWidgets
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.colors import to_hex
+
+from ..config import load_config
+
+# Load default configuration
+_CFG = load_config().get("temperature_sensitivity", {})
+OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
+PLOT_SUM = bool(_CFG.get("PLOT_SUM", True))
+PLOT_DT = bool(_CFG.get("PLOT_DT", True))
+PLOT_T1 = bool(_CFG.get("PLOT_T1", True))
+PLOT_T2 = bool(_CFG.get("PLOT_T2", True))
+PLOT_VARS = [v for v, b in [("sum", PLOT_SUM), ("dT", PLOT_DT), ("T1", PLOT_T1), ("T2", PLOT_T2)] if b]
+RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
+RAW_MARKER = "o"
+RAW_MARKER_SIZE = 0.3
+RAW_ALPHA = 1.0
+MEAN_COLORS = {25: "#00306E", 100: "#965308"}
+MEAN_MARKER = 'o'
+MEAN_MSIZE = 8
+MEAN_LW = 3
+OFFSET = 0.25
+JITTER_SPAN = 0.25
+SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
+SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
+MAX_SHOW = 8
+
+LABELS = {
+    "T1": "T1 (µs)",
+    "T2": "T2 (µs)",
+    "dT": "T2–T1 (µs)",
+    "sum": "T1+T2 (µs)",
+}
+
+FNAME_RE = re.compile(
+    r"^(?P<composition>.+?)\s+"
+    r"(?P<sample>\S+)\s+"
+    r"(?P<anneal>\S+)\s+"
+    r"(?P<temp>\d+)C$"
+)
+
+class ProgressDialog:
+    """Fallback progress indicator used when no GUI is provided."""
+    def __init__(self, total: int):
+        self.total = total
+        self.count = 0
+        self.cancelled = False
+        self.root = self
+    def update(self) -> None:
+        self.count += 1
+    def destroy(self) -> None:
+        pass
+
+def parse_metadata(stem: str) -> Dict[str, Any] | None:
+    m = FNAME_RE.match(stem)
+    if not m:
+        return None
+    md = m.groupdict()
+    md["temp"] = int(md["temp"])
+    return md
+
+
+def load_data(files: List[str]) -> pd.DataFrame:
+    files = sorted(files)
+    if not files:
+        raise FileNotFoundError("No files selected")
+    dfs = []
+    for fn in files:
+        md = parse_metadata(Path(fn).stem)
+        if md is None:
+            print(f"Skipping {fn}")
+            continue
+        df = pd.read_csv(
+            fn,
+            sep=';',
+            header=None,
+            names=['T1','T2','dT','sum'],
+            engine='python',
+            on_bad_lines='skip',
+        )
+        df[['T1', 'T2', 'dT', 'sum']] = df[['T1', 'T2', 'dT', 'sum']].apply(pd.to_numeric, errors='coerce')
+        for k, v in md.items():
+            df[k] = v
+        dfs.append(df)
+    if not dfs:
+        raise FileNotFoundError("No valid files selected")
+    return pd.concat(dfs, ignore_index=True)
+
+
+def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
+    comp = df['composition'].iat[0]
+    anneal = df['anneal'].iat[0]
+    samples = sorted(df['sample'].unique())
+    sample_idx = {s: i + 1 for i, s in enumerate(samples)}
+    df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
+    means = df.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
+    df['x_center'] = df['sample_idx'] + df['temp'].map({25: -OFFSET, 100: OFFSET})
+    np.random.seed(0)
+    df['x'] = df['x_center'] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(df))
+    df['y'] = df[var]
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for temp in sorted(df['temp'].unique()):
+        sub = df[df['temp'] == temp]
+        ax.scatter(sub['x'], sub['y'], c=RAW_COLORS.get(temp, 'gray'), marker=RAW_MARKER,
+                   s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label=f'raw {temp}°C')
+        m = means[means['temp'] == temp]
+        ax.plot(m['sample_idx'], m[var], MEAN_MARKER + '-', c=MEAN_COLORS.get(temp, 'gray'),
+                markersize=MEAN_MSIZE, linewidth=MEAN_LW, label=f'mean {temp}°C')
+
+    ticks = [sample_idx[s] for s in samples]
+    ax.set_xticks(ticks)
+    ax.set_xticklabels(samples)
+    ax.set_xlabel('Sample')
+    ax.set_ylabel(LABELS[var])
+    ax.set_title(f"{comp} {anneal} — {LABELS[var]}")
+    ax.grid(True)
+
+    legend = ax.legend(loc='best')
+    for text, handle in zip(legend.get_texts(), legend.legend_handles):
+        if isinstance(handle, Line2D):
+            rawcol = handle.get_color()
+        elif isinstance(handle, Patch):
+            rawcol = handle.get_facecolor()
+            if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
+                rawcol = rawcol[0]
+        else:
+            rawcol = 'black'
+        text.set_color(to_hex(rawcol))
+
+    fig.tight_layout()
+    fname = f"{comp} {anneal} {var}.png"
+    if save_flag:
+        os.makedirs(out_dir, exist_ok=True)
+        fig.savefig(os.path.join(out_dir, fname), dpi=300)
+    return fig, fname
+
+
+def main(files: List[str]):
+    data = load_data(files)
+    groups = data.groupby(['composition', 'anneal'])
+    total = len(groups) * len(PLOT_VARS)
+    do_show = SHOW_PLOTS and (total <= MAX_SHOW)
+    if SHOW_PLOTS and not do_show:
+        print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
+
+    progress = ProgressDialog(total) if total else None
+    plots: List[Tuple[plt.Figure, str]] = []
+    for _, grp in groups:
+        for var in PLOT_VARS:
+            if progress and getattr(progress, 'cancelled', False):
+                break
+            fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
+            plots.append((fig, fname))
+            if progress:
+                progress.update()
+        if progress and getattr(progress, 'cancelled', False):
+            break
+    if progress and not getattr(progress, 'cancelled', False):
+        progress.destroy()
+    elif progress and getattr(progress, 'cancelled', False):
+        plt.close('all')
+        print('Cancelled.')
+        return
+
+    if do_show:
+        plt.show()
+    else:
+        plt.close('all')
+
+    if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
+        reply = QtWidgets.QMessageBox.question(
+            None,
+            "Save Plots",
+            "Save generated plots?",
+            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+        )
+        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
+            if out:
+                os.makedirs(out, exist_ok=True)
+                for fig, fname in plots:
+                    fig.savefig(os.path.join(out, fname), dpi=300)
+
+    print(f'Done: processed {total} plots.')

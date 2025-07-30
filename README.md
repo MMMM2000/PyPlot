@@ -84,6 +84,25 @@ Several flags control what variables are plotted and whether the plots are displ
 python3 pyqt6_plotting/stress_dependence/stress_gui.py
 ```
 
+## Plotting temperature sensitivity data
+
+`pyqt6_plotting/temperature_sensitivity/temp_gui.py` visualizes switching-time
+measurements taken at different temperatures. File names must follow:
+
+```
+<composition> <sample> <anneal> <temp>C.txt
+```
+
+Select multiple measurement files to plot T1, T2, T2–T1 and T1+T2 for all
+samples. Raw points recorded at 25 °C are jittered slightly left of the sample
+index and those at 100 °C to the right so the two sets do not overlap. Mean
+values for each temperature are connected with lines.
+
+Run the script with:
+```bash
+python3 pyqt6_plotting/temperature_sensitivity/temp_gui.py
+```
+
 ## Comparing Hsw distributions by load
 
 `pyqt6_plotting/hsw_load_compare/load_compare_gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
@@ -153,9 +172,9 @@ around the available plotting GUIs. List the supported tools with:
 plot-cli --help
 ```
 
-Default settings for the stress dependence plotter are stored in
-`pyqt6_plotting/default_config.json` and can be customized by providing a
-modified path to :func:`pyqt6_plotting.config.load_config`.
+Default settings for the stress dependence and temperature sensitivity plotters
+are stored in `pyqt6_plotting/default_config.json` and can be customized by
+providing a modified path to :func:`pyqt6_plotting.config.load_config`.
 
 ## Virtual environment
 
