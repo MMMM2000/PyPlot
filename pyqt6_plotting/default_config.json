@@ -20,6 +20,6 @@
     "PLOT_T2": true,
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
-    "ZERO_25_BASELINE": false
+    "BASELINE_MODE": "none"
   }
 }

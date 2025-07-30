@@ -97,10 +97,10 @@ measurements taken at different temperatures. File names must follow:
 Select multiple measurement files to plot T1, T2, T2–T1 and T1+T2 for all
 samples. Raw points recorded at 25 °C are jittered slightly left of the sample
 index and those at 100 °C to the right so the two sets do not overlap. Mean
-values are shown as colored markers. A thin black line connects the 25 °C and
-100 °C means for each sample with the numeric difference printed next to the
-line. Optionally the 25 °C means can be shifted to zero so the 100 °C values
-directly represent the temperature-induced change.
+values are drawn centered on the sample index. A thin vertical line connects the
+25 °C and 100 °C means for each sample with the numeric difference printed
+next to it. The plot can show the raw values, subtract the 25 °C baseline or
+generate both variants.
 
 Run the script with:
 ```bash
