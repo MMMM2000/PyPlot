@@ -98,7 +98,8 @@ Select multiple measurement files to plot T1, T2, T2–T1 and T1+T2 for all
 samples. Raw points recorded at 25 °C are jittered slightly left of the sample
 index and those at 100 °C to the right so the two sets do not overlap. Mean
 values for each temperature are connected with lines. The difference between the
-100 °C and 25 °C means is displayed above each sample.
+100 °C and 25 °C means is displayed above each sample on a common level so the
+labels do not overlap.
 
 Run the script with:
 ```bash

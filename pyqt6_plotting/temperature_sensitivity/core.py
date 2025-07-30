@@ -122,11 +122,22 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 
     # Display delta between 100°C and 25°C for each sample
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
+    y_min, y_max = df[var].min(), df[var].max()
+    y_range = y_max - y_min
+    if y_range == 0:
+        y_range = 1.0
+    label_y = y_max + 0.05 * y_range
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
             delta = row[100] - row[25]
-            ax.annotate(f"{delta:.1f}", (idx, row[100]), textcoords="offset points",
-                        xytext=(0, 5), ha='center', fontsize=8)
+            ax.annotate(
+                f"{delta:.1f}",
+                (idx, label_y),
+                ha="center",
+                fontsize=12,
+                va="bottom",
+            )
+    ax.set_ylim(y_min - 0.05 * y_range, label_y + 0.05 * y_range)
 
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
