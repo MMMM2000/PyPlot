@@ -107,25 +107,29 @@ def load_data(files: List[str]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-def detect_outliers(df: pd.DataFrame, column: str = "sum", factor: float = 3.0) -> pd.DataFrame:
+def detect_outliers(df: pd.DataFrame, column: str = "sum", threshold: float = 5.0) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
-    Outliers are determined per file using the interquartile range multiplied
-    by ``factor``. Only values in *column* are considered.
+    Outliers are detected per file using the median absolute deviation (MAD)
+    which is more robust against noise than the interquartile range.  Values
+    whose robust z-score exceeds ``threshold`` are considered outliers.  Only
+    *column* is inspected.
     """
+
     out_rows = []
     for fname, grp in df.groupby("filename"):
         series = grp[column].dropna()
         if series.empty:
             continue
-        q1 = series.quantile(0.25)
-        q3 = series.quantile(0.75)
-        iqr = q3 - q1
-        lower = q1 - factor * iqr
-        upper = q3 + factor * iqr
-        mask = (grp[column] < lower) | (grp[column] > upper)
+        med = series.median()
+        mad = np.median(np.abs(series - med))
+        if mad == 0:
+            continue
+        robust_z = np.abs(series - med) / (1.4826 * mad)
+        mask = robust_z > threshold
         if mask.any():
             out_rows.append(grp[mask])
+
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
     return pd.DataFrame(columns=df.columns)
