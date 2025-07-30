@@ -14,6 +14,7 @@ import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
+from ..common import maybe_handle_outliers
 
 # Load default configuration
 _CFG = load_config().get("stress_dependence", {})
@@ -225,6 +226,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 
 def main(files: List[str]):
     data = load_data(files)
+    data = maybe_handle_outliers(data)
     groups = data.groupby(['composition','title','sample_end','anneal'])
     total = len(groups) * len(PLOT_VARS)
     do_show = SHOW_PLOTS and (total <= MAX_SHOW)

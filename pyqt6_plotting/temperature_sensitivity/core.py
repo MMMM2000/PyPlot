@@ -297,9 +297,12 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, bas
     return fig, fname
 
 
+from ..common import maybe_handle_outliers
+
+
 def main(files: List[str]):
     data = load_data(files)
-    data = handle_outliers(data)
+    data = maybe_handle_outliers(data)
     groups = data.groupby(['composition', 'anneal'])
     modes = [BASELINE_MODE] if BASELINE_MODE != "both" else ["none", "zero_25"]
     total = len(groups) * len(PLOT_VARS) * len(modes)

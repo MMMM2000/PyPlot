@@ -14,6 +14,7 @@ if __package__ is None or __package__ == "":
     from pyqt6_plotting.hsw_distribution import distribution_gui
     from pyqt6_plotting.temperature_sensitivity import temp_gui
     from pyqt6_plotting.utils import apply_dark_theme
+    from pyqt6_plotting import common
     from pyqt6_logger import data_logger
 else:
     from .pyqt6_plotting.stress_dependence import stress_gui
@@ -22,6 +23,7 @@ else:
     from .pyqt6_plotting.hsw_distribution import distribution_gui
     from .pyqt6_plotting.temperature_sensitivity import temp_gui
     from .pyqt6_plotting.utils import apply_dark_theme
+    from .pyqt6_plotting import common
     from .pyqt6_logger import data_logger
 
 
@@ -67,6 +69,9 @@ class MasterLauncher(QtWidgets.QDialog):
         self.plot_list.setCurrentRow(0)
         plot_layout = QtWidgets.QVBoxLayout(self.plot_tab)
         plot_layout.addWidget(self.plot_list)
+        self.outlier_cb = QtWidgets.QCheckBox("Check for outliers")
+        self.outlier_cb.setChecked(False)
+        plot_layout.addWidget(self.outlier_cb)
 
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
@@ -81,12 +86,17 @@ class MasterLauncher(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select a logger")
                 return
             func = LOGGERS[item.text()]
+            common.CHECK_OUTLIERS = False
         else:
             item = self.plot_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select a plotting script")
                 return
             func = PLOTTERS[item.text()]
+            if item.text() in ("Hsw Distribution", "Hsw Load Compare"):
+                common.CHECK_OUTLIERS = False
+            else:
+                common.CHECK_OUTLIERS = self.outlier_cb.isChecked()
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
