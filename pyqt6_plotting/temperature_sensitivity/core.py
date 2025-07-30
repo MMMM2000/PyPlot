@@ -13,6 +13,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex
+from matplotlib.figure import Figure
 
 from ..config import load_config
 
@@ -95,6 +96,8 @@ def load_data(files: List[str]) -> pd.DataFrame:
             engine='python',
             on_bad_lines='skip',
         )
+        df['filename'] = Path(fn).name
+        df['line'] = np.arange(len(df))
         df[['T1', 'T2', 'dT', 'sum']] = df[['T1', 'T2', 'dT', 'sum']].apply(pd.to_numeric, errors='coerce')
         for k, v in md.items():
             df[k] = v
@@ -102,6 +105,96 @@ def load_data(files: List[str]) -> pd.DataFrame:
     if not dfs:
         raise FileNotFoundError("No valid files selected")
     return pd.concat(dfs, ignore_index=True)
+
+
+def detect_outliers(
+    df: pd.DataFrame,
+    column: str = "sum",
+    quantile: float = 0.9,
+    factor: float = 3.0,
+) -> pd.DataFrame:
+    """Return a DataFrame of rows that are statistical outliers.
+
+    Parameters are tuned to flag only extreme values.  Per file the *quantile*
+    range (``(1-quantile)/2`` to ``1-(1-quantile)/2``) is computed and expanded
+    by ``factor`` relative to the median.  Points lying farther than this
+    distance are considered outliers.
+    """
+
+    if not (0 < quantile < 1):
+        raise ValueError("quantile must be between 0 and 1")
+
+    out_rows = []
+    low_q = (1 - quantile) / 2
+    high_q = 1 - low_q
+    for fname, grp in df.groupby("filename"):
+        series = grp[column].dropna()
+        if series.empty:
+            continue
+        med = series.median()
+        q_low = series.quantile(low_q)
+        q_high = series.quantile(high_q)
+        rng = q_high - q_low
+        if rng <= 0:
+            continue
+        mask = np.abs(series - med) > factor * rng
+        if mask.any():
+            out_rows.append(grp.loc[mask])
+
+    if out_rows:
+        return pd.concat(out_rows, ignore_index=False)
+    return pd.DataFrame(columns=df.columns)
+
+
+def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
+    """Check for and optionally remove outliers.
+
+    If a ``QApplication`` is active a message box is shown asking whether to
+    remove the detected outliers. Plots of the affected files are displayed with
+    the outliers highlighted.  Without a running Qt application the outliers are
+    removed automatically and a message is printed to stdout.
+    """
+    out_df = detect_outliers(df)
+    if out_df.empty:
+        return df
+
+    app = QtWidgets.QApplication.instance()
+    files = ", ".join(sorted(out_df["filename"].unique()))
+
+    # Plot outliers for visual confirmation
+    figs: List[Figure] = []
+    for fname, grp in df.groupby("filename"):
+        if fname not in out_df["filename"].values:
+            continue
+        fig, ax = plt.subplots(figsize=(6, 3))
+        ax.plot(grp["line"], grp["sum"], "o", ms=2, label="data")
+        sub = out_df[out_df["filename"] == fname]
+        ax.plot(sub["line"], sub["sum"], "ro", ms=6, label="outlier")
+        ax.set_title(fname)
+        ax.set_xlabel("Index")
+        ax.set_ylabel("sum")
+        ax.legend()
+        fig.tight_layout()
+        figs.append(fig)
+
+    if app is None:
+        print(f"Removing outliers from {files}.")
+        plt.close("all")
+        return df.drop(out_df.index)
+
+    for fig in figs:
+        fig.show()
+
+    reply = QtWidgets.QMessageBox.question(
+        None,
+        "Outliers detected",
+        f"Outliers detected in: {files}.\nRemove them?",
+        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+    )
+    plt.close("all")
+    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+        return df.drop(out_df.index)
+    return df
 
 
 def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, baseline_mode: str = BASELINE_MODE) -> Tuple[plt.Figure, str]:
@@ -206,6 +299,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, bas
 
 def main(files: List[str]):
     data = load_data(files)
+    data = handle_outliers(data)
     groups = data.groupby(['composition', 'anneal'])
     modes = [BASELINE_MODE] if BASELINE_MODE != "both" else ["none", "zero_25"]
     total = len(groups) * len(PLOT_VARS) * len(modes)
