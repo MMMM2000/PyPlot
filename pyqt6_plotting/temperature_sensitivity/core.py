@@ -35,7 +35,10 @@ OFFSET = 0.25
 JITTER_SPAN = 0.25
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
-ZERO_25_BASELINE = bool(_CFG.get("ZERO_25_BASELINE", False))
+BASELINE_MODE = _CFG.get("BASELINE_MODE", "none")
+if BASELINE_MODE not in {"none", "zero_25", "both"}:
+    # backwards compatibility for old ZERO_25_BASELINE flag
+    BASELINE_MODE = "zero_25" if bool(_CFG.get("ZERO_25_BASELINE", False)) else "none"
 MAX_SHOW = 8
 
 LABELS = {
@@ -100,7 +103,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
+def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, baseline_mode: str = BASELINE_MODE) -> Tuple[plt.Figure, str]:
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
@@ -111,7 +114,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     df['x_center'] = df['sample_idx'] + df['temp'].map({25: -OFFSET, 100: OFFSET})
     np.random.seed(0)
     df['x'] = df['x_center'] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(df))
-    if ZERO_25_BASELINE:
+    if baseline_mode == "zero_25":
         df['y'] = df.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
         means[var] = means.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
     else:
@@ -132,7 +135,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 
     for temp in sorted(df['temp'].unique()):
         m = means[means['temp'] == temp].copy()
-        m_x = m['sample_idx'] + {25: -OFFSET, 100: OFFSET}.get(temp, 0.0)
+        m_x = m['sample_idx']
         ax.plot(
             m_x,
             m[var],
@@ -147,15 +150,14 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
-            x25 = idx - OFFSET
-            x100 = idx + OFFSET
+            x = idx
             y25 = row[25]
             y100 = row[100]
-            ax.plot([x25, x100], [y25, y100], color='black', linewidth=1)
+            ax.plot([x, x], [y25, y100], color='black', linewidth=1)
             delta = y100 - y25
             ax.annotate(
                 f"{delta:.1f}",
-                (x25 - 0.1, (y25 + y100) / 2),
+                (x - 0.1, (y25 + y100) / 2),
                 ha='right',
                 va='center',
                 fontsize=10,
@@ -165,7 +167,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     y_range = y_max - y_min
     if y_range == 0:
         y_range = 1.0
-    ax.set_ylim(y_min - 0.05 * y_range, y_max + 0.05 * y_range)
+    ax.set_ylim(y_min - 0.02 * y_range, y_max + 0.02 * y_range)
 
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
@@ -198,7 +200,8 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 def main(files: List[str]):
     data = load_data(files)
     groups = data.groupby(['composition', 'anneal'])
-    total = len(groups) * len(PLOT_VARS)
+    modes = [BASELINE_MODE] if BASELINE_MODE != "both" else ["none", "zero_25"]
+    total = len(groups) * len(PLOT_VARS) * len(modes)
     do_show = SHOW_PLOTS and (total <= MAX_SHOW)
     if SHOW_PLOTS and not do_show:
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
@@ -207,12 +210,18 @@ def main(files: List[str]):
     plots: List[Tuple[plt.Figure, str]] = []
     for _, grp in groups:
         for var in PLOT_VARS:
+            for mode in modes:
+                if progress and getattr(progress, 'cancelled', False):
+                    break
+                fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR, baseline_mode=mode)
+                if BASELINE_MODE == "both":
+                    stem, ext = os.path.splitext(fname)
+                    fname = f"{stem}_{mode}{ext}"
+                plots.append((fig, fname))
+                if progress:
+                    progress.update()
             if progress and getattr(progress, 'cancelled', False):
                 break
-            fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
-            plots.append((fig, fname))
-            if progress:
-                progress.update()
         if progress and getattr(progress, 'cancelled', False):
             break
     if progress and not getattr(progress, 'cancelled', False):

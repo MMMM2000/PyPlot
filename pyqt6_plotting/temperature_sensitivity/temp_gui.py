@@ -42,7 +42,10 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
-    zero_cb = QtWidgets.QCheckBox("Zero 25°C baseline"); zero_cb.setChecked(orig.ZERO_25_BASELINE)
+    baseline_combo = QtWidgets.QComboBox()
+    baseline_combo.addItems(["None", "Zero 25\u00b0C", "Both"])
+    baseline_map = {"none": 0, "zero_25": 1, "both": 2}
+    baseline_combo.setCurrentIndex(baseline_map.get(orig.BASELINE_MODE, 0))
     out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
 
@@ -57,7 +60,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(zero_cb, 2, 0)
+    out_layout.addWidget(QtWidgets.QLabel("Baseline:"), 2, 0)
+    out_layout.addWidget(baseline_combo, 2, 1)
     out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
     out_layout.addWidget(out_dir_edit, 4, 0)
     out_layout.addWidget(browse_btn, 4, 1)
@@ -80,7 +84,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "T2": t2_cb.isChecked(),
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
-        "zero": zero_cb.isChecked(),
+        "baseline": {0: "none", 1: "zero_25", 2: "both"}[baseline_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
     }
     return paths, cfg
@@ -124,7 +128,7 @@ def main() -> None:
 
     orig.SHOW_PLOTS = cfg["show"]
     orig.SAVE_PLOTS = cfg["save"]
-    orig.ZERO_25_BASELINE = cfg["zero"]
+    orig.BASELINE_MODE = cfg["baseline"]
     orig.OUTPUT_DIR = cfg["out_dir"]
 
     orig.main(paths)
