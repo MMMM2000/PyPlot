@@ -35,6 +35,7 @@ OFFSET = 0.25
 JITTER_SPAN = 0.25
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
+ZERO_25_BASELINE = bool(_CFG.get("ZERO_25_BASELINE", False))
 MAX_SHOW = 8
 
 LABELS = {
@@ -106,38 +107,65 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
     means = df.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
+    baseline = means[means['temp'] == 25].set_index('sample_idx')[var].to_dict()
     df['x_center'] = df['sample_idx'] + df['temp'].map({25: -OFFSET, 100: OFFSET})
     np.random.seed(0)
     df['x'] = df['x_center'] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(df))
-    df['y'] = df[var]
+    if ZERO_25_BASELINE:
+        df['y'] = df.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+        means[var] = means.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+    else:
+        df['y'] = df[var]
 
     fig, ax = plt.subplots(figsize=(9, 5))
     for temp in sorted(df['temp'].unique()):
         sub = df[df['temp'] == temp]
-        ax.scatter(sub['x'], sub['y'], c=RAW_COLORS.get(temp, 'gray'), marker=RAW_MARKER,
-                   s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label=f'raw {temp}°C')
-        m = means[means['temp'] == temp]
-        ax.plot(m['sample_idx'], m[var], MEAN_MARKER + '-', c=MEAN_COLORS.get(temp, 'gray'),
-                markersize=MEAN_MSIZE, linewidth=MEAN_LW, label=f'mean {temp}°C')
+        ax.scatter(
+            sub['x'],
+            sub['y'],
+            c=RAW_COLORS.get(temp, 'gray'),
+            marker=RAW_MARKER,
+            s=RAW_MARKER_SIZE,
+            alpha=RAW_ALPHA,
+            label=f'raw {temp}\N{DEGREE SIGN}C',
+        )
 
-    # Display delta between 100°C and 25°C for each sample
+    for temp in sorted(df['temp'].unique()):
+        m = means[means['temp'] == temp].copy()
+        m_x = m['sample_idx'] + {25: -OFFSET, 100: OFFSET}.get(temp, 0.0)
+        ax.plot(
+            m_x,
+            m[var],
+            MEAN_MARKER,
+            linestyle='None',
+            c=MEAN_COLORS.get(temp, 'gray'),
+            markersize=MEAN_MSIZE,
+            label=f'mean {temp}\N{DEGREE SIGN}C',
+        )
+
+    # Connect 25°C and 100°C means per sample and show delta
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
-    y_min, y_max = df[var].min(), df[var].max()
+    if 25 in pivot.columns and 100 in pivot.columns:
+        for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
+            x25 = idx - OFFSET
+            x100 = idx + OFFSET
+            y25 = row[25]
+            y100 = row[100]
+            ax.plot([x25, x100], [y25, y100], color='black', linewidth=1)
+            delta = y100 - y25
+            ax.annotate(
+                f"{delta:.1f}",
+                (x25 - 0.1, (y25 + y100) / 2),
+                ha='right',
+                va='center',
+                fontsize=10,
+            )
+
+    y_min, y_max = df['y'].min(), df['y'].max()
     y_range = y_max - y_min
     if y_range == 0:
         y_range = 1.0
-    label_y = y_max + 0.05 * y_range
-    if 25 in pivot.columns and 100 in pivot.columns:
-        for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
-            delta = row[100] - row[25]
-            ax.annotate(
-                f"{delta:.1f}",
-                (idx, label_y),
-                ha="center",
-                fontsize=12,
-                va="bottom",
-            )
-    ax.set_ylim(y_min - 0.05 * y_range, label_y + 0.05 * y_range)
+    ax.set_ylim(y_min - 0.05 * y_range, y_max + 0.05 * y_range)
 
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
