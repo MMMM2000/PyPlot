@@ -12,6 +12,7 @@ if __package__ is None or __package__ == "":
     from pyqt6_plotting.hsw_load_compare import load_compare_gui
     from pyqt6_plotting.maxion_continuous import maxion_gui
     from pyqt6_plotting.hsw_distribution import distribution_gui
+    from pyqt6_plotting.temperature_sensitivity import temp_gui
     from pyqt6_plotting.utils import apply_dark_theme
     from pyqt6_logger import data_logger
 else:
@@ -19,6 +20,7 @@ else:
     from .pyqt6_plotting.hsw_load_compare import load_compare_gui
     from .pyqt6_plotting.maxion_continuous import maxion_gui
     from .pyqt6_plotting.hsw_distribution import distribution_gui
+    from .pyqt6_plotting.temperature_sensitivity import temp_gui
     from .pyqt6_plotting.utils import apply_dark_theme
     from .pyqt6_logger import data_logger
 
@@ -28,6 +30,7 @@ PLOTTERS: Dict[str, Callable[[], None]] = {
     "Hsw Load Compare": load_compare_gui.main,
     "Maxion Continuous": maxion_gui.main,
     "Hsw Distribution": distribution_gui.main,
+    "Temperature Sensitivity": temp_gui.main,
 }
 
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {

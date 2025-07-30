@@ -120,6 +120,14 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         ax.plot(m['sample_idx'], m[var], MEAN_MARKER + '-', c=MEAN_COLORS.get(temp, 'gray'),
                 markersize=MEAN_MSIZE, linewidth=MEAN_LW, label=f'mean {temp}°C')
 
+    # Display delta between 100°C and 25°C for each sample
+    pivot = means.pivot(index='sample_idx', columns='temp', values=var)
+    if 25 in pivot.columns and 100 in pivot.columns:
+        for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
+            delta = row[100] - row[25]
+            ax.annotate(f"{delta:.1f}", (idx, row[100]), textcoords="offset points",
+                        xytext=(0, 5), ha='center', fontsize=8)
+
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
     ax.set_xticklabels(samples)

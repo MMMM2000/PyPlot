@@ -51,7 +51,8 @@ Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ## Master launcher
 
 `launcher.py` starts a small GUI that groups all available loggers and
-plotting tools. Select an item and press **Run** to launch it:
+plotting tools (Stress Dependence, Temperature Sensitivity and others).
+Select an item and press **Run** to launch it:
 
 ```bash
 python3 launcher.py
@@ -96,7 +97,8 @@ measurements taken at different temperatures. File names must follow:
 Select multiple measurement files to plot T1, T2, T2–T1 and T1+T2 for all
 samples. Raw points recorded at 25 °C are jittered slightly left of the sample
 index and those at 100 °C to the right so the two sets do not overlap. Mean
-values for each temperature are connected with lines.
+values for each temperature are connected with lines. The difference between the
+100 °C and 25 °C means is displayed above each sample.
 
 Run the script with:
 ```bash
