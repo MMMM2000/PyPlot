@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from ..common import maybe_handle_outliers_series
 
 OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
@@ -81,6 +82,7 @@ def main(files: List[str]):
             if progress and getattr(progress, 'cancelled', False):
                 break
             y = df[f"ch{ch}_t1"] + df[f"ch{ch}_t2"]
+            y = maybe_handle_outliers_series(y, Path(path).name)
             fig, fname = plot_channel(y, head, coils, ch)
             plots.append((fig, fname))
             if progress:
