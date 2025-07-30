@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
+from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex
 
 from ..config import load_config
@@ -153,7 +154,13 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, bas
             x = idx
             y25 = row[25]
             y100 = row[100]
-            ax.plot([x, x], [y25, y100], color='black', linewidth=1)
+            ax.plot(
+                [x, x],
+                [y25, y100],
+                color='black',
+                linewidth=1,
+                zorder=0,
+            )
             delta = y100 - y25
             ax.annotate(
                 f"{delta:.1f}",
@@ -181,7 +188,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, bas
     for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if isinstance(handle, Line2D):
             rawcol = handle.get_color()
-        elif isinstance(handle, Patch):
+        elif isinstance(handle, (Patch, PathCollection)):
             rawcol = handle.get_facecolor()
             if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
                 rawcol = rawcol[0]
