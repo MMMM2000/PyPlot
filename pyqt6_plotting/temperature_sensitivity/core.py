@@ -77,7 +77,7 @@ class ProgressDialog:
 def non_modal_question(
     title: str,
     text: str,
-    buttons: QtWidgets.QMessageBox.StandardButtons = (
+    buttons: QtWidgets.QMessageBox.standardButtons = (
         QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
     ),
 ) -> QtWidgets.QMessageBox.StandardButton:
