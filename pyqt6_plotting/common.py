@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-# Flag controlled by the master launcher to enable outlier detection
+# Flags controlled by the master launcher
+# ``CHECK_OUTLIERS`` enables outlier detection while ``AUTO_REMOVE_OUTLIERS``
+# skips the confirmation dialog and removes detected outliers automatically.
 CHECK_OUTLIERS: bool = False
+AUTO_REMOVE_OUTLIERS: bool = False
 
 
 def maybe_handle_outliers(df: pd.DataFrame) -> pd.DataFrame:

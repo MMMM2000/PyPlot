@@ -74,7 +74,14 @@ class MasterLauncher(QtWidgets.QDialog):
         plot_layout.addWidget(self.plot_list)
         self.outlier_cb = QtWidgets.QCheckBox("Check for outliers")
         self.outlier_cb.setChecked(False)
+        self.auto_outlier_cb = QtWidgets.QCheckBox("Automatically remove outliers")
+        self.auto_outlier_cb.setChecked(False)
+        self.auto_outlier_cb.setEnabled(False)
+        self.outlier_cb.stateChanged.connect(
+            lambda state: self.auto_outlier_cb.setEnabled(bool(state))
+        )
         plot_layout.addWidget(self.outlier_cb)
+        plot_layout.addWidget(self.auto_outlier_cb)
 
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
@@ -90,6 +97,7 @@ class MasterLauncher(QtWidgets.QDialog):
                 return
             func = LOGGERS[item.text()]
             common.CHECK_OUTLIERS = False
+            common.AUTO_REMOVE_OUTLIERS = False
         else:
             item = self.plot_list.currentItem()
             if item is None:
@@ -98,8 +106,10 @@ class MasterLauncher(QtWidgets.QDialog):
             func = PLOTTERS[item.text()]
             if item.text() in ("Hsw Distribution", "Hsw Load Compare"):
                 common.CHECK_OUTLIERS = False
+                common.AUTO_REMOVE_OUTLIERS = False
             else:
                 common.CHECK_OUTLIERS = self.outlier_cb.isChecked()
+                common.AUTO_REMOVE_OUTLIERS = self.auto_outlier_cb.isChecked()
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)

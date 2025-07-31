@@ -16,6 +16,7 @@ from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
 
 from ..config import load_config
+from .. import common
 
 # Load default configuration
 _CFG = load_config().get("temperature_sensitivity", {})
@@ -198,17 +199,22 @@ def detect_outliers(
 def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Check for and optionally remove outliers.
 
-    If a ``QApplication`` is active a message box is shown asking whether to
-    remove the detected outliers. Plots of the affected files are displayed with
-    the outliers highlighted.  Without a running Qt application the outliers are
-    removed automatically and a message is printed to stdout.
+    If ``AUTO_REMOVE_OUTLIERS`` is set the outliers are dropped without any
+    user interaction. Otherwise a message box is shown when running inside a Qt
+    application asking whether to remove them. When no Qt application is
+    running the outliers are removed automatically with a short notice.
     """
     out_df = detect_outliers(df)
     if out_df.empty:
         return df
 
-    app = QtWidgets.QApplication.instance()
     files = ", ".join(sorted(out_df["filename"].unique()))
+
+    if common.AUTO_REMOVE_OUTLIERS:
+        print(f"Automatically removing outliers from {files}.")
+        return df.drop(out_df.index)
+
+    app = QtWidgets.QApplication.instance()
 
     # Plot outliers for visual confirmation
     figs: List[Figure] = []
@@ -281,6 +287,14 @@ def plot_variable(
         if include_cont and not cont.empty:
             cont['y'] = cont[var]
 
+    all_y = [raw['y']]
+    if include_cont and not cont.empty:
+        all_y.append(cont['y'])
+    y_min = min(s.min() for s in all_y)
+    y_max = max(s.max() for s in all_y)
+    y_range = y_max - y_min if y_max != y_min else 1.0
+    delta_offset = 0.05 * y_range
+
     fig, ax = plt.subplots(figsize=(9, 5))
     legend_done: set[str] = set()
     for temp in sorted(raw['temp'].unique()):
@@ -331,15 +345,14 @@ def plot_variable(
                     linewidth=1,
                     zorder=0,
                 )
-                delta_pos = (x - 0.1, (y25 + y100) / 2)
-            else:
-                delta_pos = (x + MEAN_SHIFT - 0.1, y100)
             delta = y100 - y25
+            delta_x = x - 0.1
+            delta_y = y100 + (delta_offset if has_cont else 0.0)
             ax.annotate(
                 f"{delta:.1f}",
-                delta_pos,
+                (delta_x, delta_y),
                 ha='right',
-                va='center',
+                va='bottom' if has_cont else 'center',
                 fontsize=10,
             )
 
@@ -356,18 +369,10 @@ def plot_variable(
             x_end = sample_idx[s] + MEAN_SHIFT
             scale = (x_end - x_start) / (end - start) if end != start else 1.0
             x_vals = (sub['temp'] - start) * scale + x_start
-            lbl = None if 'cont' in legend_done else 'processed continuous measurement'
+            lbl = None if 'cont' in legend_done else f'overall med {med_window} mwa {ma_window}'
             ax.plot(x_vals, proc, color='black', label=lbl)
             legend_done.add('cont')
 
-    all_y = [raw['y']]
-    if include_cont and not cont.empty:
-        all_y.append(cont['y'])
-    y_min = min(s.min() for s in all_y)
-    y_max = max(s.max() for s in all_y)
-    y_range = y_max - y_min
-    if y_range == 0:
-        y_range = 1.0
     ax.set_ylim(y_min - 0.02 * y_range, y_max + 0.02 * y_range)
 
     ticks = [sample_idx[s] for s in samples]
