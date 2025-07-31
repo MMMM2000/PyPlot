@@ -41,6 +41,10 @@ BASELINE_MODE = _CFG.get("BASELINE_MODE", "none")
 if BASELINE_MODE not in {"none", "zero_25", "both"}:
     # backwards compatibility for old ZERO_25_BASELINE flag
     BASELINE_MODE = "zero_25" if bool(_CFG.get("ZERO_25_BASELINE", False)) else "none"
+INCLUDE_CONTINUOUS = bool(_CFG.get("INCLUDE_CONTINUOUS", True))
+MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
+MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
+MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
 
 LABELS = {
@@ -54,7 +58,7 @@ FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<sample>\S+)\s+"
     r"(?P<anneal>\S+)\s+"
-    r"(?P<temp>\d+)C$"
+    r"(?P<temp>\d+C|overall)$"
 )
 
 class ProgressDialog:
@@ -74,7 +78,9 @@ def parse_metadata(stem: str) -> Dict[str, Any] | None:
     if not m:
         return None
     md = m.groupdict()
-    md["temp"] = int(md["temp"])
+    temp = md["temp"].lower()
+    md["continuous"] = temp == "overall"
+    md["temp_val"] = None if md["continuous"] else int(temp.rstrip("c"))
     return md
 
 
@@ -99,12 +105,28 @@ def load_data(files: List[str]) -> pd.DataFrame:
         df['filename'] = Path(fn).name
         df['line'] = np.arange(len(df))
         df[['T1', 'T2', 'dT', 'sum']] = df[['T1', 'T2', 'dT', 'sum']].apply(pd.to_numeric, errors='coerce')
+        if md['continuous']:
+            df['continuous'] = True
+            df['temp'] = np.nan
+        else:
+            df['temp'] = md['temp_val']
+            df['continuous'] = False
         for k, v in md.items():
-            df[k] = v
+            if k not in {'temp_val', 'continuous', 'temp'}:
+                df[k] = v
         dfs.append(df)
     if not dfs:
         raise FileNotFoundError("No valid files selected")
-    return pd.concat(dfs, ignore_index=True)
+    data = pd.concat(dfs, ignore_index=True)
+    cont_mask = data['continuous']
+    if cont_mask.any():
+        temps = data.loc[~cont_mask, 'temp'].dropna()
+        if not temps.empty:
+            t_min, t_max = temps.min(), temps.max()
+        else:
+            t_min, t_max = 0.0, float(len(data.loc[cont_mask]) - 1)
+        data.loc[cont_mask, 'temp'] = np.linspace(t_min, t_max, cont_mask.sum())
+    return data
 
 
 def detect_outliers(
@@ -197,26 +219,46 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, baseline_mode: str = BASELINE_MODE) -> Tuple[plt.Figure, str]:
+def plot_variable(
+    df: pd.DataFrame,
+    var: str,
+    save_flag: bool,
+    out_dir: str,
+    baseline_mode: str = BASELINE_MODE,
+    include_cont: bool = INCLUDE_CONTINUOUS,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> Tuple[plt.Figure, str]:
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
-    means = df.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
+
+    raw = df[~df['continuous']].copy()
+    cont = df[df['continuous']].copy()
+
+    means = raw.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
     baseline = means[means['temp'] == 25].set_index('sample_idx')[var].to_dict()
-    df['x_center'] = df['sample_idx'] + df['temp'].map({25: -OFFSET, 100: OFFSET})
+
+    raw['x_center'] = raw['sample_idx'] + raw['temp'].map({25: -OFFSET, 100: OFFSET})
     np.random.seed(0)
-    df['x'] = df['x_center'] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(df))
+    raw['x'] = raw['x_center'] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(raw))
+
     if baseline_mode == "zero_25":
-        df['y'] = df.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+        raw['y'] = raw.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
         means[var] = means.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+        if include_cont and not cont.empty:
+            cont['y'] = cont.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
     else:
-        df['y'] = df[var]
+        raw['y'] = raw[var]
+        if include_cont and not cont.empty:
+            cont['y'] = cont[var]
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    for temp in sorted(df['temp'].unique()):
-        sub = df[df['temp'] == temp]
+    legend_done: set[str] = set()
+    for temp in sorted(raw['temp'].unique()):
+        sub = raw[raw['temp'] == temp]
         ax.scatter(
             sub['x'],
             sub['y'],
@@ -227,7 +269,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, bas
             label=f'raw {temp}\N{DEGREE SIGN}C',
         )
 
-    for temp in sorted(df['temp'].unique()):
+    for temp in sorted(raw['temp'].unique()):
         m = means[means['temp'] == temp].copy()
         m_x = m['sample_idx']
         ax.plot(
@@ -263,7 +305,28 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str, bas
                 fontsize=10,
             )
 
-    y_min, y_max = df['y'].min(), df['y'].max()
+    if include_cont and not cont.empty:
+        for s in samples:
+            sub = cont[cont['sample'] == s].sort_values('temp')
+            if sub.empty:
+                continue
+            med = sub['y'].rolling(med_window, center=True, min_periods=1).median()
+            proc = med.rolling(ma_window, center=True, min_periods=1).mean()
+            start = sub['temp'].iloc[0]
+            end = sub['temp'].iloc[-1]
+            x_start = sample_idx[s] - MEAN_SHIFT
+            x_end = sample_idx[s] + MEAN_SHIFT
+            scale = (x_end - x_start) / (end - start) if end != start else 1.0
+            x_vals = (sub['temp'] - start) * scale + x_start
+            lbl = None if 'cont' in legend_done else 'processed continuous measurement'
+            ax.plot(x_vals, proc, color='black', label=lbl)
+            legend_done.add('cont')
+
+    all_y = [raw['y']]
+    if include_cont and not cont.empty:
+        all_y.append(cont['y'])
+    y_min = min(s.min() for s in all_y)
+    y_max = max(s.max() for s in all_y)
     y_range = y_max - y_min
     if y_range == 0:
         y_range = 1.0
@@ -317,7 +380,16 @@ def main(files: List[str]):
             for mode in modes:
                 if progress and getattr(progress, 'cancelled', False):
                     break
-                fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR, baseline_mode=mode)
+                fig, fname = plot_variable(
+                    grp,
+                    var,
+                    SAVE_PLOTS,
+                    OUTPUT_DIR,
+                    baseline_mode=mode,
+                    include_cont=INCLUDE_CONTINUOUS,
+                    med_window=MED_WINDOW,
+                    ma_window=MA_WINDOW,
+                )
                 if BASELINE_MODE == "both":
                     stem, ext = os.path.splitext(fname)
                     fname = f"{stem}_{mode}{ext}"

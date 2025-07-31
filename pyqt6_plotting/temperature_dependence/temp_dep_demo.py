@@ -62,8 +62,8 @@ def run_plot(med_window: int, ma_window: int) -> None:
         else:
             x25 = x100 = idx
 
-        # Draw the difference line only when there is no "overall" curve
-        if not has_overall and not m25.empty and not m100.empty:
+        # Always show the difference between 100°C and 25°C means
+        if not m25.empty and not m100.empty:
             ax.plot([idx, idx], [m25.iloc[0], m100.iloc[0]], color="black", linewidth=1)
             delta = m100.iloc[0] - m25.iloc[0]
             ax.annotate(
