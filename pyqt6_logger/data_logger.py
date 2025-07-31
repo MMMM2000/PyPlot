@@ -18,10 +18,10 @@ else:
 # 1) LOG_DIR: default directory where logged data will be stored. Modify this
 #    path to your preferred location. The value can still be overridden via
 #    the --log-dir command line option or the LOG_DIR environment variable.
-LOG_DIR = (
-    "G:/Shared drives/Projekty/VAIA/WP1 - MicroWire Development/"
-    "stress depencence/data"
-)
+# Use a logs folder in the user's home directory by default. This path works on
+# all platforms and can be overridden via the ``LOG_DIR`` environment variable
+# or the ``--log-dir`` command line option.
+LOG_DIR = str(Path.home() / "python_plot_logs")
 
 # 2) DEFAULT_PORT_COMMAND: command pre-filled in the command box when the GUI
 #    starts. Adjust to match the most common command for your logger.

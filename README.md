@@ -148,13 +148,14 @@ python3 pyqt6_plotting/hsw_distribution/distribution_gui.py
 
 ## Data logger
 
-`pyqt6_logger/data_logger.py` records serial data to a file.  At the
-top of the script you can set the default `LOG_DIR` path as well as the
-pre-filled command string and suggested log file name.  `LOG_DIR` can also be
-overridden via the `--log-dir` command line option or the `LOG_DIR` environment
-variable.  Inside the GUI you can change the directory in which logs are stored
-using the **Browse** button next to the *Directory* field.  The interface uses a
-dark Fusion palette with rounded buttons for a modern look.
+`pyqt6_logger/data_logger.py` records serial data to a file.  By default logs
+are stored in a `python_plot_logs` directory inside the current user's home
+folder so the path works on any system.  You can change the location at
+runtime with the `--log-dir` option or the `LOG_DIR` environment variable.  The
+script also exposes constants for the pre-filled command string and suggested
+file name.  Inside the GUI you can browse to a different directory at any time.
+The interface uses a dark Fusion palette with rounded buttons for a modern
+look.
 
 Launch the logger with:
 
