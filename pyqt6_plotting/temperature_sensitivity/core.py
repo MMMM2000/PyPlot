@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtWidgets, QtCore
 
 import numpy as np
 import pandas as pd
@@ -72,6 +72,33 @@ class ProgressDialog:
         self.count += 1
     def destroy(self) -> None:
         pass
+
+
+def non_modal_question(
+    title: str,
+    text: str,
+    buttons: QtWidgets.QMessageBox.StandardButtons = (
+        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
+    ),
+) -> QtWidgets.QMessageBox.StandardButton:
+    """Return the clicked button of a non-modal question dialog."""
+
+    box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Question, title, text)
+    box.setStandardButtons(buttons)
+    box.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+    result = {
+        "btn": QtWidgets.QMessageBox.StandardButton.NoButton
+    }
+
+    def _finished(code: int) -> None:
+        result["btn"] = QtWidgets.QMessageBox.StandardButton(code)
+        loop.quit()
+
+    loop = QtCore.QEventLoop()
+    box.finished.connect(_finished)
+    box.show()
+    loop.exec()
+    return result["btn"]
 
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
     m = FNAME_RE.match(stem)
@@ -207,11 +234,9 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     for fig in figs:
         fig.show()
 
-    reply = QtWidgets.QMessageBox.question(
-        None,
+    reply = non_modal_question(
         "Outliers detected",
         f"Outliers detected in: {files}.\nRemove them?",
-        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
     )
     plt.close("all")
     if reply == QtWidgets.QMessageBox.StandardButton.Yes:
@@ -237,6 +262,7 @@ def plot_variable(
 
     raw = df[~df['continuous']].copy()
     cont = df[df['continuous']].copy()
+    cont_samples = set(cont['sample_idx'].unique())
 
     means = raw.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
     baseline = means[means['temp'] == 25].set_index('sample_idx')[var].to_dict()
@@ -271,7 +297,14 @@ def plot_variable(
 
     for temp in sorted(raw['temp'].unique()):
         m = means[means['temp'] == temp].copy()
-        m_x = m['sample_idx']
+        if include_cont and not cont.empty:
+            offset = {-1: 0.0, 25: -MEAN_SHIFT, 100: MEAN_SHIFT}.get(int(temp), 0.0)
+            m_x = [
+                r.sample_idx + (offset if r.sample_idx in cont_samples else 0.0)
+                for r in m.itertuples()
+            ]
+        else:
+            m_x = m['sample_idx']
         ax.plot(
             m_x,
             m[var],
@@ -279,7 +312,7 @@ def plot_variable(
             linestyle='None',
             c=MEAN_COLORS.get(temp, 'gray'),
             markersize=MEAN_MSIZE,
-            label=f'mean {temp}\N{DEGREE SIGN}C',
+            label=f'mean {int(temp)}\N{DEGREE SIGN}C',
         )
 
     # Connect 25°C and 100°C means per sample and show delta
@@ -289,17 +322,22 @@ def plot_variable(
             x = idx
             y25 = row[25]
             y100 = row[100]
-            ax.plot(
-                [x, x],
-                [y25, y100],
-                color='black',
-                linewidth=1,
-                zorder=0,
-            )
+            has_cont = include_cont and (idx in cont_samples)
+            if not has_cont:
+                ax.plot(
+                    [x, x],
+                    [y25, y100],
+                    color='black',
+                    linewidth=1,
+                    zorder=0,
+                )
+                delta_pos = (x - 0.1, (y25 + y100) / 2)
+            else:
+                delta_pos = (x + MEAN_SHIFT - 0.1, y100)
             delta = y100 - y25
             ax.annotate(
                 f"{delta:.1f}",
-                (x - 0.1, (y25 + y100) / 2),
+                delta_pos,
                 ha='right',
                 va='center',
                 fontsize=10,
@@ -413,11 +451,9 @@ def main(files: List[str]):
         plt.close('all')
 
     if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
-        reply = QtWidgets.QMessageBox.question(
-            None,
+        reply = non_modal_question(
             "Save Plots",
             "Save generated plots?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
         )
         if reply == QtWidgets.QMessageBox.StandardButton.Yes:
             out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
