@@ -18,3 +18,5 @@ __pycache__/
 .idea/tasks.xml
 .idea/dictionaries
 .idea/usage.statistics.xml
+*.egg-info/
+
