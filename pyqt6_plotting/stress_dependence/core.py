@@ -126,16 +126,18 @@ def load_data(files: List[str]) -> pd.DataFrame:
             continue
         df = pd.read_csv(
             fn,
-            sep=';',
+            sep=";",
             header=None,
-            names=['T1','T2','dT','sum'],
-            engine='python',
-            on_bad_lines='skip',
+            names=["T1", "T2", "dT", "sum"],
+            engine="python",
+            on_bad_lines="skip",
         )
-        df[['T1', 'T2', 'dT', 'sum']] = df[['T1', 'T2', 'dT', 'sum']].apply(
-            pd.to_numeric, errors='coerce'
+        df["filename"] = Path(fn).name
+        df["line"] = np.arange(len(df))
+        df[["T1", "T2", "dT", "sum"]] = df[["T1", "T2", "dT", "sum"]].apply(
+            pd.to_numeric, errors="coerce"
         )
-        for k,v in md.items():
+        for k, v in md.items():
             df[k] = v
         dfs.append(df)
     if not dfs:
