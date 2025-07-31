@@ -11,10 +11,10 @@ if __package__ is None or __package__ == "":
     # that absolute imports of the ``pyqt6_plotting`` package work correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from pyqt6_plotting.maxion_continuous import core as orig
-    from pyqt6_plotting.utils import apply_dark_theme
+    from pyqt6_plotting.utils import apply_system_theme
 else:
     from . import core as orig
-    from ..utils import apply_dark_theme
+    from ..utils import apply_system_theme
 
 
 def ask_user() -> tuple[List[str], Dict[str, Any]]:
@@ -140,5 +140,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    apply_dark_theme(app)
+    apply_system_theme(app)
     main()

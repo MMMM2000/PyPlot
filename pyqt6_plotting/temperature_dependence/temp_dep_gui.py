@@ -7,67 +7,69 @@ from PyQt6 import QtWidgets
 import pathlib
 
 if __package__ is None or __package__ == "":
-    # When executed directly, add the repository root to ``sys.path`` so that
-    # absolute imports of the ``pyqt6_plotting`` package succeed.
+    # When executed directly, include the repository root in ``sys.path``
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.hsw_load_compare import core as orig
+    from pyqt6_plotting.temperature_dependence import core as orig
     from pyqt6_plotting.utils import apply_system_theme
 else:
     from . import core as orig
     from ..utils import apply_system_theme
 
 
-def ask_files() -> List[str]:
+def ask_user() -> tuple[List[str], Dict[str, Any]]:
     paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
         None,
-        "Select Hsw measurement files",
+        "Select measurement files",
         "",
         "Text files (*.txt);;All files (*)",
     )
     if not paths:
         sys.exit("No files selected.")
-    return list(paths)
 
-
-def ask_options() -> Dict[str, Any]:
     dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Hsw Load Compare Settings")
+    dialog.setWindowTitle("Temperature Dependence Settings")
     layout = QtWidgets.QGridLayout(dialog)
 
-    tt_cb = QtWidgets.QCheckBox("Plot TT"); tt_cb.setChecked(True)
-    hh_cb = QtWidgets.QCheckBox("Plot HH"); hh_cb.setChecked(True)
-    raw_cb = QtWidgets.QCheckBox("Show raw"); raw_cb.setChecked(False)
-    hist_cb = QtWidgets.QCheckBox("Show histograms"); hist_cb.setChecked(False)
-    share_cb = QtWidgets.QCheckBox("Same hist Y"); share_cb.setChecked(orig.SAME_HIST_Y)
+    sum_cb = QtWidgets.QCheckBox("T1+T2"); sum_cb.setChecked(orig.PLOT_SUM)
+    dt_cb  = QtWidgets.QCheckBox("T2–T1"); dt_cb.setChecked(orig.PLOT_DT)
+    t1_cb  = QtWidgets.QCheckBox("T1"); t1_cb.setChecked(orig.PLOT_T1)
+    t2_cb  = QtWidgets.QCheckBox("T2"); t2_cb.setChecked(orig.PLOT_T2)
+
+    var_group = QtWidgets.QGroupBox("Variables to plot")
+    var_layout = QtWidgets.QVBoxLayout(var_group)
+    for w in (sum_cb, dt_cb, t1_cb, t2_cb):
+        var_layout.addWidget(w)
+
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
-    out_dir_edit = QtWidgets.QLineEdit(str(orig.OUTPUT_DIR))
+    mode_combo = QtWidgets.QComboBox()
+    mode_combo.addItems(["Raw", "Processed", "Both"])
+    mode_map = {"raw": 0, "processed": 1, "both": 2}
+    mode_combo.setCurrentIndex(mode_map.get(orig.PLOT_MODE, 0))
+    out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
 
-    def browse() -> None:
+    def browse_out() -> None:
         d = QtWidgets.QFileDialog.getExistingDirectory(dialog, "Select output directory", out_dir_edit.text())
         if d:
             out_dir_edit.setText(d)
 
-    browse_btn.clicked.connect(browse)
-
-    plot_group = QtWidgets.QGroupBox("Plots")
-    plot_layout = QtWidgets.QVBoxLayout(plot_group)
-    for w in (tt_cb, hh_cb, raw_cb, hist_cb, share_cb):
-        plot_layout.addWidget(w)
+    browse_btn.clicked.connect(browse_out)
 
     out_group = QtWidgets.QGroupBox("Output")
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
-    out_layout.addWidget(out_dir_edit, 3, 0)
-    out_layout.addWidget(browse_btn, 3, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Mode:"), 2, 0)
+    out_layout.addWidget(mode_combo, 2, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
+    out_layout.addWidget(out_dir_edit, 4, 0)
+    out_layout.addWidget(browse_btn, 4, 1)
 
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
-    layout.addWidget(plot_group, 0, 0)
+    layout.addWidget(var_group, 0, 0)
     layout.addWidget(out_group, 0, 1)
     layout.addWidget(run_btn, 1, 0, 1, 2)
     dialog.setLayout(layout)
@@ -75,16 +77,17 @@ def ask_options() -> Dict[str, Any]:
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         sys.exit(0)
 
-    return {
-        "TT": tt_cb.isChecked(),
-        "HH": hh_cb.isChecked(),
-        "raw": raw_cb.isChecked(),
-        "hist": hist_cb.isChecked(),
-        "share_y": share_cb.isChecked(),
+    cfg = {
+        "sum": sum_cb.isChecked(),
+        "dT": dt_cb.isChecked(),
+        "T1": t1_cb.isChecked(),
+        "T2": t2_cb.isChecked(),
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
+        "mode": {0: "raw", 1: "processed", 2: "both"}[mode_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
     }
+    return paths, cfg
 
 
 class ProgressDialog:
@@ -111,16 +114,24 @@ class ProgressDialog:
 
 
 def main() -> None:
-    files = ask_files()
-    cfg = ask_options()
+    paths, cfg = ask_user()
     orig.ProgressDialog = ProgressDialog
+    orig.PLOT_VARS.clear()
+    if cfg["sum"]:
+        orig.PLOT_VARS.append("sum")
+    if cfg["dT"]:
+        orig.PLOT_VARS.append("dT")
+    if cfg["T1"]:
+        orig.PLOT_VARS.append("T1")
+    if cfg["T2"]:
+        orig.PLOT_VARS.append("T2")
 
-    orig.SAME_HIST_Y = cfg["share_y"]
     orig.SHOW_PLOTS = cfg["show"]
     orig.SAVE_PLOTS = cfg["save"]
+    orig.PLOT_MODE = cfg["mode"]
     orig.OUTPUT_DIR = cfg["out_dir"]
 
-    orig.main(files, cfg)
+    orig.main(paths)
 
 
 if __name__ == "__main__":

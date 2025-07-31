@@ -107,6 +107,18 @@ Run the script with:
 python3 pyqt6_plotting/temperature_sensitivity/temp_gui.py
 ```
 
+## Plotting temperature dependence data
+
+`pyqt6_plotting/temperature_dependence/temp_dep_gui.py` combines discrete
+measurements at 25 °C and 100 °C with a continuous run between those
+temperatures. The GUI can display raw points, processed curves or both and
+supports plotting the usual T1/T2 derived quantities.
+
+Run the script with:
+```bash
+python3 pyqt6_plotting/temperature_dependence/temp_dep_gui.py
+```
+
 ## Comparing Hsw distributions by load
 
 `pyqt6_plotting/hsw_load_compare/load_compare_gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.

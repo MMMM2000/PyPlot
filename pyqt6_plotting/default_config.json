@@ -21,5 +21,17 @@
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
     "BASELINE_MODE": "none"
+  },
+  "temperature_dependence": {
+    "OUTPUT_DIR": "./output",
+    "PLOT_SUM": true,
+    "PLOT_DT": true,
+    "PLOT_T1": true,
+    "PLOT_T2": true,
+    "SHOW_PLOTS": true,
+    "SAVE_PLOTS": false,
+    "PLOT_MODE": "raw",
+    "MED_WINDOW": 5,
+    "MA_WINDOW": 20
   }
 }

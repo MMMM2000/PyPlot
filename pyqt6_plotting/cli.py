@@ -7,6 +7,7 @@ from .hsw_load_compare import load_compare_gui
 from .maxion_continuous import maxion_gui
 from .hsw_distribution import distribution_gui
 from .temperature_sensitivity import temp_gui
+from .temperature_dependence import temp_dep_gui
 
 PLOTTERS = {
     "stress": stress_gui.main,
@@ -14,6 +15,7 @@ PLOTTERS = {
     "maxion": maxion_gui.main,
     "distribution": distribution_gui.main,
     "temperature": temp_gui.main,
+    "temp-dependence": temp_dep_gui.main,
 }
 
 
