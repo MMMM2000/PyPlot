@@ -138,6 +138,8 @@ def load_data(files: List[str]) -> pd.DataFrame:
         for k,v in md.items():
             df[k] = v
         dfs.append(df)
+    if not dfs:
+        raise ValueError("No valid files selected. Check filenames.")
     return pd.concat(dfs, ignore_index=True)
 
 def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:

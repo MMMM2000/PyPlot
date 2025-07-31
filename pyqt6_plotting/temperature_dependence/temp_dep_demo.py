@@ -23,6 +23,7 @@ MEAN_MARKER = "o"
 MEAN_MSIZE = 8
 OFFSET = 0.25
 JITTER_SPAN = 0.25
+MEAN_SHIFT = OFFSET * 2
 
 
 def run_plot(med_window: int, ma_window: int) -> None:
@@ -53,15 +54,21 @@ def run_plot(med_window: int, ma_window: int) -> None:
         m100 = means[(means["sample"] == s) & (means["temp"] == 100)]["sum"]
         has_overall = not df[(df["sample"] == s) & (df["continuous"])].empty
 
+        if not m25.empty and not m100.empty:
+            ax.plot([idx, idx], [m25.iloc[0], m100.iloc[0]], color="black", linewidth=1)
+            delta = m100.iloc[0] - m25.iloc[0]
+            ax.annotate(f"{delta:.1f}", (idx - 0.1, (m25.iloc[0] + m100.iloc[0]) / 2), ha="right", va="center", fontsize=10)
+
+        if not m25.empty:
+            lbl = None if "m25" in legend_done else "mean 25C"
+            ax.plot(idx - MEAN_SHIFT, m25.iloc[0], MEAN_MARKER, c=MEAN_COLORS[25], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
+            legend_done.add("m25")
+        if not m100.empty:
+            lbl = None if "m100" in legend_done else "mean 100C"
+            ax.plot(idx + MEAN_SHIFT, m100.iloc[0], MEAN_MARKER, c=MEAN_COLORS[100], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
+            legend_done.add("m100")
+
         if has_overall:
-            if not m25.empty:
-                lbl = None if "m25" in legend_done else "mean 25C"
-                ax.plot(idx - OFFSET, m25.iloc[0], MEAN_MARKER, c=MEAN_COLORS[25], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
-                legend_done.add("m25")
-            if not m100.empty:
-                lbl = None if "m100" in legend_done else "mean 100C"
-                ax.plot(idx + OFFSET, m100.iloc[0], MEAN_MARKER, c=MEAN_COLORS[100], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
-                legend_done.add("m100")
             cont = df[(df["sample"] == s) & (df["continuous"])].sort_values("temp")
             if not cont.empty:
                 med = cont["sum"].rolling(med_window, center=True, min_periods=1).median()
@@ -73,19 +80,6 @@ def run_plot(med_window: int, ma_window: int) -> None:
                 lbl = None if "overall" in legend_done else f"overall med{med_window}+mwa{ma_window}"
                 ax.plot(x, proc, color="black", label=lbl)
                 legend_done.add("overall")
-        else:
-            if not m25.empty and not m100.empty:
-                ax.plot([idx, idx], [m25.iloc[0], m100.iloc[0]], color="black", linewidth=1)
-                delta = m100.iloc[0] - m25.iloc[0]
-                ax.annotate(f"{delta:.1f}", (idx - 0.1, (m25.iloc[0] + m100.iloc[0]) / 2), ha="right", va="center", fontsize=10)
-            if not m25.empty:
-                lbl = None if "m25" in legend_done else "mean 25C"
-                ax.plot(idx, m25.iloc[0], MEAN_MARKER, c=MEAN_COLORS[25], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
-                legend_done.add("m25")
-            if not m100.empty:
-                lbl = None if "m100" in legend_done else "mean 100C"
-                ax.plot(idx, m100.iloc[0], MEAN_MARKER, c=MEAN_COLORS[100], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
-                legend_done.add("m100")
 
     ax.set_xticks(list(sample_idx.values()))
     ax.set_xticklabels(samples)
