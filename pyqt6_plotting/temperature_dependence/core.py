@@ -26,12 +26,29 @@ MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 
-RAW_COLOR = "#45A1D6"
+RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
+OVERALL_COLOR = "#6B6B6B"
 PROC_COLOR = "#F09C67"
 MARKER = "o"
 MARKER_SIZE = 0.3
 PROC_LW = 2
 JITTER_SPAN = 0.5
+
+
+class ProgressDialog:
+    """Fallback progress indicator used when no GUI is provided."""
+
+    def __init__(self, total: int):
+        self.total = total
+        self.count = 0
+        self.cancelled = False
+        self.root = self
+
+    def update(self) -> None:
+        self.count += 1
+
+    def destroy(self) -> None:
+        pass
 
 NAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -113,11 +130,26 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     if PLOT_MODE in ("raw", "both"):
         sub = df[df["continuous"]]
         if not sub.empty:
-            ax.scatter(sub["temp"], sub[var], c=RAW_COLOR, s=MARKER_SIZE, marker=MARKER, label="raw overall")
+            ax.scatter(
+                sub["temp"],
+                sub[var],
+                c=OVERALL_COLOR,
+                s=MARKER_SIZE,
+                marker=MARKER,
+                label="raw overall",
+            )
         for temp in sorted(df.loc[~df["continuous"], "temp"].unique()):
             s = df[(~df["continuous"]) & (df["temp"] == temp)]
             jitter = np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(s))
-            ax.scatter(temp + jitter, s[var], c=RAW_COLOR, s=MARKER_SIZE, marker=MARKER, label=f"raw {temp}\N{DEGREE SIGN}C")
+            color = RAW_COLORS.get(int(temp), next(iter(RAW_COLORS.values())))
+            ax.scatter(
+                temp + jitter,
+                s[var],
+                c=color,
+                s=MARKER_SIZE,
+                marker=MARKER,
+                label=f"raw {int(temp)}\N{DEGREE SIGN}C",
+            )
 
     if PLOT_MODE in ("processed", "both"):
         sub = df[df["continuous"]].sort_values("temp")
@@ -143,10 +175,22 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 def main(files: List[str]) -> None:
     data = load_data(files)
     data = maybe_handle_outliers(data)
+    total = len(PLOT_VARS)
+    progress = ProgressDialog(total) if total else None
     plots: List[Tuple[Figure, str]] = []
     for var in PLOT_VARS:
+        if progress and getattr(progress, "cancelled", False):
+            break
         fig, fname = plot_variable(data, var, SAVE_PLOTS, OUTPUT_DIR)
         plots.append((fig, fname))
+        if progress:
+            progress.update()
+    if progress and not getattr(progress, "cancelled", False):
+        progress.destroy()
+    elif progress and getattr(progress, "cancelled", False):
+        plt.close("all")
+        print("Cancelled.")
+        return
     if SHOW_PLOTS:
         plt.show()
     else:

@@ -66,12 +66,22 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout.addWidget(out_dir_edit, 4, 0)
     out_layout.addWidget(browse_btn, 4, 1)
 
+    proc_group = QtWidgets.QGroupBox("Processed curve")
+    proc_layout = QtWidgets.QGridLayout(proc_group)
+    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
+    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
+    proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 0, 0)
+    proc_layout.addWidget(med_spin, 0, 1)
+    proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 0, 2)
+    proc_layout.addWidget(ma_spin, 0, 3)
+
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
     layout.addWidget(var_group, 0, 0)
     layout.addWidget(out_group, 0, 1)
-    layout.addWidget(run_btn, 1, 0, 1, 2)
+    layout.addWidget(proc_group, 1, 0, 1, 2)
+    layout.addWidget(run_btn, 2, 0, 1, 2)
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -86,6 +96,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "save": save_cb.isChecked(),
         "mode": {0: "raw", 1: "processed", 2: "both"}[mode_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
+        "med_window": med_spin.value(),
+        "ma_window": ma_spin.value(),
     }
     return paths, cfg
 
@@ -130,6 +142,8 @@ def main() -> None:
     orig.SAVE_PLOTS = cfg["save"]
     orig.PLOT_MODE = cfg["mode"]
     orig.OUTPUT_DIR = cfg["out_dir"]
+    orig.MED_WINDOW = int(cfg["med_window"])
+    orig.MA_WINDOW = int(cfg["ma_window"])
 
     orig.main(paths)
 
