@@ -66,12 +66,24 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout.addWidget(out_dir_edit, 4, 0)
     out_layout.addWidget(browse_btn, 4, 1)
 
+    cont_group = QtWidgets.QGroupBox("Continuous data")
+    cont_layout = QtWidgets.QGridLayout(cont_group)
+    cont_cb = QtWidgets.QCheckBox("Include continuous data"); cont_cb.setChecked(orig.INCLUDE_CONTINUOUS)
+    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
+    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
+    cont_layout.addWidget(cont_cb, 0, 0, 1, 4)
+    cont_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
+    cont_layout.addWidget(med_spin, 1, 1)
+    cont_layout.addWidget(QtWidgets.QLabel("MA window:"), 1, 2)
+    cont_layout.addWidget(ma_spin, 1, 3)
+
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
     layout.addWidget(var_group, 0, 0)
     layout.addWidget(out_group, 0, 1)
-    layout.addWidget(run_btn, 1, 0, 1, 2)
+    layout.addWidget(cont_group, 1, 0, 1, 2)
+    layout.addWidget(run_btn, 2, 0, 1, 2)
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -86,6 +98,9 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "save": save_cb.isChecked(),
         "baseline": {0: "none", 1: "zero_25", 2: "both"}[baseline_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
+        "include_cont": cont_cb.isChecked(),
+        "med_window": med_spin.value(),
+        "ma_window": ma_spin.value(),
     }
     return paths, cfg
 
@@ -130,6 +145,9 @@ def main() -> None:
     orig.SAVE_PLOTS = cfg["save"]
     orig.BASELINE_MODE = cfg["baseline"]
     orig.OUTPUT_DIR = cfg["out_dir"]
+    orig.INCLUDE_CONTINUOUS = cfg["include_cont"]
+    orig.MED_WINDOW = int(cfg["med_window"])
+    orig.MA_WINDOW = int(cfg["ma_window"])
 
     orig.main(paths)
 

@@ -100,7 +100,8 @@ index and those at 100 °C to the right so the two sets do not overlap. Mean
 values are drawn centered on the sample index. A thin vertical line connects the
 25 °C and 100 °C means for each sample with the numeric difference printed
 next to it. The plot can show the raw values, subtract the 25 °C baseline or
-generate both variants.
+generate both variants. Optionally a processed continuous measurement can be
+displayed for each sample using adjustable median and moving-average windows.
 
 Run the script with:
 ```bash
