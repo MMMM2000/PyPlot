@@ -100,6 +100,8 @@ def load_data(files: List[str]) -> pd.DataFrame:
             )
             df["temp"] = md["temp_val"]
             df["continuous"] = False
+        df["filename"] = Path(fn).name
+        df["line"] = np.arange(len(df))
         df[["T1", "T2", "dT", "sum"]] = df[["T1", "T2", "dT", "sum"]].apply(pd.to_numeric, errors="coerce")
         df["temp"] = pd.to_numeric(df["temp"], errors="coerce")
         for k, v in md.items():
