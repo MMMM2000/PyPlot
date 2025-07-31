@@ -13,7 +13,7 @@ if __package__ is None or __package__ == "":
     from pyqt6_plotting.maxion_continuous import maxion_gui
     from pyqt6_plotting.hsw_distribution import distribution_gui
     from pyqt6_plotting.temperature_sensitivity import temp_gui
-    from pyqt6_plotting.utils import apply_dark_theme
+    from pyqt6_plotting.utils import apply_system_theme
     from pyqt6_plotting import common
     from pyqt6_logger import data_logger
 else:
@@ -22,7 +22,7 @@ else:
     from .pyqt6_plotting.maxion_continuous import maxion_gui
     from .pyqt6_plotting.hsw_distribution import distribution_gui
     from .pyqt6_plotting.temperature_sensitivity import temp_gui
-    from .pyqt6_plotting.utils import apply_dark_theme
+    from .pyqt6_plotting.utils import apply_system_theme
     from .pyqt6_plotting import common
     from .pyqt6_logger import data_logger
 
@@ -137,7 +137,7 @@ class MasterLauncher(QtWidgets.QDialog):
 
 def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
-    apply_dark_theme(app)
+    apply_system_theme(app)
     dlg = MasterLauncher()
     dlg.show()
     app.exec()

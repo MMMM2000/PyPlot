@@ -13,9 +13,9 @@ if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
     # ``pyqt6_plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.utils import apply_dark_theme
+    from pyqt6_plotting.utils import apply_system_theme
 else:
-    from ..utils import apply_dark_theme
+    from ..utils import apply_system_theme
 
 
 def ask_files() -> List[str]:
@@ -282,5 +282,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    apply_dark_theme(app)
+    apply_system_theme(app)
     main()
