@@ -1,9 +1,16 @@
+from __future__ import annotations
+import sys
+import pathlib
 import tkinter as tk
 from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 
-from .core import load_data
+if __package__ is None or __package__ == "":
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
+    from pyqt6_plotting.temperature_dependence.core import load_data
+else:
+    from .core import load_data
 
 DATA_DIR = Path(__file__).resolve().parents[2] / "sample_data" / "temperature_dependence"
 FILES = [
