@@ -84,7 +84,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
         df[["T1", "T2", "dT", "sum"]] = df[["T1", "T2", "dT", "sum"]].apply(pd.to_numeric, errors="coerce")
         df["temp"] = pd.to_numeric(df["temp"], errors="coerce")
         for k, v in md.items():
-            if k not in {"temp_val", "continuous"}:
+            if k not in {"temp_val", "continuous", "temp"}:
                 df[k] = v
         dfs.append(df)
     if not dfs:
