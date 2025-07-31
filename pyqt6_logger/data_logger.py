@@ -1,13 +1,13 @@
 import sys
 import os
-import pathlib
+from pathlib import Path
 from typing import Any, cast, List
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 if __package__ is None or __package__ == "":
-    sys.path.append(str(pathlib.Path(__file__).resolve().parent))
+    sys.path.append(str(Path(__file__).resolve().parent))
     from logger_ui import Ui_MainWindow
 else:
     from .logger_ui import Ui_MainWindow

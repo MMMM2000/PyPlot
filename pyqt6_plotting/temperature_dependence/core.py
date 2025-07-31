@@ -31,6 +31,7 @@ PROC_COLOR = "#F09C67"
 MARKER = "o"
 MARKER_SIZE = 0.3
 PROC_LW = 2
+JITTER_SPAN = 0.5
 
 NAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -65,11 +66,12 @@ def load_data(files: List[str]) -> pd.DataFrame:
                 fn,
                 sep=";",
                 header=None,
-                names=["temp", "T1", "T2", "dT", "sum"],
+                names=["T1", "T2", "dT", "sum"],
                 engine="python",
                 on_bad_lines="skip",
             )
             df["continuous"] = True
+            df["temp"] = np.nan
         else:
             df = pd.read_csv(
                 fn,
@@ -89,7 +91,16 @@ def load_data(files: List[str]) -> pd.DataFrame:
         dfs.append(df)
     if not dfs:
         raise FileNotFoundError("No valid files selected")
-    return pd.concat(dfs, ignore_index=True)
+    data = pd.concat(dfs, ignore_index=True)
+    cont_mask = data["continuous"]
+    if cont_mask.any():
+        temps = data.loc[~cont_mask, "temp"].dropna()
+        if not temps.empty:
+            t_min, t_max = temps.min(), temps.max()
+        else:
+            t_min, t_max = 0.0, float(len(data.loc[cont_mask]) - 1)
+        data.loc[cont_mask, "temp"] = np.linspace(t_min, t_max, cont_mask.sum())
+    return data
 
 
 def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[Figure, str]:
@@ -105,7 +116,8 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
             ax.scatter(sub["temp"], sub[var], c=RAW_COLOR, s=MARKER_SIZE, marker=MARKER, label="raw overall")
         for temp in sorted(df.loc[~df["continuous"], "temp"].unique()):
             s = df[(~df["continuous"]) & (df["temp"] == temp)]
-            ax.scatter([temp]*len(s), s[var], c=RAW_COLOR, s=MARKER_SIZE, marker=MARKER, label=f"raw {temp}\N{DEGREE SIGN}C")
+            jitter = np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(s))
+            ax.scatter(temp + jitter, s[var], c=RAW_COLOR, s=MARKER_SIZE, marker=MARKER, label=f"raw {temp}\N{DEGREE SIGN}C")
 
     if PLOT_MODE in ("processed", "both"):
         sub = df[df["continuous"]].sort_values("temp")
