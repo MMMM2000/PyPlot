@@ -54,30 +54,69 @@ def run_plot(med_window: int, ma_window: int) -> None:
         m100 = means[(means["sample"] == s) & (means["temp"] == 100)]["sum"]
         has_overall = not df[(df["sample"] == s) & (df["continuous"])].empty
 
-        if not m25.empty and not m100.empty:
+        # Use horizontal offset only if a continuous "overall" measurement is
+        # available for this sample
+        if has_overall:
+            x25 = idx - MEAN_SHIFT
+            x100 = idx + MEAN_SHIFT
+        else:
+            x25 = x100 = idx
+
+        # Draw the difference line only when there is no "overall" curve
+        if not has_overall and not m25.empty and not m100.empty:
             ax.plot([idx, idx], [m25.iloc[0], m100.iloc[0]], color="black", linewidth=1)
             delta = m100.iloc[0] - m25.iloc[0]
-            ax.annotate(f"{delta:.1f}", (idx - 0.1, (m25.iloc[0] + m100.iloc[0]) / 2), ha="right", va="center", fontsize=10)
+            ax.annotate(
+                f"{delta:.1f}",
+                (idx - 0.1, (m25.iloc[0] + m100.iloc[0]) / 2),
+                ha="right",
+                va="center",
+                fontsize=10,
+            )
 
         if not m25.empty:
             lbl = None if "m25" in legend_done else "mean 25C"
-            ax.plot(idx - MEAN_SHIFT, m25.iloc[0], MEAN_MARKER, c=MEAN_COLORS[25], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
+            ax.plot(
+                x25,
+                m25.iloc[0],
+                MEAN_MARKER,
+                c=MEAN_COLORS[25],
+                markersize=MEAN_MSIZE,
+                linestyle="None",
+                label=lbl,
+            )
             legend_done.add("m25")
         if not m100.empty:
             lbl = None if "m100" in legend_done else "mean 100C"
-            ax.plot(idx + MEAN_SHIFT, m100.iloc[0], MEAN_MARKER, c=MEAN_COLORS[100], markersize=MEAN_MSIZE, linestyle="None", label=lbl)
+            ax.plot(
+                x100,
+                m100.iloc[0],
+                MEAN_MARKER,
+                c=MEAN_COLORS[100],
+                markersize=MEAN_MSIZE,
+                linestyle="None",
+                label=lbl,
+            )
             legend_done.add("m100")
 
         if has_overall:
-            cont = df[(df["sample"] == s) & (df["continuous"])].sort_values("temp")
+            cont = (
+                df[(df["sample"] == s) & (df["continuous"])]
+                .sort_values("temp")
+            )
             if not cont.empty:
                 med = cont["sum"].rolling(med_window, center=True, min_periods=1).median()
                 proc = med.rolling(ma_window, center=True, min_periods=1).mean()
                 start = cont["temp"].iloc[0]
                 end = cont["temp"].iloc[-1]
-                scale = (2 * OFFSET) / (end - start)
-                x = (cont["temp"] - start) * scale + (idx - OFFSET)
-                lbl = None if "overall" in legend_done else f"overall med{med_window}+mwa{ma_window}"
+                # Stretch the curve from the 25°C mean position to the 100°C mean position
+                scale = (x100 - x25) / (end - start)
+                x = (cont["temp"] - start) * scale + x25
+                lbl = (
+                    None
+                    if "overall" in legend_done
+                    else f"overall med{med_window}+mwa{ma_window}"
+                )
                 ax.plot(x, proc, color="black", label=lbl)
                 legend_done.add("overall")
 
