@@ -85,6 +85,19 @@ Several flags control what variables are plotted and whether the plots are displ
 python3 pyqt6_plotting/stress_dependence/stress_gui.py
 ```
 
+## Plotting stress sensitivity data
+
+`pyqt6_plotting/stress_sensitivity/sens_gui.py` compares the low-load and high-load
+measurements per sample. File names follow the same pattern as for stress
+dependence. The tool plots raw points at 2.5 g and 17.5 g with their mean
+difference annotated for each sample. Optionally the mean values across all
+loads from the stress-dependence data can be shown as a smoothed curve.
+
+Run the script with:
+```bash
+python3 pyqt6_plotting/stress_sensitivity/sens_gui.py
+```
+
 ## Plotting temperature sensitivity data
 
 `pyqt6_plotting/temperature_sensitivity/temp_gui.py` visualizes switching-time
@@ -165,6 +178,8 @@ python3 pyqt6_logger/data_logger.py
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
+When *Use subfolder* is enabled the logger creates a directory named after the
+selected file (without the load suffix) and stores the log inside it.
 The port list shows each device's full description to make selection easier.
 
 ## Requirements

@@ -14,6 +14,7 @@ if __package__ is None or __package__ == "":
     from pyqt6_plotting.hsw_distribution import distribution_gui
     from pyqt6_plotting.temperature_sensitivity import temp_gui
     from pyqt6_plotting.temperature_dependence import temp_dep_gui
+    from pyqt6_plotting.stress_sensitivity import sens_gui
     from pyqt6_plotting.utils import apply_system_theme
     from pyqt6_plotting import common
     from pyqt6_logger import data_logger
@@ -24,6 +25,7 @@ else:
     from .pyqt6_plotting.hsw_distribution import distribution_gui
     from .pyqt6_plotting.temperature_sensitivity import temp_gui
     from .pyqt6_plotting.temperature_dependence import temp_dep_gui
+    from .pyqt6_plotting.stress_sensitivity import sens_gui
     from .pyqt6_plotting.utils import apply_system_theme
     from .pyqt6_plotting import common
     from .pyqt6_logger import data_logger
@@ -36,6 +38,7 @@ PLOTTERS: Dict[str, Callable[[], None]] = {
     "Hsw Distribution": distribution_gui.main,
     "Temperature Sensitivity": temp_gui.main,
     "Temperature Dependence": temp_dep_gui.main,
+    "Stress Sensitivity": sens_gui.main,
 }
 
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
