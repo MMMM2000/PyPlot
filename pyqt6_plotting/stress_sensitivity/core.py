@@ -295,9 +295,13 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     ax.set_ylabel(LABELS[var])
     ax.set_title(f"{comp} {title} {anneal} — {LABELS[var]}")
     ax.grid(True)
+    y_range = (y_max - y_min) if y_max != y_min else 1.0
+    delta_offset = 0.05 * y_range
     if y_min < y_max:
-        ax.set_ylim(y_min, y_max)
-    delta_offset = 0.05 * ((y_max - y_min) if y_max != y_min else 1.0)
+        ax.set_ylim(
+            y_min - 0.02 * y_range,
+            y_max + delta_offset + 0.02 * y_range,
+        )
     for idx, delta in deltas:
         ax.annotate(
             f"{delta:.1f}",
