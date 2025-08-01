@@ -45,6 +45,7 @@ MEAN_LW = 3
 OFFSET = 0.25
 JITTER_SPAN = 0.25
 MEAN_SHIFT = OFFSET * 2
+CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 0.6))
 
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -187,10 +188,66 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     return fig, fname
 
 
+def _draw_mini_dependence(ax: plt.Axes, df: pd.DataFrame, var: str, center: float, width: float) -> Tuple[float, float]:
+    """Draw a stress dependence curve scaled to a small width around *center*.
+
+    Returns the minimum and maximum y values of the processed curve."""
+    base_mean = df[(df['dir'] == 'b') & (df['load'] == BASE_LOAD)][var].mean()
+    if np.isnan(base_mean):
+        return 0.0, 0.0
+
+    dep = df[df['dir'] == 'b'].groupby('load')[var].mean().sort_index().reset_index()
+    dep['y'] = dep[var] - base_mean
+    start = dep['load'].iloc[0]
+    end = dep['load'].iloc[-1]
+    x_start = center - width / 2
+    x_end = center + width / 2
+    scale = (x_end - x_start) / (end - start) if end != start else 1.0
+    x_vals = (dep['load'] - start) * scale + x_start
+    med = dep['y'].rolling(MED_WINDOW, center=True, min_periods=1).median()
+    proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+    ax.plot(x_vals, proc, color='black', linewidth=1)
+    return proc.min(), proc.max()
+
+
+def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
+    """Plot miniature stress dependence curves for all samples in ``df``."""
+    comp = df['composition'].iat[0]
+    title = df['title'].iat[0]
+    anneal = df['anneal'].iat[0]
+
+    samples = sorted(df['sample_end'].unique())
+    fig, ax = plt.subplots(figsize=(max(7, len(samples) * 1.2), 5))
+
+    y_min, y_max = np.inf, -np.inf
+    for idx, sample in enumerate(samples, start=1):
+        sub = df[df['sample_end'] == sample]
+        _min, _max = _draw_mini_dependence(ax, sub, var, idx, CURVE_WIDTH)
+        y_min = min(y_min, _min)
+        y_max = max(y_max, _max)
+
+    ax.set_xlim(0.5, len(samples) + 0.5)
+    ax.set_xticks(range(1, len(samples) + 1))
+    ax.set_xticklabels(samples)
+    ax.set_xlabel('Sample')
+    ax.set_ylabel(var)
+    ax.set_title(f"{comp} {title} {anneal} — {var}")
+    ax.grid(True)
+    if y_min < y_max:
+        ax.set_ylim(y_min, y_max)
+
+    fig.tight_layout()
+    fname = f"{comp} {title} {anneal} {var}.png"
+    if save_flag:
+        os.makedirs(out_dir, exist_ok=True)
+        fig.savefig(os.path.join(out_dir, fname), dpi=300)
+    return fig, fname
+
+
 def main(files: List[str]) -> None:
     data = load_data(files)
     data = maybe_handle_outliers(data)
-    groups = data.groupby(['composition', 'title', 'sample_end', 'anneal'])
+    groups = data.groupby(['composition', 'title', 'anneal'])
     total = len(groups) * len(PLOT_VARS)
     do_show = SHOW_PLOTS and (total <= MAX_SHOW)
     if SHOW_PLOTS and not do_show:
@@ -202,7 +259,7 @@ def main(files: List[str]) -> None:
         for var in PLOT_VARS:
             if progress and getattr(progress, 'cancelled', False):
                 break
-            fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
+            fig, fname = plot_samples(grp, var, SAVE_PLOTS, OUTPUT_DIR)
             if fname:
                 plots.append((fig, fname))
             if progress:
