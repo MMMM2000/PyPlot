@@ -42,6 +42,8 @@ MEAN_COLORS = {BASE_LOAD: "#00306E", END_LOAD: "#965308"}
 MEAN_MARKER = 'o'
 MEAN_MSIZE = 8
 MEAN_LW = 3
+DIR_B_RAW = "#F09C67"
+DIR_B_MEAN = "#965308"
 OFFSET = 0.25
 JITTER_SPAN = 0.25
 MEAN_SHIFT = OFFSET * 2
@@ -188,26 +190,66 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     return fig, fname
 
 
-def _draw_mini_dependence(ax: plt.Axes, df: pd.DataFrame, var: str, center: float, width: float) -> Tuple[float, float]:
-    """Draw a stress dependence curve scaled to a small width around *center*.
+def _draw_mini_dependence(
+    ax: plt.Axes,
+    df: pd.DataFrame,
+    var: str,
+    center: float,
+    width: float,
+) -> Tuple[float, float]:
+    """Draw a stress dependence curve scaled around ``center``.
 
-    Returns the minimum and maximum y values of the processed curve."""
-    base_mean = df[(df['dir'] == 'b') & (df['load'] == BASE_LOAD)][var].mean()
+    The curve shows only unloading (``b``) data with raw points and means.
+    The y values are shifted so that the first load is at zero."""
+
+    base_mean = df[(df["dir"] == "b") & (df["load"] == BASE_LOAD)][var].mean()
     if np.isnan(base_mean):
         return 0.0, 0.0
 
-    dep = df[df['dir'] == 'b'].groupby('load')[var].mean().sort_index().reset_index()
-    dep['y'] = dep[var] - base_mean
-    start = dep['load'].iloc[0]
-    end = dep['load'].iloc[-1]
+    sub = df[df["dir"] == "b"].copy()
+    start = sub["load"].min()
+    end = sub["load"].max()
     x_start = center - width / 2
     x_end = center + width / 2
     scale = (x_end - x_start) / (end - start) if end != start else 1.0
-    x_vals = (dep['load'] - start) * scale + x_start
-    med = dep['y'].rolling(MED_WINDOW, center=True, min_periods=1).median()
-    proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-    ax.plot(x_vals, proc, color='black', linewidth=1)
-    return proc.min(), proc.max()
+    sub["x_center"] = (sub["load"] - start) * scale + x_start
+    np.random.seed(0)
+    sub["x"] = sub["x_center"] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(sub))
+    sub["y"] = sub[var] - base_mean
+
+    ax.scatter(
+        sub["x"],
+        sub["y"],
+        c=DIR_B_RAW,
+        marker=RAW_MARKER,
+        s=RAW_MARKER_SIZE,
+        alpha=RAW_ALPHA,
+    )
+
+    means = sub.groupby("load").agg({"x_center": "mean", "y": "mean"}).reset_index()
+    ax.plot(
+        means["x_center"],
+        means["y"],
+        MEAN_MARKER + "-",
+        c=DIR_B_MEAN,
+        markersize=MEAN_MSIZE,
+        linewidth=MEAN_LW,
+    )
+
+    if INCLUDE_DEPENDENCE:
+        dep = sub.groupby("load")[var].mean().sort_index().reset_index()
+        dep["y"] = dep[var] - base_mean
+        med = dep["y"].rolling(MED_WINDOW, center=True, min_periods=1).median()
+        proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+        x_vals = (dep["load"] - start) * scale + x_start
+        ax.plot(x_vals, proc, color="black", linewidth=1)
+        dep_min, dep_max = proc.min(), proc.max()
+    else:
+        dep_min, dep_max = sub["y"].min(), sub["y"].max()
+
+    y_min = min(sub["y"].min(), dep_min)
+    y_max = max(sub["y"].max(), dep_max)
+    return y_min, y_max
 
 
 def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:

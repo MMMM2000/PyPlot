@@ -87,11 +87,13 @@ python3 pyqt6_plotting/stress_dependence/stress_gui.py
 
 ## Plotting stress sensitivity data
 
-`pyqt6_plotting/stress_sensitivity/sens_gui.py` compares the low-load and high-load
-measurements per sample. File names follow the same pattern as for stress
-dependence. The tool plots raw points at 2.5 g and 17.5 g with their mean
-difference annotated for each sample. Optionally the mean values across all
-loads from the stress-dependence data can be shown as a smoothed curve.
+`pyqt6_plotting/stress_sensitivity/sens_gui.py` visualizes how the switching
+times change with applied stress. File names follow the same pattern as for
+stress dependence. Each sample is placed on the X axis and a miniature stress
+dependence curve is drawn using only the unloading (`b`) data. Raw points and
+their means are shown together with an optional smoothed dependence curve. The
+plot therefore compares the full stress behaviour across all samples in a
+compact layout.
 
 Run the script with:
 ```bash
