@@ -11,19 +11,14 @@ if __package__ is None or __package__ == "":
     # absolute imports of the ``pyqt6_plotting`` package succeed.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from pyqt6_plotting.hsw_load_compare import core as orig
-    from pyqt6_plotting.utils import apply_system_theme
+    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
-    from ..utils import apply_system_theme
+    from ..utils import apply_system_theme, select_files_or_folder
 
 
 def ask_files() -> List[str]:
-    paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-        None,
-        "Select Hsw measurement files",
-        "",
-        "Text files (*.txt);;All files (*)",
-    )
+    paths = select_files_or_folder()
     if not paths:
         sys.exit("No files selected.")
     return list(paths)

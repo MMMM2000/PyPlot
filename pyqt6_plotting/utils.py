@@ -1,4 +1,5 @@
 from PyQt6 import QtWidgets, QtGui
+import os
 
 
 def _dark_palette() -> QtGui.QPalette:
@@ -33,3 +34,39 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
 def apply_dark_theme(app: QtWidgets.QApplication) -> None:
     """Backward compatible wrapper around :func:`apply_system_theme`."""
     apply_system_theme(app)
+
+
+def select_files_or_folder(parent: QtWidgets.QWidget | None = None) -> list[str]:
+    """Return a list of ``.txt`` files chosen by the user.
+
+    A small dialog lets the user pick between selecting individual files or a
+    directory.  When a directory is chosen all ``.txt`` files inside it and any
+    sub-directories are returned sorted alphabetically.
+    """
+
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle("Select Input")
+    box.setText("Choose input files or a folder with data")
+    files_btn = box.addButton("Files", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    folder_btn = box.addButton("Folder", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+    box.exec()
+
+    clicked = box.clickedButton()
+    paths: list[str] = []
+    if clicked == files_btn:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            parent,
+            "Select measurement files",
+            "",
+            "Text files (*.txt);;All files (*)",
+        )
+    elif clicked == folder_btn:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder")
+        if directory:
+            for root, _dirs, files in os.walk(directory):
+                for name in files:
+                    if name.lower().endswith(".txt"):
+                        paths.append(os.path.join(root, name))
+            paths.sort()
+    return list(paths)

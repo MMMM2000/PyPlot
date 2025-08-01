@@ -19,7 +19,7 @@
     "PLOT_T2": true,
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
-    "INCLUDE_DEPENDENCE": true,
+    "INCLUDE_DEPENDENCE": false,
     "MED_WINDOW": 5,
     "MA_WINDOW": 20
   },

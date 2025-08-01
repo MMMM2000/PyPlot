@@ -6,19 +6,14 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from pyqt6_plotting.stress_sensitivity import core as orig
-    from pyqt6_plotting.utils import apply_system_theme
+    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
-    from ..utils import apply_system_theme
+    from ..utils import apply_system_theme, select_files_or_folder
 
 
 def ask_user() -> tuple[List[str], Dict[str, Any]]:
-    paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-        None,
-        "Select measurement files",
-        "",
-        "Text files (*.txt);;All files (*)",
-    )
+    paths = select_files_or_folder()
     if not paths:
         sys.exit("No files selected.")
 
@@ -56,24 +51,14 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout.addWidget(out_dir_edit, 3, 0)
     out_layout.addWidget(browse_btn, 3, 1)
 
-    dep_group = QtWidgets.QGroupBox("Stress dependence curve")
-    dep_layout = QtWidgets.QGridLayout(dep_group)
-    dep_cb = QtWidgets.QCheckBox("Include dependence curve"); dep_cb.setChecked(orig.INCLUDE_DEPENDENCE)
-    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
-    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
-    dep_layout.addWidget(dep_cb, 0, 0, 1, 4)
-    dep_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
-    dep_layout.addWidget(med_spin, 1, 1)
-    dep_layout.addWidget(QtWidgets.QLabel("MA window:"), 1, 2)
-    dep_layout.addWidget(ma_spin, 1, 3)
+
 
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
     layout.addWidget(var_group, 0, 0)
     layout.addWidget(out_group, 0, 1)
-    layout.addWidget(dep_group, 1, 0, 1, 2)
-    layout.addWidget(run_btn, 2, 0, 1, 2)
+    layout.addWidget(run_btn, 1, 0, 1, 2)
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -87,9 +72,6 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
         "out_dir": out_dir_edit.text(),
-        "include_dep": dep_cb.isChecked(),
-        "med_window": med_spin.value(),
-        "ma_window": ma_spin.value(),
     }
     return paths, cfg
 
@@ -133,9 +115,7 @@ def main() -> None:
     orig.SHOW_PLOTS = cfg["show"]
     orig.SAVE_PLOTS = cfg["save"]
     orig.OUTPUT_DIR = cfg["out_dir"]
-    orig.INCLUDE_DEPENDENCE = cfg["include_dep"]
-    orig.MED_WINDOW = int(cfg["med_window"])
-    orig.MA_WINDOW = int(cfg["ma_window"])
+    orig.INCLUDE_DEPENDENCE = False
 
     orig.main(paths)
 
