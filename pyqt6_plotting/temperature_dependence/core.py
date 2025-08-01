@@ -57,6 +57,13 @@ NAME_RE = re.compile(
     r"(?P<temp>\d+C|overall)$"
 )
 
+LABELS = {
+    "T1": "T1 (µs)",
+    "T2": "T2 (µs)",
+    "dT": "T2–T1 (µs)",
+    "sum": "T1+T2 (µs)",
+}
+
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
     m = NAME_RE.match(stem)
     if not m:
@@ -161,8 +168,8 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
             ax.plot(sub["temp"], proc, color=PROC_COLOR, linewidth=PROC_LW, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
 
     ax.set_xlabel("Temperature (°C)")
-    ax.set_ylabel(var)
-    ax.set_title(f"{comp} {sample} {anneal} — {var}")
+    ax.set_ylabel(LABELS[var])
+    ax.set_title(f"{comp} {sample} {anneal} — {LABELS[var]}")
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
