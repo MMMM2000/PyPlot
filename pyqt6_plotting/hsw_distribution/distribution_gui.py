@@ -13,18 +13,13 @@ if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
     # ``pyqt6_plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.utils import apply_system_theme
+    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
 else:
-    from ..utils import apply_system_theme
+    from ..utils import apply_system_theme, select_files_or_folder
 
 
 def ask_files() -> List[str]:
-    paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-        None,
-        "Select .txt data files",
-        "",
-        "Text files (*.txt);;All files (*)",
-    )
+    paths = select_files_or_folder()
     if not paths:
         sys.exit("No files selected.")
     return list(paths)

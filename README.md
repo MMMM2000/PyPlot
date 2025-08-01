@@ -91,9 +91,9 @@ python3 pyqt6_plotting/stress_dependence/stress_gui.py
 times change with applied stress. File names follow the same pattern as for
 stress dependence. Each sample is placed on the X axis and a miniature stress
 dependence curve is drawn using only the unloading (`b`) data. Raw points and
-their means are shown together with an optional smoothed dependence curve. The
-plot therefore compares the full stress behaviour across all samples in a
-compact layout.
+their means are shown and the difference between 17.5 g and 2.5 g unloading is
+annotated for every sample. The plot therefore compares the full stress
+behaviour across all samples in a compact layout.
 
 Run the script with:
 ```bash

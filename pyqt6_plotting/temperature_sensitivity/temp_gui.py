@@ -10,19 +10,14 @@ if __package__ is None or __package__ == "":
     # When executed directly, include the repository root in ``sys.path``
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from pyqt6_plotting.temperature_sensitivity import core as orig
-    from pyqt6_plotting.utils import apply_system_theme
+    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
-    from ..utils import apply_system_theme
+    from ..utils import apply_system_theme, select_files_or_folder
 
 
 def ask_user() -> tuple[List[str], Dict[str, Any]]:
-    paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-        None,
-        "Select measurement files",
-        "",
-        "Text files (*.txt);;All files (*)",
-    )
+    paths = select_files_or_folder()
     if not paths:
         sys.exit("No files selected.")
 

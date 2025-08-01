@@ -24,7 +24,7 @@ PLOT_T1 = bool(_CFG.get("PLOT_T1", True))
 PLOT_T2 = bool(_CFG.get("PLOT_T2", True))
 PLOT_VARS = [v for v, b in [("sum", PLOT_SUM), ("dT", PLOT_DT), ("T1", PLOT_T1), ("T2", PLOT_T2)] if b]
 
-INCLUDE_DEPENDENCE = bool(_CFG.get("INCLUDE_DEPENDENCE", True))
+INCLUDE_DEPENDENCE = bool(_CFG.get("INCLUDE_DEPENDENCE", False))
 MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
 MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
@@ -45,7 +45,7 @@ MEAN_LW = 3
 DIR_B_RAW = "#F09C67"
 DIR_B_MEAN = "#965308"
 OFFSET = 0.25
-JITTER_SPAN = 0.15
+JITTER_SPAN = 0.04
 MEAN_SHIFT = OFFSET * 2
 CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 0.6))
 
@@ -280,11 +280,13 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     for idx, sample in enumerate(samples, start=1):
         sub = df[df['sample_end'] == sample]
         _min, _max = _draw_mini_dependence(ax, sub, var, idx, CURVE_WIDTH)
-        y_min = min(y_min, _min)
-        y_max = max(y_max, _max)
         base_mean = sub[(sub['dir'] == 'b') & (sub['load'] == BASE_LOAD)][var].mean()
         end_mean = sub[(sub['dir'] == 'b') & (sub['load'] == END_LOAD)][var].mean()
-        deltas.append((idx, end_mean - base_mean))
+        delta = end_mean - base_mean
+        deltas.append((idx, delta))
+        y_min = min(y_min, _min, 0, delta)
+        y_max = max(y_max, _max, 0, delta)
+        ax.plot([idx, idx], [0, delta], color='black', linewidth=1, zorder=0)
 
     ax.set_xlim(0.5, len(samples) + 0.5)
     ax.set_xticks(range(1, len(samples) + 1))
