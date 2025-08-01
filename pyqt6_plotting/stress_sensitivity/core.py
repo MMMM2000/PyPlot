@@ -167,13 +167,13 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         ax.plot(x_vals, proc, color='black', label=f'dependence med {MED_WINDOW} mwa {MA_WINDOW}')
 
     delta = end_mean - base_mean
-    ax.plot([1, 1], [0, delta], color='black', linewidth=1, zorder=0)
     ax.annotate(
         f"\u0394(17.5b–2.5b) = {delta:.1f}",
-        xy=(0.5, 1.02),
-        xycoords="axes fraction",
+        xy=(1, delta),
+        xytext=(0, np.sign(delta) * 5),
+        textcoords="offset points",
         ha="center",
-        va="bottom",
+        va="bottom" if delta >= 0 else "top",
         fontsize=10,
     )
 
@@ -286,7 +286,6 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         deltas.append((idx, delta))
         y_min = min(y_min, _min, 0, delta)
         y_max = max(y_max, _max, 0, delta)
-        ax.plot([idx, idx], [0, delta], color='black', linewidth=1, zorder=0)
 
     ax.set_xlim(0.5, len(samples) + 0.5)
     ax.set_xticks(range(1, len(samples) + 1))
@@ -305,9 +304,11 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     for idx, delta in deltas:
         ax.annotate(
             f"{delta:.1f}",
-            (idx, y_max + delta_offset),
+            (idx, delta),
+            xytext=(0, np.sign(delta) * 5),
+            textcoords="offset points",
             ha='center',
-            va='bottom',
+            va='bottom' if delta >= 0 else 'top',
             fontsize=9,
         )
 
