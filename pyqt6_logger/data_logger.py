@@ -76,6 +76,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
         cast(Any, self.ui).progressBar_logging.setValue(0)
+        self.ui.checkBox_subdir.setChecked(False)
 
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -204,11 +205,24 @@ class MainWindow(QtWidgets.QMainWindow):
         if not path.endswith(".txt"):
             path += ".txt"
 
-        self.log_dir = os.path.dirname(path)
-        self.ui.lineEdit_log_dir.setText(self.log_dir)
+        use_sub = self.ui.checkBox_subdir.isChecked()
         file_base = os.path.splitext(os.path.basename(path))[0]
+        if use_sub:
+            parts = file_base.split()
+            if len(parts) > 1:
+                folder = " ".join(parts[:-1])
+                folder_path = os.path.join(os.path.dirname(path), folder)
+                os.makedirs(folder_path, exist_ok=True)
+                full_path = os.path.join(folder_path, f"{file_base}.txt")
+                self.log_dir = folder_path
+            else:
+                full_path = path
+                self.log_dir = os.path.dirname(path)
+        else:
+            full_path = path
+            self.log_dir = os.path.dirname(path)
+        self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.lineEdit_log_file.setText(file_base)
-        full_path = path
         try:
             self.log_file = open(full_path, "w")
         except OSError as exc:

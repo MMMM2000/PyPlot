@@ -10,8 +10,19 @@
     "PLOT_PROCESSED": false,
     "MED_WINDOW": 5,
     "MA_WINDOW": 20
-  }
-  ,
+  },
+  "stress_sensitivity": {
+    "OUTPUT_DIR": "./output",
+    "PLOT_SUM": true,
+    "PLOT_DT": true,
+    "PLOT_T1": true,
+    "PLOT_T2": true,
+    "SHOW_PLOTS": true,
+    "SAVE_PLOTS": false,
+    "INCLUDE_DEPENDENCE": true,
+    "MED_WINDOW": 5,
+    "MA_WINDOW": 20
+  },
   "temperature_sensitivity": {
     "OUTPUT_DIR": "./output",
     "PLOT_SUM": true,
