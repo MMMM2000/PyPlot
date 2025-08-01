@@ -45,7 +45,7 @@ MEAN_LW = 3
 DIR_B_RAW = "#F09C67"
 DIR_B_MEAN = "#965308"
 OFFSET = 0.25
-JITTER_SPAN = 0.25
+JITTER_SPAN = 0.15
 MEAN_SHIFT = OFFSET * 2
 CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 0.6))
 
@@ -56,6 +56,13 @@ FNAME_RE = re.compile(
     r"(?P<anneal>\S+)\s+"
     r"(?P<load>\d+(?:,\d+)?)(?P<dir>[ab])$"
 )
+LABELS = {
+    "T1": "T1 (µs)",
+    "T2": "T2 (µs)",
+    "dT": "T2–T1 (µs)",
+    "sum": "T1+T2 (µs)",
+}
+
 
 
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
@@ -161,13 +168,20 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 
     delta = end_mean - base_mean
     ax.plot([1, 1], [0, delta], color='black', linewidth=1, zorder=0)
-    ax.annotate(f"{delta:.1f}", (0.9, delta + delta_offset), ha='right', va='center', fontsize=10)
+    ax.annotate(
+        f"\u0394(17.5b–2.5b) = {delta:.1f}",
+        xy=(0.5, 1.02),
+        xycoords="axes fraction",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+    )
 
     ax.set_xticks([1])
     ax.set_xticklabels([sample])
     ax.set_xlabel('Sample')
-    ax.set_ylabel(var)
-    ax.set_title(f"{comp} {title} {sample} {anneal} — {var}")
+    ax.set_ylabel(LABELS[var])
+    ax.set_title(f"{comp} {title} {sample} {anneal} — {LABELS[var]}")
     ax.grid(True)
 
     legend = ax.legend(loc='best')
@@ -262,21 +276,34 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     fig, ax = plt.subplots(figsize=(max(7, len(samples) * 1.2), 5))
 
     y_min, y_max = np.inf, -np.inf
+    deltas = []
     for idx, sample in enumerate(samples, start=1):
         sub = df[df['sample_end'] == sample]
         _min, _max = _draw_mini_dependence(ax, sub, var, idx, CURVE_WIDTH)
         y_min = min(y_min, _min)
         y_max = max(y_max, _max)
+        base_mean = sub[(sub['dir'] == 'b') & (sub['load'] == BASE_LOAD)][var].mean()
+        end_mean = sub[(sub['dir'] == 'b') & (sub['load'] == END_LOAD)][var].mean()
+        deltas.append((idx, end_mean - base_mean))
 
     ax.set_xlim(0.5, len(samples) + 0.5)
     ax.set_xticks(range(1, len(samples) + 1))
     ax.set_xticklabels(samples)
     ax.set_xlabel('Sample')
-    ax.set_ylabel(var)
-    ax.set_title(f"{comp} {title} {anneal} — {var}")
+    ax.set_ylabel(LABELS[var])
+    ax.set_title(f"{comp} {title} {anneal} — {LABELS[var]}")
     ax.grid(True)
     if y_min < y_max:
         ax.set_ylim(y_min, y_max)
+    delta_offset = 0.05 * ((y_max - y_min) if y_max != y_min else 1.0)
+    for idx, delta in deltas:
+        ax.annotate(
+            f"{delta:.1f}",
+            (idx, y_max + delta_offset),
+            ha='center',
+            va='bottom',
+            fontsize=9,
+        )
 
     fig.tight_layout()
     fname = f"{comp} {title} {anneal} {var}.png"

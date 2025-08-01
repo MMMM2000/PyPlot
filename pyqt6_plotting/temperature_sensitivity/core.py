@@ -227,7 +227,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
         ax.plot(sub["line"], sub["sum"], "ro", ms=6, label="outlier")
         ax.set_title(fname)
         ax.set_xlabel("Index")
-        ax.set_ylabel("sum")
+        ax.set_ylabel("T1+T2 (µs)")
         ax.legend()
         fig.tight_layout()
         figs.append(fig)
