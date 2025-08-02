@@ -1,4 +1,4 @@
-from pyqt6_plotting import config
+from plotting import config
 
 
 def test_load_default_config():

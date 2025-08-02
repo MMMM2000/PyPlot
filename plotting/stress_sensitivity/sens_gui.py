@@ -1,16 +1,12 @@
-from __future__ import annotations
 import sys
 from typing import List, Dict, Any
-
 from PyQt6 import QtWidgets
-
 import pathlib
 
 if __package__ is None or __package__ == "":
-    # When executed directly, include the repository root in ``sys.path``
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.temperature_dependence import core as orig
-    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.stress_sensitivity import core as orig
+    from plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
     from ..utils import apply_system_theme, select_files_or_folder
@@ -22,7 +18,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         sys.exit("No files selected.")
 
     dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Temperature Dependence Settings")
+    dialog.setWindowTitle("Stress Sensitivity Settings")
     layout = QtWidgets.QGridLayout(dialog)
 
     sum_cb = QtWidgets.QCheckBox("T1+T2"); sum_cb.setChecked(orig.PLOT_SUM)
@@ -37,10 +33,6 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
-    mode_combo = QtWidgets.QComboBox()
-    mode_combo.addItems(["Raw", "Processed", "Both"])
-    mode_map = {"raw": 0, "processed": 1, "both": 2}
-    mode_combo.setCurrentIndex(mode_map.get(orig.PLOT_MODE, 0))
     out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
 
@@ -55,28 +47,18 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Mode:"), 2, 0)
-    out_layout.addWidget(mode_combo, 2, 1)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-    out_layout.addWidget(out_dir_edit, 4, 0)
-    out_layout.addWidget(browse_btn, 4, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
+    out_layout.addWidget(out_dir_edit, 3, 0)
+    out_layout.addWidget(browse_btn, 3, 1)
 
-    proc_group = QtWidgets.QGroupBox("Processed curve")
-    proc_layout = QtWidgets.QGridLayout(proc_group)
-    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
-    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
-    proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 0, 0)
-    proc_layout.addWidget(med_spin, 0, 1)
-    proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 0, 2)
-    proc_layout.addWidget(ma_spin, 0, 3)
+
 
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
     layout.addWidget(var_group, 0, 0)
     layout.addWidget(out_group, 0, 1)
-    layout.addWidget(proc_group, 1, 0, 1, 2)
-    layout.addWidget(run_btn, 2, 0, 1, 2)
+    layout.addWidget(run_btn, 1, 0, 1, 2)
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -89,10 +71,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "T2": t2_cb.isChecked(),
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
-        "mode": {0: "raw", 1: "processed", 2: "both"}[mode_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
-        "med_window": med_spin.value(),
-        "ma_window": ma_spin.value(),
     }
     return paths, cfg
 
@@ -135,10 +114,8 @@ def main() -> None:
 
     orig.SHOW_PLOTS = cfg["show"]
     orig.SAVE_PLOTS = cfg["save"]
-    orig.PLOT_MODE = cfg["mode"]
     orig.OUTPUT_DIR = cfg["out_dir"]
-    orig.MED_WINDOW = int(cfg["med_window"])
-    orig.MA_WINDOW = int(cfg["ma_window"])
+    orig.INCLUDE_DEPENDENCE = False
 
     orig.main(paths)
 

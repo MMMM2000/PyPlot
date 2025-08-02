@@ -7,10 +7,11 @@ from PyQt6 import QtWidgets
 import pathlib
 
 if __package__ is None or __package__ == "":
-    # When executed directly, include the repository root in ``sys.path``
+    # When executed directly, prepend the repository root to ``sys.path`` so
+    # that absolute imports of the ``plotting`` package work correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.temperature_sensitivity import core as orig
-    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.maxion_continuous import core as orig
+    from plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
     from ..utils import apply_system_theme, select_files_or_folder
@@ -22,25 +23,11 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         sys.exit("No files selected.")
 
     dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Temperature Sensitivity Settings")
+    dialog.setWindowTitle("Maxion Continuous Settings")
     layout = QtWidgets.QGridLayout(dialog)
-
-    sum_cb = QtWidgets.QCheckBox("T1+T2"); sum_cb.setChecked(orig.PLOT_SUM)
-    dt_cb  = QtWidgets.QCheckBox("T2–T1"); dt_cb.setChecked(orig.PLOT_DT)
-    t1_cb  = QtWidgets.QCheckBox("T1"); t1_cb.setChecked(orig.PLOT_T1)
-    t2_cb  = QtWidgets.QCheckBox("T2"); t2_cb.setChecked(orig.PLOT_T2)
-
-    var_group = QtWidgets.QGroupBox("Variables to plot")
-    var_layout = QtWidgets.QVBoxLayout(var_group)
-    for w in (sum_cb, dt_cb, t1_cb, t2_cb):
-        var_layout.addWidget(w)
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
-    baseline_combo = QtWidgets.QComboBox()
-    baseline_combo.addItems(["None", "Zero 25\u00b0C", "Both"])
-    baseline_map = {"none": 0, "zero_25": 1, "both": 2}
-    baseline_combo.setCurrentIndex(baseline_map.get(orig.BASELINE_MODE, 0))
     out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
 
@@ -55,29 +42,41 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Baseline:"), 2, 0)
-    out_layout.addWidget(baseline_combo, 2, 1)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-    out_layout.addWidget(out_dir_edit, 4, 0)
-    out_layout.addWidget(browse_btn, 4, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
+    out_layout.addWidget(out_dir_edit, 3, 0)
+    out_layout.addWidget(browse_btn, 3, 1)
 
-    cont_group = QtWidgets.QGroupBox("Continuous data")
-    cont_layout = QtWidgets.QGridLayout(cont_group)
-    cont_cb = QtWidgets.QCheckBox("Include continuous data"); cont_cb.setChecked(orig.INCLUDE_CONTINUOUS)
+    mode_group = QtWidgets.QGroupBox("Data to plot")
+    mode_layout = QtWidgets.QVBoxLayout(mode_group)
+    raw_rb = QtWidgets.QRadioButton("Raw"); raw_rb.setChecked(orig.PLOT_MODE == "raw")
+    proc_rb = QtWidgets.QRadioButton("Processed"); proc_rb.setChecked(orig.PLOT_MODE == "processed")
+    both_rb = QtWidgets.QRadioButton("Both"); both_rb.setChecked(orig.PLOT_MODE == "both")
+    mode_layout.addWidget(raw_rb)
+    mode_layout.addWidget(proc_rb)
+    mode_layout.addWidget(both_rb)
+
+    proc_group = QtWidgets.QGroupBox("Processed curve")
+    proc_layout = QtWidgets.QGridLayout(proc_group)
     med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
     ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
-    cont_layout.addWidget(cont_cb, 0, 0, 1, 4)
-    cont_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
-    cont_layout.addWidget(med_spin, 1, 1)
-    cont_layout.addWidget(QtWidgets.QLabel("MA window:"), 1, 2)
-    cont_layout.addWidget(ma_spin, 1, 3)
+    proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 0, 0)
+    proc_layout.addWidget(med_spin, 0, 1)
+    proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 0, 2)
+    proc_layout.addWidget(ma_spin, 0, 3)
+
+    style_group = QtWidgets.QGroupBox("Scatter")
+    style_layout = QtWidgets.QGridLayout(style_group)
+    marker_spin = QtWidgets.QDoubleSpinBox(); marker_spin.setRange(0.1, 99.9); marker_spin.setSingleStep(0.1); marker_spin.setValue(float(orig.MARKER_SIZE))
+    style_layout.addWidget(QtWidgets.QLabel("Marker size:"), 0, 0)
+    style_layout.addWidget(marker_spin, 0, 1)
 
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
-    layout.addWidget(var_group, 0, 0)
-    layout.addWidget(out_group, 0, 1)
-    layout.addWidget(cont_group, 1, 0, 1, 2)
+    layout.addWidget(out_group, 0, 0)
+    layout.addWidget(mode_group, 0, 1)
+    layout.addWidget(proc_group, 1, 0)
+    layout.addWidget(style_group, 1, 1)
     layout.addWidget(run_btn, 2, 0, 1, 2)
     dialog.setLayout(layout)
 
@@ -85,19 +84,15 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         sys.exit(0)
 
     cfg = {
-        "sum": sum_cb.isChecked(),
-        "dT": dt_cb.isChecked(),
-        "T1": t1_cb.isChecked(),
-        "T2": t2_cb.isChecked(),
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
-        "baseline": {0: "none", 1: "zero_25", 2: "both"}[baseline_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
-        "include_cont": cont_cb.isChecked(),
+        "mode": "raw" if raw_rb.isChecked() else "processed" if proc_rb.isChecked() else "both",
+        "marker": marker_spin.value(),
         "med_window": med_spin.value(),
         "ma_window": ma_spin.value(),
     }
-    return paths, cfg
+    return list(paths), cfg
 
 
 class ProgressDialog:
@@ -126,21 +121,12 @@ class ProgressDialog:
 def main() -> None:
     paths, cfg = ask_user()
     orig.ProgressDialog = ProgressDialog
-    orig.PLOT_VARS.clear()
-    if cfg["sum"]:
-        orig.PLOT_VARS.append("sum")
-    if cfg["dT"]:
-        orig.PLOT_VARS.append("dT")
-    if cfg["T1"]:
-        orig.PLOT_VARS.append("T1")
-    if cfg["T2"]:
-        orig.PLOT_VARS.append("T2")
 
     orig.SHOW_PLOTS = cfg["show"]
     orig.SAVE_PLOTS = cfg["save"]
-    orig.BASELINE_MODE = cfg["baseline"]
     orig.OUTPUT_DIR = cfg["out_dir"]
-    orig.INCLUDE_CONTINUOUS = cfg["include_cont"]
+    orig.PLOT_MODE = cfg["mode"]
+    orig.MARKER_SIZE = cfg["marker"]
     orig.MED_WINDOW = int(cfg["med_window"])
     orig.MA_WINDOW = int(cfg["ma_window"])
 

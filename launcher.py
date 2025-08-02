@@ -8,27 +8,27 @@ from PyQt6 import QtWidgets
 # Make sure repository root is on sys.path when executed directly
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parent))
-    from pyqt6_plotting.stress_dependence import stress_gui
-    from pyqt6_plotting.hsw_load_compare import load_compare_gui
-    from pyqt6_plotting.maxion_continuous import maxion_gui
-    from pyqt6_plotting.hsw_distribution import distribution_gui
-    from pyqt6_plotting.temperature_sensitivity import temp_gui
-    from pyqt6_plotting.temperature_dependence import temp_dep_gui
-    from pyqt6_plotting.stress_sensitivity import sens_gui
-    from pyqt6_plotting.utils import apply_system_theme
-    from pyqt6_plotting import common
-    from pyqt6_logger import data_logger
+    from plotting.stress_dependence import stress_gui
+    from plotting.hsw_load_compare import load_compare_gui
+    from plotting.maxion_continuous import maxion_gui
+    from plotting.hsw_distribution import distribution_gui
+    from plotting.temperature_sensitivity import temp_gui
+    from plotting.temperature_dependence import temp_dep_gui
+    from plotting.stress_sensitivity import sens_gui
+    from plotting.utils import apply_system_theme
+    from plotting import common
+    from data_logger import data_logger
 else:
-    from .pyqt6_plotting.stress_dependence import stress_gui
-    from .pyqt6_plotting.hsw_load_compare import load_compare_gui
-    from .pyqt6_plotting.maxion_continuous import maxion_gui
-    from .pyqt6_plotting.hsw_distribution import distribution_gui
-    from .pyqt6_plotting.temperature_sensitivity import temp_gui
-    from .pyqt6_plotting.temperature_dependence import temp_dep_gui
-    from .pyqt6_plotting.stress_sensitivity import sens_gui
-    from .pyqt6_plotting.utils import apply_system_theme
-    from .pyqt6_plotting import common
-    from .pyqt6_logger import data_logger
+    from .plotting.stress_dependence import stress_gui
+    from .plotting.hsw_load_compare import load_compare_gui
+    from .plotting.maxion_continuous import maxion_gui
+    from .plotting.hsw_distribution import distribution_gui
+    from .plotting.temperature_sensitivity import temp_gui
+    from .plotting.temperature_dependence import temp_dep_gui
+    from .plotting.stress_sensitivity import sens_gui
+    from .plotting.utils import apply_system_theme
+    from .plotting import common
+    from .data_logger import data_logger
 
 
 PLOTTERS: Dict[str, Callable[[], None]] = {

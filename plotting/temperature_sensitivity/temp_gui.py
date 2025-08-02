@@ -1,12 +1,16 @@
+from __future__ import annotations
 import sys
 from typing import List, Dict, Any
+
 from PyQt6 import QtWidgets
+
 import pathlib
 
 if __package__ is None or __package__ == "":
+    # When executed directly, include the repository root in ``sys.path``
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.stress_sensitivity import core as orig
-    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.temperature_sensitivity import core as orig
+    from plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
     from ..utils import apply_system_theme, select_files_or_folder
@@ -18,7 +22,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         sys.exit("No files selected.")
 
     dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Stress Sensitivity Settings")
+    dialog.setWindowTitle("Temperature Sensitivity Settings")
     layout = QtWidgets.QGridLayout(dialog)
 
     sum_cb = QtWidgets.QCheckBox("T1+T2"); sum_cb.setChecked(orig.PLOT_SUM)
@@ -33,6 +37,10 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
+    baseline_combo = QtWidgets.QComboBox()
+    baseline_combo.addItems(["None", "Zero 25\u00b0C", "Both"])
+    baseline_map = {"none": 0, "zero_25": 1, "both": 2}
+    baseline_combo.setCurrentIndex(baseline_map.get(orig.BASELINE_MODE, 0))
     out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
 
@@ -47,18 +55,30 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
-    out_layout.addWidget(out_dir_edit, 3, 0)
-    out_layout.addWidget(browse_btn, 3, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Baseline:"), 2, 0)
+    out_layout.addWidget(baseline_combo, 2, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
+    out_layout.addWidget(out_dir_edit, 4, 0)
+    out_layout.addWidget(browse_btn, 4, 1)
 
-
+    cont_group = QtWidgets.QGroupBox("Continuous data")
+    cont_layout = QtWidgets.QGridLayout(cont_group)
+    cont_cb = QtWidgets.QCheckBox("Include continuous data"); cont_cb.setChecked(orig.INCLUDE_CONTINUOUS)
+    med_spin = QtWidgets.QSpinBox(); med_spin.setRange(1, 9999); med_spin.setValue(int(orig.MED_WINDOW))
+    ma_spin = QtWidgets.QSpinBox(); ma_spin.setRange(1, 9999); ma_spin.setValue(int(orig.MA_WINDOW))
+    cont_layout.addWidget(cont_cb, 0, 0, 1, 4)
+    cont_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
+    cont_layout.addWidget(med_spin, 1, 1)
+    cont_layout.addWidget(QtWidgets.QLabel("MA window:"), 1, 2)
+    cont_layout.addWidget(ma_spin, 1, 3)
 
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
     layout.addWidget(var_group, 0, 0)
     layout.addWidget(out_group, 0, 1)
-    layout.addWidget(run_btn, 1, 0, 1, 2)
+    layout.addWidget(cont_group, 1, 0, 1, 2)
+    layout.addWidget(run_btn, 2, 0, 1, 2)
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -71,7 +91,11 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "T2": t2_cb.isChecked(),
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
+        "baseline": {0: "none", 1: "zero_25", 2: "both"}[baseline_combo.currentIndex()],
         "out_dir": out_dir_edit.text(),
+        "include_cont": cont_cb.isChecked(),
+        "med_window": med_spin.value(),
+        "ma_window": ma_spin.value(),
     }
     return paths, cfg
 
@@ -114,8 +138,11 @@ def main() -> None:
 
     orig.SHOW_PLOTS = cfg["show"]
     orig.SAVE_PLOTS = cfg["save"]
+    orig.BASELINE_MODE = cfg["baseline"]
     orig.OUTPUT_DIR = cfg["out_dir"]
-    orig.INCLUDE_DEPENDENCE = False
+    orig.INCLUDE_CONTINUOUS = cfg["include_cont"]
+    orig.MED_WINDOW = int(cfg["med_window"])
+    orig.MA_WINDOW = int(cfg["ma_window"])
 
     orig.main(paths)
 

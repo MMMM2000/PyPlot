@@ -61,7 +61,7 @@ python3 launcher.py
 
 ## Plotting stress dependence data
 
-`pyqt6_plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
+`plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
 
 - `DATA_DIR` – directory where your raw `.txt` files live
 - `OUTPUT_DIR` – directory in which to save generated plots
@@ -82,12 +82,12 @@ labels automatically.
 
 Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  Run the plotter with:
 ```bash
-python3 pyqt6_plotting/stress_dependence/stress_gui.py
+python3 plotting/stress_dependence/stress_gui.py
 ```
 
 ## Plotting stress sensitivity data
 
-`pyqt6_plotting/stress_sensitivity/sens_gui.py` visualizes how the switching
+`plotting/stress_sensitivity/sens_gui.py` visualizes how the switching
 times change with applied stress. File names follow the same pattern as for
 stress dependence. Each sample is placed on the X axis and a miniature stress
 dependence curve is drawn using only the unloading (`b`) data. Raw points and
@@ -97,12 +97,12 @@ behaviour across all samples in a compact layout.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/stress_sensitivity/sens_gui.py
+python3 plotting/stress_sensitivity/sens_gui.py
 ```
 
 ## Plotting temperature sensitivity data
 
-`pyqt6_plotting/temperature_sensitivity/temp_gui.py` visualizes switching-time
+`plotting/temperature_sensitivity/temp_gui.py` visualizes switching-time
 measurements taken at different temperatures. File names must follow:
 
 ```
@@ -120,51 +120,51 @@ displayed for each sample using adjustable median and moving-average windows.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/temperature_sensitivity/temp_gui.py
+python3 plotting/temperature_sensitivity/temp_gui.py
 ```
 
 ## Plotting temperature dependence data
 
-`pyqt6_plotting/temperature_dependence/temp_dep_gui.py` combines discrete
+`plotting/temperature_dependence/temp_dep_gui.py` combines discrete
 measurements at 25 °C and 100 °C with a continuous run between those
 temperatures. The GUI can display raw points, processed curves or both and
 supports plotting the usual T1/T2 derived quantities.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/temperature_dependence/temp_dep_gui.py
+python3 plotting/temperature_dependence/temp_dep_gui.py
 ```
 
 ## Comparing Hsw distributions by load
 
-`pyqt6_plotting/hsw_load_compare/load_compare_gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
+`plotting/hsw_load_compare/load_compare_gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/hsw_load_compare/load_compare_gui.py
+python3 plotting/hsw_load_compare/load_compare_gui.py
 ```
 
 ## Plotting Maxion continuous measurements
 
-`pyqt6_plotting/maxion_continuous/maxion_gui.py` visualizes Maxion continuous measurement files and allows plotting raw and/or processed curves for all three channels.  Figures can be displayed and optionally saved.
+`plotting/maxion_continuous/maxion_gui.py` visualizes Maxion continuous measurement files and allows plotting raw and/or processed curves for all three channels.  Figures can be displayed and optionally saved.
 
 Run the script with:
 ```bash
-python3 pyqt6_plotting/maxion_continuous/maxion_gui.py
+python3 plotting/maxion_continuous/maxion_gui.py
 ```
 
 ## Hsw distribution analysis
 
-`pyqt6_plotting/hsw_distribution/distribution_gui.py` applies a Histogram-Core filter to TT and HH (or T1 and T2) measurements, then plots raw curves, count histograms and probability density curves.  You can choose the column naming scheme in the options dialog.
+`plotting/hsw_distribution/distribution_gui.py` applies a Histogram-Core filter to TT and HH (or T1 and T2) measurements, then plots raw curves, count histograms and probability density curves.  You can choose the column naming scheme in the options dialog.
 
 Launch it with:
 ```bash
-python3 pyqt6_plotting/hsw_distribution/distribution_gui.py
+python3 plotting/hsw_distribution/distribution_gui.py
 ```
 
 ## Data logger
 
-`pyqt6_logger/data_logger.py` records serial data to a file.  By default logs
+`data_logger/data_logger.py` records serial data to a file.  By default logs
 are stored in a `python_plot_logs` directory inside the current user's home
 folder so the path works on any system.  You can change the location at
 runtime with the `--log-dir` option or the `LOG_DIR` environment variable.  The
@@ -176,7 +176,7 @@ look.
 Launch the logger with:
 
 ```bash
-python3 pyqt6_logger/data_logger.py
+python3 data_logger/data_logger.py
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
@@ -208,8 +208,8 @@ plot-cli --help
 ```
 
 Default settings for the stress dependence and temperature sensitivity plotters
-are stored in `pyqt6_plotting/default_config.json` and can be customized by
-providing a modified path to :func:`pyqt6_plotting.config.load_config`.
+are stored in `plotting/default_config.json` and can be customized by
+providing a modified path to :func:`plotting.config.load_config`.
 
 ## Virtual environment
 
