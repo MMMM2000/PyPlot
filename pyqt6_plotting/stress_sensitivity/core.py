@@ -15,7 +15,7 @@ from matplotlib.colors import to_hex
 from matplotlib.typing import ColorType
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
@@ -247,20 +247,26 @@ def _draw_mini_dependence(
         return 0.0, 0.0
 
     sub = df[df["dir"] == "b"].copy()
-    start = sub["load"].min()
-    end = sub["load"].max()
     x_start = center - width / 2
     x_end = center + width / 2
-    # Map loads so that jittered raw data spans exactly ``width`` units,
-    # ensuring the next sample begins where the previous sample's raw data ends.
-    load_start = x_start + JITTER_SPAN
-    load_end = x_end - JITTER_SPAN
-    scale = (load_end - load_start) / (end - start) if end != start else 1.0
-    sub["x_center"] = (sub["load"] - start) * scale + load_start
-    np.random.seed(0)
-    sub["x"] = sub["x_center"] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(sub))
-    sub["y"] = sub[var] - base_mean
+
+    # Distribute each load into an equal-width segment so that raw points from
+    # adjacent loads touch but do not overlap. When the raw data for one load
+    # ends, the next load begins immediately to its right.
     loads_sorted = sorted(sub["load"].unique())
+    n_loads = len(loads_sorted)
+    seg_width = (x_end - x_start) / n_loads if n_loads else width
+    seg_starts = {load: x_start + i * seg_width for i, load in enumerate(loads_sorted)}
+    seg_ends = {load: seg_start + seg_width for load, seg_start in seg_starts.items()}
+    centers = {load: (seg_starts[load] + seg_ends[load]) / 2 for load in loads_sorted}
+
+    np.random.seed(0)
+    sub["x_center"] = sub["load"].map(centers)
+    sub["x"] = sub.apply(
+        lambda r: np.random.uniform(seg_starts[r["load"]], seg_ends[r["load"]]),
+        axis=1,
+    )
+    sub["y"] = sub[var] - base_mean
     color_map = {load: RAW_ALT_COLORS[i % len(RAW_ALT_COLORS)] for i, load in enumerate(loads_sorted)}
     colors = sub["load"].map(color_map)
 
@@ -290,7 +296,7 @@ def _draw_mini_dependence(
         dep["y"] = dep[var] - base_mean
         med = dep["y"].rolling(MED_WINDOW, center=True, min_periods=1).median()
         proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-        x_vals = (dep["load"] - start) * scale + x_start
+        x_vals = dep["load"].map(centers)
         ax.plot(x_vals, proc, color="black", linewidth=1)
         dep_min, dep_max = proc.min(), proc.max()
     else:
