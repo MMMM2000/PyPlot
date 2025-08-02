@@ -60,7 +60,13 @@ LEGEND_MARKER_SIZE = 6
 OFFSET = 0.25
 JITTER_SPAN = 0.04
 MEAN_SHIFT = OFFSET * 2
-CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 0.6))
+# Horizontal span of each miniature stress dependence curve.
+#
+# A value of ``1.0`` makes neighbouring curves touch so that the right edge of
+# one sample lines up with the left edge of the next (e.g. where ``s3-1a`` ends
+# ``s3-1b`` begins).  The setting can still be overridden via the configuration
+# file if a different spacing is desired.
+CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 1.0))
 
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -297,7 +303,10 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     anneal = df['anneal'].iat[0]
 
     samples = sorted(df['sample_end'].unique())
-    fig, ax = plt.subplots(figsize=(max(7, len(samples) * 1.2), 5))
+    # Give each sample enough horizontal space so its miniature dependence curve
+    # spans ``CURVE_WIDTH`` units.  The figure width scales with ``CURVE_WIDTH``
+    # to retain roughly the same level of detail regardless of the setting.
+    fig, ax = plt.subplots(figsize=(max(7, len(samples) * CURVE_WIDTH * 2), 5))
 
     y_min, y_max = np.inf, -np.inf
     deltas = []

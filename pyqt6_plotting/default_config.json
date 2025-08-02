@@ -21,7 +21,8 @@
     "SAVE_PLOTS": false,
     "INCLUDE_DEPENDENCE": false,
     "MED_WINDOW": 5,
-    "MA_WINDOW": 20
+    "MA_WINDOW": 20,
+    "CURVE_WIDTH": 1.0
   },
   "temperature_sensitivity": {
     "OUTPUT_DIR": "./output",
