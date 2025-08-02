@@ -17,6 +17,7 @@ from matplotlib.colors import to_hex
 from matplotlib.collections import PathCollection
 from matplotlib.typing import ColorType
 from ..common import maybe_handle_outliers
+from matplotlib.figure import Figure
 
 # Load default configuration
 _CFG = load_config().get("stress_dependence", {})
@@ -147,7 +148,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
         raise ValueError("No valid files selected. Check filenames.")
     return pd.concat(dfs, ignore_index=True)
 
-def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
+def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[Figure, str]:
     """Plot a single variable and optionally save the figure."""
     comp, title, samp, anneal = (
         df['composition'].iat[0],
@@ -246,7 +247,7 @@ def main(files: List[str]):
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
-    plots: List[Tuple[plt.Figure, str]] = []
+    plots: List[Tuple[Figure, str]] = []
     for _, grp in groups:
         for var in PLOT_VARS:
             if progress and getattr(progress, 'cancelled', False):
