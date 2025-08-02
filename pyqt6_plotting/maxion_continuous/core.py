@@ -1,13 +1,14 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Tuple
 
 from PyQt6 import QtWidgets
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
 
 OUTPUT_DIR = os.getcwd()
@@ -49,7 +50,7 @@ def load_file(path: str) -> pd.DataFrame:
     return pd.read_csv(path, sep=";", header=None, names=cols, engine="python", on_bad_lines="skip")
 
 
-def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[plt.Figure, str]:
+def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, str]:
     fig, ax = plt.subplots(figsize=(9, 4))
     x = np.arange(len(y))
     if PLOT_MODE in ("raw", "both"):
@@ -74,7 +75,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[plt.Figu
 def main(files: List[str]):
     total = len(files) * 3
     progress = ProgressDialog(total) if total else None
-    plots: List[Tuple[plt.Figure, str]] = []
+    plots: List[Tuple[Figure, str]] = []
     for path in files:
         head, coils = parse_name(Path(path).stem)
         df = load_file(path)

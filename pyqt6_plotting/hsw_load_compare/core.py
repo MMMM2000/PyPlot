@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 
 # Defaults
 CORE_BINS = 50
@@ -160,7 +161,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
     x_min, x_max = all_centers.min(), all_centers.max()
     fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
     fig_log.subplots_adjust(hspace=0)
-    plots: List[Tuple[plt.Figure, str]] = [(fig_log, "log_compare.png")]
+    plots: List[Tuple[Figure, str]] = [(fig_log, "log_compare.png")]
     if nrows == 1:
         ax_log = [ax_log]
     log_x_vals = []

@@ -13,6 +13,8 @@ from matplotlib.patches import Patch
 from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex
 from matplotlib.typing import ColorType
+from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
@@ -44,7 +46,7 @@ RAW_MARKER_SIZE = 0.1
 RAW_ALPHA = 1.0
 
 # Mean values
-MEAN_COLOR = "black"
+MEAN_COLORS = {"a": "red", "b": "black"}
 MEAN_MARKER = "o"
 MEAN_MARKER_SIZE = 3
 MEAN_LINE_WIDTH = 1
@@ -115,11 +117,12 @@ def load_data(files: List[str]) -> pd.DataFrame:
     return pd.concat(dfs, ignore_index=True)
 
 
-def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
+def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[Figure, str]:
     comp = df['composition'].iat[0]
     title = df['title'].iat[0]
     anneal = df['anneal'].iat[0]
     sample = df['sample_end'].iat[0]
+    mean_color = MEAN_COLORS.get(sample[-1], "black")
 
     base_mean = df[(df['dir'] == 'b') & (df['load'] == BASE_LOAD)][var].mean()
     end_mean = df[(df['dir'] == 'b') & (df['load'] == END_LOAD)][var].mean()
@@ -160,10 +163,10 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         [1 - OFFSET, 1 + OFFSET],
         means.set_index('load').loc[[BASE_LOAD, END_LOAD], 'y'],
         MEAN_MARKER+'-',
-        c=MEAN_COLOR,
+        c=mean_color,
         markersize=MEAN_MARKER_SIZE,
         linewidth=MEAN_LINE_WIDTH,
-        label='means',
+        label='mean marked end' if sample.endswith('a') else 'mean unmarked end',
     )
 
     if INCLUDE_DEPENDENCE and not dep.empty:
@@ -221,7 +224,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 
 
 def _draw_mini_dependence(
-    ax: plt.Axes,
+    ax: Axes,
     df: pd.DataFrame,
     var: str,
     center: float,
@@ -260,11 +263,13 @@ def _draw_mini_dependence(
     )
 
     means = sub.groupby("load").agg({"x_center": "mean", "y": "mean"}).reset_index()
+    sample_end = str(df["sample_end"].iat[0]) if "sample_end" in df.columns else ""
+    mean_color = MEAN_COLORS.get(sample_end[-1], "black")
     ax.plot(
         means["x_center"],
         means["y"],
         MEAN_MARKER + "-",
-        c=MEAN_COLOR,
+        c=mean_color,
         markersize=MEAN_MARKER_SIZE,
         linewidth=MEAN_LINE_WIDTH,
     )
@@ -285,7 +290,7 @@ def _draw_mini_dependence(
     return y_min, y_max
 
 
-def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[plt.Figure, str]:
+def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> Tuple[Figure, str]:
     """Plot miniature stress dependence curves for all samples in ``df``."""
     comp = df['composition'].iat[0]
     title = df['title'].iat[0]
@@ -338,9 +343,12 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         Line2D([0], [0], marker=RAW_MARKER, linestyle='', color='none',
                markerfacecolor=RAW_ALT_COLORS[1], markersize=LEGEND_MARKER_SIZE,
                label='raw even loads'),
-        Line2D([0], [0], marker=MEAN_MARKER, color=MEAN_COLOR,
+        Line2D([0], [0], marker=MEAN_MARKER, color=MEAN_COLORS['a'],
                markersize=LEGEND_MARKER_SIZE, linewidth=MEAN_LINE_WIDTH,
-               label='means'),
+               label='mean marked end'),
+        Line2D([0], [0], marker=MEAN_MARKER, color=MEAN_COLORS['b'],
+               markersize=LEGEND_MARKER_SIZE, linewidth=MEAN_LINE_WIDTH,
+               label='mean unmarked end'),
     ]
     if INCLUDE_DEPENDENCE:
         handles.append(Line2D([0], [0], color='black', label=f'dependence med {MED_WINDOW} mwa {MA_WINDOW}'))
@@ -379,7 +387,7 @@ def main(files: List[str]) -> None:
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
-    plots: List[Tuple[plt.Figure, str]] = []
+    plots: List[Tuple[Figure, str]] = []
     for _, grp in groups:
         for var in PLOT_VARS:
             if progress and getattr(progress, 'cancelled', False):

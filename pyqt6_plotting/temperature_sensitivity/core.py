@@ -261,7 +261,7 @@ def plot_variable(
     include_cont: bool = INCLUDE_CONTINUOUS,
     med_window: int = MED_WINDOW,
     ma_window: int = MA_WINDOW,
-) -> Tuple[plt.Figure, str]:
+) -> Tuple[Figure, str]:
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
@@ -424,7 +424,7 @@ def main(files: List[str]):
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
-    plots: List[Tuple[plt.Figure, str]] = []
+    plots: List[Tuple[Figure, str]] = []
     for _, grp in groups:
         for var in PLOT_VARS:
             for mode in modes:
