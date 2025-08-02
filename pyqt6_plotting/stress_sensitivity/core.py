@@ -15,6 +15,7 @@ from matplotlib.colors import to_hex
 from matplotlib.typing import ColorType
 from matplotlib.figure import Figure
 from matplotlib.axes import Axes
+from tqdm.auto import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
@@ -60,7 +61,13 @@ LEGEND_MARKER_SIZE = 6
 OFFSET = 0.25
 JITTER_SPAN = 0.04
 MEAN_SHIFT = OFFSET * 2
-CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 0.6))
+# Horizontal span of each miniature stress dependence curve.
+#
+# A value of ``1.0`` makes neighbouring curves touch so that the raw data of
+# one sample ends exactly where the next sample's raw data begins (e.g. where
+# ``s3-1a`` ends ``s3-1b`` begins).  The setting can still be overridden via the
+# configuration file if a different spacing is desired.
+CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 1.0))
 
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -244,8 +251,12 @@ def _draw_mini_dependence(
     end = sub["load"].max()
     x_start = center - width / 2
     x_end = center + width / 2
-    scale = (x_end - x_start) / (end - start) if end != start else 1.0
-    sub["x_center"] = (sub["load"] - start) * scale + x_start
+    # Map loads so that jittered raw data spans exactly ``width`` units,
+    # ensuring the next sample begins where the previous sample's raw data ends.
+    load_start = x_start + JITTER_SPAN
+    load_end = x_end - JITTER_SPAN
+    scale = (load_end - load_start) / (end - start) if end != start else 1.0
+    sub["x_center"] = (sub["load"] - start) * scale + load_start
     np.random.seed(0)
     sub["x"] = sub["x_center"] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(sub))
     sub["y"] = sub[var] - base_mean
@@ -297,7 +308,10 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     anneal = df['anneal'].iat[0]
 
     samples = sorted(df['sample_end'].unique())
-    fig, ax = plt.subplots(figsize=(max(7, len(samples) * 1.2), 5))
+    # Give each sample enough horizontal space so its miniature dependence curve
+    # spans ``CURVE_WIDTH`` units.  The figure width scales with ``CURVE_WIDTH``
+    # to retain roughly the same level of detail regardless of the setting.
+    fig, ax = plt.subplots(figsize=(max(7, len(samples) * CURVE_WIDTH * 2), 5))
 
     y_min, y_max = np.inf, -np.inf
     deltas = []
@@ -429,16 +443,15 @@ def main(files: List[str]) -> None:
 
 
 class ProgressDialog:
-    """Fallback progress indicator used when no GUI is provided."""
+    """CLI progress bar used when no GUI is provided."""
 
     def __init__(self, total: int):
-        self.total = total
-        self.count = 0
+        self.pbar = tqdm(total=total, desc="Processing", unit="plot")
         self.cancelled = False
         self.root = self
 
     def update(self) -> None:
-        self.count += 1
+        self.pbar.update(1)
 
     def destroy(self) -> None:
-        pass
+        self.pbar.close()
