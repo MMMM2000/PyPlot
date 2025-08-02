@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, cast
 
 from PyQt6 import QtWidgets
 
@@ -12,6 +12,7 @@ from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex
+from matplotlib.typing import ColorType
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
@@ -198,13 +199,18 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if isinstance(handle, Line2D):
             rawcol = handle.get_color()
+            if handle.get_markerfacecolor() and handle.get_markerfacecolor() != 'none':
+                rawcol = handle.get_markerfacecolor()
+            handle.set_markersize(LEGEND_MARKER_SIZE)
         elif isinstance(handle, (Patch, PathCollection)):
             rawcol = handle.get_facecolor()
+            if isinstance(handle, PathCollection):
+                handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
             if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
                 rawcol = rawcol[0]
         else:
             rawcol = 'black'
-        text.set_color(to_hex(rawcol))
+        text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
     fname = f"{comp} {title} {sample} {anneal} {var}.png"
@@ -344,13 +350,16 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
             rawcol = handle.get_color()
             if handle.get_markerfacecolor() and handle.get_markerfacecolor() != 'none':
                 rawcol = handle.get_markerfacecolor()
+            handle.set_markersize(LEGEND_MARKER_SIZE)
         elif isinstance(handle, (Patch, PathCollection)):
             rawcol = handle.get_facecolor()
+            if isinstance(handle, PathCollection):
+                handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
             if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
                 rawcol = rawcol[0]
         else:
             rawcol = 'black'
-        text.set_color(to_hex(rawcol))
+        text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
     fname = f"{comp} {title} {anneal} {var}.png"
