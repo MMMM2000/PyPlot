@@ -8,10 +8,10 @@ import pathlib
 
 if __package__ is None or __package__ == "":
     # When executed directly, add the repository root to ``sys.path`` so that
-    # absolute imports of the ``pyqt6_plotting`` package succeed.
+    # absolute imports of the ``plotting`` package succeed.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.hsw_load_compare import core as orig
-    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.hsw_load_compare import core as orig
+    from plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from . import core as orig
     from ..utils import apply_system_theme, select_files_or_folder

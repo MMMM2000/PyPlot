@@ -11,9 +11,9 @@ import matplotlib.pyplot as plt
 
 if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
-    # ``pyqt6_plotting`` package can be imported correctly.
+    # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from pyqt6_plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.utils import apply_system_theme, select_files_or_folder
 else:
     from ..utils import apply_system_theme, select_files_or_folder
 

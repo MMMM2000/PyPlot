@@ -16,10 +16,10 @@ test = ["pytest"]
 
 [project.scripts]
 launcher = "launcher:main"
-plot-cli = "pyqt6_plotting.cli:main"
+plot-cli = "plotting.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["pyqt6_logger", "pyqt6_plotting"]
+include = ["data_logger", "plotting"]
 
 [build-system]
 requires = ["setuptools>=61"]
