@@ -34,16 +34,26 @@ MAX_SHOW = 8
 BASE_LOAD = float(_CFG.get("BASE_LOAD", 2.5))
 END_LOAD = float(_CFG.get("END_LOAD", 17.5))
 
-RAW_COLORS = {BASE_LOAD: "#45A1D6", END_LOAD: "#F09C67"}
+# ---- Appearance settings ----
+# Raw data points
+RAW_ALT_COLORS = ["#45A1D6", "#F09C67"]  # alternating raw point colors
+RAW_COLORS = {BASE_LOAD: RAW_ALT_COLORS[0], END_LOAD: RAW_ALT_COLORS[1]}
 RAW_MARKER = "o"
 RAW_MARKER_SIZE = 0.3
 RAW_ALPHA = 1.0
-MEAN_COLORS = {BASE_LOAD: "#00306E", END_LOAD: "#965308"}
-MEAN_MARKER = 'o'
-MEAN_MSIZE = 8
-MEAN_LW = 3
-DIR_B_RAW = "#F09C67"
-DIR_B_MEAN = "#965308"
+
+# Mean values
+MEAN_COLOR = "black"
+MEAN_MARKER = "o"
+MEAN_MARKER_SIZE = 8
+MEAN_LINE_WIDTH = 3
+
+# Annotation and legend sizes
+DELTA_LABEL_SIZE = 10
+MINI_DELTA_LABEL_SIZE = 9
+LEGEND_MARKER_SIZE = 6
+
+# Layout tweaks
 OFFSET = 0.25
 JITTER_SPAN = 0.04
 MEAN_SHIFT = OFFSET * 2
@@ -149,9 +159,9 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         [1 - OFFSET, 1 + OFFSET],
         means.set_index('load').loc[[BASE_LOAD, END_LOAD], 'y'],
         MEAN_MARKER+'-',
-        c='black',
-        markersize=MEAN_MSIZE,
-        linewidth=MEAN_LW,
+        c=MEAN_COLOR,
+        markersize=MEAN_MARKER_SIZE,
+        linewidth=MEAN_LINE_WIDTH,
         label='means',
     )
 
@@ -174,7 +184,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         textcoords="offset points",
         ha="center",
         va="bottom" if delta >= 0 else "top",
-        fontsize=10,
+        fontsize=DELTA_LABEL_SIZE,
     )
 
     ax.set_xticks([1])
@@ -230,11 +240,14 @@ def _draw_mini_dependence(
     np.random.seed(0)
     sub["x"] = sub["x_center"] + np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(sub))
     sub["y"] = sub[var] - base_mean
+    loads_sorted = sorted(sub["load"].unique())
+    color_map = {load: RAW_ALT_COLORS[i % len(RAW_ALT_COLORS)] for i, load in enumerate(loads_sorted)}
+    colors = sub["load"].map(color_map)
 
     ax.scatter(
         sub["x"],
         sub["y"],
-        c=DIR_B_RAW,
+        c=colors,
         marker=RAW_MARKER,
         s=RAW_MARKER_SIZE,
         alpha=RAW_ALPHA,
@@ -245,9 +258,9 @@ def _draw_mini_dependence(
         means["x_center"],
         means["y"],
         MEAN_MARKER + "-",
-        c=DIR_B_MEAN,
-        markersize=MEAN_MSIZE,
-        linewidth=MEAN_LW,
+        c=MEAN_COLOR,
+        markersize=MEAN_MARKER_SIZE,
+        linewidth=MEAN_LINE_WIDTH,
     )
 
     if INCLUDE_DEPENDENCE:
@@ -309,8 +322,35 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
             textcoords="offset points",
             ha='center',
             va='bottom' if delta >= 0 else 'top',
-            fontsize=9,
+            fontsize=MINI_DELTA_LABEL_SIZE,
         )
+
+    handles = [
+        Line2D([0], [0], marker=RAW_MARKER, linestyle='', color='none',
+               markerfacecolor=RAW_ALT_COLORS[0], markersize=LEGEND_MARKER_SIZE,
+               label='raw odd loads'),
+        Line2D([0], [0], marker=RAW_MARKER, linestyle='', color='none',
+               markerfacecolor=RAW_ALT_COLORS[1], markersize=LEGEND_MARKER_SIZE,
+               label='raw even loads'),
+        Line2D([0], [0], marker=MEAN_MARKER, color=MEAN_COLOR,
+               markersize=LEGEND_MARKER_SIZE, linewidth=MEAN_LINE_WIDTH,
+               label='means'),
+    ]
+    if INCLUDE_DEPENDENCE:
+        handles.append(Line2D([0], [0], color='black', label=f'dependence med {MED_WINDOW} mwa {MA_WINDOW}'))
+    legend = ax.legend(handles=handles, loc='best')
+    for text, handle in zip(legend.get_texts(), legend.legend_handles):
+        if isinstance(handle, Line2D):
+            rawcol = handle.get_color()
+            if handle.get_markerfacecolor() and handle.get_markerfacecolor() != 'none':
+                rawcol = handle.get_markerfacecolor()
+        elif isinstance(handle, (Patch, PathCollection)):
+            rawcol = handle.get_facecolor()
+            if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
+                rawcol = rawcol[0]
+        else:
+            rawcol = 'black'
+        text.set_color(to_hex(rawcol))
 
     fig.tight_layout()
     fname = f"{comp} {title} {anneal} {var}.png"
