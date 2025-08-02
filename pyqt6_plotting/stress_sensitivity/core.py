@@ -53,7 +53,7 @@ MEAN_LINE_WIDTH = 1
 
 # Annotation and legend sizes
 DELTA_LABEL_SIZE = 30
-MINI_DELTA_LABEL_SIZE = 9
+MINI_DELTA_LABEL_SIZE = 12
 LEGEND_MARKER_SIZE = 6
 
 # Layout tweaks
