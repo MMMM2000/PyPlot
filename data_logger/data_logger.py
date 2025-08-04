@@ -62,8 +62,9 @@ class InfoLineEdit(QtWidgets.QLineEdit):
         self._warn_action.triggered.connect(self._show_warning)
         self._warn_action.setVisible(False)
 
-        self._pattern = re.compile(r"^[\w\s,.-]*$")
-        self._warning = "Only letters, numbers, spaces, comma, period, '-' and '_' are allowed."
+        # Disallow spaces and dashes by default to keep file names parseable
+        self._pattern = re.compile(r"^[\w,.]*$")
+        self._warning = "Only letters, numbers, comma, period, and '_' are allowed."
         self.textChanged.connect(self._validate)
 
     def set_validation(self, pattern: str, message: str) -> None:
@@ -114,13 +115,16 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.s_sample = InfoLineEdit("Microwire identifier, e.g., 156_2")
         self.s_sample.setMinimumWidth(160)
         self.s_sample.setText("156_2")
-        self.s_sample.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
+        self.s_sample.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")
         form.addRow("Microwire:", self.s_sample)
 
         self.s_number = InfoLineEdit("Sample number, e.g., s2-1")
         self.s_number.setMinimumWidth(100)
         self.s_number.setText("s2-1")
-        self.s_number.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
+        self.s_number.set_validation(
+            r"^[A-Za-z0-9]+-[A-Za-z0-9]+$",
+            "Use pattern like s2-2 with a single '-'",
+        )
         form.addRow("Sample number:", self.s_number)
         self.s_end = QtWidgets.QComboBox()
         # Display descriptive text but keep the raw value for file naming
@@ -159,13 +163,16 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.t_sample = InfoLineEdit("Microwire identifier, e.g., 156_2")
         self.t_sample.setMinimumWidth(160)
         self.t_sample.setText("156_2")
-        self.t_sample.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
+        self.t_sample.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")
         tform.addRow("Microwire:", self.t_sample)
 
         self.t_number = InfoLineEdit("Sample number, e.g., s2-1")
         self.t_number.setMinimumWidth(100)
         self.t_number.setText("s2-1")
-        self.t_number.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
+        self.t_number.set_validation(
+            r"^[A-Za-z0-9]+-[A-Za-z0-9]+$",
+            "Use pattern like s2-2 with a single '-'",
+        )
         tform.addRow("Sample number:", self.t_number)
 
         self.t_anneal = InfoLineEdit("Annealing description, e.g., 74mA")
@@ -176,7 +183,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.t_temp = InfoLineEdit("Measurement temperature, e.g., 300K")
         self.t_temp.setMinimumWidth(100)
         self.t_temp.setText("300K")
-        self.t_temp.set_validation(r"^[\w.-]+$", "Use only letters, numbers or '-' ")
+        self.t_temp.set_validation(r"^[A-Za-z0-9_.]+$", "Use only letters, numbers, '_' or '.'")
         tform.addRow("Temperature:", self.t_temp)
         self.stacked.addWidget(temp)
 
