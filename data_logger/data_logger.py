@@ -59,12 +59,13 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         # Stress format
         stress = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(stress)
+        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.s_comp = QtWidgets.QLineEdit()
         form.addRow("Composition:", self.s_comp)
         self.s_sample = QtWidgets.QLineEdit()
-        form.addRow("Sample name:", self.s_sample)
+        form.addRow("Microwire:", self.s_sample)
         self.s_number = QtWidgets.QLineEdit()
-        form.addRow("Sample number:", self.s_number)
+        form.addRow("Microwire number:", self.s_number)
         self.s_end = QtWidgets.QComboBox()
         self.s_end.addItems(["a", "b"])
         form.addRow("Sample end:", self.s_end)
@@ -83,10 +84,13 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         # Temperature format
         temp = QtWidgets.QWidget()
         tform = QtWidgets.QFormLayout(temp)
+        tform.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.t_comp = QtWidgets.QLineEdit()
         tform.addRow("Composition:", self.t_comp)
         self.t_sample = QtWidgets.QLineEdit()
-        tform.addRow("Sample:", self.t_sample)
+        tform.addRow("Microwire:", self.t_sample)
+        self.t_number = QtWidgets.QLineEdit()
+        tform.addRow("Microwire number:", self.t_number)
         self.t_anneal = QtWidgets.QLineEdit()
         tform.addRow("Annealing:", self.t_anneal)
         self.t_temp = QtWidgets.QLineEdit()
@@ -96,6 +100,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         # Maxion format
         maxw = QtWidgets.QWidget()
         mform = QtWidgets.QFormLayout(maxw)
+        mform.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.m_head = QtWidgets.QSpinBox()
         self.m_head.setRange(1, 6)
         mform.addRow("Head:", self.m_head)
@@ -121,6 +126,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
             self.s_dir,
             self.t_comp,
             self.t_sample,
+            self.t_number,
             self.t_anneal,
             self.t_temp,
             self.m_head,
@@ -158,9 +164,10 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         elif fmt == "Temperature":
             comp = self.t_comp.text().strip()
             sample = self.t_sample.text().strip()
+            number = self.t_number.text().strip()
             anneal = self.t_anneal.text().strip()
             temp = self.t_temp.text().strip()
-            name = f"{comp} {sample} {anneal} {temp}"
+            name = f"{comp} {sample} {number} {anneal} {temp}"
         elif fmt == "Maxion":
             head = self.m_head.value()
             desc = self.m_desc.text().strip()
@@ -221,19 +228,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
         # expand layout to fit name builder
-        self.resize(639, 700)
-        self.ui.pushButton_connect_port.move(60, 360)
-        self.ui.groupBox_commands.move(40, 410)
+        self.resize(639, 750)
+        self.ui.pushButton_connect_port.move(60, 410)
+        self.ui.groupBox_commands.move(40, 460)
 
         # hide legacy build-name button
         self.ui.pushButton_build_name.hide()
 
         # create name builder widget
         self.file_box = QtWidgets.QGroupBox("File name", self.ui.centralWidget)
-        self.file_box.setGeometry(QtCore.QRect(40, 150, 561, 200))
+        self.file_box.setGeometry(QtCore.QRect(40, 150, 561, 240))
         box_layout = QtWidgets.QVBoxLayout(self.file_box)
         self.name_builder = FileNameBuilderWidget(self.file_box, self.ui.lineEdit_log_file)
         box_layout.addWidget(self.name_builder)
+        # allow quick logging via Enter in the load field
+        self.name_builder.s_load.lineEdit().returnPressed.connect(self.start_logging)
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
