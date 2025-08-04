@@ -59,6 +59,14 @@ python3 launcher.py
 ```
 
 
+## Data logger
+
+The data logger window allows recording measurements and saving them to text
+files.  Use the **Build name** button to compose file names from individual
+fields such as composition, sample number or load.  Alternatively you can type
+any custom file name directly into the log file box.
+
+
 ## Plotting stress dependence data
 
 `plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.

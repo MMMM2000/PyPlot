@@ -40,6 +40,64 @@ DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
 WINDOWS: list[QtWidgets.QWidget] = []
 
 
+class NameBuilderDialog(QtWidgets.QDialog):
+    """Dialog for composing structured file names."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Build file name")
+
+        layout = QtWidgets.QFormLayout(self)
+
+        self.edit_comp = QtWidgets.QLineEdit(self)
+        layout.addRow("Composition:", self.edit_comp)
+
+        self.edit_sample = QtWidgets.QLineEdit(self)
+        layout.addRow("Sample name:", self.edit_sample)
+
+        self.edit_number = QtWidgets.QLineEdit(self)
+        layout.addRow("Sample number:", self.edit_number)
+
+        self.combo_end = QtWidgets.QComboBox(self)
+        self.combo_end.addItems(["a", "b"])
+        layout.addRow("Sample end:", self.combo_end)
+
+        self.edit_anneal = QtWidgets.QLineEdit(self)
+        layout.addRow("Annealing:", self.edit_anneal)
+
+        self.spin_load = QtWidgets.QDoubleSpinBox(self)
+        self.spin_load.setDecimals(1)
+        self.spin_load.setSingleStep(2.5)
+        self.spin_load.setRange(-1e6, 1e6)
+        layout.addRow("Load:", self.spin_load)
+
+        self.combo_dir = QtWidgets.QComboBox(self)
+        self.combo_dir.addItems(["a", "b"])
+        layout.addRow("Load dir:", self.combo_dir)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addRow(buttons)
+
+    def build_name(self) -> str:
+        comp = self.edit_comp.text().strip()
+        sample = self.edit_sample.text().strip()
+        number = self.edit_number.text().strip()
+        end = self.combo_end.currentText()
+        anneal = self.edit_anneal.text().strip()
+        load_val = self.spin_load.value()
+        if load_val.is_integer():
+            load = f"{int(load_val)}"
+        else:
+            load = f"{load_val}".replace(".", ",")
+        direction = self.combo_dir.currentText()
+        return f"{comp} {sample} {number}{end} {anneal} {load}{direction}"
+
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_dir=DEFAULT_LOG_DIR):
         super().__init__()
@@ -97,6 +155,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
+        self.ui.pushButton_build_name.clicked.connect(self.build_filename)
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -185,6 +244,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """Send the text from the command line edit down the serial port."""
         cmd = self.ui.lineEdit_port_command.text() + "\n"
         self.serial.write(cmd.encode('ascii'))
+
+    def build_filename(self) -> None:
+        """Open a dialog to compose a structured file name."""
+        dlg = NameBuilderDialog(self)
+        if dlg.exec():
+            self.ui.lineEdit_log_file.setText(dlg.build_name())
 
     def start_logging(self):
         """
