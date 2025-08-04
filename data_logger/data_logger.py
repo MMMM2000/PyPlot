@@ -1,6 +1,7 @@
 import sys
 import os
 from pathlib import Path
+import re
 from typing import Any, cast, List
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
@@ -40,6 +41,46 @@ DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
 WINDOWS: list[QtWidgets.QWidget] = []
 
 
+class InfoLineEdit(QtWidgets.QLineEdit):
+    """Line edit with inline info and warning icons.
+
+    The trailing "i" icon displays contextual help for the field. A red
+    exclamation mark appears when validation fails; clicking it shows the
+    associated error message.
+    """
+
+    def __init__(self, info: str = "", parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        style = self.style()
+
+        info_icon = style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
+        self._info_action = self.addAction(info_icon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        self._info_action.triggered.connect(lambda: QtWidgets.QMessageBox.information(self, "Field info", info))
+
+        warn_icon = style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
+        self._warn_action = self.addAction(warn_icon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        self._warn_action.triggered.connect(self._show_warning)
+        self._warn_action.setVisible(False)
+
+        self._pattern = re.compile(r"^[\w\s,.-]*$")
+        self._warning = "Only letters, numbers, spaces, comma, period, '-' and '_' are allowed."
+        self.textChanged.connect(self._validate)
+
+    def set_validation(self, pattern: str, message: str) -> None:
+        """Set a custom validation regex and warning message."""
+
+        self._pattern = re.compile(pattern)
+        self._warning = message
+        self._validate(self.text())
+
+    # slots -----------------------------------------------------------------
+    def _validate(self, text: str) -> None:  # pragma: no cover - trivial
+        self._warn_action.setVisible(bool(text) and not self._pattern.fullmatch(text))
+
+    def _show_warning(self) -> None:  # pragma: no cover - trivial
+        QtWidgets.QMessageBox.warning(self, "Invalid input", self._warning)
+
+
 class FileNameBuilderWidget(QtWidgets.QWidget):
     """Widget for composing structured file names."""
 
@@ -64,28 +105,38 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(4)
-        self.s_comp = QtWidgets.QLineEdit()
+        self.s_comp = InfoLineEdit("Chemical composition of the sample, e.g., FeSiBP or FeSiB")
         self.s_comp.setMinimumWidth(160)
+        self.s_comp.setText("FeSiBP")
+        self.s_comp.set_validation(r"^[A-Za-z0-9]+$", "Use only letters and numbers")
         form.addRow("Composition:", self.s_comp)
-        self.s_sample = QtWidgets.QLineEdit()
+
+        self.s_sample = InfoLineEdit("Microwire identifier, e.g., 156_2")
         self.s_sample.setMinimumWidth(160)
+        self.s_sample.setText("156_2")
+        self.s_sample.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
         form.addRow("Microwire:", self.s_sample)
-        self.s_number = QtWidgets.QLineEdit()
+
+        self.s_number = InfoLineEdit("Sample number, e.g., s2-1")
         self.s_number.setMinimumWidth(100)
-        form.addRow("Microwire number:", self.s_number)
+        self.s_number.setText("s2-1")
+        self.s_number.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
+        form.addRow("Sample number:", self.s_number)
         self.s_end = QtWidgets.QComboBox()
         # Display descriptive text but keep the raw value for file naming
         self.s_end.addItem("Marked end (a)", "a")
         self.s_end.addItem("Unmarked end (b)", "b")
         form.addRow("Sample end:", self.s_end)
-        self.s_anneal = QtWidgets.QLineEdit()
+        self.s_anneal = InfoLineEdit("Annealing description, e.g., 74mA")
         self.s_anneal.setMinimumWidth(160)
+        self.s_anneal.setText("74mA")
         form.addRow("Annealing:", self.s_anneal)
         self.s_load = QtWidgets.QDoubleSpinBox()
         self.s_load.setDecimals(1)
         self.s_load.setSingleStep(2.5)
         # Disallow negative loads
         self.s_load.setRange(0, 1e6)
+        self.s_load.setValue(2.5)
         form.addRow("Load:", self.s_load)
         self.s_dir = QtWidgets.QComboBox()
         self.s_dir.addItem("Loading (a)", "a")
@@ -99,20 +150,33 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         tform.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         tform.setHorizontalSpacing(8)
         tform.setVerticalSpacing(4)
-        self.t_comp = QtWidgets.QLineEdit()
+        self.t_comp = InfoLineEdit("Chemical composition of the sample, e.g., FeSiBP or FeSiB")
         self.t_comp.setMinimumWidth(160)
+        self.t_comp.setText("FeSiBP")
+        self.t_comp.set_validation(r"^[A-Za-z0-9]+$", "Use only letters and numbers")
         tform.addRow("Composition:", self.t_comp)
-        self.t_sample = QtWidgets.QLineEdit()
+
+        self.t_sample = InfoLineEdit("Microwire identifier, e.g., 156_2")
         self.t_sample.setMinimumWidth(160)
+        self.t_sample.setText("156_2")
+        self.t_sample.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
         tform.addRow("Microwire:", self.t_sample)
-        self.t_number = QtWidgets.QLineEdit()
+
+        self.t_number = InfoLineEdit("Sample number, e.g., s2-1")
         self.t_number.setMinimumWidth(100)
-        tform.addRow("Microwire number:", self.t_number)
-        self.t_anneal = QtWidgets.QLineEdit()
+        self.t_number.setText("s2-1")
+        self.t_number.set_validation(r"^[\w-]+$", "Use only letters, numbers, '_' or '-' ")
+        tform.addRow("Sample number:", self.t_number)
+
+        self.t_anneal = InfoLineEdit("Annealing description, e.g., 74mA")
         self.t_anneal.setMinimumWidth(160)
+        self.t_anneal.setText("74mA")
         tform.addRow("Annealing:", self.t_anneal)
-        self.t_temp = QtWidgets.QLineEdit()
+
+        self.t_temp = InfoLineEdit("Measurement temperature, e.g., 300K")
         self.t_temp.setMinimumWidth(100)
+        self.t_temp.setText("300K")
+        self.t_temp.set_validation(r"^[\w.-]+$", "Use only letters, numbers or '-' ")
         tform.addRow("Temperature:", self.t_temp)
         self.stacked.addWidget(temp)
 
@@ -125,7 +189,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.m_head = QtWidgets.QSpinBox()
         self.m_head.setRange(1, 6)
         mform.addRow("Head:", self.m_head)
-        self.m_desc = QtWidgets.QLineEdit()
+        self.m_desc = InfoLineEdit("Description of the experiment")
         self.m_desc.setMinimumWidth(160)
         mform.addRow("Description:", self.m_desc)
         self.m_coils = QtWidgets.QComboBox()
