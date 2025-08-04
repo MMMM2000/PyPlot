@@ -72,7 +72,7 @@ CURVE_WIDTH = float(_CFG.get("CURVE_WIDTH", 1.0))
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<title>\S+)\s+"
-    r"(?P<sample_end>s\d+(?:-\d+)?[ab])\s+"
+    r"(?P<sample_end>\S+[ab])\s+"
     r"(?P<anneal>\S+)\s+"
     r"(?P<load>\d+(?:,\d+)?)(?P<dir>[ab])$"
 )
