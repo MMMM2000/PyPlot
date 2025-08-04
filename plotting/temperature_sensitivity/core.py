@@ -61,7 +61,7 @@ FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<sample>\S+)\s+"
     r"(?P<anneal>\S+)\s+"
-    r"(?P<temp>\d+C|overall)$"
+    r"(?P<temp>\d+(?:-\d+)?C)$"
 )
 
 class ProgressDialog:
@@ -109,7 +109,7 @@ def parse_metadata(stem: str) -> Dict[str, Any] | None:
         return None
     md = m.groupdict()
     temp = md["temp"].lower()
-    md["continuous"] = temp == "overall"
+    md["continuous"] = "-" in temp
     md["temp_val"] = None if md["continuous"] else int(temp.rstrip("c"))
     return md
 
@@ -371,7 +371,7 @@ def plot_variable(
             x_end = sample_idx[s] + MEAN_SHIFT
             scale = (x_end - x_start) / (end - start) if end != start else 1.0
             x_vals = (sub['temp'] - start) * scale + x_start
-            lbl = None if 'cont' in legend_done else f'overall med {med_window} mwa {ma_window}'
+            lbl = None if 'cont' in legend_done else f'25-100C med {med_window} mwa {ma_window}'
             ax.plot(x_vals, proc, color='black', label=lbl)
             legend_done.add('cont')
 

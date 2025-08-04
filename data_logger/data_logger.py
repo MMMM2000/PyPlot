@@ -131,7 +131,9 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.s_end.addItem("Marked end (a)", "a")
         self.s_end.addItem("Unmarked end (b)", "b")
         form.addRow("Sample end:", self.s_end)
-        self.s_anneal = InfoLineEdit("Annealing description, e.g., 74mA")
+        self.s_anneal = InfoLineEdit(
+            "Annealing description, e.g., ascast, 300C, 74mA"
+        )
         self.s_anneal.setMinimumWidth(160)
         self.s_anneal.setText("74mA")
         form.addRow("Annealing:", self.s_anneal)
@@ -180,10 +182,9 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.t_anneal.setText("74mA")
         tform.addRow("Annealing:", self.t_anneal)
 
-        self.t_temp = InfoLineEdit("Measurement temperature, e.g., 300K")
+        self.t_temp = QtWidgets.QComboBox()
         self.t_temp.setMinimumWidth(100)
-        self.t_temp.setText("300K")
-        self.t_temp.set_validation(r"^[A-Za-z0-9_.]+$", "Use only letters, numbers, '_' or '.'")
+        self.t_temp.addItems(["25C", "25-100C", "100C"])
         tform.addRow("Temperature:", self.t_temp)
         self.stacked.addWidget(temp)
 
@@ -259,7 +260,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
             sample = self.t_sample.text().strip()
             number = self.t_number.text().strip()
             anneal = self.t_anneal.text().strip()
-            temp = self.t_temp.text().strip()
+            temp = self.t_temp.currentText().strip()
             name = f"{comp} {sample} {number} {anneal} {temp}"
         elif fmt == "Maxion":
             head = self.m_head.value()

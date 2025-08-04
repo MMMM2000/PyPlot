@@ -54,7 +54,7 @@ NAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<sample>\S+)\s+"
     r"(?P<anneal>\S+)\s+"
-    r"(?P<temp>\d+C|overall)$"
+    r"(?P<temp>\d+(?:-\d+)?C)$"
 )
 
 LABELS = {
@@ -70,7 +70,7 @@ def parse_metadata(stem: str) -> Dict[str, Any] | None:
         return None
     md = m.groupdict()
     temp = md["temp"].lower()
-    md["continuous"] = temp == "overall"
+    md["continuous"] = "-" in temp
     md["temp_val"] = None if md["continuous"] else int(temp.rstrip("c"))
     return md
 
@@ -145,7 +145,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
                 c=OVERALL_COLOR,
                 s=MARKER_SIZE,
                 marker=MARKER,
-                label="raw overall",
+                label="raw 25-100C",
             )
         for temp in sorted(df.loc[~df["continuous"], "temp"].unique()):
             s = df[(~df["continuous"]) & (df["temp"] == temp)]
