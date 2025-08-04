@@ -63,8 +63,11 @@ python3 launcher.py
 
 The data logger window allows recording measurements and saving them to text
 files.  Use the **Build name** button to compose file names from individual
-fields such as composition, sample number or load.  Alternatively you can type
-any custom file name directly into the log file box.
+fields such as composition, sample number or load.  To keep file names
+compatible with the plotting scripts, input fields reject spaces and hyphens;
+the sample number is the sole exception and must contain exactly one hyphen
+(e.g. ``s2-2``).  Alternatively you can type any custom file name directly into
+the log file box.
 
 
 ## Plotting stress dependence data
