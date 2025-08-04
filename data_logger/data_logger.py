@@ -40,63 +40,135 @@ DEFAULT_LOG_DIR = os.getenv("LOG_DIR", LOG_DIR)
 WINDOWS: list[QtWidgets.QWidget] = []
 
 
-class NameBuilderDialog(QtWidgets.QDialog):
-    """Dialog for composing structured file names."""
+class FileNameBuilderWidget(QtWidgets.QWidget):
+    """Widget for composing structured file names."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget, target: QtWidgets.QLineEdit) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Build file name")
+        self.target = target
 
-        layout = QtWidgets.QFormLayout(self)
+        layout = QtWidgets.QVBoxLayout(self)
 
-        self.edit_comp = QtWidgets.QLineEdit(self)
-        layout.addRow("Composition:", self.edit_comp)
+        self.combo_format = QtWidgets.QComboBox(self)
+        self.combo_format.addItems(["Stress", "Temperature", "Maxion", "Custom"])
+        layout.addWidget(self.combo_format)
 
-        self.edit_sample = QtWidgets.QLineEdit(self)
-        layout.addRow("Sample name:", self.edit_sample)
+        self.stacked = QtWidgets.QStackedWidget(self)
+        layout.addWidget(self.stacked)
 
-        self.edit_number = QtWidgets.QLineEdit(self)
-        layout.addRow("Sample number:", self.edit_number)
+        # Stress format
+        stress = QtWidgets.QWidget()
+        form = QtWidgets.QFormLayout(stress)
+        self.s_comp = QtWidgets.QLineEdit()
+        form.addRow("Composition:", self.s_comp)
+        self.s_sample = QtWidgets.QLineEdit()
+        form.addRow("Sample name:", self.s_sample)
+        self.s_number = QtWidgets.QLineEdit()
+        form.addRow("Sample number:", self.s_number)
+        self.s_end = QtWidgets.QComboBox()
+        self.s_end.addItems(["a", "b"])
+        form.addRow("Sample end:", self.s_end)
+        self.s_anneal = QtWidgets.QLineEdit()
+        form.addRow("Annealing:", self.s_anneal)
+        self.s_load = QtWidgets.QDoubleSpinBox()
+        self.s_load.setDecimals(1)
+        self.s_load.setSingleStep(2.5)
+        self.s_load.setRange(-1e6, 1e6)
+        form.addRow("Load:", self.s_load)
+        self.s_dir = QtWidgets.QComboBox()
+        self.s_dir.addItems(["a", "b"])
+        form.addRow("Load dir:", self.s_dir)
+        self.stacked.addWidget(stress)
 
-        self.combo_end = QtWidgets.QComboBox(self)
-        self.combo_end.addItems(["a", "b"])
-        layout.addRow("Sample end:", self.combo_end)
+        # Temperature format
+        temp = QtWidgets.QWidget()
+        tform = QtWidgets.QFormLayout(temp)
+        self.t_comp = QtWidgets.QLineEdit()
+        tform.addRow("Composition:", self.t_comp)
+        self.t_sample = QtWidgets.QLineEdit()
+        tform.addRow("Sample:", self.t_sample)
+        self.t_anneal = QtWidgets.QLineEdit()
+        tform.addRow("Annealing:", self.t_anneal)
+        self.t_temp = QtWidgets.QLineEdit()
+        tform.addRow("Temperature:", self.t_temp)
+        self.stacked.addWidget(temp)
 
-        self.edit_anneal = QtWidgets.QLineEdit(self)
-        layout.addRow("Annealing:", self.edit_anneal)
+        # Maxion format
+        maxw = QtWidgets.QWidget()
+        mform = QtWidgets.QFormLayout(maxw)
+        self.m_head = QtWidgets.QSpinBox()
+        self.m_head.setRange(1, 6)
+        mform.addRow("Head:", self.m_head)
+        self.m_desc = QtWidgets.QLineEdit()
+        mform.addRow("Description:", self.m_desc)
+        self.m_coils = QtWidgets.QComboBox()
+        self.m_coils.addItems(["2", "3"])
+        mform.addRow("Coils:", self.m_coils)
+        self.stacked.addWidget(maxw)
 
-        self.spin_load = QtWidgets.QDoubleSpinBox(self)
-        self.spin_load.setDecimals(1)
-        self.spin_load.setSingleStep(2.5)
-        self.spin_load.setRange(-1e6, 1e6)
-        layout.addRow("Load:", self.spin_load)
+        # Placeholder for custom format
+        self.stacked.addWidget(QtWidgets.QWidget())
 
-        self.combo_dir = QtWidgets.QComboBox(self)
-        self.combo_dir.addItems(["a", "b"])
-        layout.addRow("Load dir:", self.combo_dir)
+        # connections
+        self.combo_format.currentIndexChanged.connect(self.on_format_change)
+        for w in [
+            self.s_comp,
+            self.s_sample,
+            self.s_number,
+            self.s_end,
+            self.s_anneal,
+            self.s_load,
+            self.s_dir,
+            self.t_comp,
+            self.t_sample,
+            self.t_anneal,
+            self.t_temp,
+            self.m_head,
+            self.m_desc,
+            self.m_coils,
+        ]:
+            if isinstance(w, QtWidgets.QLineEdit):
+                w.textChanged.connect(self.update_name)
+            elif isinstance(w, QtWidgets.QComboBox):
+                w.currentIndexChanged.connect(self.update_name)
+            elif isinstance(w, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
+                w.valueChanged.connect(self.update_name)
 
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
-            parent=self,
-        )
-        buttons.accepted.connect(self.accept)
-        buttons.rejected.connect(self.reject)
-        layout.addRow(buttons)
+        self.on_format_change(0)
 
-    def build_name(self) -> str:
-        comp = self.edit_comp.text().strip()
-        sample = self.edit_sample.text().strip()
-        number = self.edit_number.text().strip()
-        end = self.combo_end.currentText()
-        anneal = self.edit_anneal.text().strip()
-        load_val = self.spin_load.value()
-        if load_val.is_integer():
-            load = f"{int(load_val)}"
+    def on_format_change(self, idx: int) -> None:
+        self.stacked.setCurrentIndex(idx)
+        custom = self.combo_format.currentText() == "Custom"
+        self.target.setReadOnly(not custom)
+        if not custom:
+            self.update_name()
+
+    def update_name(self) -> None:
+        fmt = self.combo_format.currentText()
+        if fmt == "Stress":
+            comp = self.s_comp.text().strip()
+            sample = self.s_sample.text().strip()
+            number = self.s_number.text().strip()
+            end = self.s_end.currentText()
+            anneal = self.s_anneal.text().strip()
+            load_val = self.s_load.value()
+            load = f"{int(load_val)}" if load_val.is_integer() else f"{load_val}".replace(".", ",")
+            direction = self.s_dir.currentText()
+            name = f"{comp} {sample} {number}{end} {anneal} {load}{direction}"
+        elif fmt == "Temperature":
+            comp = self.t_comp.text().strip()
+            sample = self.t_sample.text().strip()
+            anneal = self.t_anneal.text().strip()
+            temp = self.t_temp.text().strip()
+            name = f"{comp} {sample} {anneal} {temp}"
+        elif fmt == "Maxion":
+            head = self.m_head.value()
+            desc = self.m_desc.text().strip()
+            coils = self.m_coils.currentText()
+            name = f"{head} {desc} {coils} coils"
         else:
-            load = f"{load_val}".replace(".", ",")
-        direction = self.combo_dir.currentText()
-        return f"{comp} {sample} {number}{end} {anneal} {load}{direction}"
+            return
+        self.target.setText(name)
 
 class MainWindow(QtWidgets.QMainWindow):
     def __init__(self, log_dir=DEFAULT_LOG_DIR):
@@ -148,6 +220,21 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lineEdit_log_file.returnPressed.connect(self.start_logging)
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
+        # expand layout to fit name builder
+        self.resize(639, 700)
+        self.ui.pushButton_connect_port.move(60, 360)
+        self.ui.groupBox_commands.move(40, 410)
+
+        # hide legacy build-name button
+        self.ui.pushButton_build_name.hide()
+
+        # create name builder widget
+        self.file_box = QtWidgets.QGroupBox("File name", self.ui.centralWidget)
+        self.file_box.setGeometry(QtCore.QRect(40, 150, 561, 200))
+        box_layout = QtWidgets.QVBoxLayout(self.file_box)
+        self.name_builder = FileNameBuilderWidget(self.file_box, self.ui.lineEdit_log_file)
+        box_layout.addWidget(self.name_builder)
+
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
         self.ui.comboBox_port.currentIndexChanged.connect(self.update_port_name)
@@ -155,7 +242,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
-        self.ui.pushButton_build_name.clicked.connect(self.build_filename)
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -244,12 +330,6 @@ class MainWindow(QtWidgets.QMainWindow):
         """Send the text from the command line edit down the serial port."""
         cmd = self.ui.lineEdit_port_command.text() + "\n"
         self.serial.write(cmd.encode('ascii'))
-
-    def build_filename(self) -> None:
-        """Open a dialog to compose a structured file name."""
-        dlg = NameBuilderDialog(self)
-        if dlg.exec():
-            self.ui.lineEdit_log_file.setText(dlg.build_name())
 
     def start_logging(self):
         """
