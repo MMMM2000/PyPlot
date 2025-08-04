@@ -3,6 +3,8 @@ import pytest
 from plotting.stress_dependence.core import parse_metadata as sd_parse
 from plotting.stress_sensitivity.core import parse_metadata as ss_parse
 from plotting.hsw_load_compare.core import parse_metadata as hl_parse
+from plotting.temperature_sensitivity.core import parse_metadata as ts_parse
+from plotting.temperature_dependence.core import parse_metadata as td_parse
 
 
 def test_parse_metadata_accepts_arbitrary_sample_number():
@@ -16,3 +18,14 @@ def test_parse_metadata_accepts_arbitrary_sample_number():
 
     md_hl = hl_parse(fname)
     assert md_hl and md_hl["sample_end"] == "foo-3a"
+
+
+def test_temperature_filename_parsing():
+    md = ts_parse("FeSiB 85_10 74mA 25C")
+    assert md and not md["continuous"] and md["temp_val"] == 25
+
+    md_cont = ts_parse("FeSiB 85_10 74mA 25-100C")
+    assert md_cont and md_cont["continuous"] and md_cont["temp_val"] is None
+
+    md_td = td_parse("FeSiB 85_10 74mA 100C")
+    assert md_td and md_td["temp_val"] == 100

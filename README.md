@@ -62,12 +62,15 @@ python3 launcher.py
 ## Data logger
 
 The data logger window allows recording measurements and saving them to text
-files.  Use the **Build name** button to compose file names from individual
-fields such as composition, sample number or load.  To keep file names
-compatible with the plotting scripts, input fields reject spaces and hyphens;
-the sample number is the sole exception and must contain exactly one hyphen
-(e.g. ``s2-2``).  Alternatively you can type any custom file name directly into
-the log file box.
+files. A built-in name builder assembles structured file names from individual
+fields such as composition, sample number or load. For stress files the
+annealing field accepts descriptions like *ascast*, *300C* or *74mA*. When using
+the temperature template the measurement temperature can be selected from
+**25C**, **25-100C** (a continuous run) or **100C**. To keep file names compatible
+with the plotting scripts, input fields reject spaces and hyphens; the sample
+number is the sole exception and must contain exactly one hyphen (e.g.
+``s2-2``). Alternatively you can type any custom file name directly into the log
+file box.
 
 
 ## Plotting stress dependence data
@@ -117,17 +120,19 @@ python3 plotting/stress_sensitivity/sens_gui.py
 measurements taken at different temperatures. File names must follow:
 
 ```
-<composition> <sample> <anneal> <temp>C.txt
+<composition> <sample> <anneal> <temp>.txt
 ```
 
+where `<temp>` is one of **25C**, **100C** or **25-100C** for a continuous run.
 Select multiple measurement files to plot T1, T2, T2–T1 and T1+T2 for all
 samples. Raw points recorded at 25 °C are jittered slightly left of the sample
 index and those at 100 °C to the right so the two sets do not overlap. Mean
 values are drawn centered on the sample index. A thin vertical line connects the
 25 °C and 100 °C means for each sample with the numeric difference printed
 next to it. The plot can show the raw values, subtract the 25 °C baseline or
-generate both variants. Optionally a processed continuous measurement can be
-displayed for each sample using adjustable median and moving-average windows.
+generate both variants. If a file named **25-100C** is present a processed
+continuous measurement can be displayed for each sample using adjustable median
+and moving-average windows.
 
 Run the script with:
 ```bash
@@ -138,7 +143,8 @@ python3 plotting/temperature_sensitivity/temp_gui.py
 
 `plotting/temperature_dependence/temp_dep_gui.py` combines discrete
 measurements at 25 °C and 100 °C with a continuous run between those
-temperatures. The GUI can display raw points, processed curves or both and
+temperatures. Name the continuous file **25-100C** so it is detected
+automatically. The GUI can display raw points, processed curves or both and
 supports plotting the usual T1/T2 derived quantities.
 
 Run the script with:
@@ -191,6 +197,8 @@ python3 data_logger/data_logger.py
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
+The built-in name builder supports stress and temperature templates and offers
+25C, 25-100C or 100C as selectable temperature values.
 When *Use subfolder* is enabled the logger creates a directory named after the
 selected file (without the load suffix) and stores the log inside it.
 The port list shows each device's full description to make selection easier.
