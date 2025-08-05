@@ -15,7 +15,7 @@ class UiMainWindowModernA(object):
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernA")
-        MainWindow.resize(640, 480)
+        MainWindow.resize(720, 540)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -105,6 +105,9 @@ class UiMainWindowModernA(object):
 
         # --- Status bar ------------------------------------------------------
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
+        self.label_connection_indicator = QtWidgets.QLabel("● Disconnected")
+        self.label_connection_indicator.setStyleSheet("color: red;")
+        self.statusbar.addPermanentWidget(self.label_connection_indicator)
         MainWindow.setStatusBar(self.statusbar)
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
