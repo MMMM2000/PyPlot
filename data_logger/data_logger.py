@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 from typing import Any, cast, List
 
-from PyQt6 import QtCore, QtWidgets, QtSerialPort
+from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 if __package__ is None or __package__ == "":
@@ -52,13 +52,21 @@ class InfoLineEdit(QtWidgets.QLineEdit):
     def __init__(self, info: str = "", parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         style = self.style()
+        if style is None:
+            raise RuntimeError("Widget style is unavailable")
 
         info_icon = style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxInformation)
-        self._info_action = self.addAction(info_icon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        info_action = self.addAction(info_icon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        if info_action is None:
+            raise RuntimeError("Failed to create info action")
+        self._info_action: QtGui.QAction = info_action
         self._info_action.triggered.connect(lambda: QtWidgets.QMessageBox.information(self, "Field info", info))
 
         warn_icon = style.standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning)
-        self._warn_action = self.addAction(warn_icon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        warn_action = self.addAction(warn_icon, QtWidgets.QLineEdit.ActionPosition.TrailingPosition)
+        if warn_action is None:
+            raise RuntimeError("Failed to create warning action")
+        self._warn_action: QtGui.QAction = warn_action
         self._warn_action.triggered.connect(self._show_warning)
         self._warn_action.setVisible(False)
 
@@ -336,7 +344,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.name_builder = FileNameBuilderWidget(self.file_box, self.ui.lineEdit_log_file)
         box_layout.addWidget(self.name_builder)
         # allow quick logging via Enter in the load field
-        self.name_builder.s_load.lineEdit().returnPressed.connect(self.start_logging)
+        load_edit = self.name_builder.s_load.lineEdit()
+        if load_edit is not None:
+            load_edit.returnPressed.connect(self.start_logging)
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
