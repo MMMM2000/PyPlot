@@ -2,20 +2,20 @@
 
 This version splits the window into two columns: connection/command controls on
 the left and logging controls on the right. Layout managers ensure widgets are
-spacious and non‑overlapping while the window uses a translucent style.
+spacious and non‑overlapping.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from .data_logger import FileNameBuilderWidget
+
 
 class UiMainWindowModernB(object):
-    """Two-column layout with transparency."""
+    """Two-column layout."""
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernB")
         MainWindow.resize(700, 420)
-        MainWindow.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        MainWindow.setWindowOpacity(0.92)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -79,6 +79,7 @@ class UiMainWindowModernB(object):
         self.label_extension = QtWidgets.QLabel(".txt")
         log_layout.addWidget(self.label_extension, 1, 2)
         self.pushButton_build_name = QtWidgets.QPushButton("Build name")
+        self.pushButton_build_name.hide()
         log_layout.addWidget(self.pushButton_build_name, 1, 3)
 
         self.pushButton_record = QtWidgets.QPushButton("Record")
@@ -96,6 +97,9 @@ class UiMainWindowModernB(object):
         log_layout.addWidget(self.progressBar_logging, 3, 0, 1, 2)
         log_layout.addWidget(self.pushButton_cancel, 3, 2)
         log_layout.addWidget(self.checkBox_subdir, 3, 3)
+
+        self.file_name_builder = FileNameBuilderWidget(self.groupBox_log, self.lineEdit_log_file)
+        log_layout.addWidget(self.file_name_builder, 4, 0, 1, 4)
 
         right_column.addWidget(self.groupBox_log)
         main_layout.addLayout(right_column)
