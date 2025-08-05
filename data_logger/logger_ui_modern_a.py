@@ -7,7 +7,7 @@ interface while avoiding fixed geometries so widgets cannot overlap.
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .data_logger import FileNameBuilderWidget
+from .file_name_builder import FileNameBuilderWidget
 
 
 class UiMainWindowModernA(object):

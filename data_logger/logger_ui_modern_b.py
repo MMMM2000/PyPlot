@@ -69,7 +69,7 @@ class UiMainWindowModernB(object):
         # Right column -------------------------------------------------------
         right_column = QtWidgets.QVBoxLayout()
 
-        from .data_logger import FileNameBuilderWidget
+        from .file_name_builder import FileNameBuilderWidget
         self.groupBox_log = QtWidgets.QGroupBox("Logging")
         log_layout = QtWidgets.QGridLayout(self.groupBox_log)
         log_layout.setColumnStretch(1, 1)
