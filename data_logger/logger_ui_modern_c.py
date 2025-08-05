@@ -1,21 +1,20 @@
 """Alternative modern UI option C for the data logger.
 
 This design arranges controls across two tabs – "Connection" and "Logging" –
-making efficient use of space and providing a clean look. Transparency and
-layout managers are employed to avoid overlapping widgets.
+making efficient use of space and providing a clean look.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from .data_logger import FileNameBuilderWidget
+
 
 class UiMainWindowModernC(object):
-    """Tabbed interface with translucent background."""
+    """Tabbed interface."""
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernC")
         MainWindow.resize(660, 440)
-        MainWindow.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        MainWindow.setWindowOpacity(0.94)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -81,6 +80,7 @@ class UiMainWindowModernC(object):
         self.label_extension = QtWidgets.QLabel(".txt")
         log_layout.addWidget(self.label_extension, 1, 2)
         self.pushButton_build_name = QtWidgets.QPushButton("Build name")
+        self.pushButton_build_name.hide()
         log_layout.addWidget(self.pushButton_build_name, 1, 3)
 
         self.pushButton_record = QtWidgets.QPushButton("Record")
@@ -98,6 +98,9 @@ class UiMainWindowModernC(object):
         log_layout.addWidget(self.progressBar_logging, 3, 0, 1, 2)
         log_layout.addWidget(self.pushButton_cancel, 3, 2)
         log_layout.addWidget(self.checkBox_subdir, 3, 3)
+
+        self.file_name_builder = FileNameBuilderWidget(self.tab_logging, self.lineEdit_log_file)
+        log_layout.addWidget(self.file_name_builder, 4, 0, 1, 4)
 
         self.tabWidget.addTab(self.tab_logging, "Logging")
 

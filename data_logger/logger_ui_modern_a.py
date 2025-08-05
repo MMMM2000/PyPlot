@@ -1,22 +1,21 @@
 """Alternative modern UI option A for the data logger.
 
-This layout uses vertical stacking with spacious margins and a translucent
+This layout uses vertical stacking with spacious margins and a solid
 background for a contemporary look. It mirrors the controls of the original
 interface while avoiding fixed geometries so widgets cannot overlap.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from .data_logger import FileNameBuilderWidget
+
 
 class UiMainWindowModernA(object):
-    """Simple vertical layout with mild transparency."""
+    """Simple vertical layout."""
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernA")
         MainWindow.resize(640, 480)
-        # Provide cross‑platform translucent window support
-        MainWindow.setAttribute(QtCore.Qt.WidgetAttribute.WA_TranslucentBackground)
-        MainWindow.setWindowOpacity(0.95)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -80,6 +79,7 @@ class UiMainWindowModernA(object):
         self.label_extension = QtWidgets.QLabel(".txt")
         log_layout.addWidget(self.label_extension, 1, 2)
         self.pushButton_build_name = QtWidgets.QPushButton("Build name")
+        self.pushButton_build_name.hide()
         log_layout.addWidget(self.pushButton_build_name, 1, 3)
 
         self.pushButton_record = QtWidgets.QPushButton("Record")
@@ -97,6 +97,9 @@ class UiMainWindowModernA(object):
         log_layout.addWidget(self.progressBar_logging, 3, 0, 1, 2)
         log_layout.addWidget(self.pushButton_cancel, 3, 2)
         log_layout.addWidget(self.checkBox_subdir, 3, 3)
+
+        self.file_name_builder = FileNameBuilderWidget(self.groupBox_log, self.lineEdit_log_file)
+        log_layout.addWidget(self.file_name_builder, 4, 0, 1, 4)
 
         main_layout.addWidget(self.groupBox_log)
 
