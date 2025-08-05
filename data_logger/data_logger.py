@@ -10,8 +10,12 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parent))
     from logger_ui import Ui_MainWindow
+    from logger_ui_modern_b import UiMainWindowModernB
+    from logger_ui_modern_c import UiMainWindowModernC
 else:
     from .logger_ui import Ui_MainWindow
+    from .logger_ui_modern_b import UiMainWindowModernB
+    from .logger_ui_modern_c import UiMainWindowModernC
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -280,10 +284,14 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.target.setText(name)
 
 class MainWindow(QtWidgets.QMainWindow):
-    def __init__(self, log_dir=DEFAULT_LOG_DIR):
+    UI_CLASSES = [Ui_MainWindow, UiMainWindowModernB, UiMainWindowModernC]
+
+    def __init__(self, log_dir=DEFAULT_LOG_DIR, ui_index: int = 0):
         super().__init__()
         self.log_dir = log_dir
-        self.ui = Ui_MainWindow()
+        self.ui_index = ui_index
+        UiClass = self.UI_CLASSES[self.ui_index]
+        self.ui = UiClass()
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
 
@@ -292,26 +300,24 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # runtime state
         self.port_response = ""
-        self.connected     = False
-        self.port_name     = ""
-        self.baudrate      = int(self.ui.comboBox_baudrate.currentText())
+        self.connected = False
+        self.port_name = ""
+        self.baudrate = int(self.ui.comboBox_baudrate.currentText())
         self.ui.groupBox_commands.setEnabled(False)
 
         self.serial = QtSerialPort.QSerialPort()
-        self.lock   = QtCore.QMutex()
+        self.lock = QtCore.QMutex()
 
-        # update the on-screen response label every 10 ms
         self.timer = QtCore.QTimer()
         self.timer.timeout.connect(self.update_response_label)
         self.timer.start(10)
 
         # logging state
-        self.log_file     = None  # will become an open file in start_logging()
+        self.log_file = None  # becomes an open file in start_logging()
         self.sample_count = 2000
-        self.sample_idx   = 0
-        self.logging_on   = False
+        self.sample_idx = 0
+        self.logging_on = False
 
-        # set up progress bar (Pylance needs cast to know it exists)
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
         cast(Any, self.ui).progressBar_logging.setValue(0)
@@ -321,32 +327,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         # fill port list and set defaults
         self.populate_ports()
-        self.ui.comboBox_baudrate.setCurrentIndex(0)  # highest bitrate
+        self.ui.comboBox_baudrate.setCurrentIndex(0)
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
 
-        # show only the base name without extension
         self.ui.lineEdit_log_file.setText(DEFAULT_LOG_FILE_NAME)
         self.ui.lineEdit_log_file.returnPressed.connect(self.start_logging)
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
-        # expand layout to fit name builder
-        self.resize(639, 750)
-        self.ui.pushButton_connect_port.move(60, 410)
-        self.ui.groupBox_commands.move(40, 460)
-
-        # hide legacy build-name button
-        self.ui.pushButton_build_name.hide()
-
-        # create name builder widget
-        self.file_box = QtWidgets.QGroupBox("File name", self.ui.centralWidget)
-        self.file_box.setGeometry(QtCore.QRect(40, 150, 561, 240))
-        box_layout = QtWidgets.QVBoxLayout(self.file_box)
-        self.name_builder = FileNameBuilderWidget(self.file_box, self.ui.lineEdit_log_file)
-        box_layout.addWidget(self.name_builder)
-        # allow quick logging via Enter in the load field
-        load_edit = self.name_builder.s_load.lineEdit()
-        if load_edit is not None:
-            load_edit.returnPressed.connect(self.start_logging)
+        # hook into file name builder if present
+        self.name_builder = getattr(self.ui, "file_name_builder", None)
+        if self.name_builder is not None:
+            load_edit = self.name_builder.s_load.lineEdit()
+            if load_edit is not None:
+                load_edit.returnPressed.connect(self.start_logging)
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
@@ -355,6 +348,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
+        self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
+        self.ui.pushButton_switch_ui.clicked.connect(self.switch_ui)
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -404,6 +399,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if new_dir:
             self.log_dir = new_dir
             self.ui.lineEdit_log_dir.setText(new_dir)
+
+    def switch_ui(self):
+        """Cycle through available UI layouts."""
+        new_index = (self.ui_index + 1) % len(self.UI_CLASSES)
+        new_window = MainWindow(self.log_dir, ui_index=new_index)
+        new_window.show()
+        WINDOWS.append(new_window)
+        self.close()
 
     def read_from_port(self):
         """

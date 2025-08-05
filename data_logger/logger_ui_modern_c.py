@@ -6,8 +6,6 @@ making efficient use of space and providing a clean look.
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .data_logger import FileNameBuilderWidget
-
 
 class UiMainWindowModernC(object):
     """Tabbed interface."""
@@ -34,8 +32,12 @@ class UiMainWindowModernC(object):
         self.groupBox_serial = QtWidgets.QGroupBox("Serial")
         serial_layout = QtWidgets.QFormLayout(self.groupBox_serial)
         serial_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        port_row = QtWidgets.QHBoxLayout()
         self.comboBox_port = QtWidgets.QComboBox()
-        serial_layout.addRow("Port:", self.comboBox_port)
+        port_row.addWidget(self.comboBox_port)
+        self.pushButton_refresh_ports = QtWidgets.QPushButton("Refresh")
+        port_row.addWidget(self.pushButton_refresh_ports)
+        serial_layout.addRow("Port:", port_row)
         self.comboBox_baud = QtWidgets.QComboBox()
         self.comboBox_baud.addItems([
             "921600",
@@ -66,6 +68,7 @@ class UiMainWindowModernC(object):
         self.tabWidget.addTab(self.tab_connection, "Connection")
 
         # --- Logging tab ----------------------------------------------------
+        from .data_logger import FileNameBuilderWidget
         self.tab_logging = QtWidgets.QWidget()
         log_layout = QtWidgets.QGridLayout(self.tab_logging)
         log_layout.setColumnStretch(1, 1)
@@ -115,7 +118,14 @@ class UiMainWindowModernC(object):
         self.label_connection_indicator = QtWidgets.QLabel("● Disconnected")
         self.label_connection_indicator.setStyleSheet("color: red;")
         self.statusbar.addPermanentWidget(self.label_connection_indicator)
+        self.pushButton_switch_ui = QtWidgets.QPushButton("Switch UI")
+        self.statusbar.addPermanentWidget(self.pushButton_switch_ui)
         MainWindow.setStatusBar(self.statusbar)
+
+        # Compatibility aliases
+        self.groupBox_commands = self.groupBox_cmd
+        self.comboBox_baudrate = self.comboBox_baud
+        self.pushButton_connect_port = self.pushButton_connect
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
