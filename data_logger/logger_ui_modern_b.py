@@ -7,8 +7,6 @@ spacious and non‑overlapping.
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from .data_logger import FileNameBuilderWidget
-
 
 class UiMainWindowModernB(object):
     """Two-column layout."""
@@ -33,7 +31,12 @@ class UiMainWindowModernB(object):
         self.groupBox_serial = QtWidgets.QGroupBox("Serial")
         serial_layout = QtWidgets.QFormLayout(self.groupBox_serial)
         serial_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        port_row = QtWidgets.QHBoxLayout()
         self.comboBox_port = QtWidgets.QComboBox()
+        port_row.addWidget(self.comboBox_port)
+        self.pushButton_refresh_ports = QtWidgets.QPushButton("Refresh")
+        port_row.addWidget(self.pushButton_refresh_ports)
+        serial_layout.addRow("Port:", port_row)
         self.comboBox_baud = QtWidgets.QComboBox()
         self.comboBox_baud.addItems([
             "921600",
@@ -43,7 +46,6 @@ class UiMainWindowModernB(object):
             "19200",
             "9600",
         ])
-        serial_layout.addRow("Port:", self.comboBox_port)
         serial_layout.addRow("Baud:", self.comboBox_baud)
         self.pushButton_connect = QtWidgets.QPushButton("Connect")
         serial_layout.addRow(self.pushButton_connect)
@@ -67,6 +69,7 @@ class UiMainWindowModernB(object):
         # Right column -------------------------------------------------------
         right_column = QtWidgets.QVBoxLayout()
 
+        from .data_logger import FileNameBuilderWidget
         self.groupBox_log = QtWidgets.QGroupBox("Logging")
         log_layout = QtWidgets.QGridLayout(self.groupBox_log)
         log_layout.setColumnStretch(1, 1)
@@ -111,7 +114,14 @@ class UiMainWindowModernB(object):
         self.label_connection_indicator = QtWidgets.QLabel("● Disconnected")
         self.label_connection_indicator.setStyleSheet("color: red;")
         self.statusbar.addPermanentWidget(self.label_connection_indicator)
+        self.pushButton_switch_ui = QtWidgets.QPushButton("Switch UI")
+        self.statusbar.addPermanentWidget(self.pushButton_switch_ui)
         MainWindow.setStatusBar(self.statusbar)
+
+        # Compatibility aliases
+        self.groupBox_commands = self.groupBox_cmd
+        self.comboBox_baudrate = self.comboBox_baud
+        self.pushButton_connect_port = self.pushButton_connect
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
 
