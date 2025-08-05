@@ -68,7 +68,7 @@ class UiMainWindowModernC(object):
         self.tabWidget.addTab(self.tab_connection, "Connection")
 
         # --- Logging tab ----------------------------------------------------
-        from .data_logger import FileNameBuilderWidget
+        from .file_name_builder import FileNameBuilderWidget
         self.tab_logging = QtWidgets.QWidget()
         log_layout = QtWidgets.QGridLayout(self.tab_logging)
         log_layout.setColumnStretch(1, 1)
