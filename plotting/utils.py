@@ -1,4 +1,4 @@
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 import os
 import sys
 
@@ -20,14 +20,32 @@ def _dark_palette() -> QtGui.QPalette:
     return palette
 
 
+def _apply_color_scheme(
+    app: QtWidgets.QApplication, scheme: QtCore.Qt.ColorScheme | None = None
+) -> None:
+    """Apply a palette matching ``scheme``.
+
+    When ``scheme`` is ``None`` the current system color scheme is queried via
+    :meth:`QGuiApplication.styleHints`.
+    """
+
+    if scheme is None:
+        scheme = app.styleHints().colorScheme()
+    if scheme == QtCore.Qt.ColorScheme.Dark:
+        app.setPalette(_dark_palette())
+    else:
+        app.setPalette(app.style().standardPalette())
+
+
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
     """Apply a palette and style that follow the host operating system.
 
     On Windows the native ``windowsvista`` style is used which blends in well
     with the Fluent Design language.  macOS uses the ``macintosh`` style.  Other
-    platforms fall back to the cross‑platform ``Fusion`` style.  Afterwards the
-    current palette is inspected to decide whether a dark or light palette
-    should be applied, mimicking the system light/dark appearance.
+    platforms fall back to the cross‑platform ``Fusion`` style.  The current
+    color scheme is then inspected to decide whether a dark or light palette
+    should be applied, mimicking the system light/dark appearance.  The palette
+    updates automatically when the system color scheme changes.
     """
 
     if sys.platform.startswith("win"):
@@ -41,12 +59,11 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
     else:
         app.setStyle("Fusion")
 
-    current = app.palette()
-    win_color = current.color(QtGui.QPalette.ColorRole.Window)
-    if win_color.lightness() < 128:
-        app.setPalette(_dark_palette())
-    else:
-        app.setPalette(current)
+    _apply_color_scheme(app)
+
+    hints = app.styleHints()
+    if hasattr(hints, "colorSchemeChanged"):
+        hints.colorSchemeChanged.connect(lambda scheme: _apply_color_scheme(app, scheme))
 
 
 def apply_dark_theme(app: QtWidgets.QApplication) -> None:
