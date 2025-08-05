@@ -48,6 +48,19 @@ font should be typed into a terminal exactly as written and confirmed with the
 Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ``activate`` command from step 4 before running ``python`` or ``pip`` again.
 
+## Plotly interactive example
+
+A small demo using [Plotly](https://plotly.com/python/) shows how to create an
+editable figure and save it for later tweaks.  Run the script with:
+
+```bash
+python plotting/plotly_demo.py
+```
+
+The plot opens in your default browser with editing enabled.  An HTML file
+named ``plotly_demo.html`` is also written to the current directory so the
+interactive figure can be reopened and modified at any time.
+
 ## Master launcher
 
 `launcher.py` starts a small GUI that groups all available loggers and
