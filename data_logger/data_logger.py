@@ -8,7 +8,9 @@ from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 if __package__ is None or __package__ == "":
-    sys.path.append(str(Path(__file__).resolve().parent))
+    module_dir = Path(__file__).resolve().parent
+    sys.path.append(str(module_dir))
+    sys.path.append(str(module_dir.parent))
     from logger_ui_modern_a import UiMainWindowModernA
     from logger_ui_modern_b import UiMainWindowModernB
     from logger_ui_modern_c import UiMainWindowModernC
@@ -18,6 +20,8 @@ else:
     from .logger_ui_modern_b import UiMainWindowModernB
     from .logger_ui_modern_c import UiMainWindowModernC
     from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
+
+from plotting.utils import apply_system_theme
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -58,24 +62,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui = UiClass()
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
-
-        self.setStyleSheet(
-            """
-            QWidget { background-color: #2b2b2b; color: #f0f0f0; }
-            QPushButton {
-                background-color: #444444;
-                border: 1px solid #555555;
-                padding: 6px 12px;
-                border-radius: 4px;
-            }
-            QPushButton::disabled { background-color: #333333; color: #777777; }
-            QLineEdit, QComboBox, QSpinBox {
-                background-color: #3b3b3b;
-                border: 1px solid #555555;
-            }
-            QStatusBar { background-color: #2b2b2b; }
-            """
-        )
 
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.pushButton_browse_dir.clicked.connect(self.choose_log_dir)
@@ -359,6 +345,8 @@ def main(argv: List[str] | None = None) -> QtWidgets.QWidget:
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
         owns_app = True
+
+    apply_system_theme(app)
 
     window = MainWindow(log_dir)
     window.show()

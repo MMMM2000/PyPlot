@@ -1,5 +1,6 @@
 from PyQt6 import QtWidgets, QtGui
 import os
+import sys
 
 
 def _dark_palette() -> QtGui.QPalette:
@@ -20,8 +21,25 @@ def _dark_palette() -> QtGui.QPalette:
 
 
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
-    """Apply a palette that follows the system light/dark theme."""
-    app.setStyle("Fusion")
+    """Apply a palette and style that follow the host operating system.
+
+    On Windows the native ``windowsvista`` style is used which blends in well
+    with the Fluent Design language.  macOS uses the ``macintosh`` style.  Other
+    platforms fall back to the cross‑platform ``Fusion`` style.  Afterwards the
+    current palette is inspected to decide whether a dark or light palette
+    should be applied, mimicking the system light/dark appearance.
+    """
+
+    if sys.platform.startswith("win"):
+        app.setStyle("windowsvista")
+    elif sys.platform == "darwin":
+        # ``macintosh`` is available on all Qt builds for macOS; ``macos`` was
+        # introduced in Qt 6.5.  ``setStyle`` ignores unknown styles so this
+        # conditional keeps compatibility with older versions.
+        style_name = "macos" if "macos" in QtWidgets.QStyleFactory.keys() else "macintosh"
+        app.setStyle(style_name)
+    else:
+        app.setStyle("Fusion")
 
     current = app.palette()
     win_color = current.color(QtGui.QPalette.ColorRole.Window)
