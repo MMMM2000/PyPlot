@@ -2,6 +2,7 @@ import sys
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, cast, List
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
@@ -295,6 +296,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
 
+        self.setStyleSheet(
+            """
+            QWidget { background-color: #2b2b2b; color: #f0f0f0; }
+            QPushButton {
+                background-color: #444444;
+                border: 1px solid #555555;
+                padding: 6px 12px;
+                border-radius: 4px;
+            }
+            QPushButton::disabled { background-color: #333333; color: #777777; }
+            QLineEdit, QComboBox, QSpinBox {
+                background-color: #3b3b3b;
+                border: 1px solid #555555;
+            }
+            QStatusBar { background-color: #2b2b2b; }
+            """
+        )
+
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.pushButton_browse_dir.clicked.connect(self.choose_log_dir)
 
@@ -317,6 +336,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = 2000
         self.sample_idx = 0
         self.logging_on = False
+        self.sample_rate: float | None = None
+        self.last_sample_time: float | None = None
 
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
@@ -350,6 +371,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
         self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
         self.ui.pushButton_switch_ui.clicked.connect(self.switch_ui)
+        self.ui.spinBox_log_sample_count.valueChanged.connect(self.update_time_estimate)
+
+        self.update_time_estimate()
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -377,11 +401,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.connected = True
                 self.ui.pushButton_connect_port.setText("Disconnect")
                 self.ui.groupBox_commands.setEnabled(True)
+                self.ui.label_connection_indicator.setText("\u25cf Connected")
+                self.ui.label_connection_indicator.setStyleSheet("color: green;")
         else:
             self.serial.close()
             self.connected = False
             self.ui.pushButton_connect_port.setText("Connect to port")
             self.ui.groupBox_commands.setEnabled(False)
+            self.ui.label_connection_indicator.setText("\u25cf Disconnected")
+            self.ui.label_connection_indicator.setStyleSheet("color: red;")
 
     def update_port_name(self):
         """Keep self.port_name in sync with the combo box selection."""
@@ -422,6 +450,17 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_bytes = bytes(raw)            # type: ignore[arg-type]
         self.port_response = raw_bytes.decode('ascii')
 
+        now = time.perf_counter()
+        if self.last_sample_time is not None:
+            dt = now - self.last_sample_time
+            if dt > 0:
+                rate = 1.0 / dt
+                if self.sample_rate is None:
+                    self.sample_rate = rate
+                else:
+                    self.sample_rate = 0.9 * self.sample_rate + 0.1 * rate
+        self.last_sample_time = now
+
         if self.logging_on:
             assert self.log_file is not None
 
@@ -437,10 +476,22 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.pushButton_cancel.setEnabled(False)
 
         self.lock.unlock()
+        self.update_time_estimate()
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
         self.ui.label_port_response.setText(self.port_response)
+
+    def update_time_estimate(self) -> None:
+        """Update the estimated logging time display."""
+        if self.sample_rate:
+            remaining = self.ui.spinBox_log_sample_count.value()
+            if self.logging_on:
+                remaining -= self.sample_idx
+            secs = remaining / self.sample_rate if self.sample_rate else 0.0
+            self.ui.label_time_estimate.setText(f"Est. time: {secs:.1f} s")
+        else:
+            self.ui.label_time_estimate.setText("Est. time: N/A")
 
     def send_command(self):
         """Send the text from the command line edit down the serial port."""
@@ -499,6 +550,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).progressBar_logging.setValue(0)
+        self.update_time_estimate()
 
     def cancel_logging(self):
         """Abort the current logging session."""
@@ -510,6 +562,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logging_on = False
         self.ui.pushButton_record.setEnabled(True)
         self.ui.pushButton_cancel.setEnabled(False)
+        self.update_time_estimate()
 
 def main(argv: List[str] | None = None) -> QtWidgets.QWidget:
     """Launch the data logger window and return the created widget.
