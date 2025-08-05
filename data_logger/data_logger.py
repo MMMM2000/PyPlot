@@ -245,9 +245,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.logging_on:
                 remaining -= self.sample_idx
             secs = remaining / self.sample_rate if self.sample_rate else 0.0
-            label.setText(f"Est. time: {secs:.1f} s")
+            label.setText(f"Time remaining: {secs:.1f} s")
         else:
-            label.setText("Est. time: N/A")
+            label.setText("Time remaining: N/A")
 
     def send_command(self):
         """Send the text from the command line edit down the serial port."""
