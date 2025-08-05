@@ -96,7 +96,7 @@ class UiMainWindowModernB(object):
         log_layout.addWidget(self.spinBox_log_sample_count, 2, 1)
         log_layout.addWidget(self.label_samples, 2, 2)
 
-        self.label_time_estimate = QtWidgets.QLabel("Est. time: N/A")
+        self.label_time_estimate = QtWidgets.QLabel("Time remaining: N/A")
         log_layout.addWidget(self.label_time_estimate, 3, 0, 1, 3)
 
         self.progressBar_logging = QtWidgets.QProgressBar()
