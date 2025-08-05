@@ -10,11 +10,11 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(Path(__file__).resolve().parent))
-    from logger_ui import Ui_MainWindow
+    from logger_ui_modern_a import UiMainWindowModernA
     from logger_ui_modern_b import UiMainWindowModernB
     from logger_ui_modern_c import UiMainWindowModernC
 else:
-    from .logger_ui import Ui_MainWindow
+    from .logger_ui_modern_a import UiMainWindowModernA
     from .logger_ui_modern_b import UiMainWindowModernB
     from .logger_ui_modern_c import UiMainWindowModernC
 
@@ -285,7 +285,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.target.setText(name)
 
 class MainWindow(QtWidgets.QMainWindow):
-    UI_CLASSES = [Ui_MainWindow, UiMainWindowModernB, UiMainWindowModernC]
+    UI_CLASSES = [UiMainWindowModernA, UiMainWindowModernB, UiMainWindowModernC]
 
     def __init__(self, log_dir=DEFAULT_LOG_DIR, ui_index: int = 0):
         super().__init__()
@@ -369,8 +369,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
-        self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
-        self.ui.pushButton_switch_ui.clicked.connect(self.switch_ui)
+        refresh_btn = getattr(self.ui, "pushButton_refresh_ports", None)
+        if refresh_btn is not None:
+            refresh_btn.clicked.connect(self.populate_ports)
+        switch_btn = getattr(self.ui, "pushButton_switch_ui", None)
+        if switch_btn is not None:
+            switch_btn.clicked.connect(self.switch_ui)
         self.ui.spinBox_log_sample_count.valueChanged.connect(self.update_time_estimate)
 
         self.update_time_estimate()
@@ -484,14 +488,17 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def update_time_estimate(self) -> None:
         """Update the estimated logging time display."""
+        label = getattr(self.ui, "label_time_estimate", None)
+        if label is None:
+            return
         if self.sample_rate:
             remaining = self.ui.spinBox_log_sample_count.value()
             if self.logging_on:
                 remaining -= self.sample_idx
             secs = remaining / self.sample_rate if self.sample_rate else 0.0
-            self.ui.label_time_estimate.setText(f"Est. time: {secs:.1f} s")
+            label.setText(f"Est. time: {secs:.1f} s")
         else:
-            self.ui.label_time_estimate.setText("Est. time: N/A")
+            label.setText("Est. time: N/A")
 
     def send_command(self):
         """Send the text from the command line edit down the serial port."""
