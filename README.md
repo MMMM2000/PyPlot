@@ -88,7 +88,7 @@ file box.
 
 ## Plotting stress dependence data
 
-`plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a dark themed PyQt6 interface.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
+`plotting/stress_dependence/stress_gui.py` generates plots from a folder of measurement files using a PyQt6 interface that follows the system light or dark theme.  The values shown in the GUI come from the **DEFAULT CONFIGURATION** section inside `core.py` and can be adjusted there.
 
 - `DATA_DIR` – directory where your raw `.txt` files live
 - `OUTPUT_DIR` – directory in which to save generated plots
@@ -200,8 +200,8 @@ folder so the path works on any system.  You can change the location at
 runtime with the `--log-dir` option or the `LOG_DIR` environment variable.  The
 script also exposes constants for the pre-filled command string and suggested
 file name.  Inside the GUI you can browse to a different directory at any time.
-The interface uses a dark Fusion palette with rounded buttons for a modern
-look.
+The interface follows the host operating system's light or dark appearance and
+uses rounded buttons for a modern look.
 
 Launch the logger with:
 

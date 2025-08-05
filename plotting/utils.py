@@ -3,19 +3,23 @@ import os
 import sys
 
 
-def _dark_palette() -> QtGui.QPalette:
+def _dark_palette(accent: QtGui.QColor) -> QtGui.QPalette:
+    """Return a dark palette using ``accent`` for highlighted items."""
+
     palette = QtGui.QPalette()
-    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(53, 53, 53))
-    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(255, 255, 255))
-    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(35, 35, 35))
-    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(53, 53, 53))
-    palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(255, 255, 255))
-    palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(255, 255, 255))
-    palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(255, 255, 255))
-    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(53, 53, 53))
-    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(255, 255, 255))
+    palette.setColor(QtGui.QPalette.ColorRole.Window, QtGui.QColor(32, 32, 32))
+    palette.setColor(QtGui.QPalette.ColorRole.WindowText, QtGui.QColor(220, 220, 220))
+    palette.setColor(QtGui.QPalette.ColorRole.Base, QtGui.QColor(24, 24, 24))
+    palette.setColor(
+        QtGui.QPalette.ColorRole.AlternateBase, QtGui.QColor(32, 32, 32)
+    )
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, QtGui.QColor(240, 240, 240))
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, QtGui.QColor(0, 0, 0))
+    palette.setColor(QtGui.QPalette.ColorRole.Text, QtGui.QColor(220, 220, 220))
+    palette.setColor(QtGui.QPalette.ColorRole.Button, QtGui.QColor(32, 32, 32))
+    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, QtGui.QColor(220, 220, 220))
     palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor(255, 0, 0))
-    palette.setColor(QtGui.QPalette.ColorRole.Highlight, QtGui.QColor(42, 130, 218))
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, accent)
     palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor(0, 0, 0))
     return palette
 
@@ -31,21 +35,37 @@ def _apply_color_scheme(
 
     if scheme is None:
         scheme = app.styleHints().colorScheme()
-    if scheme == QtCore.Qt.ColorScheme.Dark:
-        app.setPalette(_dark_palette())
+
+    if sys.platform.startswith("win"):
+        if scheme == QtCore.Qt.ColorScheme.Dark:
+            accent = app.style().standardPalette().color(
+                QtGui.QPalette.ColorRole.Highlight
+            )
+            app.setPalette(_dark_palette(accent))
+        else:
+            app.setPalette(app.style().standardPalette())
+    elif sys.platform == "darwin":
+        app.setPalette(QtGui.QPalette())
     else:
-        app.setPalette(app.style().standardPalette())
+        if scheme == QtCore.Qt.ColorScheme.Dark:
+            accent = app.style().standardPalette().color(
+                QtGui.QPalette.ColorRole.Highlight
+            )
+            app.setPalette(_dark_palette(accent))
+        else:
+            app.setPalette(app.style().standardPalette())
 
 
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
     """Apply a palette and style that follow the host operating system.
 
-    On Windows the native ``windowsvista`` style is used which blends in well
-    with the Fluent Design language.  macOS uses the ``macintosh`` style.  Other
+    Windows uses the native ``windowsvista`` style with colors tuned to match
+    Fluent Design, including the current system accent color for highlights.
+    macOS applies the ``macos``/``macintosh`` style and relies on the operating
+    system to provide an appropriate palette for light or dark mode.  Other
     platforms fall back to the cross‑platform ``Fusion`` style.  The current
-    color scheme is then inspected to decide whether a dark or light palette
-    should be applied, mimicking the system light/dark appearance.  The palette
-    updates automatically when the system color scheme changes.
+    color scheme is inspected to decide whether a dark or light palette should
+    be applied and updates automatically when the system appearance changes.
     """
 
     if sys.platform.startswith("win"):
