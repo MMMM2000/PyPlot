@@ -14,7 +14,7 @@ class UiMainWindowModernC(object):
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernC")
-        MainWindow.resize(660, 440)
+        MainWindow.resize(760, 500)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -33,6 +33,7 @@ class UiMainWindowModernC(object):
 
         self.groupBox_serial = QtWidgets.QGroupBox("Serial")
         serial_layout = QtWidgets.QFormLayout(self.groupBox_serial)
+        serial_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.comboBox_port = QtWidgets.QComboBox()
         serial_layout.addRow("Port:", self.comboBox_port)
         self.comboBox_baud = QtWidgets.QComboBox()
@@ -67,6 +68,7 @@ class UiMainWindowModernC(object):
         # --- Logging tab ----------------------------------------------------
         self.tab_logging = QtWidgets.QWidget()
         log_layout = QtWidgets.QGridLayout(self.tab_logging)
+        log_layout.setColumnStretch(1, 1)
 
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
@@ -102,10 +104,17 @@ class UiMainWindowModernC(object):
         self.file_name_builder = FileNameBuilderWidget(self.tab_logging, self.lineEdit_log_file)
         log_layout.addWidget(self.file_name_builder, 4, 0, 1, 4)
 
+        self.label_port_response_log = QtWidgets.QLabel("Port response")
+        self.label_port_response_log.setWordWrap(True)
+        log_layout.addWidget(self.label_port_response_log, 5, 0, 1, 4)
+
         self.tabWidget.addTab(self.tab_logging, "Logging")
 
         # --- Status bar ------------------------------------------------------
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
+        self.label_connection_indicator = QtWidgets.QLabel("● Disconnected")
+        self.label_connection_indicator.setStyleSheet("color: red;")
+        self.statusbar.addPermanentWidget(self.label_connection_indicator)
         MainWindow.setStatusBar(self.statusbar)
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)

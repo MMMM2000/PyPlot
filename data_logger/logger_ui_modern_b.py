@@ -15,7 +15,7 @@ class UiMainWindowModernB(object):
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernB")
-        MainWindow.resize(700, 420)
+        MainWindow.resize(900, 500)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -32,6 +32,7 @@ class UiMainWindowModernB(object):
 
         self.groupBox_serial = QtWidgets.QGroupBox("Serial")
         serial_layout = QtWidgets.QFormLayout(self.groupBox_serial)
+        serial_layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         self.comboBox_port = QtWidgets.QComboBox()
         self.comboBox_baud = QtWidgets.QComboBox()
         self.comboBox_baud.addItems([
@@ -68,6 +69,7 @@ class UiMainWindowModernB(object):
 
         self.groupBox_log = QtWidgets.QGroupBox("Logging")
         log_layout = QtWidgets.QGridLayout(self.groupBox_log)
+        log_layout.setColumnStretch(1, 1)
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
         log_layout.addWidget(self.lineEdit_log_dir, 0, 1)
@@ -106,6 +108,9 @@ class UiMainWindowModernB(object):
 
         # Status bar --------------------------------------------------------
         self.statusbar = QtWidgets.QStatusBar(MainWindow)
+        self.label_connection_indicator = QtWidgets.QLabel("● Disconnected")
+        self.label_connection_indicator.setStyleSheet("color: red;")
+        self.statusbar.addPermanentWidget(self.label_connection_indicator)
         MainWindow.setStatusBar(self.statusbar)
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
