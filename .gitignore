@@ -20,3 +20,8 @@ __pycache__/
 .idea/usage.statistics.xml
 *.egg-info/
 
+
+# Tauri example
+ui_examples/tauri_data_logger/node_modules/
+ui_examples/tauri_data_logger/dist/
+ui_examples/tauri_data_logger/src-tauri/target/
