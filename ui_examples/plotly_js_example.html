@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Plotly JS Example</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body class="bg-gray-50 text-gray-900">
+  <div class="max-w-3xl mx-auto p-4">
+    <h1 class="text-2xl font-bold mb-4 text-center">Plotly.js Modern UI</h1>
+    <div id="plot" class="rounded-lg shadow-md"></div>
+  </div>
+  <script>
+    const trace = {
+      x: [1, 2, 3, 4, 5],
+      y: [1, 4, 9, 16, 25],
+      mode: 'lines+markers',
+      marker: { color: '#1f77b4' },
+    };
+
+    const layout = {
+      margin: { t: 20 },
+      paper_bgcolor: 'transparent',
+      plot_bgcolor: 'transparent',
+    };
+
+    Plotly.newPlot('plot', [trace], layout, { responsive: true });
+  </script>
+</body>
+</html>
