@@ -61,6 +61,18 @@ The plot opens in your default browser with editing enabled.  An HTML file
 named ``plotly_demo.html`` is also written to the current directory so the
 interactive figure can be reopened and modified at any time.
 
+## Sample UI approaches
+
+The ``ui_examples`` folder provides minimal scripts that showcase different
+ways to build user interfaces:
+
+- ``cli_menu.py`` – a simple text-based menu.
+- ``pyqt_demo.py`` – a small desktop window with a button.
+- ``plotly_ui.py`` – an interactive Plotly figure with a range slider.
+
+Run any of the scripts with ``python ui_examples/<name>.py`` to explore each
+style.
+
 ## Master launcher
 
 `launcher.py` starts a small GUI that groups all available loggers and
