@@ -1,11 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from pathlib import Path
+
+
+# Include data files from the ``plotting`` package so bundled executables can
+# access resources like ``default_config.json`` via ``importlib.resources``.
+plotting_datas = [(str(Path("plotting") / "default_config.json"), "plotting")]
 
 a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=plotting_datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

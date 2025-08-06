@@ -54,12 +54,12 @@ The Python tools can be bundled into native applications with
 [PyInstaller](https://pyinstaller.org/).  This dependency is included in
 `requirements.txt` so no extra setup is required. After activating the virtual
 environment and installing the requirements you can create platform specific
-packages with:
+packages with the provided `launcher.spec` which bundles required data files.
 
 ### Windows (`.exe`)
 
 ```bash
-pyinstaller --noconsole --onefile launcher.py
+pyinstaller launcher.spec
 ```
 
 The executable `launcher.exe` appears in the `dist` folder and can be copied to
@@ -68,7 +68,7 @@ any Windows machine.
 ### macOS (`.app` or `.dmg`)
 
 ```bash
-pyinstaller --windowed --onefile launcher.py
+pyinstaller launcher.spec
 ```
 
 This creates `dist/launcher.app`.  To distribute it as a disk image run:
