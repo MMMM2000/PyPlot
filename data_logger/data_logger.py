@@ -4,6 +4,7 @@ from pathlib import Path
 import time
 import math
 from typing import Any, cast, List
+from collections import deque
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtSerialPort import QSerialPortInfo
@@ -92,6 +93,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_idx = 0
         self.logging_on = False
         self.sample_rate: float | None = None
+        self._rate_window: deque[float] = deque(maxlen=20)
         self.last_sample_time: float | None = None
         self._last_time_secs: int | None = None
         self._finish_time: float | None = None
@@ -216,10 +218,8 @@ class MainWindow(QtWidgets.QMainWindow):
             dt = now - self.last_sample_time
             if dt > 0:
                 rate = 1.0 / dt
-                if self.sample_rate is None:
-                    self.sample_rate = rate
-                else:
-                    self.sample_rate = 0.9 * self.sample_rate + 0.1 * rate
+                self._rate_window.append(rate)
+                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
         self.last_sample_time = now
 
         if self.logging_on:
