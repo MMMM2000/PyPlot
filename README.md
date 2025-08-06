@@ -69,6 +69,7 @@ ways to build user interfaces:
 - ``cli_menu.py`` – a simple text-based menu.
 - ``pyqt_demo.py`` – a small desktop window with a button.
 - ``plotly_ui.py`` – an interactive Plotly figure with a range slider.
+- ``tauri_data_logger`` – a desktop app built with Tauri, React and Tailwind CSS.
 
 Run any of the scripts with ``python ui_examples/<name>.py`` to explore each
 style.

@@ -1,0 +1,19 @@
+{
+  "package": {
+    "productName": "Tauri Data Logger",
+    "version": "0.1.0"
+  },
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build",
+    "devPath": "http://localhost:5173",
+    "distDir": "../dist"
+  },
+  "tauri": {
+    "windows": [
+      {
+        "title": "Tauri Data Logger"
+      }
+    ]
+  }
+}
