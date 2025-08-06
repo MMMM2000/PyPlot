@@ -2,6 +2,7 @@ import sys
 import os
 from pathlib import Path
 import time
+import math
 from typing import Any, cast, List
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
@@ -80,6 +81,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.timeout.connect(self.update_response_label)
         self.timer.start(10)
 
+        # update time estimate once per second
+        self.time_timer = QtCore.QTimer()
+        self.time_timer.timeout.connect(self.update_time_estimate)
+        self.time_timer.start(1000)
+
         # logging state
         self.log_file = None  # becomes an open file in start_logging()
         self.sample_count = 2000
@@ -88,6 +94,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_rate: float | None = None
         self.last_sample_time: float | None = None
         self._last_time_secs: int | None = None
+        self._finish_time: float | None = None
 
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
@@ -223,14 +230,18 @@ class MainWindow(QtWidgets.QMainWindow):
             self.sample_idx += 1
             cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
 
+            if self.sample_rate:
+                remaining_samples = self.sample_count - self.sample_idx
+                self._finish_time = now + remaining_samples / self.sample_rate
+
             if self.sample_idx >= self.sample_count:
                 self.log_file.close()
                 self.logging_on = False
                 self.ui.pushButton_record.setEnabled(True)
                 self.ui.pushButton_cancel.setEnabled(False)
+                self._finish_time = None
 
         self.lock.unlock()
-        self.update_time_estimate()
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
@@ -243,25 +254,27 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if self.sample_rate:
             remaining = self.ui.spinBox_log_sample_count.value()
-            if self.logging_on:
-                remaining -= self.sample_idx
-            secs = int(remaining / self.sample_rate) if self.sample_rate else 0
+            if self.logging_on and self._finish_time is not None:
+                secs = max(0, math.ceil(self._finish_time - time.perf_counter()))
+            else:
+                if self.logging_on:
+                    remaining -= self.sample_idx
+                secs = math.ceil(remaining / self.sample_rate)
 
-            if secs != self._last_time_secs:
-                self._last_time_secs = secs
-                if secs >= 3600:
-                    hours, rem = divmod(secs, 3600)
-                    minutes, seconds = divmod(rem, 60)
-                    label.setText(
-                        f"Time remaining: {hours}h {minutes:02d}m {seconds:02d}s"
-                    )
-                elif secs >= 60:
-                    minutes, seconds = divmod(secs, 60)
-                    label.setText(
-                        f"Time remaining: {minutes}m {seconds:02d}s"
-                    )
-                else:
-                    label.setText(f"Time remaining: {secs}s")
+            self._last_time_secs = secs
+            if secs >= 3600:
+                hours, rem = divmod(secs, 3600)
+                minutes, seconds = divmod(rem, 60)
+                label.setText(
+                    f"Time remaining: {hours}h {minutes:02d}m {seconds:02d}s"
+                )
+            elif secs >= 60:
+                minutes, seconds = divmod(secs, 60)
+                label.setText(
+                    f"Time remaining: {minutes}m {seconds:02d}s"
+                )
+            else:
+                label.setText(f"Time remaining: {secs}s")
         else:
             self._last_time_secs = None
             label.setText("Time remaining: N/A")
@@ -317,6 +330,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = self.ui.spinBox_log_sample_count.value()
         self.sample_idx   = 0
         self.logging_on   = True
+        self._finish_time = None
 
         self.ui.pushButton_record.setEnabled(False)
         self.ui.pushButton_cancel.setEnabled(True)
@@ -335,6 +349,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logging_on = False
         self.ui.pushButton_record.setEnabled(True)
         self.ui.pushButton_cancel.setEnabled(False)
+        self._finish_time = None
         self.update_time_estimate()
 
 def main(argv: List[str] | None = None) -> QtWidgets.QWidget:
