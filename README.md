@@ -48,6 +48,41 @@ font should be typed into a terminal exactly as written and confirmed with the
 Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ``activate`` command from step 4 before running ``python`` or ``pip`` again.
 
+## Building standalone executables
+
+The Python tools can be bundled into native applications with
+[PyInstaller](https://pyinstaller.org/).  This dependency is included in
+`requirements.txt` so no extra setup is required. After activating the virtual
+environment and installing the requirements you can create platform specific
+packages with:
+
+### Windows (`.exe`)
+
+```bash
+pyinstaller --noconsole --onefile launcher.py
+```
+
+The executable `launcher.exe` appears in the `dist` folder and can be copied to
+any Windows machine.
+
+### macOS (`.app` or `.dmg`)
+
+```bash
+pyinstaller --windowed --onefile launcher.py
+```
+
+This creates `dist/launcher.app`.  To distribute it as a disk image run:
+
+```bash
+hdiutil create -volname PythonPlot -srcfolder dist/launcher.app dist/launcher.dmg
+```
+
+Both commands may be executed on a Mac to generate a self‑contained application
+bundle.
+
+React or Tauri experiments are **not** required for the Python tools.  They live
+in the `ui_examples` directory and have their own dependencies and build steps.
+
 ## Plotly interactive example
 
 A small demo using [Plotly](https://plotly.com/python/) shows how to create an
@@ -69,7 +104,8 @@ ways to build user interfaces:
 - ``cli_menu.py`` – a simple text-based menu.
 - ``pyqt_demo.py`` – a small desktop window with a button.
 - ``plotly_ui.py`` – an interactive Plotly figure with a range slider.
-- ``tauri_data_logger`` – a desktop app built with Tauri, React and Tailwind CSS.
+- ``tauri_data_logger`` – a desktop app built with Tauri, React and Tailwind CSS
+  (see its separate README for setup details).
 
 Run any of the scripts with ``python ui_examples/<name>.py`` to explore each
 style.

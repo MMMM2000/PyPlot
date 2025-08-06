@@ -1,30 +1,70 @@
 # Tauri Data Logger UI
 
-A minimal sample data logger UI built with React, Tailwind CSS, and Tauri. The app invokes a Rust command to fetch sample log entries and displays them in a small React interface.
+A minimal desktop sample built with **React**, **Tailwind CSS** and
+[Tauri](https://tauri.app).  The React interface calls into a Rust command that
+returns a few mock log entries so you can see how the pieces fit together.
 
 ## Prerequisites
 
-- [Node.js](https://nodejs.org/) (v16 or later)
-- [Rust](https://www.rust-lang.org/tools/install)
-- Tauri CLI: `npm install -g @tauri-apps/cli` (or run through `npm` scripts)
+The project relies on tools from both the JavaScript and Rust ecosystems.
 
-## Setup
+### Common tools
+
+- [Node.js](https://nodejs.org/) 16 or newer
+- [Rust](https://www.rust-lang.org/tools/install) via `rustup`
+- Tauri CLI – install globally with `npm install -g @tauri-apps/cli` or use the
+  `tauri` binary provided by the `npm` scripts
+
+### Platform packages
+
+**Windows**
+
+- Install the [Visual Studio C++ Build Tools](https://aka.ms/vs/17/release/vs_BuildTools.exe)
+  and enable the *Desktop development with C++* workload.
+
+**macOS**
+
+- Install the Xcode command line tools: `xcode-select --install`
+
+**Linux (Debian/Ubuntu)**
+
+Install a handful of system libraries required by Tauri:
+
+```bash
+sudo apt update
+sudo apt install libgtk-3-dev libwebkit2gtk-4.0-dev libsoup2.4-dev \
+    libayatana-appindicator3-dev librsvg2-dev
+```
+
+Some modern distributions only provide WebKit 4.1.  In that case install
+`libwebkit2gtk-4.1-dev` and run the commands below with
+`TAURI_BUILD_FLAGS="--features wry/webkit2gtk_4_1"`.
+
+## Setup and development
 
 ```bash
 cd ui_examples/tauri_data_logger
-npm install
-npm run tauri dev
+npm install                           # fetch JavaScript dependencies
+npm run tauri dev                     # start the Tauri development server
+# If using WebKit 4.1:
+# TAURI_BUILD_FLAGS="--features wry/webkit2gtk_4_1" npm run tauri dev
 ```
 
-The app opens a desktop window. Use the **Load Sample Logs** button to fetch a few hard-coded log entries from the Rust backend.
+A desktop window opens.  Press **Load Sample Logs** to invoke the Rust backend
+and display a few hard-coded entries.
 
-## Build
-
-To create a production build:
+## Building a release binary
 
 ```bash
-npm run build
-npm run tauri build
+npm run build                         # bundle the React frontend
+npm run tauri build                   # create a native executable
+# or, with WebKit 4.1:
+# TAURI_BUILD_FLAGS="--features wry/webkit2gtk_4_1" npm run tauri build
 ```
 
-This produces a standalone binary in the `src-tauri/target` directory.
+The compiled application will be placed in `src-tauri/target/release` (or
+`debug` when running the dev command).
+
+This Tauri example lives entirely inside `ui_examples/tauri_data_logger` and is
+separate from the Python plotting tools.
+
