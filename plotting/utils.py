@@ -68,8 +68,11 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
     be applied and updates automatically when the system appearance changes.
     """
 
+    scheme = app.styleHints().colorScheme()
+
     if sys.platform.startswith("win"):
-        app.setStyle("windowsvista")
+        style = "windowsvista" if scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
+        app.setStyle(style)
     elif sys.platform == "darwin":
         # ``macintosh`` is available on all Qt builds for macOS; ``macos`` was
         # introduced in Qt 6.5.  ``setStyle`` ignores unknown styles so this
@@ -79,11 +82,17 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
     else:
         app.setStyle("Fusion")
 
-    _apply_color_scheme(app)
+    _apply_color_scheme(app, scheme)
 
     hints = app.styleHints()
     if hasattr(hints, "colorSchemeChanged"):
-        hints.colorSchemeChanged.connect(lambda scheme: _apply_color_scheme(app, scheme))
+        def update_scheme(new_scheme: QtCore.Qt.ColorScheme) -> None:
+            if sys.platform.startswith("win"):
+                style = "windowsvista" if new_scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
+                app.setStyle(style)
+            _apply_color_scheme(app, new_scheme)
+
+        hints.colorSchemeChanged.connect(update_scheme)
 
 
 def apply_dark_theme(app: QtWidgets.QApplication) -> None:
