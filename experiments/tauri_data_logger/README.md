@@ -1,8 +1,8 @@
 # Tauri Data Logger UI
 
 A minimal desktop sample built with **React**, **Tailwind CSS** and
-[Tauri](https://tauri.app).  The React interface calls into a Rust command that
-returns a few mock log entries so you can see how the pieces fit together.
+[Tauri](https://tauri.app).  The React interface talks to a small Python
+backend through a Rust command so you can see how all the pieces fit together.
 
 ## Prerequisites
 
@@ -43,15 +43,15 @@ Some modern distributions only provide WebKit 4.1.  In that case install
 ## Setup and development
 
 ```bash
-cd ui_examples/tauri_data_logger
+cd experiments/tauri_data_logger
 npm install                           # fetch JavaScript dependencies
 npm run tauri dev                     # start the Tauri development server
 # If using WebKit 4.1:
 # TAURI_BUILD_FLAGS="--features wry/webkit2gtk_4_1" npm run tauri dev
 ```
 
-A desktop window opens.  Press **Load Sample Logs** to invoke the Rust backend
-and display a few hard-coded entries.
+A desktop window opens.  Press **Load Logs from Python** to invoke the Python
+script and display a few generated entries.
 
 ## Building a release binary
 
@@ -65,6 +65,6 @@ npm run tauri build                   # create a native executable
 The compiled application will be placed in `src-tauri/target/release` (or
 `debug` when running the dev command).
 
-This Tauri example lives entirely inside `ui_examples/tauri_data_logger` and is
-separate from the Python plotting tools.
+This example lives entirely inside `experiments/tauri_data_logger` and is
+separate from the main Python plotting tools.
 

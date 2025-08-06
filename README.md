@@ -81,7 +81,7 @@ Both commands may be executed on a Mac to generate a self‑contained applicatio
 bundle.
 
 React or Tauri experiments are **not** required for the Python tools.  They live
-in the `ui_examples` directory and have their own dependencies and build steps.
+in the `experiments` directory and have their own dependencies and build steps.
 
 ## Plotly interactive example
 
@@ -96,19 +96,12 @@ The plot opens in your default browser with editing enabled.  An HTML file
 named ``plotly_demo.html`` is also written to the current directory so the
 interactive figure can be reopened and modified at any time.
 
-## Sample UI approaches
+## Experiments
 
-The ``ui_examples`` folder provides minimal scripts that showcase different
-ways to build user interfaces:
-
-- ``cli_menu.py`` – a simple text-based menu.
-- ``pyqt_demo.py`` – a small desktop window with a button.
-- ``plotly_ui.py`` – an interactive Plotly figure with a range slider.
-- ``tauri_data_logger`` – a desktop app built with Tauri, React and Tailwind CSS
-  (see its separate README for setup details).
-
-Run any of the scripts with ``python ui_examples/<name>.py`` to explore each
-style.
+The ``experiments`` folder holds interface prototypes that are separate from the
+core Python code.  It currently contains a Tauri, React and Tailwind CSS sample
+that communicates with a small Python backend.  See its README for setup
+instructions.
 
 ## Master launcher
 

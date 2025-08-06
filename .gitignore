@@ -21,7 +21,7 @@ __pycache__/
 *.egg-info/
 
 
-# Tauri example
-ui_examples/tauri_data_logger/node_modules/
-ui_examples/tauri_data_logger/dist/
-ui_examples/tauri_data_logger/src-tauri/target/
+# Tauri experiments
+experiments/tauri_data_logger/node_modules/
+experiments/tauri_data_logger/dist/
+experiments/tauri_data_logger/src-tauri/target/

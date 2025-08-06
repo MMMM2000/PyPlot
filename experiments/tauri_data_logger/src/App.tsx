@@ -10,7 +10,7 @@ export default function App() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
 
   async function loadLogs() {
-    const data = await invoke<LogEntry[]>('get_sample_logs');
+    const data = await invoke<LogEntry[]>('get_logs');
     setLogs(data);
   }
 
@@ -18,7 +18,7 @@ export default function App() {
     <div className="p-4">
       <h1 className="text-2xl font-bold mb-4">Data Logger</h1>
       <button onClick={loadLogs} className="bg-blue-500 text-white px-4 py-2 rounded">
-        Load Sample Logs
+        Load Logs from Python
       </button>
       <ul className="mt-4 space-y-2">
         {logs.map((log, idx) => (
