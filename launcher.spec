@@ -5,7 +5,7 @@ a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('plotting/default_config.json', 'plotting')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

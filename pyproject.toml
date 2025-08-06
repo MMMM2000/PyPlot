@@ -21,6 +21,9 @@ plot-cli = "plotting.cli:main"
 [tool.setuptools.packages.find]
 include = ["data_logger", "plotting"]
 
+[tool.setuptools.package-data]
+plotting = ["default_config.json"]
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
