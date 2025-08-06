@@ -87,6 +87,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logging_on = False
         self.sample_rate: float | None = None
         self.last_sample_time: float | None = None
+        self._last_time_secs: int | None = None
 
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
@@ -244,9 +245,25 @@ class MainWindow(QtWidgets.QMainWindow):
             remaining = self.ui.spinBox_log_sample_count.value()
             if self.logging_on:
                 remaining -= self.sample_idx
-            secs = remaining / self.sample_rate if self.sample_rate else 0.0
-            label.setText(f"Time remaining: {secs:.1f} s")
+            secs = int(remaining / self.sample_rate) if self.sample_rate else 0
+
+            if secs != self._last_time_secs:
+                self._last_time_secs = secs
+                if secs >= 3600:
+                    hours, rem = divmod(secs, 3600)
+                    minutes, seconds = divmod(rem, 60)
+                    label.setText(
+                        f"Time remaining: {hours}h {minutes:02d}m {seconds:02d}s"
+                    )
+                elif secs >= 60:
+                    minutes, seconds = divmod(secs, 60)
+                    label.setText(
+                        f"Time remaining: {minutes}m {seconds:02d}s"
+                    )
+                else:
+                    label.setText(f"Time remaining: {secs}s")
         else:
+            self._last_time_secs = None
             label.setText("Time remaining: N/A")
 
     def send_command(self):
