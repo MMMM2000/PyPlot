@@ -5,7 +5,8 @@ a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # Include default configuration so the bundled executable can locate it.
+    datas=[('plotting/default_config.json', 'plotting')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
