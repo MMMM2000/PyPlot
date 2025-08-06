@@ -93,7 +93,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_idx = 0
         self.logging_on = False
         self.sample_rate: float | None = None
-        self._rate_window: deque[float] = deque(maxlen=20)
+        self._rate_window: deque[float] = deque(maxlen=1000)
         self.last_sample_time: float | None = None
         self._last_time_secs: int | None = None
         self._finish_time: float | None = None
