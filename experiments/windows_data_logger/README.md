@@ -2,7 +2,8 @@
 
 Simple WinForms application that logs serial data to a text file. It mirrors the
 features of the PyQt6 logger: choose log directory, optional sub-folder creation
-based on the file name, and customizable file names.
+based on the file name, and customizable file names. The project targets
+**.NET 9.0** so make sure the latest SDK is installed.
 
 ## Building
 
