@@ -5,7 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
-tauri = { version = "1", features = ["dialog-open", "dialog-save", "fs-read-file", "fs-write-file", "path-all"] }
+tauri = { version = "1", features = [] }
 tauri-plugin-serialport-v1 = "0.1.0"
 
 [build-dependencies]
