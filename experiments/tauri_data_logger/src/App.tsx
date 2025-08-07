@@ -6,15 +6,17 @@ import {
 import { open } from '@tauri-apps/api/dialog';
 import { writeTextFile, createDir } from '@tauri-apps/api/fs';
 import { join, homeDir } from '@tauri-apps/api/path';
+import FileNameBuilder from './FileNameBuilder';
 
 const DEFAULT_CMD = '>2050;1270;1;';
 const DEFAULT_SAMPLE_COUNT = 2000;
 const DEFAULT_LOG_FILE_NAME = 'log';
+const BAUD_RATES = [921600, 460800, 115200, 57600, 19200, 9600];
 
 export default function App() {
   const [ports, setPorts] = useState<SerialportInfo[]>([]);
   const [path, setPath] = useState('');
-  const [baud, setBaud] = useState(115200);
+  const [baud, setBaud] = useState(BAUD_RATES[0]);
   const [port, setPort] = useState<Serialport | null>(null);
   const [connected, setConnected] = useState(false);
   const [command, setCommand] = useState(DEFAULT_CMD);
@@ -145,7 +147,7 @@ export default function App() {
   const progress = Math.floor((sampleIdx / sampleCount) * 100);
 
   return (
-    <div className="p-4 space-y-4">
+    <div className="min-h-screen p-4 space-y-4 bg-white text-gray-900 dark:bg-gray-900 dark:text-gray-100">
       <h1 className="text-2xl font-bold">Data Logger</h1>
       <div className="flex items-center space-x-2">
         <select
@@ -165,12 +167,17 @@ export default function App() {
         >
           Refresh
         </button>
-        <input
-          type="number"
+        <select
           value={baud}
           onChange={(e) => setBaud(parseInt(e.target.value))}
-          className="border p-1 w-24"
-        />
+          className="border p-1"
+        >
+          {BAUD_RATES.map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
         <button
           onClick={toggleConnection}
           className="bg-blue-500 text-white px-2 py-1 rounded"
@@ -209,21 +216,15 @@ export default function App() {
             Browse
           </button>
         </div>
-        <div className="flex items-center space-x-2">
+        <FileNameBuilder fileName={fileName} setFileName={setFileName} />
+        <label className="flex items-center space-x-1">
           <input
-            value={fileName}
-            onChange={(e) => setFileName(e.target.value)}
-            className="border p-1 flex-grow"
+            type="checkbox"
+            checked={useSubdir}
+            onChange={(e) => setUseSubdir(e.target.checked)}
           />
-          <label className="flex items-center space-x-1">
-            <input
-              type="checkbox"
-              checked={useSubdir}
-              onChange={(e) => setUseSubdir(e.target.checked)}
-            />
-            <span>Subfolder</span>
-          </label>
-        </div>
+          <span>Subfolder</span>
+        </label>
         <div className="flex items-center space-x-2">
           <input
             type="number"
@@ -246,7 +247,7 @@ export default function App() {
             Cancel
           </button>
         </div>
-        <div className="h-4 bg-gray-200 rounded">
+        <div className="h-4 bg-gray-200 dark:bg-gray-700 rounded">
           <div
             className="h-full bg-purple-500 rounded"
             style={{ width: `${progress}%` }}
