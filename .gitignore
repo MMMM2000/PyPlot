@@ -29,3 +29,5 @@ experiments/tauri_data_logger/src-tauri/target/
 # Windows data logger build outputs
 experiments/windows_data_logger/bin/
 experiments/windows_data_logger/obj/
+
+.fake
