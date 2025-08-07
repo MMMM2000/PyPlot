@@ -3,11 +3,13 @@ import {
   Serialport,
   SerialportInfo,
 } from '@kuyoonjo/tauri-plugin-serialport-api';
-import { save } from '@tauri-apps/api/dialog';
-import { writeTextFile } from '@tauri-apps/api/fs';
+import { open } from '@tauri-apps/api/dialog';
+import { writeTextFile, createDir } from '@tauri-apps/api/fs';
+import { join, homeDir } from '@tauri-apps/api/path';
 
 const DEFAULT_CMD = '>2050;1270;1;';
 const DEFAULT_SAMPLE_COUNT = 2000;
+const DEFAULT_LOG_FILE_NAME = 'log';
 
 export default function App() {
   const [ports, setPorts] = useState<SerialportInfo[]>([]);
@@ -25,9 +27,18 @@ export default function App() {
   const lastTimeRef = useRef<number | null>(null);
   const rateWindowRef = useRef<number[]>([]);
   const [sampleRate, setSampleRate] = useState<number | null>(null);
+  const [logDir, setLogDir] = useState('');
+  const [fileName, setFileName] = useState(DEFAULT_LOG_FILE_NAME);
+  const [useSubdir, setUseSubdir] = useState(false);
 
   useEffect(() => {
     refreshPorts();
+    (async () => {
+      const home = await homeDir();
+      const dir = await join(home, 'python_plot_logs');
+      await createDir(dir, { recursive: true });
+      setLogDir(dir);
+    })();
   }, []);
 
   async function refreshPorts() {
@@ -50,6 +61,14 @@ export default function App() {
     await p.listen(onData, true);
     setPort(p);
     setConnected(true);
+  }
+
+  async function chooseLogDir() {
+    const selected = await open({ directory: true });
+    if (typeof selected === 'string') {
+      await createDir(selected, { recursive: true });
+      setLogDir(selected);
+    }
   }
 
   async function onData(data: string) {
@@ -95,10 +114,24 @@ export default function App() {
   }
 
   async function startLogging() {
-    const path = await save({ filters: [{ name: 'Text', extensions: ['txt'] }] });
-    if (!path) return;
-    logFileRef.current = path as string;
-    await writeTextFile(logFileRef.current, '');
+    let dir = logDir;
+    if (!dir) {
+      const home = await homeDir();
+      dir = await join(home, 'python_plot_logs');
+    }
+    let base = fileName || DEFAULT_LOG_FILE_NAME;
+    let fullDir = dir;
+    if (useSubdir) {
+      const parts = base.split(' ');
+      if (parts.length > 1) {
+        const folder = parts.slice(0, -1).join(' ');
+        fullDir = await join(dir, folder);
+      }
+    }
+    await createDir(fullDir, { recursive: true });
+    const fullPath = await join(fullDir, `${base}.txt`);
+    logFileRef.current = fullPath;
+    await writeTextFile(fullPath, '');
     setSampleIdx(0);
     setLogging(true);
   }
@@ -163,6 +196,34 @@ export default function App() {
       </div>
 
       <div className="space-y-2">
+        <div className="flex items-center space-x-2">
+          <input
+            value={logDir}
+            onChange={(e) => setLogDir(e.target.value)}
+            className="border p-1 flex-grow"
+          />
+          <button
+            onClick={chooseLogDir}
+            className="bg-gray-500 text-white px-2 py-1 rounded"
+          >
+            Browse
+          </button>
+        </div>
+        <div className="flex items-center space-x-2">
+          <input
+            value={fileName}
+            onChange={(e) => setFileName(e.target.value)}
+            className="border p-1 flex-grow"
+          />
+          <label className="flex items-center space-x-1">
+            <input
+              type="checkbox"
+              checked={useSubdir}
+              onChange={(e) => setUseSubdir(e.target.checked)}
+            />
+            <span>Subfolder</span>
+          </label>
+        </div>
         <div className="flex items-center space-x-2">
           <input
             type="number"

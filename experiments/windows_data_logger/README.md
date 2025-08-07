@@ -1,19 +1,26 @@
-# Windows Native Data Logger
+# Windows Data Logger
 
-This experiment provides a simple data logger using Tkinter and PySerial to
-offer a Windows-native look and feel. The interface mirrors the PyQt6 logger:
+Simple WinForms application that logs serial data to a text file. It mirrors the
+features of the PyQt6 logger: choose log directory, optional sub-folder creation
+based on the file name, and customizable file names.
 
-- Select and refresh available serial ports
-- Connect and send commands
-- Record a fixed number of samples to a text file
-- Display live sample rate and remaining time
-- Cancel an active recording
+## Building
 
-Run the logger on Windows with:
+1. Install the [.NET 6 SDK](https://dotnet.microsoft.com/en-us/download).
+2. From a developer command prompt, run:
+   ```sh
+   dotnet build
+   ```
 
-```bash
-python logger.py
+## Running
+
+After building, launch the app with:
+
+```sh
+dotnet run
 ```
 
-The script depends on the `pyserial` package which is listed in the project
-requirements.
+Select the serial port and baud rate, then enter a command. Choose a log
+directory, specify a base file name, and enable **Subfolder** to create a folder
+from the file name (all words except the last). Press **Record** to start
+logging and **Cancel** to stop.
