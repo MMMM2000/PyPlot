@@ -3,7 +3,10 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, cast
 
-from PyQt6 import QtWidgets
+try:  # pragma: no cover - optional GUI dependency
+    from PyQt6 import QtWidgets
+except Exception:  # pragma: no cover - running without Qt
+    QtWidgets = None  # type: ignore
 
 import numpy as np
 import pandas as pd
@@ -431,7 +434,12 @@ def main(files: List[str]) -> None:
     else:
         plt.close('all')
 
-    if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
+    if (
+        QtWidgets is not None
+        and not SAVE_PLOTS
+        and plots
+        and QtWidgets.QApplication.instance() is not None
+    ):
         reply = QtWidgets.QMessageBox.question(
             None,
             "Save Plots",

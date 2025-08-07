@@ -3,7 +3,11 @@ import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, cast
 
-from PyQt6 import QtWidgets, QtCore
+try:  # pragma: no cover - optional GUI dependency
+    from PyQt6 import QtWidgets, QtCore
+except Exception:  # pragma: no cover - running without Qt
+    QtWidgets = None  # type: ignore
+    QtCore = None  # type: ignore
 
 import numpy as np
 import pandas as pd
@@ -66,42 +70,52 @@ FNAME_RE = re.compile(
 
 class ProgressDialog:
     """Fallback progress indicator used when no GUI is provided."""
+
     def __init__(self, total: int):
         self.total = total
         self.count = 0
         self.cancelled = False
         self.root = self
+
     def update(self) -> None:
         self.count += 1
+
     def destroy(self) -> None:
         pass
 
 
-def non_modal_question(
-    title: str,
-    text: str,
-    buttons: QtWidgets.QMessageBox.standardButtons = (
-        QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
-    ),
-) -> QtWidgets.QMessageBox.StandardButton:
-    """Return the clicked button of a non-modal question dialog."""
+if QtWidgets is not None and QtCore is not None:
+    def non_modal_question(
+        title: str,
+        text: str,
+        buttons: Any = None,
+    ) -> QtWidgets.QMessageBox.StandardButton:
+        """Return the clicked button of a non-modal question dialog."""
 
-    box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Question, title, text)
-    box.setStandardButtons(buttons)
-    box.setWindowModality(QtCore.Qt.WindowModality.NonModal)
-    result = {
-        "btn": QtWidgets.QMessageBox.StandardButton.NoButton
-    }
+        if buttons is None:
+            buttons = (
+                QtWidgets.QMessageBox.StandardButton.Yes
+                | QtWidgets.QMessageBox.StandardButton.No
+            )
 
-    def _finished(code: int) -> None:
-        result["btn"] = QtWidgets.QMessageBox.StandardButton(code)
-        loop.quit()
+        box = QtWidgets.QMessageBox(QtWidgets.QMessageBox.Icon.Question, title, text)
+        box.setStandardButtons(buttons)
+        box.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+        result = {"btn": QtWidgets.QMessageBox.StandardButton.NoButton}
 
-    loop = QtCore.QEventLoop()
-    box.finished.connect(_finished)
-    box.show()
-    loop.exec()
-    return result["btn"]
+        def _finished(code: int) -> None:
+            result["btn"] = QtWidgets.QMessageBox.StandardButton(code)
+            loop.quit()
+
+        loop = QtCore.QEventLoop()
+        box.finished.connect(_finished)
+        box.show()
+        loop.exec()
+        return result["btn"]
+
+else:  # pragma: no cover - Qt not available
+    def non_modal_question(*_args: Any, **_kwargs: Any) -> Any:  # type: ignore
+        raise RuntimeError("QtWidgets is required for non_modal_question")
 
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
     m = FNAME_RE.match(stem)
@@ -216,7 +230,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
         print(f"Automatically removing outliers from {files}.")
         return df.drop(out_df.index)
 
-    app = QtWidgets.QApplication.instance()
+    app = QtWidgets.QApplication.instance() if QtWidgets is not None else None
 
     # Plot outliers for visual confirmation
     figs: List[Figure] = []
@@ -247,7 +261,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
         f"Outliers detected in: {files}.\nRemove them?",
     )
     plt.close("all")
-    if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+    if QtWidgets is not None and reply == QtWidgets.QMessageBox.StandardButton.Yes:
         return df.drop(out_df.index)
     return df
 
@@ -462,7 +476,12 @@ def main(files: List[str]):
     else:
         plt.close('all')
 
-    if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
+    if (
+        QtWidgets is not None
+        and not SAVE_PLOTS
+        and plots
+        and QtWidgets.QApplication.instance() is not None
+    ):
         reply = non_modal_question(
             "Save Plots",
             "Save generated plots?",
