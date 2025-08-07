@@ -107,8 +107,8 @@ export default function App() {
     setLogging(false);
   }
 
-  const remaining = sampleCount - sampleIdx;
-  const timeRemaining = sampleRate ? Math.ceil(remaining / sampleRate) : null;
+  const effectiveRemaining = logging ? sampleCount - sampleIdx : sampleCount;
+  const timeRemaining = sampleRate ? Math.ceil(effectiveRemaining / sampleRate) : null;
   const progress = Math.floor((sampleIdx / sampleCount) * 100);
 
   return (
@@ -126,6 +126,12 @@ export default function App() {
             </option>
           ))}
         </select>
+        <button
+          onClick={refreshPorts}
+          className="bg-gray-500 text-white px-2 py-1 rounded"
+        >
+          Refresh
+        </button>
         <input
           type="number"
           value={baud}
@@ -185,9 +191,8 @@ export default function App() {
             style={{ width: `${progress}%` }}
           ></div>
         </div>
-        {logging && (
-          <div>Time remaining: {timeRemaining ?? 'N/A'}s</div>
-        )}
+        <div>Sample rate: {sampleRate ? sampleRate.toFixed(1) : 'N/A'} Hz</div>
+        <div>Time remaining: {timeRemaining ?? 'N/A'}s</div>
       </div>
     </div>
   );

@@ -5,3 +5,4 @@ plotly==6.2.0
 PyQt6==6.9.1
 tqdm==4.67.1
 pyinstaller==6.15.0
+pyserial==3.5
