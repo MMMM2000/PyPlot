@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Serialport,
   SerialportInfo,
-} from 'tauri-plugin-serialport-api';
+} from '@kuyoonjo/tauri-plugin-serialport-api';
 import { save } from '@tauri-apps/api/dialog';
 import { writeTextFile } from '@tauri-apps/api/fs';
 
