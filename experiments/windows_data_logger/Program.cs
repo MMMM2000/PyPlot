@@ -1,9 +1,19 @@
+using System;
+using System.Windows.Forms;
+
 namespace WindowsDataLogger;
 
-class Program
+internal static class Program
 {
-    static void Main(string[] args)
+    /// <summary>
+    ///  Main entry point for the application.
+    /// </summary>
+    [STAThread]
+    static void Main()
     {
-        System.Console.WriteLine("Hello, World!");
+        Application.EnableVisualStyles();
+        Application.SetCompatibleTextRenderingDefault(false);
+        Application.Run(new MainForm());
     }
 }
+
