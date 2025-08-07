@@ -99,9 +99,14 @@ interactive figure can be reopened and modified at any time.
 ## Experiments
 
 The ``experiments`` folder holds interface prototypes that are separate from the
-core Python code.  It currently contains a Tauri, React and Tailwind CSS sample
-that communicates with a small Python backend.  See its README for setup
-instructions.
+core Python code. It currently contains:
+
+- A Tauri, React and Tailwind CSS sample that communicates with a small Python
+  backend.
+- A simple Windows-native logger built with Tkinter that mirrors the PyQt6
+  interface.
+
+See its README for setup instructions.
 
 ## Master launcher
 
