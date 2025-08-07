@@ -6,7 +6,7 @@ based on the file name, and customizable file names.
 
 ## Building
 
-1. Install the [.NET 6 SDK](https://dotnet.microsoft.com/en-us/download).
+1. Install the [.NET 9 SDK](https://dotnet.microsoft.com/en-us/download/dotnet/9.0).
 2. From a developer command prompt, run:
    ```sh
    dotnet build
