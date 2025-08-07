@@ -1,15 +1,9 @@
-using System;
-using System.Windows.Forms;
+namespace WindowsDataLogger;
 
-namespace WindowsDataLogger
+class Program
 {
-    internal static class Program
+    static void Main(string[] args)
     {
-        [STAThread]
-        static void Main()
-        {
-            ApplicationConfiguration.Initialize();
-            Application.Run(new MainForm());
-        }
+        System.Console.WriteLine("Hello, World!");
     }
 }
