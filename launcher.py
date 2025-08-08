@@ -18,6 +18,7 @@ if __package__ is None or __package__ == "":
     from plotting.utils import apply_system_theme
     from plotting import common
     from data_logger import data_logger
+    from plotting.pdf_plotter import pdf_gui
 else:
     from .plotting.stress_dependence import stress_gui
     from .plotting.hsw_load_compare import load_compare_gui
@@ -29,6 +30,7 @@ else:
     from .plotting.utils import apply_system_theme
     from .plotting import common
     from .data_logger import data_logger
+    from .plotting.pdf_plotter import pdf_gui
 
 
 PLOTTERS: Dict[str, Callable[[], None]] = {
@@ -39,6 +41,7 @@ PLOTTERS: Dict[str, Callable[[], None]] = {
     "Temperature Sensitivity": temp_gui.main,
     "Temperature Dependence": temp_dep_gui.main,
     "Stress Sensitivity": sens_gui.main,
+    "PDF Plotter": pdf_gui.main,
 }
 
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {

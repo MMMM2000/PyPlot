@@ -8,6 +8,7 @@ dependencies = [
     "matplotlib",
     "numpy",
     "pandas",
+    "PyPDF2",
 ]
 requires-python = ">=3.8"
 
