@@ -5,7 +5,7 @@ import re
 import sys
 from typing import Dict, Iterable, List, Tuple
 
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
@@ -57,7 +57,9 @@ class PlotWindow(QtWidgets.QWidget):
     """Window containing a matplotlib canvas and toolbar."""
 
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
+        # Force top-level window even if a parent is provided so that plots are
+        # visible when the user presses the "Plot" button.
+        super().__init__(parent, QtCore.Qt.Window)
         fig = Figure(figsize=(8, 5), constrained_layout=True)
         self.canvas = FigureCanvas(fig)
         self.ax = fig.add_subplot(111)
