@@ -55,12 +55,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self, log_dir=DEFAULT_LOG_DIR):
         super().__init__()
-        # ``log_dir`` tracks the current directory where files are saved.  When
-        # using sub-folders this will point to the active sub-folder, but we
-        # keep ``base_log_dir`` as the root directory chosen by the user so new
-        # sub-folders are created at the correct level.
+        # ``log_dir`` represents the root directory where all recordings will be
+        # placed.  When using subfolders we derive per-measurement directories
+        # from this path, so keep a dedicated copy for reference.
         self.log_dir = log_dir
-        self.base_log_dir = log_dir
+        self.root_log_dir = log_dir
         self.ui = UiMainWindow()
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
@@ -188,9 +187,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self, "Select log directory", self.log_dir
         )
         if new_dir:
-            # Update both the base directory and the current log directory.
-            self.base_log_dir = new_dir
+            # Update both the current log directory and the root directory used
+            # for deriving subfolders.
             self.log_dir = new_dir
+            self.root_log_dir = new_dir
             self.ui.lineEdit_log_dir.setText(new_dir)
 
     def read_from_port(self):
@@ -280,62 +280,31 @@ class MainWindow(QtWidgets.QMainWindow):
             self.serial.write(cmd.encode('ascii'))
 
     def start_logging(self):
-        """
-        Prompt the user for a log-file location, open the file,
-        and begin writing incoming samples to it.
-        """
-        file_base = self.ui.lineEdit_log_file.text()
-        use_sub = self.ui.checkBox_subdir.isChecked()
-
-        # Determine initial directory shown in the save dialog.  When using
-        # sub-folders we construct the expected folder name but do not create it
-        # yet; Qt will fall back to ``base_log_dir`` if it doesn't exist.
-        initial_dir = self.log_dir
-        if use_sub:
-            parts = file_base.split()
-            if len(parts) > 1:
-                folder = " ".join(parts[:-1])
-                initial_dir = os.path.join(self.base_log_dir, folder)
-            else:
-                initial_dir = self.base_log_dir
-
-        initial = os.path.join(initial_dir, f"{file_base}.txt")
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            "Select log file",
-            initial,
-            "Text files (*.txt)"
-        )
-        if not path:
+        """Open the selected log file and begin writing incoming samples."""
+        file_base = self.ui.lineEdit_log_file.text().strip()
+        if not file_base:
             return
 
-        if not path.endswith(".txt"):
-            path += ".txt"
-
-        file_base = os.path.splitext(os.path.basename(path))[0]
+        use_sub = self.ui.checkBox_subdir.isChecked()
+        target_dir = self.root_log_dir
         if use_sub:
             parts = file_base.split()
             if len(parts) > 1:
                 folder = " ".join(parts[:-1])
-                folder_path = os.path.join(self.base_log_dir, folder)
-                os.makedirs(folder_path, exist_ok=True)
-                full_path = os.path.join(folder_path, f"{file_base}.txt")
-                self.log_dir = folder_path
-            else:
-                full_path = path
-                self.log_dir = os.path.dirname(path)
-                self.base_log_dir = self.log_dir
-        else:
-            full_path = path
-            self.log_dir = os.path.dirname(path)
-            self.base_log_dir = self.log_dir
+                target_dir = os.path.join(self.root_log_dir, folder)
+        os.makedirs(target_dir, exist_ok=True)
+        full_path = os.path.join(target_dir, f"{file_base}.txt")
 
+        self.log_dir = target_dir
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.lineEdit_log_file.setText(file_base)
+
         try:
             self.log_file = open(full_path, "w")
         except OSError as exc:
-            QtWidgets.QMessageBox.critical(self, "Error", f"Failed to open {full_path}: {exc}")
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Failed to open {full_path}: {exc}"
+            )
             return
 
         self.sample_count = self.ui.spinBox_log_sample_count.value()
