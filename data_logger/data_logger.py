@@ -15,9 +15,11 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(module_dir.parent))
     from logger_ui import UiMainWindow
     from file_name_builder import FileNameBuilderWidget, InfoLineEdit
+    from serial_port import serial_connection
 else:
     from .logger_ui import UiMainWindow
     from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
+    from .serial_port import serial_connection
 
 from plotting.utils import apply_system_theme
 
@@ -68,7 +70,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
         self.ui.groupBox_commands.setEnabled(False)
 
-        self.serial = QtSerialPort.QSerialPort()
+        self.serial: QtSerialPort.QSerialPort | None = None
+        self._serial_ctx = None
         self.lock = QtCore.QMutex()
 
         self.timer = QtCore.QTimer()
@@ -142,22 +145,24 @@ class MainWindow(QtWidgets.QMainWindow):
     def toggle_connection(self):
         """Open or close the serial port on button click."""
         if not self.connected:
-            self.serial.setPortName(self.port_name)
-            self.serial.setBaudRate(self.baudrate)
-            self.serial.setFlowControl(QtSerialPort.QSerialPort.FlowControl.NoFlowControl)
-            self.serial.setDataBits(QtSerialPort.QSerialPort.DataBits.Data8)
-            self.serial.setParity(QtSerialPort.QSerialPort.Parity.NoParity)
-            self.serial.setStopBits(QtSerialPort.QSerialPort.StopBits.OneStop)
-            if self.serial.open(QtCore.QIODeviceBase.OpenModeFlag.ReadWrite):
-                self.serial.clear()
-                self.serial.readyRead.connect(self.read_from_port)
-                self.connected = True
-                self.ui.pushButton_connect_port.setText("Disconnect")
-                self.ui.groupBox_commands.setEnabled(True)
-                self.ui.label_connection_indicator.setText("\u25cf Connected")
-                self.ui.label_connection_indicator.setStyleSheet("color: green;")
+            try:
+                self._serial_ctx = serial_connection(self.port_name, self.baudrate)
+                self.serial = self._serial_ctx.__enter__()
+            except OSError as exc:
+                QtWidgets.QMessageBox.critical(self, "Error", str(exc))
+                return
+
+            self.serial.readyRead.connect(self.read_from_port)
+            self.connected = True
+            self.ui.pushButton_connect_port.setText("Disconnect")
+            self.ui.groupBox_commands.setEnabled(True)
+            self.ui.label_connection_indicator.setText("\u25cf Connected")
+            self.ui.label_connection_indicator.setStyleSheet("color: green;")
         else:
-            self.serial.close()
+            if self._serial_ctx is not None:
+                self._serial_ctx.__exit__(None, None, None)
+                self._serial_ctx = None
+            self.serial = None
             self.connected = False
             self.ui.pushButton_connect_port.setText("Connect to port")
             self.ui.groupBox_commands.setEnabled(False)
@@ -186,7 +191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         Read a line from the serial port whenever data arrives.
         Decode from ASCII, update the display, and log to file if active.
         """
-        if not self.serial.canReadLine():
+        if self.serial is None or not self.serial.canReadLine():
             return
 
         self.lock.lock()
@@ -264,7 +269,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_command(self):
         """Send the text from the command line edit down the serial port."""
         cmd = self.ui.lineEdit_port_command.text() + "\n"
-        self.serial.write(cmd.encode('ascii'))
+        if self.serial is not None:
+            self.serial.write(cmd.encode('ascii'))
 
     def start_logging(self):
         """
