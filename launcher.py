@@ -33,7 +33,10 @@ else:
     from .plotting.pdf_plotter import pdf_gui
 
 
-PLOTTERS: Dict[str, Callable[[], None]] = {
+# Some plotters return a ``QWidget`` (their main window) while others simply
+# launch their UI and return ``None``.  The launcher therefore accepts both to
+# allow a consistent interface.
+PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
     "Stress Dependence": stress_gui.main,
     "Hsw Load Compare": load_compare_gui.main,
     "Maxion Continuous": maxion_gui.main,

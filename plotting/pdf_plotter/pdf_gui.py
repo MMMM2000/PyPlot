@@ -67,6 +67,47 @@ class PlotWindow(QtWidgets.QWidget):
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 1)
 
+        # Track the desired aspect ratio of the canvas so that it can be
+        # preserved when the user resizes the window.
+        self._aspect_ratio = fig.get_figwidth() / fig.get_figheight()
+        self._update_min_size()
+
+    def _update_min_size(self) -> None:
+        """Ensure the window cannot be shrunk smaller than the figure."""
+        dpi = self.canvas.figure.dpi
+        w = self.canvas.figure.get_figwidth() * dpi
+        h = self.canvas.figure.get_figheight() * dpi
+        # Add toolbar height to keep it visible as well
+        h += self.toolbar.sizeHint().height()
+        self.setMinimumSize(int(w), int(h))
+
+    def set_figure_size(self, width: float, height: float) -> None:
+        """Update figure size and related window constraints."""
+        self.canvas.figure.set_size_inches(width, height)
+        self._aspect_ratio = width / height
+        dpi = self.canvas.figure.dpi
+        self.canvas.setFixedSize(int(width * dpi), int(height * dpi))
+        self._update_min_size()
+        # Ensure current size respects the new minimum size
+        self.resize(max(self.width(), self.minimumWidth()),
+                    max(self.height(), self.minimumHeight()))
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - GUI behaviour
+        """Keep the canvas in the configured aspect ratio on resize."""
+        super().resizeEvent(event)
+        dpi = self.canvas.figure.dpi
+        avail_w = self.width()
+        avail_h = self.height() - self.toolbar.height()
+        target_h = avail_w / self._aspect_ratio
+        if target_h > avail_h:
+            canvas_h = avail_h
+            canvas_w = avail_h * self._aspect_ratio
+        else:
+            canvas_w = avail_w
+            canvas_h = target_h
+        self.canvas.setFixedSize(int(canvas_w), int(canvas_h))
+        self.canvas.figure.set_size_inches(canvas_w / dpi, canvas_h / dpi, forward=False)
+
 
 class PdfPlotterWindow(QtWidgets.QWidget):
     """Settings window for plotting data extracted from PDFs."""
@@ -308,14 +349,14 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
-        win.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+        win.set_figure_size(float(self.fig_w.value()), float(self.fig_h.value()))
         ax = win.ax
         ax.clear()
         ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
         for i, (label, x, y) in enumerate(lines):
             color = self._color.name() if i == 0 else None
-            ax.plot(
+            line, = ax.plot(
                 x,
                 y,
                 linestyle=ls,
@@ -325,6 +366,20 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 color=color,
                 label=label,
             )
+            if x and y:
+                max_idx = max(range(len(x)), key=x.__getitem__)
+                delta = y[max_idx] - y[0]
+                ax.text(
+                    0.95,
+                    0.05 + i * 0.05,
+                    f"{label} Δ={delta:.2f}",
+                    transform=ax.transAxes,
+                    ha="right",
+                    va="bottom",
+                    fontsize=10,
+                    color=line.get_color(),
+                    bbox=dict(facecolor="white", alpha=0.6, edgecolor="none"),
+                )
 
         ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
         ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
