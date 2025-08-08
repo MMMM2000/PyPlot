@@ -13,14 +13,10 @@ if __package__ is None or __package__ == "":
     module_dir = Path(__file__).resolve().parent
     sys.path.append(str(module_dir))
     sys.path.append(str(module_dir.parent))
-    from logger_ui_modern_a import UiMainWindowModernA
-    from logger_ui_modern_b import UiMainWindowModernB
-    from logger_ui_modern_c import UiMainWindowModernC
+    from logger_ui import UiMainWindow
     from file_name_builder import FileNameBuilderWidget, InfoLineEdit
 else:
-    from .logger_ui_modern_a import UiMainWindowModernA
-    from .logger_ui_modern_b import UiMainWindowModernB
-    from .logger_ui_modern_c import UiMainWindowModernC
+    from .logger_ui import UiMainWindow
     from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
 
 from plotting.utils import apply_system_theme
@@ -54,14 +50,11 @@ WINDOWS: list[QtWidgets.QWidget] = []
 
 
 class MainWindow(QtWidgets.QMainWindow):
-    UI_CLASSES = [UiMainWindowModernA, UiMainWindowModernB, UiMainWindowModernC]
 
-    def __init__(self, log_dir=DEFAULT_LOG_DIR, ui_index: int = 0):
+    def __init__(self, log_dir=DEFAULT_LOG_DIR):
         super().__init__()
         self.log_dir = log_dir
-        self.ui_index = ui_index
-        UiClass = self.UI_CLASSES[self.ui_index]
-        self.ui = UiClass()
+        self.ui = UiMainWindow()
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
 
@@ -131,9 +124,6 @@ class MainWindow(QtWidgets.QMainWindow):
         refresh_btn = getattr(self.ui, "pushButton_refresh_ports", None)
         if refresh_btn is not None:
             refresh_btn.clicked.connect(self.populate_ports)
-        switch_btn = getattr(self.ui, "pushButton_switch_ui", None)
-        if switch_btn is not None:
-            switch_btn.clicked.connect(self.switch_ui)
         self.ui.spinBox_log_sample_count.valueChanged.connect(self.update_time_estimate)
 
         self.update_time_estimate()
@@ -190,14 +180,6 @@ class MainWindow(QtWidgets.QMainWindow):
         if new_dir:
             self.log_dir = new_dir
             self.ui.lineEdit_log_dir.setText(new_dir)
-
-    def switch_ui(self):
-        """Cycle through available UI layouts."""
-        new_index = (self.ui_index + 1) % len(self.UI_CLASSES)
-        new_window = MainWindow(self.log_dir, ui_index=new_index)
-        new_window.show()
-        WINDOWS.append(new_window)
-        self.close()
 
     def read_from_port(self):
         """
