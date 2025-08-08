@@ -346,7 +346,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
         if self.mode_combo.currentText() == "Combined":
             if self.plot_win is None:
-                self.plot_win = PlotWindow(self)
+                # Use a top-level window so it actually appears when shown.
+                # Giving the parent here prevents the widget from being a
+                # separate window and results in no visible plot when the
+                # user clicks the Plot button.
+                self.plot_win = PlotWindow(None)
             lines: List[Tuple[str, List[float], List[float]]] = []
             for path, sets in lines_by_file.items():
                 base = os.path.basename(path)
@@ -367,7 +371,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 w.close()
             self.plot_wins = []
             for path, sets in lines_by_file.items():
-                win = PlotWindow(self)
+                # As above, create top-level windows so they are independent
+                # from the settings dialog and show up correctly.
+                win = PlotWindow(None)
                 lines: List[Tuple[str, List[float], List[float]]] = []
                 for y_name, xs, ys in sets:
                     lines.append((y_name, xs, ys))
@@ -389,6 +395,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             w.close()
         self.plot_wins = []
         self.last_plot_window = None
+
+    # ------------------------------------------------------------------
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI cleanup
+        """Ensure all plot windows are closed when the main window closes."""
+        self.clear_plot()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------
     def _save_window(self, win: PlotWindow) -> None:
