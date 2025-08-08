@@ -5,7 +5,7 @@ import re
 import sys
 from typing import Dict, Iterable, List, Tuple
 
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
@@ -60,12 +60,21 @@ class PlotWindow(QtWidgets.QWidget):
         super().__init__(parent)
         fig = Figure(figsize=(8, 5), constrained_layout=True)
         self.canvas = FigureCanvas(fig)
+        # Keep the canvas at a fixed size so the aspect ratio is always
+        # respected. Users can adjust the figure size through the settings
+        # dialog, but the resulting plot windows themselves cannot be resized
+        # to distort the canvas.
+        self.canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+
         self.ax = fig.add_subplot(111)
         self.toolbar = NavigationToolbar(self.canvas, self)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas, 1)
+        layout.addWidget(self.canvas, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
 
 
 class PdfPlotterWindow(QtWidgets.QWidget):
@@ -308,14 +317,20 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
-        win.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+        # Update the figure and canvas size first so window sizing is correct.
+        fig_w, fig_h = float(self.fig_w.value()), float(self.fig_h.value())
+        win.canvas.figure.set_size_inches(fig_w, fig_h)
+        dpi = win.canvas.figure.dpi
+        win.canvas.setFixedSize(int(fig_w * dpi), int(fig_h * dpi))
+
         ax = win.ax
         ax.clear()
         ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
+        deltas: List[Tuple[str, float, str]] = []
         for i, (label, x, y) in enumerate(lines):
             color = self._color.name() if i == 0 else None
-            ax.plot(
+            (line,) = ax.plot(
                 x,
                 y,
                 linestyle=ls,
@@ -325,6 +340,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 color=color,
                 label=label,
             )
+            if x and y:
+                max_idx = max(range(len(x)), key=x.__getitem__)
+                delta = y[max_idx] - y[0]
+                deltas.append((label, delta, line.get_color()))
 
         ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
         ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
@@ -333,7 +352,24 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
         if self.legend_cb.isChecked():
             ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+
+        for i, (label, delta, color) in enumerate(deltas):
+            ax.text(
+                0.98,
+                0.02 + i * 0.06,
+                f"Δ {label}={delta:.2f}",
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                color=color,
+                fontsize=int(self.label_fs.value()),
+            )
+
         win.canvas.draw()
+        win.setWindowTitle(title)
+        # Ensure the window is sized to show the full plot and cannot be made smaller.
+        win.adjustSize()
+        win.setMinimumSize(win.size())
 
     # ------------------------------------------------------------------
     def plot(self) -> None:
