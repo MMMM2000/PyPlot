@@ -33,7 +33,7 @@ else:
     from .plotting.pdf_plotter import pdf_gui
 
 
-PLOTTERS: Dict[str, Callable[[], None]] = {
+PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
     "Stress Dependence": stress_gui.main,
     "Hsw Load Compare": load_compare_gui.main,
     "Maxion Continuous": maxion_gui.main,
