@@ -83,3 +83,33 @@ def test_read_from_port_logs_data(tmp_path: Path):
     assert window.log_file.closed
     assert (tmp_path / 'out.txt').read_text() == "123\n"
     assert window.sample_idx == 1
+
+
+def test_use_subdir_creates_folder(tmp_path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(log_dir=str(tmp_path))
+
+    window.ui.checkBox_subdir.setChecked(True)
+    window.ui.lineEdit_log_file.setText("FeSiBP 156_2 s2-1a 74mA 2,5a")
+
+    window.start_logging()
+    path1 = tmp_path / "FeSiBP 156_2 s2-1a 74mA" / "FeSiBP 156_2 s2-1a 74mA 2,5a.txt"
+    assert path1.exists()
+    window.cancel_logging()
+
+    # Next load uses same folder
+    window.ui.lineEdit_log_file.setText("FeSiBP 156_2 s2-1a 74mA 5a")
+    window.start_logging()
+    path2 = tmp_path / "FeSiBP 156_2 s2-1a 74mA" / "FeSiBP 156_2 s2-1a 74mA 5a.txt"
+    assert path2.exists()
+    window.cancel_logging()
+
+    # Changing the sample number should create a new sibling folder, not a nested one
+    window.ui.lineEdit_log_file.setText("FeSiBP 156_2 s2-1b 74mA 2,5a")
+    window.start_logging()
+    path3 = tmp_path / "FeSiBP 156_2 s2-1b 74mA" / "FeSiBP 156_2 s2-1b 74mA 2,5a.txt"
+    assert path3.exists()
+    # Ensure no nested directory was created inside the previous folder
+    assert not (tmp_path / "FeSiBP 156_2 s2-1a 74mA" / "FeSiBP 156_2 s2-1b 74mA").exists()
+    window.cancel_logging()
