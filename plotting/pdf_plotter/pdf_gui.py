@@ -53,17 +53,32 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     return rows
 
 
+class PlotWindow(QtWidgets.QWidget):
+    """Simple window that hosts a matplotlib canvas."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Plot")
+        layout = QtWidgets.QVBoxLayout(self)
+        fig = Figure(figsize=(8, 5), constrained_layout=True)
+        self.canvas = FigureCanvas(fig)
+        self.ax = fig.add_subplot(111)
+        self.toolbar = NavigationToolbar(self.canvas, self)
+        layout.addWidget(self.toolbar)
+        layout.addWidget(self.canvas, 1)
+
+
 class PdfPlotterWindow(QtWidgets.QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PDF T1/T2 Plotter")
         self.resize(1100, 700)
 
-        self.files: list[str] = []
-        self.rows: list[NumberRow] = []
+        self.file_rows: list[tuple[str, list[NumberRow]]] = []
+        self.plot_windows: list[PlotWindow] = []
 
         # Root layout
-        root = QtWidgets.QHBoxLayout(self)
+        root = QtWidgets.QVBoxLayout(self)
 
         # Controls panel (scrollable)
         ctrl_scroll = QtWidgets.QScrollArea()
@@ -84,10 +99,23 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Files", file_box)
 
         # Variables
-        self.y_combo = QtWidgets.QComboBox(); self.y_combo.addItems(["T1+T2", "T1", "T2", "T2–T1"])  # default T1+T2
+        self.t1_cb = QtWidgets.QCheckBox("T1")
+        self.t2_cb = QtWidgets.QCheckBox("T2")
+        self.dt_cb = QtWidgets.QCheckBox("T2–T1")
+        self.sum_cb = QtWidgets.QCheckBox("T1+T2"); self.sum_cb.setChecked(True)
+        var_box = QtWidgets.QWidget()
+        vbl = QtWidgets.QVBoxLayout(var_box)
+        for w in (self.sum_cb, self.t1_cb, self.t2_cb, self.dt_cb):
+            vbl.addWidget(w)
         self.x_combo = QtWidgets.QComboBox(); self.x_combo.addItems(["Force (N)", "Strain (mm)"])
-        form.addRow("Y variable", self.y_combo)
+        form.addRow("Variables", var_box)
         form.addRow("X variable", self.x_combo)
+
+        # Options
+        self.zero_cb = QtWidgets.QCheckBox(); self.zero_cb.setChecked(True)
+        self.separate_cb = QtWidgets.QCheckBox()
+        form.addRow("Zero first point", self.zero_cb)
+        form.addRow("Separate plots per file", self.separate_cb)
 
         # Styling
         self.line_style = QtWidgets.QComboBox(); self.line_style.addItems(["-", "--", ":", "-.", "None"]) ; self.line_style.setCurrentIndex(0)
@@ -156,34 +184,24 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.auto_cb.setText("Auto update on change")
         form.addRow("", btn_box)
 
-        # Matplotlib canvas
-        fig = Figure(figsize=(8, 5), constrained_layout=True)
-        self.canvas = FigureCanvas(fig)
-        self.ax = fig.add_subplot(111)
-        self.toolbar = NavigationToolbar(self.canvas, self)
-
-        right = QtWidgets.QWidget()
-        right_layout = QtWidgets.QVBoxLayout(right)
-        right_layout.addWidget(self.toolbar)
-        right_layout.addWidget(self.canvas, 1)
-
         # Assemble layout
-        root.addWidget(ctrl_scroll, 0)
-        root.addWidget(right, 1)
+        root.addWidget(ctrl_scroll, 1)
 
         # Wire updates
         # Connect change signals to trigger auto-plot
-        for w in [self.y_combo, self.x_combo, self.line_style, self.marker_style, self.legend_loc]:
+        for w in [self.x_combo, self.line_style, self.marker_style, self.legend_loc]:
             w.currentIndexChanged.connect(self._maybe_auto_plot)
         for w in [self.line_width, self.marker_size, self.legend_fs, self.title_fs, self.label_fs, self.tick_fs]:
             w.valueChanged.connect(self._maybe_auto_plot)
-        for w in [self.grid_cb, self.legend_cb]:
+        for w in [self.grid_cb, self.legend_cb, self.zero_cb, self.separate_cb,
+                  self.sum_cb, self.t1_cb, self.t2_cb, self.dt_cb]:
             w.stateChanged.connect(self._maybe_auto_plot)
         for w in [self.title_edit, self.x_label_edit, self.y_label_edit]:
             w.textChanged.connect(self._maybe_auto_plot)
 
-        self.y_combo.currentTextChanged.connect(self._sync_labels_from_choices)
         self.x_combo.currentTextChanged.connect(self._sync_labels_from_choices)
+        for w in [self.sum_cb, self.t1_cb, self.t2_cb, self.dt_cb]:
+            w.stateChanged.connect(self._sync_labels_from_choices)
         self._sync_labels_from_choices()
 
     def _hbox(self, *widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -209,12 +227,26 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             self._update_color_btn()
             self._maybe_auto_plot()
 
+    def _selected_vars(self) -> list[str]:
+        vars: list[str] = []
+        if self.sum_cb.isChecked():
+            vars.append(self.sum_cb.text())
+        if self.t1_cb.isChecked():
+            vars.append(self.t1_cb.text())
+        if self.t2_cb.isChecked():
+            vars.append(self.t2_cb.text())
+        if self.dt_cb.isChecked():
+            vars.append(self.dt_cb.text())
+        return vars
+
     def _sync_labels_from_choices(self) -> None:
         # Keep text fields in sync with choices unless user edited
         if not self.x_label_edit.isModified():
             self.x_label_edit.setText(self.x_combo.currentText())
         if not self.y_label_edit.isModified():
-            self.y_label_edit.setText(self.y_combo.currentText())
+            sel = self._selected_vars()
+            if len(sel) == 1:
+                self.y_label_edit.setText(sel[0])
 
     def select_files(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -225,20 +257,19 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         )
         if not paths:
             return
-        self.files = list(paths)
-        self.rows.clear()
+        self.file_rows.clear()
         total = 0
-        for p in self.files:
+        for p in paths:
             try:
                 r = parse_pdf_to_rows(p)
-                self.rows.extend(r)
+                self.file_rows.append((p, r))
                 total += len(r)
             except Exception as e:
                 QtWidgets.QMessageBox.critical(self, "Error", f"Failed to parse {os.path.basename(p)}:\n{e}")
         if total == 0:
             self.status_lbl.setText("No numeric rows found. Check the PDFs.")
         else:
-            base = os.path.basename(self.files[-1]) if len(self.files) == 1 else f"{len(self.files)} files"
+            base = os.path.basename(self.file_rows[-1][0]) if len(self.file_rows) == 1 else f"{len(self.file_rows)} files"
             self.status_lbl.setText(f"Loaded {base} — {total} rows")
         self._maybe_auto_plot()
 
@@ -246,19 +277,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if self.auto_cb.isChecked():
             self.plot()
 
-    def compute_xy(self) -> tuple[list[float], list[float]]:
+    def compute_xy(self, rows: list[NumberRow], var: str, x_name: str) -> tuple[list[float], list[float]]:
         xs: list[float] = []
         ys: list[float] = []
-        y_name = self.y_combo.currentText()
-        x_name = self.x_combo.currentText()
-        for t1, t2, force, strain in self.rows:
-            if y_name == "T1":
+        for t1, t2, force, strain in rows:
+            if var == "T1":
                 y = t1
-            elif y_name == "T2":
+            elif var == "T2":
                 y = t2
-            elif y_name in ("T2–T1", "T2-T1"):
+            elif var in ("T2–T1", "T2-T1"):
                 y = t2 - t1
-            elif y_name == "T1+T2":
+            elif var == "T1+T2":
                 y = t1 + t2
             else:
                 continue
@@ -268,59 +297,112 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return xs, ys
 
     def plot(self) -> None:
-        if not self.rows:
-            # No files loaded
+        if not self.file_rows:
             return
-        x, y = self.compute_xy()
-        if not x:
+        vars = self._selected_vars()
+        if not vars:
             return
 
-        # Apply fig size
-        self.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+        x_name = self.x_combo.currentText()
+        separate = self.separate_cb.isChecked()
+        zero_first = self.zero_cb.isChecked()
 
-        ax = self.ax
-        ax.clear()
+        # Close existing windows
+        self.clear_plot()
+
         ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
-        ax.plot(
-            x,
-            y,
-            linestyle=ls,
-            marker=marker,
-            linewidth=float(self.line_width.value()),
-            markersize=float(self.marker_size.value()),
-            color=self._color.name(),
-            label=self.y_combo.currentText(),
-        )
 
-        # Labels and title
-        ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
-        ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
-        title = self.title_edit.text().strip()
-        if not title:
-            base = os.path.basename(self.files[-1]) if len(self.files) == 1 else f"{len(self.files)} files"
-            title = f"{self.y_combo.currentText()} vs {self.x_combo.currentText()} — {base}"
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
-
-        # Ticks
-        ax.tick_params(labelsize=int(self.tick_fs.value()))
-
-        # Grid and legend
-        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
-        if self.legend_cb.isChecked():
-            ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
-
-        self.canvas.draw()
+        if separate and len(self.file_rows) > 1:
+            for path, rows in self.file_rows:
+                win = PlotWindow(self)
+                ax = win.ax
+                total_lines = len(vars)
+                color = self._color.name() if total_lines == 1 else None
+                for var in vars:
+                    x, y = self.compute_xy(rows, var, x_name)
+                    if not x:
+                        continue
+                    if zero_first and y:
+                        offset = y[0]
+                        y = [yy - offset for yy in y]
+                    ax.plot(
+                        x,
+                        y,
+                        linestyle=ls,
+                        marker=marker,
+                        linewidth=float(self.line_width.value()),
+                        markersize=float(self.marker_size.value()),
+                        color=color,
+                        label=var,
+                    )
+                ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
+                ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
+                title = self.title_edit.text().strip()
+                base = os.path.basename(path)
+                if not title:
+                    vars_str = ", ".join(vars)
+                    title = f"{vars_str} vs {self.x_combo.currentText()} — {base}"
+                ax.set_title(title, fontsize=int(self.title_fs.value()))
+                ax.tick_params(labelsize=int(self.tick_fs.value()))
+                ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
+                if self.legend_cb.isChecked():
+                    ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+                win.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+                win.canvas.draw()
+                win.show()
+                self.plot_windows.append(win)
+        else:
+            win = PlotWindow(self)
+            ax = win.ax
+            total_lines = len(vars) * len(self.file_rows)
+            color = self._color.name() if total_lines == 1 else None
+            for path, rows in self.file_rows:
+                for var in vars:
+                    x, y = self.compute_xy(rows, var, x_name)
+                    if not x:
+                        continue
+                    if zero_first and y:
+                        offset = y[0]
+                        y = [yy - offset for yy in y]
+                    label = var if len(self.file_rows) == 1 else f"{os.path.basename(path)} {var}"
+                    ax.plot(
+                        x,
+                        y,
+                        linestyle=ls,
+                        marker=marker,
+                        linewidth=float(self.line_width.value()),
+                        markersize=float(self.marker_size.value()),
+                        color=color,
+                        label=label,
+                    )
+            ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
+            ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
+            title = self.title_edit.text().strip()
+            base = os.path.basename(self.file_rows[-1][0]) if len(self.file_rows) == 1 else f"{len(self.file_rows)} files"
+            if not title:
+                vars_str = ", ".join(vars)
+                title = f"{vars_str} vs {self.x_combo.currentText()} — {base}"
+            ax.set_title(title, fontsize=int(self.title_fs.value()))
+            ax.tick_params(labelsize=int(self.tick_fs.value()))
+            ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
+            if self.legend_cb.isChecked():
+                ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+            win.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+            win.canvas.draw()
+            win.show()
+            self.plot_windows.append(win)
 
         if self.save_cb.isChecked():
             self.save_current()
 
     def clear_plot(self) -> None:
-        self.ax.clear()
-        self.canvas.draw()
+        for w in self.plot_windows:
+            w.close()
+        self.plot_windows.clear()
 
     def save_current(self) -> None:
-        if not self.rows:
+        if not self.plot_windows:
             QtWidgets.QMessageBox.information(self, "No data", "Nothing to save.")
             return
         out_dir = self.out_dir.text().strip() or os.getcwd()
@@ -328,10 +410,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ext = self.format_combo.currentText().lower()
         base = self.title_edit.text().strip()
         if not base:
-            base = f"{self.y_combo.currentText()}_vs_{self.x_combo.currentText()}"
+            base = f"{'_'.join(self._selected_vars())}_vs_{self.x_combo.currentText()}"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         path = os.path.join(out_dir, f"{safe}.{ext}")
-        self.canvas.figure.savefig(path, dpi=int(self.dpi_spin.value()))
+        fig = self.plot_windows[0].canvas.figure
+        fig.savefig(path, dpi=int(self.dpi_spin.value()))
 
 
 def main() -> QtWidgets.QWidget:

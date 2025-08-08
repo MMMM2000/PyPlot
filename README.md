@@ -238,11 +238,13 @@ python3 plotting/hsw_distribution/distribution_gui.py
 
 `plotting/pdf_plotter/pdf_gui.py` reads values from PDFs that contain rows with four
 semicolon-separated columns: `T1; T2; Force; Strain` (comma or dot decimals). The
-GUI keeps plotting options visible so you can tweak settings and the plot updates
-in place. Options include Y/X selection (defaults to T1+T2 vs Force), line/marker
-styles, colors, sizes, legend control, grid, custom axis labels and title, text
-sizes, and saving (format, DPI, output directory, and figure size) with an optional
-“save on plot” toggle.
+GUI shows controls in one window and plots in a separate window. Load multiple PDFs
+and either overlay them in one graph or open one plot per file. Choose which
+variables (T1, T2, T2–T1, T1+T2) to draw via check boxes (T1+T2 selected by default)
+and optionally normalize so the first point starts at zero. Other options include
+X selection (defaults to Force), line/marker styles, colors, sizes, legend control,
+grid, custom axis labels and title, text sizes, and saving (format, DPI, output
+directory, and figure size) with an optional “save on plot” toggle.
 
 Try it from the master launcher or run directly:
 
