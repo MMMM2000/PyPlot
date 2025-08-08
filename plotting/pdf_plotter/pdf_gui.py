@@ -64,6 +64,10 @@ class PlotWindow(QtWidgets.QWidget):
         self.toolbar = NavigationToolbar(self.canvas, self)
 
         layout = QtWidgets.QVBoxLayout(self)
+        # Keep the window size fixed to the canvas/toolbar dimensions. This
+        # prevents the user from resizing the plot window to a size where the
+        # plot is clipped or the aspect ratio is distorted.
+        layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 1)
 
@@ -308,11 +312,23 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
+        """Render ``lines`` to ``win`` and enforce the desired figure aspect."""
+
         win.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+
+        # Fix the canvas and window size so the plot always keeps the requested
+        # dimensions and aspect ratio regardless of user resizing attempts.
+        dpi = win.canvas.figure.get_dpi()
+        c_w = int(float(self.fig_w.value()) * dpi)
+        c_h = int(float(self.fig_h.value()) * dpi)
+        win.canvas.setFixedSize(c_w, c_h)
+        win.adjustSize()
+
         ax = win.ax
         ax.clear()
         ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
+        deltas: List[str] = []
         for i, (label, x, y) in enumerate(lines):
             color = self._color.name() if i == 0 else None
             ax.plot(
@@ -325,6 +341,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 color=color,
                 label=label,
             )
+            if x and y:
+                max_idx = max(range(len(x)), key=x.__getitem__)
+                delta = y[max_idx] - y[0]
+                deltas.append(f"{label}: Δ={delta:.2f}")
 
         ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
         ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
@@ -333,7 +353,19 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
         if self.legend_cb.isChecked():
             ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+        if deltas:
+            ax.text(
+                0.95,
+                0.05,
+                "\n".join(deltas),
+                transform=ax.transAxes,
+                ha="right",
+                va="bottom",
+                fontsize=int(self.label_fs.value()),
+                bbox=dict(facecolor="white", alpha=0.6),
+            )
         win.canvas.draw()
+        win.setWindowTitle(title)
 
     # ------------------------------------------------------------------
     def plot(self) -> None:
