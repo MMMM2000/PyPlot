@@ -113,8 +113,6 @@ class UiMainWindowModernA(object):
         self.label_connection_indicator = QtWidgets.QLabel("\u25cf Disconnected")
         self.label_connection_indicator.setStyleSheet("color: red;")
         self.statusbar.addPermanentWidget(self.label_connection_indicator)
-        self.pushButton_switch_ui = QtWidgets.QPushButton("Switch UI")
-        self.statusbar.addPermanentWidget(self.pushButton_switch_ui)
         MainWindow.setStatusBar(self.statusbar)
 
         # Compatibility aliases for existing logic
