@@ -234,6 +234,24 @@ Launch it with:
 python3 plotting/hsw_distribution/distribution_gui.py
 ```
 
+## Plotting PDF data
+
+`plotting/pdf_plotter/pdf_gui.py` reads values from PDFs that contain rows with four
+semicolon-separated columns: `T1; T2; Force; Strain` (comma or dot decimals). The
+GUI keeps plotting options visible so you can tweak settings and the plot updates
+in place. Options include Y/X selection (defaults to T1+T2 vs Force), line/marker
+styles, colors, sizes, legend control, grid, custom axis labels and title, text
+sizes, and saving (format, DPI, output directory, and figure size) with an optional
+“save on plot” toggle.
+
+Try it from the master launcher or run directly:
+
+```bash
+python3 plotting/pdf_plotter/pdf_gui.py
+```
+
+A sample PDF is provided in the `sample_data` folder for quick testing.
+
 ## Data logger
 
 `data_logger/data_logger.py` records serial data to a file.  By default logs
@@ -307,4 +325,3 @@ lists the most common problems and how to solve them.
 
 If you still encounter issues, consider searching the exact error message online
 or ask someone familiar with Python for help.
-
