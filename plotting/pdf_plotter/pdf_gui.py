@@ -339,6 +339,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
     def plot(self) -> None:
         lines_by_file = self.compute_lines()
         if not lines_by_file:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No data",
+                "Nothing to plot. Load PDF files and ensure at least one Y variable is selected.",
+            )
             return
 
         selected = [cb.text() for cb in self.y_checks if cb.isChecked()]
