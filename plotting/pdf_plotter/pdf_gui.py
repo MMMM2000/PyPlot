@@ -5,7 +5,7 @@ import re
 import sys
 from typing import Dict, Iterable, List, Tuple
 
-from PyQt6 import QtGui, QtWidgets
+from PyQt6 import QtGui, QtWidgets, QtCore
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.backends.backend_qtagg import NavigationToolbar2QT as NavigationToolbar
 from matplotlib.figure import Figure
@@ -60,12 +60,18 @@ class PlotWindow(QtWidgets.QWidget):
         super().__init__(parent)
         fig = Figure(figsize=(8, 5), constrained_layout=True)
         self.canvas = FigureCanvas(fig)
+        # Keep the canvas at a fixed size to maintain aspect ratio.
+        self.canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.ax = fig.add_subplot(111)
         self.toolbar = NavigationToolbar(self.canvas, self)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas, 1)
+        # Center the canvas within any extra space.
+        layout.addWidget(self.canvas, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
 
 
 class PdfPlotterWindow(QtWidgets.QWidget):
@@ -75,6 +81,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         super().__init__()
         self.setWindowTitle("PDF T1/T2 Plotter")
         self.resize(520, 700)
+        self.setMinimumSize(520, 700)
 
         # Loaded data: list of (path, rows)
         self.data: List[Tuple[str, List[NumberRow]]] = []
@@ -307,15 +314,31 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return lines_by_file
 
     # ------------------------------------------------------------------
-    def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
-        win.canvas.figure.set_size_inches(float(self.fig_w.value()), float(self.fig_h.value()))
+    def _plot_to_window(
+        self,
+        win: PlotWindow,
+        lines: Iterable[Tuple[str, List[float], List[float]]],
+        title: str,
+    ) -> None:
+        win.canvas.figure.set_size_inches(
+            float(self.fig_w.value()), float(self.fig_h.value())
+        )
+
+        # Update the canvas and window size to match the figure dimensions.
+        dpi = win.canvas.figure.get_dpi()
+        w_px = int(self.fig_w.value() * dpi)
+        h_px = int(self.fig_h.value() * dpi)
+        win.canvas.setFixedSize(w_px, h_px)
+        win.setMinimumSize(w_px, h_px + win.toolbar.sizeHint().height())
+        win.resize(win.minimumSize())
+
         ax = win.ax
         ax.clear()
         ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
         for i, (label, x, y) in enumerate(lines):
             color = self._color.name() if i == 0 else None
-            ax.plot(
+            line = ax.plot(
                 x,
                 y,
                 linestyle=ls,
@@ -324,7 +347,20 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 markersize=float(self.marker_size.value()),
                 color=color,
                 label=label,
-            )
+            )[0]
+
+            # Annotate delta: difference between final and initial y values.
+            if x and y:
+                max_idx = max(range(len(x)), key=lambda j: x[j])
+                delta = y[max_idx] - y[0]
+                ax.annotate(
+                    f"Δ={delta:.2f}",
+                    xy=(x[max_idx], y[max_idx]),
+                    xytext=(5, 5),
+                    textcoords="offset points",
+                    color=line.get_color(),
+                    fontsize=int(self.label_fs.value()),
+                )
 
         ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
         ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
