@@ -53,6 +53,30 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     return rows
 
 
+class LabelDialog(QtWidgets.QDialog):
+    """Dialog to edit plot title and axis labels."""
+
+    def __init__(self, title: str, xlabel: str, ylabel: str, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Edit Labels")
+        form = QtWidgets.QFormLayout(self)
+        self.title_edit = QtWidgets.QLineEdit(title)
+        self.x_edit = QtWidgets.QLineEdit(xlabel)
+        self.y_edit = QtWidgets.QLineEdit(ylabel)
+        form.addRow("Title", self.title_edit)
+        form.addRow("X label", self.x_edit)
+        form.addRow("Y label", self.y_edit)
+        btns = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        form.addRow(btns)
+
+    def get_values(self) -> Tuple[str, str, str]:
+        return self.title_edit.text(), self.x_edit.text(), self.y_edit.text()
+
+
 class PlotWindow(QtWidgets.QWidget):
     """Window containing a matplotlib canvas and toolbar."""
 
@@ -72,9 +96,34 @@ class PlotWindow(QtWidgets.QWidget):
         self.ax = fig.add_subplot(111)
         self.toolbar = NavigationToolbar(self.canvas, self)
 
+        self.custom_title = ""
+        self.custom_x_label = ""
+        self.custom_y_label = ""
+        self.fig_size = (8.0, 5.0)
+        self._fig_inited = False
+
+        edit_act = QtGui.QAction("Labels…", self)
+        edit_act.triggered.connect(self._edit_labels)
+        self.toolbar.addAction(edit_act)
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+
+    # ------------------------------------------------------------------
+    def _edit_labels(self) -> None:
+        dlg = LabelDialog(
+            self.custom_title or self.ax.get_title(),
+            self.custom_x_label or self.ax.get_xlabel(),
+            self.custom_y_label or self.ax.get_ylabel(),
+            self,
+        )
+        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self.custom_title, self.custom_x_label, self.custom_y_label = dlg.get_values()
+            self.ax.set_title(self.custom_title)
+            self.ax.set_xlabel(self.custom_x_label)
+            self.ax.set_ylabel(self.custom_y_label)
+            self.canvas.draw_idle()
 
 
 class PdfPlotterWindow(QtWidgets.QWidget):
@@ -162,11 +211,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.title_edit = QtWidgets.QLineEdit()
         self.x_label_edit = QtWidgets.QLineEdit("Force (N)")
         self.y_label_edit = QtWidgets.QLineEdit("T1+T2")
-        for w in [self.title_edit, self.x_label_edit, self.y_label_edit]:
+        self.y_units_edit = QtWidgets.QLineEdit("arb. units")
+        for w in [self.title_edit, self.x_label_edit, self.y_label_edit, self.y_units_edit]:
             w.textChanged.connect(self._maybe_auto_plot)
         form.addRow("Title", self.title_edit)
         form.addRow("X label", self.x_label_edit)
         form.addRow("Y label", self.y_label_edit)
+        form.addRow("Y units", self.y_units_edit)
 
         # Legend
         self.legend_cb = QtWidgets.QCheckBox(); self.legend_cb.setChecked(True)
@@ -319,9 +370,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
         # Update the figure and canvas size first so window sizing is correct.
         fig_w, fig_h = float(self.fig_w.value()), float(self.fig_h.value())
+        size_changed = not win._fig_inited or win.fig_size != (fig_w, fig_h)
         win.canvas.figure.set_size_inches(fig_w, fig_h)
         dpi = win.canvas.figure.dpi
         win.canvas.setFixedSize(int(fig_w * dpi), int(fig_h * dpi))
+        win.fig_size = (fig_w, fig_h)
+        win._fig_inited = True
 
         ax = win.ax
         ax.clear()
@@ -345,9 +399,22 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 delta = y[max_idx] - y[0]
                 deltas.append((label, delta, line.get_color()))
 
-        ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
-        ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
+        if win.custom_x_label:
+            ax.set_xlabel(win.custom_x_label, fontsize=int(self.label_fs.value()))
+        else:
+            ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
+
+        if win.custom_y_label:
+            ax.set_ylabel(win.custom_y_label, fontsize=int(self.label_fs.value()))
+        else:
+            y_lab = self.y_label_edit.text()
+            units = self.y_units_edit.text().strip()
+            if units:
+                y_lab = f"{y_lab} ({units})"
+            ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()))
+
+        final_title = win.custom_title or title
+        ax.set_title(final_title, fontsize=int(self.title_fs.value()))
         ax.tick_params(labelsize=int(self.tick_fs.value()))
         ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
         if self.legend_cb.isChecked():
@@ -366,10 +433,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             )
 
         win.canvas.draw()
-        win.setWindowTitle(title)
+        win.setWindowTitle(final_title)
         # Ensure the window is sized to show the full plot and cannot be made smaller.
-        win.adjustSize()
-        win.setMinimumSize(win.size())
+        if size_changed:
+            win.adjustSize()
+            win.setMinimumSize(win.size())
 
     # ------------------------------------------------------------------
     def plot(self) -> None:
