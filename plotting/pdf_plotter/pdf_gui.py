@@ -72,9 +72,41 @@ class PlotWindow(QtWidgets.QWidget):
         self.ax = fig.add_subplot(111)
         self.toolbar = NavigationToolbar(self.canvas, self)
 
+        # Controls for per-window titles and labels
+        self.title_edit = QtWidgets.QLineEdit()
+        self.x_label_edit = QtWidgets.QLineEdit()
+        self.y_label_edit = QtWidgets.QLineEdit()
+        form = QtWidgets.QFormLayout()
+        form.addRow("Title", self.title_edit)
+        form.addRow("X label", self.x_label_edit)
+        form.addRow("Y label", self.y_label_edit)
+
         layout = QtWidgets.QVBoxLayout(self)
+        layout.addLayout(form)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 0, QtCore.Qt.AlignmentFlag.AlignCenter)
+
+        self.title_edit.editingFinished.connect(self._apply_labels)
+        self.x_label_edit.editingFinished.connect(self._apply_labels)
+        self.y_label_edit.editingFinished.connect(self._apply_labels)
+
+        # Store font sizes and unit for later label edits
+        self._title_fs = 12
+        self._label_fs = 11
+        self._y_unit: str = ""
+        self._sized_once = False
+
+    # ------------------------------------------------------------------
+    def _apply_labels(self) -> None:
+        """Update axis labels and window title from the edits."""
+        y_text = self.y_label_edit.text()
+        if self._y_unit:
+            y_text = f"{y_text} ({self._y_unit})"
+        self.ax.set_xlabel(self.x_label_edit.text(), fontsize=self._label_fs)
+        self.ax.set_ylabel(y_text, fontsize=self._label_fs)
+        self.ax.set_title(self.title_edit.text(), fontsize=self._title_fs)
+        self.setWindowTitle(self.title_edit.text())
+        self.canvas.draw_idle()
 
 
 class PdfPlotterWindow(QtWidgets.QWidget):
@@ -167,6 +199,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Title", self.title_edit)
         form.addRow("X label", self.x_label_edit)
         form.addRow("Y label", self.y_label_edit)
+
+        self.y_unit_combo = QtWidgets.QComboBox()
+        self.y_unit_combo.addItems(["µs", "ms", "s"])
+        self.y_unit_combo.currentIndexChanged.connect(self._maybe_auto_plot)
+        form.addRow("Y units", self.y_unit_combo)
 
         # Legend
         self.legend_cb = QtWidgets.QCheckBox(); self.legend_cb.setChecked(True)
@@ -328,11 +365,15 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
         deltas: List[Tuple[str, float, str]] = []
+        scale_map = {"µs": 1.0, "ms": 1e-3, "s": 1e-6}
+        unit = self.y_unit_combo.currentText()
+        scale = scale_map.get(unit, 1.0)
         for i, (label, x, y) in enumerate(lines):
+            y_scaled = [val * scale for val in y]
             color = self._color.name() if i == 0 else None
             (line,) = ax.plot(
                 x,
-                y,
+                y_scaled,
                 linestyle=ls,
                 marker=marker,
                 linewidth=float(self.line_width.value()),
@@ -340,14 +381,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 color=color,
                 label=label,
             )
-            if x and y:
+            if x and y_scaled:
                 max_idx = max(range(len(x)), key=x.__getitem__)
-                delta = y[max_idx] - y[0]
+                delta = y_scaled[max_idx] - y_scaled[0]
                 deltas.append((label, delta, line.get_color()))
 
-        ax.set_xlabel(self.x_label_edit.text(), fontsize=int(self.label_fs.value()))
-        ax.set_ylabel(self.y_label_edit.text(), fontsize=int(self.label_fs.value()))
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
         ax.tick_params(labelsize=int(self.tick_fs.value()))
         ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
         if self.legend_cb.isChecked():
@@ -357,7 +395,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             ax.text(
                 0.98,
                 0.02 + i * 0.06,
-                f"Δ {label}={delta:.2f}",
+                f"Δ {label}={delta:.2f} {unit}",
                 transform=ax.transAxes,
                 ha="right",
                 va="bottom",
@@ -365,11 +403,20 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 fontsize=int(self.label_fs.value()),
             )
 
+        win._title_fs = int(self.title_fs.value())
+        win._label_fs = int(self.label_fs.value())
+        win._y_unit = unit
+        win.title_edit.setText(title)
+        win.x_label_edit.setText(self.x_label_edit.text())
+        win.y_label_edit.setText(self.y_label_edit.text())
+        win._apply_labels()
+
         win.canvas.draw()
-        win.setWindowTitle(title)
-        # Ensure the window is sized to show the full plot and cannot be made smaller.
-        win.adjustSize()
-        win.setMinimumSize(win.size())
+        # Ensure the window is sized on first plot but keep user size afterwards.
+        if not win._sized_once:
+            win.adjustSize()
+            win.setMinimumSize(win.size())
+            win._sized_once = True
 
     # ------------------------------------------------------------------
     def plot(self) -> None:
