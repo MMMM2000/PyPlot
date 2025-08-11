@@ -299,8 +299,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.lineEdit_log_file.setText(file_base)
 
+        # If the file already exists, ask the user what to do.
+        mode = "w"
+        if os.path.exists(full_path):
+            msg = QtWidgets.QMessageBox(self)
+            msg.setWindowTitle("File exists")
+            msg.setIcon(QtWidgets.QMessageBox.Icon.Question)
+            base = os.path.basename(full_path)
+            msg.setText(f"'{base}' already exists.")
+            msg.setInformativeText("Choose an action:")
+
+            replace_btn = msg.addButton("Replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            continue_btn = msg.addButton("Continue", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            cancel_btn = msg.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked is cancel_btn:
+                return
+            elif clicked is continue_btn:
+                mode = "a"
+            else:
+                mode = "w"
+
         try:
-            self.log_file = open(full_path, "w")
+            self.log_file = open(full_path, mode)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to open {full_path}: {exc}"
