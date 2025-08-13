@@ -145,28 +145,40 @@ class PlotWindow(QtWidgets.QWidget):
         layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
 
     def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool=False) -> None:
-        """Set the figure, canvas, and window to a fixed size matching settings.
+        """Set the figure, canvas, and optionally the window to a fixed size.
 
-        - Figure size in inches is set directly (no auto-fit to window).
-        - Canvas is given fixed pixel size based on the figure DPI.
-        - Window resizes to fit content but is NOT permanently locked,
-          so it can shrink/grow on subsequent updates.
+        Previously this method always resized the top-level widget to the
+        layout's ``sizeHint`` which caused the window to jump in size the first
+        time any style change triggered a redraw.  The ``resize_window`` flag
+        now allows callers to control when the window should actually be
+        resized, preventing the unwanted initial resize behaviour.
+
+        Parameters
+        ----------
+        fig_w_in, fig_h_in:
+            Target figure dimensions in inches.
+        resize_window:
+            If ``True`` the top-level window is resized to match the canvas;
+            otherwise only the figure and canvas sizes are updated.
         """
+
         fig = self.canvas.figure
         fig.set_size_inches(fig_w_in, fig_h_in, forward=False)
         dpi = fig.dpi or 100.0
         wpx = int(round(fig_w_in * dpi))
         hpx = int(round(fig_h_in * dpi))
+
         # Fix the canvas to the exact pixel size
         self.canvas.setFixedSize(wpx, hpx)
         self.canvas.updateGeometry()
-        # Allow the top-level widget to shrink/grow by clearing any previous constraints
-        # then explicitly resize the window to its size hint. ``adjustSize`` tends not to
-        # shrink top‑level widgets on some platforms which caused the plot window to grow
-        # when style changes (e.g. line width) were applied and remain enlarged afterwards.
+
+        # Allow the top-level widget to shrink/grow by clearing any previous
+        # constraints, but only resize it when explicitly requested.  This keeps
+        # the window size stable across subsequent updates.
         self.setMinimumSize(QtCore.QSize(0, 0))
         self.setMaximumSize(QtCore.QSize(16777215, 16777215))
-        self.resize(self.sizeHint())
+        if resize_window:
+            self.resize(self.sizeHint())
 
     def _toggle_lock(self, on: bool) -> None:
         self.axis_locked = on
@@ -627,11 +639,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         win._target_aspect = max(fig_w, 1e-9) / max(fig_h, 1e-9)
         # Only resize the top-level window if the figure size changed
         size_changed = (fig_w, fig_h) != tuple(win.fig_size)
-        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=size_changed)
-        if size_changed:
+        # Resize the top-level window on first draw or whenever the figure
+        # dimensions change.  Subsequent style updates keep the window size
+        # stable which fixes the first-change resize behaviour.
+        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=(size_changed or not win._fig_inited))
+        if size_changed or not win._fig_inited:
             win.fig_size = (fig_w, fig_h)
         if not win._fig_inited:
-            win.fig_size = (fig_w, fig_h)
             win._fig_inited = True
 
         # Preserve limits if locked
