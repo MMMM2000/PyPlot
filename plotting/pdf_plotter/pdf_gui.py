@@ -143,7 +143,7 @@ class PlotWindow(QtWidgets.QWidget):
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
-    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool=False) -> None:
+    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float) -> None:
         """Set the figure, canvas, and window to a fixed size matching settings.
 
         - Figure size in inches is set directly (no auto-fit to window).
@@ -165,8 +165,7 @@ class PlotWindow(QtWidgets.QWidget):
         # when style changes (e.g. line width) were applied and remain enlarged afterwards.
         self.setMinimumSize(QtCore.QSize(0, 0))
         self.setMaximumSize(QtCore.QSize(16777215, 16777215))
-        if resize_window:
-            self.resize(self.sizeHint())
+        self.resize(self.sizeHint())
 
     def _toggle_lock(self, on: bool) -> None:
         self.axis_locked = on
@@ -625,11 +624,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Always size the figure, canvas, and window to match settings (non-resizable)
         fig_w, fig_h = self._figure_size_inches()
         win._target_aspect = max(fig_w, 1e-9) / max(fig_h, 1e-9)
-        # Only resize the top-level window if the figure size changed
-        size_changed = (fig_w, fig_h) != tuple(win.fig_size)
-        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=size_changed)
-        if size_changed:
-            win.fig_size = (fig_w, fig_h)
+        win.apply_fixed_plot_size(fig_w, fig_h)
         if not win._fig_inited:
             win.fig_size = (fig_w, fig_h)
             win._fig_inited = True
@@ -687,9 +682,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Ticks font size
         ax.tick_params(labelsize=int(self.tick_fs.value()))
 
-                # Avoid layout thrash: only re-layout when size changed or first draw
-        if not win._fig_inited or size_changed:
-            win.canvas.figure.tight_layout()
+        win.canvas.figure.tight_layout()
         win.canvas.draw_idle()
 
     def _save_window(self, win: PlotWindow) -> None:
