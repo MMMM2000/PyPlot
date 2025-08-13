@@ -1,0 +1,128 @@
+40:    """Extract numeric rows from a PDF.
+44:    """
+46:        raise RuntimeError("PyPDF2 not installed. Install with: pip install PyPDF2")
+49:    num = r"-?\d+(?:[.,]\d+)?"
+50:    pat = re.compile(rf"\s*({num})\s*;\s*({num})\s*;\s*({num})\s*;\s*({num})\s*")
+52:        text = page.extract_text() or ""
+58:                s2 = re.sub(r"[^\d;,.\-\s]", "", s)
+62:                    t1 = float(m.group(1).replace(",", "."))
+63:                    t2 = float(m.group(2).replace(",", "."))
+64:                    force = float(m.group(3).replace(",", "."))
+65:                    strain = float(m.group(4).replace(",", "."))
+78:        self.setWindowTitle("Edit Labels")
+83:        form.addRow("Title", self.title_edit)
+84:        form.addRow("X label", self.x_edit)
+85:        form.addRow("Y label", self.y_edit)
+101:    """Window containing a matplotlib canvas and toolbar."""
+103:    instances: "weakref.WeakSet[PlotWindow]" = weakref.WeakSet()
+112:        self._last_title: str = ""
+124:        self.custom_title = ""
+125:        self.custom_x_label = ""
+126:        self.custom_y_label = ""
+130:        edit_act = QtGui.QAction("Labels…", self)
+134:        self.lock_act = QtGui.QAction("Lock Axes", self)
+177:    """Select plot windows to apply current settings to."""
+181:        self.setWindowTitle("Window Manager")
+185:            "Select plot windows to re-apply CURRENT settings (style, labels, figure size). Data stays the same."
+193:        self.refresh_btn = QtWidgets.QPushButton("Refresh")
+194:        self.apply_btn = QtWidgets.QPushButton("Apply to selected")
+207:            title = w.ax.get_title() or "(untitled)"
+223:            QtWidgets.QMessageBox.information(self, "No selection", "Select one or more plot windows.")
+227:            if isinstance(w, PlotWindow) and getattr(w, "_last_lines", None):
+236:    """Settings window for plotting data extracted from PDFs."""
+240:        self.setWindowTitle("PDF T1/T2 Plotter")
+263:        self.browse_btn = QtWidgets.QPushButton("Open PDF(s)…")
+266:        form.addRow("Files", file_box)
+272:        for name in ["T1+T2", "T1", "T2", "T2–T1"]:
+274:            cb.setChecked(name == "T1+T2")
+280:        self.x_combo.addItems(["Force (N)", "Strain (mm)"])
+283:        form.addRow("Y variables", y_box)
+284:        form.addRow("X variable", self.x_combo)
+288:        self.mode_combo.addItems(["Combined", "Separate"])
+290:        self.zero_cb = QtWidgets.QCheckBox("First point at zero")
+293:        form.addRow("Plot mode", self.mode_combo)
+294:        form.addRow("Zero first", self.zero_cb)
+298:        self.line_style.addItems(["-", "--", ":", "-.", "None"])
+301:        self.marker_style.addItems(["o", "s", "d", "^", "v", "x", "+", ".", "None"])
+312:        self._color = QtGui.QColor("#1f77b4")
+320:            (w.valueChanged if hasattr(w, "valueChanged") else w.stateChanged).connect(self._maybe_auto_plot)
+321:        form.addRow("Line style", self.line_style)
+322:        form.addRow("Marker", self.marker_style)
+323:        form.addRow("Line width", self.line_width)
+324:        form.addRow("Marker size", self.marker_size)
+325:        form.addRow("Color", self.color_btn)
+326:        form.addRow("Grid", self.grid_cb)
+330:        self.x_label_edit = QtWidgets.QLineEdit("Force (N)")
+331:        self.y_label_edit = QtWidgets.QLineEdit("T1+T2")
+332:        self.y_units_edit = QtWidgets.QLineEdit("arb. units")
+335:        form.addRow("Title", self.title_edit)
+336:        form.addRow("X label", self.x_label_edit)
+337:        form.addRow("Y label", self.y_label_edit)
+338:        form.addRow("Y units", self.y_units_edit)
+346:                "best",
+347:                "upper right",
+348:                "upper left",
+349:                "lower left",
+350:                "lower right",
+351:                "right",
+352:                "center left",
+353:                "center right",
+354:                "lower center",
+355:                "upper center",
+356:                "center",
+366:        form.addRow("Legend", self.legend_cb)
+367:        form.addRow("Legend loc", self.legend_loc)
+368:        form.addRow("Legend size", self.legend_fs)
+382:        form.addRow("Title size", self.title_fs)
+383:        form.addRow("Label size", self.label_fs)
+384:        form.addRow("Tick size", self.tick_fs)
+390:        self.browse_out_btn = QtWidgets.QPushButton("Browse…")
+394:        self.format_combo.addItems(["png", "pdf"])
+405:        self.fig_units.addItems(["in", "cm", "mm"])
+407:        self.lock_aspect_cb = QtWidgets.QCheckBox("Lock aspect ratio")
+418:        self.save_now_btn = QtWidgets.QPushButton("Save Now")
+420:        form.addRow("Save on plot", self.save_cb)
+421:        form.addRow("Output dir", out_box)
+422:        form.addRow("Format", self.format_combo)
+423:        form.addRow("DPI", self.dpi_spin)
+424:        form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
+425:        form.addRow("", self.save_now_btn)
+428:        self.auto_cb = QtWidgets.QCheckBox("Auto update on change")
+430:        self.plot_btn = QtWidgets.QPushButton("Plot")
+431:        self.clear_btn = QtWidgets.QPushButton("Clear")
+432:        self.manager_btn = QtWidgets.QPushButton("Window Manager…")
+437:        form.addRow("", btn_box)
+453:        if unit == "cm":
+455:        if unit == "mm":
+460:        to_mm = {"mm": 1.0, "cm": 10.0, "in": 25.4}
+467:        old_unit = getattr(self, "_current_units", new_unit)
+513:        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir.text())
+524:        c = QtWidgets.QColorDialog.getColor(self._color, self, "Pick color")
+534:            sel = ["T1+T2"]
+537:        self.y_label_edit.setText(" / ".join(sel))
+544:        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Select PDF files", "", "PDF files (*.pdf)")
+547:        self.file_edit.setText(" ; ".join(paths))
+556:                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to parse {p}:\n{e}")
+558:            QtWidgets.QMessageBox.information(self, "No data", "No numeric rows found. Check the PDF contents.")
+566:            selected = ["T1+T2"]
+573:                    if x_name.startswith("Force"):
+577:                    if y_name == "T1":
+579:                    elif y_name == "T2":
+581:                    elif y_name == "T2–T1":
+618:        ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
+619:        marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
+644:            y_lab = f"{y_lab} ({units})"
+649:        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
+671:        base = win.ax.get_title() or "plot"
+672:        safe = re.sub(r"[^\w\-\.]+", "_", base)
+673:        path = os.path.join(out_dir, f"{safe}.{ext}")
+678:            QtWidgets.QMessageBox.information(self, "No data", "Nothing to save.")
+684:            QtWidgets.QMessageBox.information(self, "No data", "Load PDF files first.")
+689:            QtWidgets.QMessageBox.information(self, "No data", "No valid rows to plot.")
+696:        if mode == "Combined":
+703:                    label = f"{base} {y_name}" if len(lines_by_file) > 1 else y_name
+707:                base = os.path.basename(next(iter(lines_by_file))) if len(lines_by_file) == 1 else f"{len(lines_by_file)} files"
+708:                title = f"{' / '.join(selected)} vs {x_name} — {base}"
+723:                    label = f"{base} {y_name}"
+725:                title = self.title_edit.text().strip() or f"{' / '.join(selected)} vs {x_name} — {base}"
+753:if __name__ == "__main__":  # pragma: no cover - manual execution

@@ -1,0 +1,102 @@
+0656:         if self.legend_cb.isChecked():
+0657:             ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+0658: 
+0659:         # Ticks font size
+0660:         ax.tick_params(labelsize=int(self.tick_fs.value()))
+0661: 
+0662:         win.canvas.figure.tight_layout()
+0663:         win.canvas.draw_idle()
+0664: 
+0665:     def _save_window(self, win: PlotWindow) -> None:
+0666:         out_dir = self.out_dir.text()
+0667:         if not out_dir:
+0668:             return
+0669:         os.makedirs(out_dir, exist_ok=True)
+0670:         ext = self.format_combo.currentText().lower()
+0671:         base = win.ax.get_title() or "plot"
+0672:         safe = re.sub(r"[^\w\-\.]+", "_", base)
+0673:         path = os.path.join(out_dir, f"{safe}.{ext}")
+0674:         win.canvas.figure.savefig(path, dpi=int(self.dpi_spin.value()))
+0675: 
+0676:     def save_current(self) -> None:
+0677:         if self.last_plot_window is None:
+0678:             QtWidgets.QMessageBox.information(self, "No data", "Nothing to save.")
+0679:             return
+0680:         self._save_window(self.last_plot_window)
+0681: 
+0682:     def plot(self) -> None:
+0683:         if not self.data:
+0684:             QtWidgets.QMessageBox.information(self, "No data", "Load PDF files first.")
+0685:             return
+0686: 
+0687:         lines_by_file = self._collect_lines_by_file()
+0688:         if not lines_by_file:
+0689:             QtWidgets.QMessageBox.information(self, "No data", "No valid rows to plot.")
+0690:             return
+0691: 
+0692:         selected = [cb.text() for cb in self.y_checks if cb.isChecked()]
+0693:         x_name = self.x_combo.currentText()
+0694: 
+0695:         mode = self.mode_combo.currentText()
+0696:         if mode == "Combined":
+0697:             if self.plot_win is None:
+0698:                 self.plot_win = PlotWindow(None)
+0699:             lines: List[Tuple[str, List[float], List[float]]] = []
+0700:             for path, sets in lines_by_file.items():
+0701:                 base = os.path.basename(path)
+0702:                 for y_name, xs, ys in sets:
+0703:                     label = f"{base} {y_name}" if len(lines_by_file) > 1 else y_name
+0704:                     lines.append((label, xs, ys))
+0705:             title = self.title_edit.text().strip()
+0706:             if not title:
+0707:                 base = os.path.basename(next(iter(lines_by_file))) if len(lines_by_file) == 1 else f"{len(lines_by_file)} files"
+0708:                 title = f"{' / '.join(selected)} vs {x_name} — {base}"
+0709:             self._plot_to_window(self.plot_win, lines, title)
+0710:             self.plot_win.show()
+0711:             self.last_plot_window = self.plot_win
+0712:             if self.save_cb.isChecked():
+0713:                 self._save_window(self.plot_win)
+0714:         else:  # Separate
+0715:             for w in self.plot_wins:
+0716:                 w.close()
+0717:             self.plot_wins = []
+0718:             for path, sets in lines_by_file.items():
+0719:                 win = PlotWindow(None)
+0720:                 lines: List[Tuple[str, List[float], List[float]]] = []
+0721:                 base = os.path.basename(path)
+0722:                 for y_name, xs, ys in sets:
+0723:                     label = f"{base} {y_name}"
+0724:                     lines.append((label, xs, ys))
+0725:                 title = self.title_edit.text().strip() or f"{' / '.join(selected)} vs {x_name} — {base}"
+0726:                 self._plot_to_window(win, lines, title)
+0727:                 win.show()
+0728:                 self.plot_wins.append(win)
+0729:                 self.last_plot_window = win
+0730:                 if self.save_cb.isChecked():
+0731:                     self._save_window(win)
+0732: 
+0733:     def clear_plot(self) -> None:
+0734:         if self.plot_win:
+0735:             self.plot_win.ax.clear()
+0736:             self.plot_win.canvas.draw_idle()
+0737:         for w in self.plot_wins:
+0738:             w.ax.clear()
+0739:             w.canvas.draw_idle()
+0740: 
+0741:     def open_manager(self) -> None:
+0742:         dlg = WindowManagerDialog(self)
+0743:         dlg.exec()
+0744: 
+0745: 
+0746: # -----------------------------------------------------------------------------
+0747: def main() -> QtWidgets.QWidget:
+0748:     win = PdfPlotterWindow()
+0749:     win.show()
+0750:     return win
+0751: 
+0752: 
+0753: if __name__ == "__main__":  # pragma: no cover - manual execution
+0754:     app = QtWidgets.QApplication(sys.argv)
+0755:     apply_system_theme(app)
+0756:     _w = main()
+0757:     app.exec()
