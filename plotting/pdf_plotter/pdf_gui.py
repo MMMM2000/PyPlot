@@ -458,7 +458,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.clear_btn.clicked.connect(self.clear_plot)
         self.manager_btn.clicked.connect(self.open_manager)
         btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn, self.manager_btn)
-        form.addRow("", btn_box)
+        outer.addWidget(btn_box)
 
         self._sync_labels_from_choices()
 
@@ -679,6 +679,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ax.tick_params(labelsize=int(self.tick_fs.value()))
 
         win.canvas.figure.tight_layout()
+        # ``tight_layout`` may alter the figure dimensions which in turn can
+        # expand the canvas and window.  Re-apply the fixed size so the plot
+        # window does not grow when tweaking styling options.
+        win.apply_fixed_plot_size(fig_w, fig_h)
         win.canvas.draw_idle()
 
     def _save_window(self, win: PlotWindow) -> None:
