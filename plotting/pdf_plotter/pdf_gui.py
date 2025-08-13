@@ -160,10 +160,12 @@ class PlotWindow(QtWidgets.QWidget):
         self.canvas.setFixedSize(wpx, hpx)
         self.canvas.updateGeometry()
         # Allow the top-level widget to shrink/grow by clearing any previous constraints
-        # then ask Qt to resize this window to fit the canvas + toolbar.
+        # then explicitly resize the window to its size hint. ``adjustSize`` tends not to
+        # shrink top‑level widgets on some platforms which caused the plot window to grow
+        # when style changes (e.g. line width) were applied and remain enlarged afterwards.
         self.setMinimumSize(QtCore.QSize(0, 0))
         self.setMaximumSize(QtCore.QSize(16777215, 16777215))
-        self.adjustSize()
+        self.resize(self.sizeHint())
 
     def _toggle_lock(self, on: bool) -> None:
         self.axis_locked = on
@@ -458,9 +460,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.clear_btn.clicked.connect(self.clear_plot)
         self.manager_btn.clicked.connect(self.open_manager)
         btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn, self.manager_btn)
-        form.addRow("", btn_box)
 
         self._sync_labels_from_choices()
+        # Ensure the plot controls are always visible without scrolling by placing the
+        # button row outside the scrollable area.
+        outer.addWidget(btn_box)
 
     # --- Helpers ---------------------------------------------------------------
     def _hbox(self, *widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
