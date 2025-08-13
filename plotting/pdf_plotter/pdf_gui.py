@@ -113,11 +113,10 @@ class PlotWindow(QtWidgets.QWidget):
 
         fig = Figure(figsize=(8, 5))  # use tight_layout() after plotting
         self.canvas = FigureCanvas(fig)
-        # Allow the canvas to expand/shrink with the window; we'll control
-        # the figure size on resize to preserve aspect ratio.
+        # We'll keep the canvas at a fixed pixel size to match figure size.
         self.canvas.setSizePolicy(
-            QtWidgets.QSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding,
-                                  QtWidgets.QSizePolicy.Policy.Expanding)
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
         )
 
         self.ax = fig.add_subplot(111)
@@ -144,27 +143,27 @@ class PlotWindow(QtWidgets.QWidget):
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
 
-    def _fit_figure_to_canvas(self) -> None:
-        try:
-            asp = self._target_aspect or (self.fig_size[0] / max(self.fig_size[1], 1e-9))
-            avail_w = max(self.canvas.width(), 1)
-            avail_h = max(self.canvas.height(), 1)
-            w_fit = avail_w
-            h_fit = int(round(w_fit / max(asp, 1e-9)))
-            if h_fit > avail_h:
-                h_fit = avail_h
-                w_fit = int(round(h_fit * asp))
-            dpi = self.canvas.figure.dpi or 100.0
-            self.canvas.figure.set_size_inches(w_fit / dpi, h_fit / dpi, forward=False)
-            self.canvas.figure.tight_layout()
-            self.canvas.draw_idle()
-        except Exception:
-            pass
+    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float) -> None:
+        """Set the figure, canvas, and window to a fixed size matching settings.
 
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
-        # Keep the figure's aspect ratio consistent while fitting the canvas area.
-        self._fit_figure_to_canvas()
-        super().resizeEvent(event)
+        - Figure size in inches is set directly (no auto-fit to window).
+        - Canvas is given fixed pixel size based on the figure DPI.
+        - Window resizes to fit content but is NOT permanently locked,
+          so it can shrink/grow on subsequent updates.
+        """
+        fig = self.canvas.figure
+        fig.set_size_inches(fig_w_in, fig_h_in, forward=False)
+        dpi = fig.dpi or 100.0
+        wpx = int(round(fig_w_in * dpi))
+        hpx = int(round(fig_h_in * dpi))
+        # Fix the canvas to the exact pixel size
+        self.canvas.setFixedSize(wpx, hpx)
+        self.canvas.updateGeometry()
+        # Allow the top-level widget to shrink/grow by clearing any previous constraints
+        # then ask Qt to resize this window to fit the canvas + toolbar.
+        self.setMinimumSize(QtCore.QSize(0, 0))
+        self.setMaximumSize(QtCore.QSize(16777215, 16777215))
+        self.adjustSize()
 
     def _toggle_lock(self, on: bool) -> None:
         self.axis_locked = on
@@ -618,24 +617,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return lines_by_file
 
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
-        # Size (keep static and prevent window smaller than plot)
+        # Always size the figure, canvas, and window to match settings (non-resizable)
         fig_w, fig_h = self._figure_size_inches()
         win._target_aspect = max(fig_w, 1e-9) / max(fig_h, 1e-9)
-        # Only set the concrete pixel size once, on first init. After that,
-        # let the user resize the window; we preserve aspect in resizeEvent.
+        win.apply_fixed_plot_size(fig_w, fig_h)
         if not win._fig_inited:
-            win.canvas.figure.set_size_inches(fig_w, fig_h)
-            dpi = win.canvas.figure.dpi or 100.0
-            wpx = int(fig_w * dpi)
-            hpx = int(fig_h * dpi)
-            # Choose a reasonable initial window size to fit the plot + toolbar
-            init_w = wpx + 32
-            init_h = hpx + win.toolbar.sizeHint().height() + 48
-            win.resize(max(init_w, 300), max(init_h, 240))
             win.fig_size = (fig_w, fig_h)
             win._fig_inited = True
-        # Always fit current figure to current canvas using the target aspect
-        win._fit_figure_to_canvas()
 
         # Preserve limits if locked
         saved = None
@@ -645,7 +633,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ax = win.ax
         ax.clear()
 
-        ls = None if self.line_style.currentText() == "None" else self.line_style.currentText()
+        # Matplotlib expects the literal string 'None' to disable line drawing.
+        ls = 'None' if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
 
         deltas: List[Tuple[str, float, Any]] = []
