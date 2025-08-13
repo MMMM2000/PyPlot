@@ -9,6 +9,8 @@ dependencies = [
     "numpy",
     "pandas",
     "PyPDF2",
+    "pyqtgraph",
+    "plotly",
 ]
 requires-python = ">=3.8"
 
