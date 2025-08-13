@@ -5,13 +5,11 @@ import os
 import re
 import sys
 import weakref
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Tuple
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
-from matplotlib.figure import Figure
+import pyqtgraph as pg
 
 try:  # optional dependency
     from PyPDF2 import PdfReader
@@ -95,10 +93,10 @@ class LabelDialog(QtWidgets.QDialog):
 
 
 # -----------------------------------------------------------------------------
-# A single plot window with a canvas + toolbar
+# A single plot window with a PyQtGraph widget and toolbar
 # -----------------------------------------------------------------------------
 class PlotWindow(QtWidgets.QWidget):
-    """Window containing a matplotlib canvas and toolbar."""
+    """Window containing a PyQtGraph widget and export action."""
 
     instances: "weakref.WeakSet[PlotWindow]" = weakref.WeakSet()
 
@@ -106,90 +104,73 @@ class PlotWindow(QtWidgets.QWidget):
         super().__init__(parent)
         PlotWindow.instances.add(self)
 
-        self.axis_locked: bool = False
-        self._saved_limits: Tuple[Tuple[float, float], Tuple[float, float]] | None = None
-        self._last_lines: List[Tuple[str, List[float], List[float]]] = []
-        self._last_title: str = ""
+        self.plot_widget = pg.PlotWidget()
+        self.plot_widget.showGrid(x=True, y=True)
 
-        fig = Figure(figsize=(8, 5))  # use tight_layout() after plotting
-        self.canvas = FigureCanvas(fig)
-        # We'll keep the canvas at a fixed pixel size to match figure size.
-        self.canvas.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-
-        self.ax = fig.add_subplot(111)
-        self.toolbar = NavigationToolbar(self.canvas, self)
-
-        self.custom_title = ""
-        self.custom_x_label = ""
-        self.custom_y_label = ""
-        self.fig_size = (8.0, 5.0)
-        self._fig_inited = False
-        self._target_aspect: float | None = None
-
-        edit_act = QtGui.QAction("Labels…", self)
-        edit_act.triggered.connect(self._edit_labels)
-        self.toolbar.addAction(edit_act)
-
-        self.lock_act = QtGui.QAction("Lock Axes", self)
-        self.lock_act.setCheckable(True)
-        self.lock_act.setChecked(False)
-        self.lock_act.toggled.connect(self._toggle_lock)
-        self.toolbar.addAction(self.lock_act)
+        self.toolbar = QtWidgets.QToolBar()
+        export_act = QtGui.QAction("Export…", self)
+        export_act.triggered.connect(self.export_matplotlib)
+        self.toolbar.addAction(export_act)
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
-        layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
+        layout.addWidget(self.plot_widget)
 
-    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool=False) -> None:
-        """Set the figure, canvas, and window to a fixed size matching settings.
+        self._last_lines: List[Tuple[str, List[float], List[float]]] = []
+        self._last_title: str = ""
 
-        - Figure size in inches is set directly (no auto-fit to window).
-        - Canvas is given fixed pixel size based on the figure DPI.
-        - Window resizes to fit content but is NOT permanently locked,
-          so it can shrink/grow on subsequent updates.
-        """
-        fig = self.canvas.figure
-        fig.set_size_inches(fig_w_in, fig_h_in, forward=False)
-        dpi = fig.dpi or 100.0
-        wpx = int(round(fig_w_in * dpi))
-        hpx = int(round(fig_h_in * dpi))
-        # Fix the canvas to the exact pixel size
-        self.canvas.setFixedSize(wpx, hpx)
-        self.canvas.updateGeometry()
-        # Allow the top-level widget to shrink/grow by clearing any previous constraints.
-        # Only resize the window to its size hint when ``resize_window`` is True; otherwise
-        # leave the current size untouched so style tweaks don't unexpectedly enlarge it.
-        self.setMinimumSize(QtCore.QSize(0, 0))
-        self.setMaximumSize(QtCore.QSize(16777215, 16777215))
-        if resize_window:
-            self.resize(self.sizeHint())
-        else:
-            self.updateGeometry()
+    def plot_lines(
+        self,
+        lines: Iterable[Tuple[str, List[float], List[float]]],
+        title: str,
+        xlabel: str,
+        ylabel: str,
+        pen: QtGui.QPen,
+        symbol: str | None,
+        symbol_size: float,
+        grid: bool,
+        legend: bool,
+    ) -> None:
+        self.plot_widget.clear()
+        self.plot_widget.showGrid(x=grid, y=grid)
+        if legend:
+            self.plot_widget.addLegend()
+        for label, xs, ys in lines:
+            self.plot_widget.plot(
+                xs,
+                ys,
+                pen=pen,
+                symbol=symbol,
+                symbolSize=symbol_size,
+                name=label,
+            )
+        self.plot_widget.setTitle(title)
+        self.plot_widget.setLabel("bottom", xlabel)
+        self.plot_widget.setLabel("left", ylabel)
+        self._last_lines = list(lines)
+        self._last_title = title
 
-    def _toggle_lock(self, on: bool) -> None:
-        self.axis_locked = on
-        if on:
-            self._saved_limits = (self.ax.get_xlim(), self.ax.get_ylim())
-        else:
-            self._saved_limits = None
-
-    def _edit_labels(self) -> None:
-        dlg = LabelDialog(
-            self.custom_title or self.ax.get_title(),
-            self.custom_x_label or self.ax.get_xlabel(),
-            self.custom_y_label or self.ax.get_ylabel(),
+    def export_matplotlib(self) -> None:
+        if not self._last_lines:
+            return
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
+            "Export figure",
+            filter="PDF Files (*.pdf);;SVG Files (*.svg)",
         )
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            self.custom_title, self.custom_x_label, self.custom_y_label = dlg.get_values()
-            self.ax.set_title(self.custom_title)
-            self.ax.set_xlabel(self.custom_x_label)
-            self.ax.set_ylabel(self.custom_y_label)
-            self.canvas.draw_idle()
+        if not path:
+            return
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots()
+        for label, xs, ys in self._last_lines:
+            ax.plot(xs, ys, label=label)
+        ax.set_title(self._last_title)
+        ax.set_xlabel(self.plot_widget.getAxis("bottom").labelText)
+        ax.set_ylabel(self.plot_widget.getAxis("left").labelText)
+        ax.legend()
+        fig.savefig(path)
+        plt.close(fig)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         try:
@@ -233,7 +214,7 @@ class WindowManagerDialog(QtWidgets.QDialog):
     def refresh(self) -> None:
         self.list.clear()
         for w in list(PlotWindow.instances):
-            title = w.ax.get_title() or "(untitled)"
+            title = w._last_title or "(untitled)"
             it = QtWidgets.QListWidgetItem(title)
             it.setData(QtCore.Qt.ItemDataRole.UserRole, w)
             self.list.addItem(it)
@@ -624,36 +605,63 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return lines_by_file
 
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, List[float], List[float]]], title: str) -> None:
-        # Always size the figure, canvas, and window to match settings (non-resizable)
+        # Determine target aspect ratio for potential future use
         fig_w, fig_h = self._figure_size_inches()
         win._target_aspect = max(fig_w, 1e-9) / max(fig_h, 1e-9)
-        # Only resize the top-level window if the figure size changed
-        size_changed = (fig_w, fig_h) != tuple(win.fig_size)
-        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=size_changed)
-        if size_changed:
-            win.fig_size = (fig_w, fig_h)
-        if not win._fig_inited:
-            win.fig_size = (fig_w, fig_h)
-            win._fig_inited = True
 
-        # Preserve limits if locked
-        saved = None
-        if win.axis_locked:
-            saved = (win.ax.get_xlim(), win.ax.get_ylim())
-
-        ax = win.ax
-        ax.clear()
-
-        # Matplotlib expects the literal string 'None' to disable line drawing.
-        ls = 'None' if self.line_style.currentText() == "None" else self.line_style.currentText()
+        style_map = {
+            "-": QtCore.Qt.PenStyle.SolidLine,
+            "--": QtCore.Qt.PenStyle.DashLine,
+            ":": QtCore.Qt.PenStyle.DotLine,
+            "-.": QtCore.Qt.PenStyle.DashDotLine,
+        }
+        ls = self.line_style.currentText()
+        pen_style = style_map.get(ls, QtCore.Qt.PenStyle.NoPen if ls == "None" else QtCore.Qt.PenStyle.SolidLine)
+        pen = pg.mkPen(self._color, width=float(self.line_width.value()), style=pen_style)
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
+        x_lab = self.x_label_edit.text()
+        units = self.y_units_edit.text().strip()
+        y_lab = self.y_label_edit.text().strip()
+        if units:
+            y_lab = f"{y_lab} ({units})"
+        win.plot_lines(
+            lines,
+            title,
+            x_lab,
+            y_lab,
+            pen,
+            marker,
+            float(self.marker_size.value()),
+            self.grid_cb.isChecked(),
+            self.legend_cb.isChecked(),
+        )
 
-        deltas: List[Tuple[str, float, Any]] = []
-        for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None  # first series user color, others cycle
-            (line,) = ax.plot(
-                x,
-                y,
+        # Ticks font size
+        font = QtGui.QFont()
+        font.setPointSize(int(self.tick_fs.value()))
+        win.plot_widget.getAxis("bottom").setStyle(tickFont=font)
+        win.plot_widget.getAxis("left").setStyle(tickFont=font)
+
+    def _save_window(self, win: PlotWindow) -> None:
+        out_dir = self.out_dir.text()
+        if not out_dir or not win._last_lines:
+            return
+        os.makedirs(out_dir, exist_ok=True)
+        ext = self.format_combo.currentText().lower()
+        base = win._last_title or "plot"
+        safe = re.sub(r"[^\w\-\.]+", "_", base)
+        path = os.path.join(out_dir, f"{safe}.{ext}")
+        import matplotlib.pyplot as plt
+
+        fig_w, fig_h = self._figure_size_inches()
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        ls = "None" if self.line_style.currentText() == "None" else self.line_style.currentText()
+        marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
+        for i, (label, xs, ys) in enumerate(win._last_lines):
+            color = self._color.name() if i == 0 else None
+            ax.plot(
+                xs,
+                ys,
                 linestyle=ls,
                 marker=marker,
                 linewidth=float(self.line_width.value()),
@@ -661,12 +669,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 color=color,
                 label=label,
             )
-            if x and y:
-                max_idx = max(range(len(x)), key=x.__getitem__)
-                delta = y[max_idx] - y[0]
-                deltas.append((label, delta, line.get_color()))
-
-        # Labels
         x_lab = self.x_label_edit.text()
         units = self.y_units_edit.text().strip()
         y_lab = self.y_label_edit.text().strip()
@@ -674,45 +676,25 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             y_lab = f"{y_lab} ({units})"
         ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()))
         ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()))
-
-        # Grid, limits, title, legend
-        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
-        if saved is not None:
-            ax.set_xlim(saved[0])
-            ax.set_ylim(saved[1])
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
-        win._last_lines = list(lines)
-        win._last_title = title
+        ax.set_title(win._last_title, fontsize=int(self.title_fs.value()))
         if self.legend_cb.isChecked():
             ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
-
-        # Ticks font size
+        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
         ax.tick_params(labelsize=int(self.tick_fs.value()))
+        fig.savefig(path, dpi=int(self.dpi_spin.value()))
+        plt.close(fig)
 
-        # Avoid layout thrash: only re-layout when size changed or first draw
-        if not win._fig_inited or size_changed:
-            win.canvas.figure.tight_layout()
-        win.canvas.draw_idle()
-
-    def _save_window(self, win: PlotWindow) -> None:
-        out_dir = self.out_dir.text()
-        if not out_dir:
-            return
-        os.makedirs(out_dir, exist_ok=True)
-        ext = self.format_combo.currentText().lower()
-        base = win.ax.get_title() or "plot"
-        safe = re.sub(r"[^\w\-\.]+", "_", base)
-        path = os.path.join(out_dir, f"{safe}.{ext}")
-        # Save with dimensions from settings, regardless of on-screen size.
-        fig = win.canvas.figure
-        old_size = tuple(fig.get_size_inches())
-        fig_w, fig_h = self._figure_size_inches()
+        # Optional Plotly export for shareable HTML
         try:
-            fig.set_size_inches(fig_w, fig_h, forward=False)
-            fig.savefig(path, dpi=int(self.dpi_spin.value()))
-        finally:
-            fig.set_size_inches(old_size[0], old_size[1], forward=False)
-            win.canvas.draw_idle()
+            import plotly.graph_objects as go
+
+            fig_p = go.Figure()
+            for label, xs, ys in win._last_lines:
+                fig_p.add_trace(go.Scatter(x=xs, y=ys, mode="lines+markers", name=label))
+            fig_p.update_layout(title=win._last_title, xaxis_title=x_lab, yaxis_title=y_lab)
+            fig_p.write_html(os.path.join(out_dir, f"{safe}.html"))
+        except Exception:
+            pass
 
     def save_current(self) -> None:
         if self.last_plot_window is None:
@@ -773,11 +755,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
     def clear_plot(self) -> None:
         if self.plot_win:
-            self.plot_win.ax.clear()
-            self.plot_win.canvas.draw_idle()
+            self.plot_win.plot_widget.clear()
         for w in self.plot_wins:
-            w.ax.clear()
-            w.canvas.draw_idle()
+            w.plot_widget.clear()
 
     def open_manager(self) -> None:
         dlg = WindowManagerDialog(self)

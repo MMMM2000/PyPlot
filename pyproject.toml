@@ -5,10 +5,12 @@ description = "PyQt6 data logging and plotting utilities"
 authors = [{name = "Unknown"}]
 dependencies = [
     "PyQt6",
+    "pyqtgraph",
     "matplotlib",
     "numpy",
     "pandas",
     "PyPDF2",
+    "plotly",
 ]
 requires-python = ">=3.8"
 
