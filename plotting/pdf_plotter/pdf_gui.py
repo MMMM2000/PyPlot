@@ -33,6 +33,26 @@ except Exception:
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
 
+class _NoWheelSpinBox(QtWidgets.QSpinBox):
+    """A QSpinBox that ignores wheel events unless focused."""
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:  # type: ignore[override]
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
+class _NoWheelDoubleSpinBox(QtWidgets.QDoubleSpinBox):
+    """A QDoubleSpinBox that ignores wheel events unless focused."""
+
+    def wheelEvent(self, event: QtGui.QWheelEvent) -> None:  # type: ignore[override]
+        if self.hasFocus():
+            super().wheelEvent(event)
+        else:
+            event.ignore()
+
+
 # -----------------------------------------------------------------------------
 # Data loading
 # -----------------------------------------------------------------------------
@@ -137,14 +157,32 @@ class PlotWindow(QtWidgets.QWidget):
         export_act.triggered.connect(self._export_matplotlib)
         self.toolbar.addAction(export_act)
 
+        self.dark_act = QtGui.QAction("Dark mode", self)
+        self.dark_act.setCheckable(True)
+        self.dark_act.setChecked(False)
+        self.dark_act.toggled.connect(self._apply_theme)
+        self.toolbar.addAction(self.dark_act)
+
         layout = QtWidgets.QVBoxLayout(self)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.plot_widget)
         layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
+        self._apply_theme(False)
 
     def _export_matplotlib(self) -> None:
         if self.controller is not None:
             self.controller._save_window(self)
+
+    def _apply_theme(self, on: bool) -> None:
+        bg = "k" if on else "w"
+        fg = "w" if on else "k"
+        self.plot_widget.setBackground(bg)
+        pi = self.plot_widget.getPlotItem()
+        for name in ("bottom", "left"):
+            ax = pi.getAxis(name)
+            ax.setPen(pg.mkPen(fg))
+            ax.setTextPen(pg.mkPen(fg))
+        pi.showGrid(x=True, y=True, alpha=0.3)
 
     def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
         """Resize the underlying widget to roughly match the requested figure size."""
@@ -165,10 +203,11 @@ class PlotWindow(QtWidgets.QWidget):
             self._saved_limits = None
 
     def _edit_labels(self) -> None:
+        plot_item = self.plot_widget.getPlotItem()
         dlg = LabelDialog(
-            self.custom_title or self.plot_widget.plotItem.titleLabel.text,
-            self.custom_x_label or self.plot_widget.plotItem.getAxis("bottom").labelText,
-            self.custom_y_label or self.plot_widget.plotItem.getAxis("left").labelText,
+            self.custom_title or plot_item.titleLabel.text,
+            self.custom_x_label or plot_item.getAxis("bottom").labelText,
+            self.custom_y_label or plot_item.getAxis("left").labelText,
             self,
         )
         if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -219,7 +258,8 @@ class WindowManagerDialog(QtWidgets.QDialog):
     def refresh(self) -> None:
         self.list.clear()
         for w in list(PlotWindow.instances):
-            title = w.plot_widget.plotItem.titleLabel.text or "(untitled)"
+            pi = w.plot_widget.getPlotItem()
+            title = pi.titleLabel.text or "(untitled)"
             it = QtWidgets.QListWidgetItem(title)
             it.setData(QtCore.Qt.ItemDataRole.UserRole, w)
             self.list.addItem(it)
@@ -315,11 +355,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.marker_style = QtWidgets.QComboBox()
         self.marker_style.addItems(["o", "s", "d", "^", "v", "x", "+", ".", "None"])
         self.marker_style.setCurrentIndex(0)
-        self.line_width = QtWidgets.QDoubleSpinBox()
+        self.line_width = _NoWheelDoubleSpinBox()
         self.line_width.setRange(0.1, 10.0)
         self.line_width.setSingleStep(0.1)
         self.line_width.setValue(1.5)
-        self.marker_size = QtWidgets.QDoubleSpinBox()
+        self.marker_size = _NoWheelDoubleSpinBox()
         self.marker_size.setRange(0.5, 30.0)
         self.marker_size.setSingleStep(0.5)
         self.marker_size.setValue(5.0)
@@ -339,6 +379,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Marker size", self.marker_size)
         form.addRow("Color", self.color_btn)
         form.addRow("Grid", self.grid_cb)
+
+        self.dark_cb = QtWidgets.QCheckBox("Dark background")
+        self.dark_cb.setChecked(False)
+        self.dark_cb.toggled.connect(self._apply_dark_global)
+        form.addRow("", self.dark_cb)
 
         # Labels
         self.title_edit = QtWidgets.QLineEdit()
@@ -372,7 +417,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             ]
         )
         self.legend_loc.setCurrentIndex(0)
-        self.legend_fs = QtWidgets.QSpinBox()
+        self.legend_fs = _NoWheelSpinBox()
         self.legend_fs.setRange(6, 48)
         self.legend_fs.setValue(10)
         self.legend_cb.stateChanged.connect(self._maybe_auto_plot)
@@ -383,13 +428,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Legend size", self.legend_fs)
 
         # Fonts
-        self.title_fs = QtWidgets.QSpinBox()
+        self.title_fs = _NoWheelSpinBox()
         self.title_fs.setRange(6, 72)
         self.title_fs.setValue(12)
-        self.label_fs = QtWidgets.QSpinBox()
+        self.label_fs = _NoWheelSpinBox()
         self.label_fs.setRange(6, 72)
         self.label_fs.setValue(11)
-        self.tick_fs = QtWidgets.QSpinBox()
+        self.tick_fs = _NoWheelSpinBox()
         self.tick_fs.setRange(6, 48)
         self.tick_fs.setValue(10)
         for w in [self.title_fs, self.label_fs, self.tick_fs]:
@@ -405,15 +450,18 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.browse_out_btn = QtWidgets.QPushButton("Browse…")
         self.browse_out_btn.clicked.connect(self._browse_out)
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
-        self.format_combo = QtWidgets.QComboBox()
-        self.format_combo.addItems(["png", "pdf"])
-        self.dpi_spin = QtWidgets.QSpinBox()
+        self.png_cb = QtWidgets.QCheckBox("PNG")
+        self.png_cb.setChecked(True)
+        self.html_cb = QtWidgets.QCheckBox("HTML")
+        self.html_cb.setChecked(False)
+        fmt_box = self._hbox(self.png_cb, self.html_cb)
+        self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 600)
         self.dpi_spin.setValue(300)
-        self.fig_w = QtWidgets.QDoubleSpinBox()
+        self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm
-        self.fig_h = QtWidgets.QDoubleSpinBox()
+        self.fig_h = _NoWheelDoubleSpinBox()
         self.fig_h.setRange(1.0, 1000.0)
         self.fig_h.setValue(120.0)  # default in mm
         self.fig_units = QtWidgets.QComboBox()
@@ -434,7 +482,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.save_now_btn.clicked.connect(self.save_current)
         form.addRow("Save on plot", self.save_cb)
         form.addRow("Output dir", out_box)
-        form.addRow("Format", self.format_combo)
+        form.addRow("Formats", fmt_box)
         form.addRow("DPI", self.dpi_spin)
         form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
         form.addRow("", self.save_now_btn)
@@ -479,6 +527,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             return value
         mm = value * to_mm[from_unit]
         return mm / to_mm[to_unit]
+
+    def _apply_dark_global(self, on: bool) -> None:
+        for w in list(PlotWindow.instances):
+            w.dark_act.setChecked(on)
+        self._maybe_auto_plot()
+
+    def _resolved_color(self, base: QtGui.QColor, dark: bool) -> str:
+        c = QtGui.QColor(base)
+        if dark and c.lightness() < 128:
+            c = c.lighter(170)
+        return c.name()
 
     def _on_units_changed(self, new_unit: str) -> None:
         old_unit = getattr(self, "_current_units", new_unit)
@@ -628,15 +687,23 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
         pw = win.plot_widget
         pw.clear()
+        win._apply_theme(win.dark_act.isChecked())
 
         ls = self.line_style.currentText()
         marker = self.marker_style.currentText()
         pen_width = float(self.line_width.value())
         symbol_size = float(self.marker_size.value())
         for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
+            color = self._resolved_color(self._color, win.dark_act.isChecked()) if i == 0 else None
             pen = pg.mkPen(color=color, width=pen_width, style=QtCore.Qt.PenStyle.SolidLine)
-            pw.plot(x, y, pen=None if ls == "None" else pen, symbol=None if marker == "None" else marker, symbolSize=symbol_size, name=label)
+            pw.plot(
+                x,
+                y,
+                pen=None if ls == "None" else pen,
+                symbol=None if marker == "None" else marker,
+                symbolSize=symbol_size,
+                name=label,
+            )
 
         x_lab = self.x_label_edit.text()
         units = self.y_units_edit.text().strip()
@@ -660,6 +727,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         fig_w, fig_h = self._figure_size_inches()
         fig = Figure(figsize=(fig_w, fig_h))
         ax = fig.add_subplot(111)
+        fig.patch.set_facecolor("white")
+        ax.set_facecolor("white")
 
         ls = 'None' if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
@@ -706,29 +775,34 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         elif ls != "None" and marker == "None":
             mode = "lines"
         for i, (label, x, y) in enumerate(lines):
+            color = self._color.name() if i == 0 else None
             fig.add_trace(
-                go.Scatter(x=x, y=y, mode=mode, name=label)
+                go.Scatter(x=x, y=y, mode=mode, name=label, line=dict(color=color), marker=dict(color=color))
             )
         x_lab = self.x_label_edit.text()
         units = self.y_units_edit.text().strip()
         y_lab = self.y_label_edit.text().strip()
         if units:
             y_lab = f"{y_lab} ({units})"
-        fig.update_layout(title=title, xaxis_title=x_lab, yaxis_title=y_lab)
+        fig.update_layout(title=title, xaxis_title=x_lab, yaxis_title=y_lab, template="plotly_white")
         fig.write_html(f"{base_path}.html")
 
     def _save_window(self, win: PlotWindow) -> None:
         out_dir = self.out_dir.text()
         if not out_dir:
             return
+        if not (self.png_cb.isChecked() or self.html_cb.isChecked()):
+            QtWidgets.QMessageBox.information(self, "No format", "Select at least one output format.")
+            return
         os.makedirs(out_dir, exist_ok=True)
-        ext = self.format_combo.currentText().lower()
         base = win._last_title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
-        fig = self._create_matplotlib_fig(win._last_lines, win._last_title)
-        fig.savefig(f"{base_path}.{ext}", dpi=int(self.dpi_spin.value()))
-        self._save_plotly_html(win._last_lines, win._last_title, base_path)
+        if self.png_cb.isChecked():
+            fig = self._create_matplotlib_fig(win._last_lines, win._last_title)
+            fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
+        if self.html_cb.isChecked():
+            self._save_plotly_html(win._last_lines, win._last_title, base_path)
 
     def save_current(self) -> None:
         if self.last_plot_window is None:
@@ -753,6 +827,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if mode == "Combined":
             if self.plot_win is None:
                 self.plot_win = PlotWindow(None, controller=self)
+            self.plot_win.dark_act.setChecked(self.dark_cb.isChecked())
             lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
             for path, sets in lines_by_file.items():
                 base = os.path.basename(path)
@@ -774,6 +849,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             self.plot_wins = []
             for path, sets in lines_by_file.items():
                 win = PlotWindow(None, controller=self)
+                win.dark_act.setChecked(self.dark_cb.isChecked())
                 lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
                 base = os.path.basename(path)
                 for y_name, xs, ys in sets:
