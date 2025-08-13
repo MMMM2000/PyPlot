@@ -160,13 +160,15 @@ class PlotWindow(QtWidgets.QWidget):
         # Fix the canvas to the exact pixel size
         self.canvas.setFixedSize(wpx, hpx)
         self.canvas.updateGeometry()
-        # Allow the top-level widget to shrink/grow by clearing any previous constraints
-        # then explicitly resize the window to its size hint. ``adjustSize`` tends not to
-        # shrink top‑level widgets on some platforms which caused the plot window to grow
-        # when style changes (e.g. line width) were applied and remain enlarged afterwards.
+        # Allow the top-level widget to shrink/grow by clearing any previous constraints.
+        # Only resize the window to its size hint when ``resize_window`` is True; otherwise
+        # leave the current size untouched so style tweaks don't unexpectedly enlarge it.
         self.setMinimumSize(QtCore.QSize(0, 0))
         self.setMaximumSize(QtCore.QSize(16777215, 16777215))
-        self.resize(self.sizeHint())
+        if resize_window:
+            self.resize(self.sizeHint())
+        else:
+            self.updateGeometry()
 
     def _toggle_lock(self, on: bool) -> None:
         self.axis_locked = on

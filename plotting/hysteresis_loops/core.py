@@ -49,7 +49,7 @@ def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> plt.Figure
     metas.sort(key=lambda t: (t[0][1], t[0][2]))  # by sort_key then label
     base_name = metas[0][0][0]
     n = len(metas)
-    fig, axes = plt.subplots(n, 1, sharex=True, figsize=(7, 1.6*n), gridspec_kw={'hspace': 0})
+    fig, axes = plt.subplots(n, 1, sharex=True, figsize=(7, 1.2 * n), gridspec_kw={'hspace': 0})
     if n == 1:
         axes = [axes]
     for ax, ((base, _, label), path, x, y) in zip(axes, metas):
@@ -80,7 +80,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True):
         fig = _stacked(loaded)
         if show:
             plt.show()
-        return [fig]
+        return fig
 
     if mode.lower() == "combined":
         fig, ax = plt.subplots()
@@ -99,7 +99,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True):
         fig.tight_layout()
         if show:
             plt.show()
-        return [fig]
+        return fig
 
     # Separate
     figs: List[plt.Figure] = []
