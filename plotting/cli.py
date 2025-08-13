@@ -9,6 +9,7 @@ from .hsw_distribution import distribution_gui
 from .temperature_sensitivity import temp_gui
 from .temperature_dependence import temp_dep_gui
 from .stress_sensitivity import sens_gui
+from .hysteresis_loops import loops_gui
 
 PLOTTERS = {
     "stress": stress_gui.main,
@@ -18,6 +19,7 @@ PLOTTERS = {
     "temperature": temp_gui.main,
     "temp-dependence": temp_dep_gui.main,
     "stress-sens": sens_gui.main,
+    "hysteresis-loops": loops_gui.main,
 }
 
 

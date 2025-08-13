@@ -19,6 +19,7 @@ if __package__ is None or __package__ == "":
     from plotting import common
     from data_logger import data_logger
     from plotting.pdf_plotter import pdf_gui
+    from plotting.hysteresis_loops import loops_gui
 else:
     from .plotting.stress_dependence import stress_gui
     from .plotting.hsw_load_compare import load_compare_gui
@@ -31,6 +32,7 @@ else:
     from .plotting import common
     from .data_logger import data_logger
     from .plotting.pdf_plotter import pdf_gui
+    from .plotting.hysteresis_loops import loops_gui
 
 
 PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
@@ -42,6 +44,7 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
     "Temperature Dependence": temp_dep_gui.main,
     "Stress Sensitivity": sens_gui.main,
     "PDF Plotter": pdf_gui.main,
+    "Hysteresis Loops": loops_gui.main,
 }
 
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
