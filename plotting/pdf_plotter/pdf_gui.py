@@ -19,17 +19,7 @@ try:  # optional dependency
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
-# Support running both as a package module and as a standalone script
-try:
-    # When launched via `python -m plotting.pdf_plotter.pdf_gui` or imported from launcher
-    from ..utils import apply_system_theme, select_files_or_folder  # type: ignore
-except Exception:
-    # When launched directly: `python plotting/pdf_plotter/pdf_gui.py`
-    from pathlib import Path as _Path
-    _root = str(_Path(__file__).resolve().parents[2])  # repo root
-    if _root not in sys.path:
-        sys.path.append(_root)
-    from plotting.utils import apply_system_theme, select_files_or_folder  # type: ignore
+from ..utils import apply_system_theme, select_files_or_folder  # type: ignore
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -148,6 +138,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
         # Track plot windows and last plotted data
         self.plot_wins: List[PlotWindow] = []
+        self.plot_win: PlotWindow | None = None
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
         self._last_x_label: str = ""
@@ -551,6 +542,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             self._plot_to_window(win, lines, title, x_label, y_label)
             win.show()
             self.plot_wins.append(win)
+            self.plot_win = win
             self._last_lines = win._last_lines
             self._last_title = title
             self._last_x_label = x_label
@@ -569,6 +561,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 self._plot_to_window(win, lines, title, x_label, y_label)
                 win.show()
                 self.plot_wins.append(win)
+                self.plot_win = win
                 self._last_lines = win._last_lines
                 self._last_title = title
                 self._last_x_label = x_label
@@ -646,6 +639,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         for w in self.plot_wins:
             w.close()
         self.plot_wins = []
+        self.plot_win = None
         self._last_lines = []
         self._last_title = ""
         self._last_x_label = ""
