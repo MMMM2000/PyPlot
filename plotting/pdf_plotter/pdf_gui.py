@@ -19,7 +19,12 @@ try:  # optional dependency
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
-from ..utils import apply_system_theme, select_files_or_folder  # type: ignore
+from ..utils import (
+    apply_system_theme,
+    select_files_or_folder,
+    DEFAULT_DPI,
+    save_figure,
+)  # type: ignore
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -55,6 +60,10 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     """
     if PdfReader is None:
         raise RuntimeError("PyPDF2 not installed. Install with: pip install PyPDF2")
+    if not os.path.exists(path):
+        alt = os.path.join(os.path.dirname(path), "pdf_data", os.path.basename(path))
+        if os.path.exists(alt):
+            path = alt
     rows: List[NumberRow] = []
     reader = PdfReader(path)
     num = r"-?\d+(?:[.,]\d+)?"
@@ -101,18 +110,29 @@ class PlotWindow(QtWidgets.QMainWindow):
         layout = QtWidgets.QVBoxLayout(central)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
-        layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
         self.setCentralWidget(central)
+        self._base_w_in = 1.0
+        self._base_h_in = 1.0
+        self._aspect_ratio = 1.0
 
     def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
+        self._base_w_in = fig_w_in
+        self._base_h_in = fig_h_in
+        self._aspect_ratio = fig_w_in / max(fig_h_in, 1e-9)
         dpi = self.logicalDpiX() or 100.0
         wpx = int(round(fig_w_in * dpi))
         hpx = int(round(fig_h_in * dpi))
-        self.canvas.setFixedSize(wpx, hpx)
+        screen = QtWidgets.QApplication.primaryScreen()
+        if screen:
+            geo = screen.availableGeometry()
+            max_w = int(geo.width() * 0.9)
+            max_h = int(geo.height() * 0.9) - self.toolbar.sizeHint().height()
+            wpx = min(wpx, max_w)
+            hpx = min(hpx, max_h)
+        self.canvas.resize(wpx, hpx)
         if resize_window:
-            self.resize(self.sizeHint())
-        else:
-            self.updateGeometry()
+            self.resize(wpx, hpx + self.toolbar.sizeHint().height())
+        self._update_dpi()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         try:
@@ -120,6 +140,21 @@ class PlotWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         super().closeEvent(event)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        avail_w = self.width()
+        avail_h = self.height() - self.toolbar.height()
+        target_w = min(avail_w, int(avail_h * self._aspect_ratio))
+        target_h = int(target_w / self._aspect_ratio)
+        self.canvas.resize(target_w, target_h)
+        self._update_dpi()
+
+    def _update_dpi(self) -> None:
+        wpx = self.canvas.width()
+        dpi = wpx / max(self._base_w_in, 1e-9)
+        self.fig.set_dpi(dpi)
+        self.fig.set_size_inches(self._base_w_in, self._base_h_in)
 
 
 # -----------------------------------------------------------------------------
@@ -273,12 +308,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.browse_out_btn = QtWidgets.QPushButton("Browse…")
         self.browse_out_btn.clicked.connect(self._browse_out)
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
-        self.png_cb = QtWidgets.QCheckBox("PNG")
-        self.png_cb.setChecked(True)
-        fmt_box = self._hbox(self.png_cb)
+        self.format_combo = QtWidgets.QComboBox()
+        self.format_combo.addItems(["png", "pdf", "svg"])
+        fmt_box = self._hbox(self.format_combo)
         self.dpi_spin = _NoWheelSpinBox()
-        self.dpi_spin.setRange(72, 600)
-        self.dpi_spin.setValue(300)
+        self.dpi_spin.setRange(72, 10000)
+        self.dpi_spin.setValue(DEFAULT_DPI)
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm
@@ -303,7 +338,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.save_now_btn.clicked.connect(self.save_current)
         form.addRow("Save on plot", self.save_cb)
         form.addRow("Output dir", out_box)
-        form.addRow("Formats", fmt_box)
+        form.addRow("Format", fmt_box)
         form.addRow("DPI", self.dpi_spin)
         form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
         form.addRow("", self.save_now_btn)
@@ -524,7 +559,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         selected = [cb.text() for cb in self.y_checks if cb.isChecked()]
         if not selected:
             selected = ["T1+T2"]
-        y_label = " / ".join(selected)
+        y_label = " / ".join(selected) + " (arb. u.)"
         x_label = x_name
         mode = self.mode_combo.currentText()
         if mode == "Combined":
@@ -610,15 +645,14 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         out_dir = self.out_dir.text()
         if not out_dir:
             return
-        if not self.png_cb.isChecked():
-            QtWidgets.QMessageBox.information(self, "No format", "Enable PNG output.")
-            return
         os.makedirs(out_dir, exist_ok=True)
         base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
         fig = self._create_matplotlib_fig(lines, title, x_label, y_label)
-        fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
+        fmt = self.format_combo.currentText()
+        dpi = int(self.dpi_spin.value()) if fmt == "png" else None
+        save_figure(fig, base_path, fmt=fmt, dpi=dpi)
 
     def save_current(self) -> None:
         if not self._last_lines:

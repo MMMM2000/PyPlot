@@ -1,4 +1,5 @@
 from PyQt6 import QtWidgets, QtGui, QtCore
+from matplotlib.figure import Figure
 import os
 import sys
 
@@ -135,3 +136,32 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = "
                         paths.append(os.path.join(root, name))
             paths.sort()
     return list(paths)
+
+
+DEFAULT_DPI = 1000
+
+
+def save_figure(fig: Figure, base_path: str, fmt: str = "png", dpi: int | None = None) -> str:
+    """Save ``fig`` to ``base_path`` with format ``fmt``.
+
+    Parameters
+    ----------
+    fig:
+        Matplotlib figure to save.
+    base_path:
+        Path without extension. The chosen format will be appended.
+    fmt:
+        Output format. Defaults to ``"png"``.
+    dpi:
+        Resolution in dots per inch. When ``None`` the default of
+        :data:`DEFAULT_DPI` is used for PNG output while vector formats use
+        Matplotlib's default.
+    """
+
+    fmt = fmt.lower()
+    if dpi is None and fmt == "png":
+        dpi = DEFAULT_DPI
+    target = f"{base_path}.{fmt}"
+    fig.savefig(target, dpi=dpi)
+    return target
+

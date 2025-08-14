@@ -18,6 +18,7 @@ from matplotlib.typing import ColorType
 
 from ..config import load_config
 from .. import common
+from ..utils import DEFAULT_DPI, save_figure
 
 # Load default configuration
 _CFG = load_config().get("temperature_sensitivity", {})
@@ -49,6 +50,8 @@ MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
 MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
+OUTPUT_FORMAT = _CFG.get("OUTPUT_FORMAT", "png")
+OUTPUT_DPI = int(_CFG.get("OUTPUT_DPI", DEFAULT_DPI))
 
 LABELS = {
     "T1": "T1 (µs)",
@@ -403,11 +406,11 @@ def plot_variable(
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {anneal} {var}.png"
+    fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
+    return fig, f"{fname}.{OUTPUT_FORMAT}"
 
 
 from ..common import maybe_handle_outliers
@@ -472,6 +475,7 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = Path(fname).with_suffix("")
+                    save_figure(fig, os.path.join(out, str(base)), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
 
     print(f'Done: processed {total} plots.')

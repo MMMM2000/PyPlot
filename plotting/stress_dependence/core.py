@@ -18,6 +18,7 @@ from matplotlib.collections import PathCollection
 from matplotlib.typing import ColorType
 from ..common import maybe_handle_outliers
 from matplotlib.figure import Figure
+from ..utils import DEFAULT_DPI, save_figure
 
 # Load default configuration
 _CFG = load_config().get("stress_dependence", {})
@@ -52,6 +53,8 @@ PROC_ALPHA = 0.5
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 MAX_SHOW = 8
+OUTPUT_FORMAT = _CFG.get("OUTPUT_FORMAT", "png")
+OUTPUT_DPI = int(_CFG.get("OUTPUT_DPI", DEFAULT_DPI))
 
 
 class ProgressDialog:
@@ -231,11 +234,11 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {samp} {anneal} {var}.png"
+    fname = f"{comp} {title} {samp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
+    return fig, f"{fname}.{OUTPUT_FORMAT}"
 
 def main(files: List[str]):
     data = load_data(files)
@@ -282,6 +285,7 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = Path(fname).with_suffix("")
+                    save_figure(fig, os.path.join(out, str(base)), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
 
     print(f'Done: processed {total} plots.')

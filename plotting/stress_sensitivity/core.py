@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
+from ..utils import DEFAULT_DPI, save_figure
 
 _CFG = load_config().get("stress_sensitivity", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
@@ -27,6 +28,8 @@ PLOT_DT = bool(_CFG.get("PLOT_DT", True))
 PLOT_T1 = bool(_CFG.get("PLOT_T1", True))
 PLOT_T2 = bool(_CFG.get("PLOT_T2", True))
 PLOT_VARS = [v for v, b in [("sum", PLOT_SUM), ("dT", PLOT_DT), ("T1", PLOT_T1), ("T2", PLOT_T2)] if b]
+OUTPUT_FORMAT = _CFG.get("OUTPUT_FORMAT", "png")
+OUTPUT_DPI = int(_CFG.get("OUTPUT_DPI", DEFAULT_DPI))
 
 INCLUDE_DEPENDENCE = bool(_CFG.get("INCLUDE_DEPENDENCE", False))
 MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
@@ -223,11 +226,11 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {sample} {anneal} {var}.png"
+    fname = f"{comp} {title} {sample} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
+    return fig, f"{fname}.{OUTPUT_FORMAT}"
 
 
 def _draw_mini_dependence(
@@ -390,11 +393,11 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {anneal} {var}.png"
+    fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
+    return fig, f"{fname}.{OUTPUT_FORMAT}"
 
 
 def main(files: List[str]) -> None:
@@ -443,7 +446,8 @@ def main(files: List[str]) -> None:
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = Path(fname).with_suffix("")
+                    save_figure(fig, os.path.join(out, str(base)), fmt=OUTPUT_FORMAT, dpi=OUTPUT_DPI)
 
     print(f'Done: processed {total} plots.')
 
