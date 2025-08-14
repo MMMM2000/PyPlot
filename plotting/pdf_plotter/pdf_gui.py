@@ -10,7 +10,6 @@ from typing import Any, Dict, Iterable, List, Tuple
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import numpy as np
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
@@ -88,6 +87,36 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
                 except ValueError:
                     pass
     return rows
+
+
+def select_pdf_files(parent: QtWidgets.QWidget | None = None) -> List[str]:
+    """Let the user choose PDF files or a folder containing PDFs."""
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle("Select Input")
+    box.setText("Choose input files or a folder with PDFs")
+    files_btn = box.addButton("Files", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    folder_btn = box.addButton("Folder", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+    box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+    box.exec()
+
+    paths: List[str] = []
+    clicked = box.clickedButton()
+    if clicked == files_btn:
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            parent,
+            "Select PDF files",
+            "",
+            "PDF files (*.pdf)",
+        )
+    elif clicked == folder_btn:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder")
+        if directory:
+            for root, _dirs, files in os.walk(directory):
+                for name in files:
+                    if name.lower().endswith(".pdf"):
+                        paths.append(os.path.join(root, name))
+            paths.sort()
+    return list(paths)
 
 
 # -----------------------------------------------------------------------------
@@ -172,10 +201,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.data: List[Tuple[str, List[NumberRow]]] = []
 
         # Track plot windows and last plotted data
-        self.plot_win: PlotWindow | None = None
         self.plot_wins: List[PlotWindow] = []
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
+        self._last_x_label: str = ""
+        self._last_y_label: str = ""
 
         # Make the settings UI scrollable
         outer = QtWidgets.QVBoxLayout(self)
@@ -201,13 +231,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         for name in ["T1+T2", "T1", "T2", "T2–T1"]:
             cb = QtWidgets.QCheckBox(name)
             cb.setChecked(name == "T1+T2")
-            cb.stateChanged.connect(self._sync_labels_from_choices)
             cb.stateChanged.connect(self._maybe_auto_plot)
             y_layout.addWidget(cb)
             self.y_checks.append(cb)
         self.x_combo = QtWidgets.QComboBox()
-        self.x_combo.addItems(["Force (N)", "Strain (mm)"])
-        self.x_combo.currentIndexChanged.connect(self._sync_labels_from_choices)
+        self.x_combo.addItems(["Force (N)", "Strain (mm)", "Force & Strain"])
         self.x_combo.currentIndexChanged.connect(self._maybe_auto_plot)
         form.addRow("Y variables", y_box)
         form.addRow("X variable", self.x_combo)
@@ -237,10 +265,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.marker_size.setRange(0.5, 30.0)
         self.marker_size.setSingleStep(0.5)
         self.marker_size.setValue(5.0)
-        self.color_btn = QtWidgets.QPushButton()
-        self._color = QtGui.QColor("#1f77b4")
-        self._update_color_btn()
-        self.color_btn.clicked.connect(self._pick_color)
         self.grid_cb = QtWidgets.QCheckBox()
         self.grid_cb.setChecked(True)
         for w in [self.line_style, self.marker_style]:
@@ -251,7 +275,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Marker", self.marker_style)
         form.addRow("Line width", self.line_width)
         form.addRow("Marker size", self.marker_size)
-        form.addRow("Color", self.color_btn)
         form.addRow("Grid", self.grid_cb)
 
         self.dark_cb = QtWidgets.QCheckBox("Dark background")
@@ -259,17 +282,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.dark_cb.toggled.connect(self._apply_dark_global)
         form.addRow("", self.dark_cb)
 
-        # Labels
-        self.title_edit = QtWidgets.QLineEdit()
-        self.x_label_edit = QtWidgets.QLineEdit("Force (N)")
-        self.y_label_edit = QtWidgets.QLineEdit("T1+T2")
-        self.y_units_edit = QtWidgets.QLineEdit("arb. units")
-        for w in [self.title_edit, self.x_label_edit, self.y_label_edit, self.y_units_edit]:
-            w.textChanged.connect(self._maybe_auto_plot)
-        form.addRow("Title", self.title_edit)
-        form.addRow("X label", self.x_label_edit)
-        form.addRow("Y label", self.y_label_edit)
-        form.addRow("Y units", self.y_units_edit)
+        # Labels (handled directly in Matplotlib window; no manual entries)
 
         # Legend
         self.legend_cb = QtWidgets.QCheckBox()
@@ -326,9 +339,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
         self.png_cb = QtWidgets.QCheckBox("PNG")
         self.png_cb.setChecked(True)
-        self.html_cb = QtWidgets.QCheckBox("HTML")
-        self.html_cb.setChecked(False)
-        fmt_box = self._hbox(self.png_cb, self.html_cb)
         self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 600)
         self.dpi_spin.setValue(300)
@@ -356,7 +366,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.save_now_btn.clicked.connect(self.save_current)
         form.addRow("Save on plot", self.save_cb)
         form.addRow("Output dir", out_box)
-        form.addRow("Formats", fmt_box)
+        form.addRow("Format", self.png_cb)
         form.addRow("DPI", self.dpi_spin)
         form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
         form.addRow("", self.save_now_btn)
@@ -370,7 +380,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.clear_btn.clicked.connect(self.clear_plot)
         btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn)
 
-        self._sync_labels_from_choices()
         # Ensure the plot controls are always visible without scrolling by placing the
         # button row outside the scrollable area.
         outer.addWidget(btn_box)
@@ -404,24 +413,14 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Dark mode is applied when creating new plots
         self._maybe_auto_plot()
 
-    def _resolved_color(self, base: QtGui.QColor, dark: bool) -> str:
-        c = QtGui.QColor(base)
-        if dark and c.lightness() < 128:
-            c = c.lighter(170)
-        return c.name()
-
-    def _line_colors(self, n: int) -> List[str]:
-        """Return ``n`` distinct colors starting with the chosen color."""
-        base = self._resolved_color(self._color, self.dark_cb.isChecked())
-        cycle = [c for c in plt.rcParams["axes.prop_cycle"].by_key().get("color", []) if c.lower() != base.lower()]
-        if n - 1 > len(cycle):
-            reps = (n - 1 - 1) // len(cycle) + 1 if cycle else 0
-            cycle = (cycle * (reps + 1))[: n - 1]
-        else:
-            cycle = cycle[: n - 1]
-        return [base] + cycle
-
-    def _draw_on_axes(self, ax: Any, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> None:
+    def _draw_on_axes(
+        self,
+        ax: Any,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        x_label: str,
+        y_label: str,
+    ) -> None:
         """Draw the given lines onto a Matplotlib Axes."""
         fig = ax.figure
         dark = self.dark_cb.isChecked()
@@ -433,8 +432,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ls = "None" if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
         lines = list(lines)
-        colors = self._line_colors(len(lines))
-        for (label, x, y), color in zip(lines, colors):
+        for label, x, y in lines:
             ax.plot(
                 x,
                 y,
@@ -442,17 +440,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 marker=marker,
                 linewidth=float(self.line_width.value()),
                 markersize=float(self.marker_size.value()),
-                color=color,
                 label=label,
             )
 
-        x_lab = self.x_label_edit.text()
-        units = self.y_units_edit.text().strip()
-        y_lab = self.y_label_edit.text().strip()
-        if units:
-            y_lab = f"{y_lab} ({units})"
-        ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()), color=fg)
-        ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()), color=fg)
+        ax.set_xlabel(x_label, fontsize=int(self.label_fs.value()), color=fg)
+        ax.set_ylabel(y_label, fontsize=int(self.label_fs.value()), color=fg)
         ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
         ax.set_title(title, fontsize=int(self.title_fs.value()), color=fg)
         if self.legend_cb.isChecked():
@@ -513,34 +505,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if d:
             self.out_dir.setText(d)
 
-    def _update_color_btn(self) -> None:
-        pix = QtGui.QPixmap(24, 16)
-        pix.fill(self._color)
-        self.color_btn.setIcon(QtGui.QIcon(pix))
-        self.color_btn.setText(self._color.name())
-
-    def _pick_color(self) -> None:
-        c = QtWidgets.QColorDialog.getColor(self._color, self, "Pick color")
-        if c and c.isValid():
-            self._color = c
-            self._update_color_btn()
-            self._maybe_auto_plot()
-
-    def _sync_labels_from_choices(self) -> None:
-        x_name = self.x_combo.currentText()
-        sel = [cb.text() for cb in self.y_checks if cb.isChecked()]
-        if not sel:
-            sel = ["T1+T2"]
-            self.y_checks[0].setChecked(True)
-        self.x_label_edit.setText(x_name)
-        self.y_label_edit.setText(" / ".join(sel))
-
     def _maybe_auto_plot(self) -> None:
         if self.auto_cb.isChecked():
             self.plot()
 
     def _load_files(self) -> None:
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(self, "Select PDF files", "", "PDF files (*.pdf)")
+        paths = select_pdf_files(self)
         if not paths:
             return
         self.file_edit.setText(" ; ".join(paths))
@@ -557,22 +527,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "No data", "No numeric rows found. Check the PDF contents.")
 
     # --- Plotting --------------------------------------------------------------
-    def _collect_lines_by_file(self) -> Dict[str, List[Tuple[str, np.ndarray, np.ndarray]]]:
+    def _collect_lines_by_file(
+        self, x_name: str, selected: List[str]
+    ) -> Dict[str, List[Tuple[str, np.ndarray, np.ndarray]]]:
         lines_by_file: Dict[str, List[Tuple[str, np.ndarray, np.ndarray]]] = {}
-        x_name = self.x_combo.currentText()
-        selected = [cb.text() for cb in self.y_checks if cb.isChecked()]
-        if not selected:
-            selected = ["T1+T2"]
         for path, rows in self.data:
             sets: List[Tuple[str, np.ndarray, np.ndarray]] = []
             for y_name in selected:
                 xs: List[float] = []
                 ys: List[float] = []
                 for t1, t2, force, strain in rows:
-                    if x_name.startswith("Force"):
-                        x = force
-                    else:
-                        x = strain
+                    x = force if x_name.startswith("Force") else strain
                     if y_name == "T1":
                         y = t1
                     elif y_name == "T2":
@@ -593,135 +558,137 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 lines_by_file[path] = sets
         return lines_by_file
 
-    def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> None:
+    def _plot_to_window(
+        self,
+        win: PlotWindow,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        x_label: str,
+        y_label: str,
+    ) -> None:
         fig_w, fig_h = self._figure_size_inches()
         win.apply_fixed_plot_size(fig_w, fig_h, resize_window=True)
         win.fig.clf()
         ax = win.fig.add_subplot(111)
-        self._draw_on_axes(ax, lines, title)
+        self._draw_on_axes(ax, lines, title, x_label, y_label)
         win.canvas.draw()
         win._last_lines = [(lbl, np.asarray(x, dtype=float), np.asarray(y, dtype=float)) for (lbl, x, y) in lines]
         win._last_title = title
 
-    def _create_matplotlib_fig(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> Figure:
+    def _create_matplotlib_fig(
+        self,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        x_label: str,
+        y_label: str,
+    ) -> Figure:
         fig_w, fig_h = self._figure_size_inches()
         fig = Figure(figsize=(fig_w, fig_h))
         ax = fig.add_subplot(111)
-        self._draw_on_axes(ax, lines, title)
+        self._draw_on_axes(ax, lines, title, x_label, y_label)
         return fig
 
-    def _save_plotly_html(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str, base_path: str) -> None:
-        try:
-            import plotly.graph_objects as go
-        except Exception:  # pragma: no cover - optional
-            return
-        fig = go.Figure()
-        ls = self.line_style.currentText()
-        marker = self.marker_style.currentText()
-        mode = "lines+markers"
-        if ls == "None" and marker != "None":
-            mode = "markers"
-        elif ls != "None" and marker == "None":
-            mode = "lines"
-        lines = list(lines)
-        colors = self._line_colors(len(lines))
-        for (label, x, y), color in zip(lines, colors):
-            fig.add_trace(
-                go.Scatter(x=x, y=y, mode=mode, name=label, line=dict(color=color), marker=dict(color=color))
-            )
-        x_lab = self.x_label_edit.text()
-        units = self.y_units_edit.text().strip()
-        y_lab = self.y_label_edit.text().strip()
-        if units:
-            y_lab = f"{y_lab} ({units})"
-        fig.update_layout(title=title, xaxis_title=x_lab, yaxis_title=y_lab, template="plotly_white")
-        fig.write_html(f"{base_path}.html")
-
-    def _save_lines(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> None:
+    def _save_lines(
+        self,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        x_label: str,
+        y_label: str,
+    ) -> None:
         out_dir = self.out_dir.text()
         if not out_dir:
             return
-        if not (self.png_cb.isChecked() or self.html_cb.isChecked()):
-            QtWidgets.QMessageBox.information(self, "No format", "Select at least one output format.")
+        if not self.png_cb.isChecked():
+            QtWidgets.QMessageBox.information(self, "No format", "Select PNG to save.")
             return
         os.makedirs(out_dir, exist_ok=True)
         base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
-        if self.png_cb.isChecked():
-            fig = self._create_matplotlib_fig(lines, title)
-            fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
-        if self.html_cb.isChecked():
-            self._save_plotly_html(lines, title, base_path)
+        fig = self._create_matplotlib_fig(lines, title, x_label, y_label)
+        fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
 
     def save_current(self) -> None:
         if not self._last_lines:
             QtWidgets.QMessageBox.information(self, "No data", "Nothing to save.")
             return
-        self._save_lines(self._last_lines, self._last_title)
+        self._save_lines(self._last_lines, self._last_title, self._last_x_label, self._last_y_label)
 
     def plot(self) -> None:
         if not self.data:
             QtWidgets.QMessageBox.information(self, "No data", "Load PDF files first.")
             return
 
-        lines_by_file = self._collect_lines_by_file()
-        if not lines_by_file:
-            QtWidgets.QMessageBox.information(self, "No data", "No valid rows to plot.")
-            return
-
         selected = [cb.text() for cb in self.y_checks if cb.isChecked()]
-        x_name = self.x_combo.currentText()
+        if not selected:
+            selected = ["T1+T2"]
+            self.y_checks[0].setChecked(True)
 
+        x_choice = self.x_combo.currentText()
+        x_names = ["Force (N)", "Strain (mm)"] if x_choice == "Force & Strain" else [x_choice]
         mode = self.mode_combo.currentText()
-        if mode == "Combined":
-            if self.plot_win is None:
-                self.plot_win = PlotWindow(None, controller=self)
-            lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
-            for path, sets in lines_by_file.items():
-                base = os.path.basename(path)
-                for y_name, xs, ys in sets:
-                    label = f"{base} {y_name}" if len(lines_by_file) > 1 else y_name
-                    lines.append((label, xs, ys))
-            title = self.title_edit.text().strip()
-            if not title:
-                base = os.path.basename(next(iter(lines_by_file))) if len(lines_by_file) == 1 else f"{len(lines_by_file)} files"
-                title = f"{' / '.join(selected)} vs {x_name} — {base}"
-            self._plot_to_window(self.plot_win, lines, title)
-            self.plot_win.show()
-            self._last_lines = self.plot_win._last_lines
-            self._last_title = title
-            if self.save_cb.isChecked():
-                self._save_lines(self._last_lines, self._last_title)
-        else:  # Separate
-            for w in self.plot_wins:
-                w.close()
-            self.plot_wins = []
-            for path, sets in lines_by_file.items():
+
+        for w in self.plot_wins:
+            w.close()
+        self.plot_wins = []
+
+        for x_name in x_names:
+            lines_by_file = self._collect_lines_by_file(x_name, selected)
+            if not lines_by_file:
+                continue
+            if mode == "Combined":
+                lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
+                for path, sets in lines_by_file.items():
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    for y_name, xs, ys in sets:
+                        label = f"{base} {y_name}" if len(lines_by_file) > 1 else y_name
+                        lines.append((label, xs, ys))
+                base_title = (
+                    os.path.splitext(os.path.basename(next(iter(lines_by_file))))[0]
+                    if len(lines_by_file) == 1
+                    else f"{len(lines_by_file)} files"
+                )
+                title = f"{' / '.join(selected)} vs {x_name} — {base_title}"
+                x_label = x_name
+                y_label = " / ".join(selected)
                 win = PlotWindow(None, controller=self)
-                lines = []
-                base = os.path.basename(path)
-                for y_name, xs, ys in sets:
-                    label = f"{base} {y_name}"
-                    lines.append((label, xs, ys))
-                title = self.title_edit.text().strip() or f"{' / '.join(selected)} vs {x_name} — {base}"
-                self._plot_to_window(win, lines, title)
+                self._plot_to_window(win, lines, title, x_label, y_label)
                 win.show()
                 self.plot_wins.append(win)
                 self._last_lines = win._last_lines
                 self._last_title = title
+                self._last_x_label = x_label
+                self._last_y_label = y_label
                 if self.save_cb.isChecked():
-                    self._save_lines(self._last_lines, self._last_title)
+                    self._save_lines(self._last_lines, title, x_label, y_label)
+            else:  # Separate
+                for path, sets in lines_by_file.items():
+                    win = PlotWindow(None, controller=self)
+                    lines = []
+                    base = os.path.splitext(os.path.basename(path))[0]
+                    for y_name, xs, ys in sets:
+                        lines.append((y_name, xs, ys))
+                    title = f"{' / '.join(selected)} vs {x_name} — {base}"
+                    x_label = x_name
+                    y_label = " / ".join(selected)
+                    self._plot_to_window(win, lines, title, x_label, y_label)
+                    win.show()
+                    self.plot_wins.append(win)
+                    self._last_lines = win._last_lines
+                    self._last_title = title
+                    self._last_x_label = x_label
+                    self._last_y_label = y_label
+                    if self.save_cb.isChecked():
+                        self._save_lines(self._last_lines, title, x_label, y_label)
 
     def clear_plot(self) -> None:
-        if self.plot_win:
-            self.plot_win.close()
-            self.plot_win = None
         for w in self.plot_wins:
             w.close()
         self.plot_wins = []
         self._last_lines = []
         self._last_title = ""
+        self._last_x_label = ""
+        self._last_y_label = ""
 
 
 # -----------------------------------------------------------------------------

@@ -15,10 +15,12 @@ def test_plot_creates_top_level_window():
         rows = parse_pdf_to_rows('sample_data/3D prud c.3 2mm iba data.pdf')
         win.data.append(('sample_data/3D prud c.3 2mm iba data.pdf', rows))
         win.plot()
-        assert win.plot_win is not None
-        # Plot window should be a top-level window (no parent)
-        assert win.plot_win.parent() is None
+        assert win.plot_wins
+        # Plot windows should be top-level windows (no parent)
+        assert all(w.parent() is None for w in win.plot_wins)
     finally:
         # Ensure windows and application are cleaned up
+        for w in win.plot_wins:
+            w.close()
         win.close()
         app.quit()
