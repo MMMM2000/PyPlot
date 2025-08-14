@@ -146,8 +146,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Loaded data: list of (path, rows)
         self.data: List[Tuple[str, List[NumberRow]]] = []
 
-        # Track plot windows and last plotted data
+        # Track plot windows and last plotted data. ``plot_win`` is kept for
+        # backward compatibility with older code expecting a single window.
         self.plot_wins: List[PlotWindow] = []
+        self.plot_win: PlotWindow | None = None
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
         self._last_x_label: str = ""
@@ -551,6 +553,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             self._plot_to_window(win, lines, title, x_label, y_label)
             win.show()
             self.plot_wins.append(win)
+            self.plot_win = win
             self._last_lines = win._last_lines
             self._last_title = title
             self._last_x_label = x_label
@@ -569,6 +572,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 self._plot_to_window(win, lines, title, x_label, y_label)
                 win.show()
                 self.plot_wins.append(win)
+                self.plot_win = win
                 self._last_lines = win._last_lines
                 self._last_title = title
                 self._last_x_label = x_label

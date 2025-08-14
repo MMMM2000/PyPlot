@@ -221,6 +221,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # strip leading '>' if present, then write
             self.log_file.write(self.port_response.lstrip(">"))
+            # Flush immediately so data is not lost if the application crashes
+            # and so other tools can tail the log as it is written.
+            self.log_file.flush()
             self.sample_idx += 1
             cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
 
@@ -323,7 +326,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 mode = "w"
 
         try:
-            self.log_file = open(full_path, mode)
+            # Use line buffering so each newline is written promptly
+            self.log_file = open(full_path, mode, buffering=1)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to open {full_path}: {exc}"
