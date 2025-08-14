@@ -104,9 +104,13 @@ interactive figure can be reopened and modified at any time.
 ## Experiments
 
 The ``experiments`` folder holds interface prototypes that are separate from the
-core Python code.  It currently contains a Tauri, React and Tailwind CSS sample
-that communicates with a small Python backend.  See its README for setup
-instructions.
+core Python code.  A new **Data Plotter** experiment lets you choose a plotting
+script, pick data files and optionally check for outliers before launching the
+selected tool.  Start it with:
+
+```bash
+python -m experiments.data_plotter
+```
 
 ## Master launcher
 
@@ -303,13 +307,6 @@ importable without modifying ``sys.path``:
 
 ```bash
 pip install -e .
-```
-
-The `plot-cli` command installed by the package provides a simple wrapper
-around the available plotting GUIs. List the supported tools with:
-
-```bash
-plot-cli --help
 ```
 
 Default settings for the stress dependence and temperature sensitivity plotters

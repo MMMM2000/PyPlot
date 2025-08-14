@@ -179,20 +179,20 @@ def detect_outliers(
     if not (0 < quantile < 1):
         raise ValueError("quantile must be between 0 and 1")
 
-    out_rows = []
+    out_rows: list[pd.DataFrame] = []
     low_q = (1 - quantile) / 2
     high_q = 1 - low_q
-    for fname, grp in df.groupby("filename"):
-        series = grp[column].dropna()
-        if series.empty:
+    window = 21
+    for _, grp in df.groupby("filename"):
+        series = grp[column]
+        if series.isna().all():
             continue
-        med = series.median()
-        q_low = series.quantile(low_q)
-        q_high = series.quantile(high_q)
+        med = series.rolling(window, center=True, min_periods=1).median()
+        q_low = series.rolling(window, center=True, min_periods=1).quantile(low_q)
+        q_high = series.rolling(window, center=True, min_periods=1).quantile(high_q)
         rng = q_high - q_low
-        if rng <= 0:
-            continue
-        mask = np.abs(series - med) > factor * rng
+        mask = (series - med).abs() > factor * rng
+        mask = mask.fillna(False)
         if mask.any():
             out_rows.append(grp.loc[mask])
 
