@@ -100,13 +100,21 @@ def apply_dark_theme(app: QtWidgets.QApplication) -> None:
     apply_system_theme(app)
 
 
-def select_files_or_folder(parent: QtWidgets.QWidget | None = None) -> list[str]:
-    """Return a list of ``.txt`` files chosen by the user.
+def select_files_or_folder(
+    parent: QtWidgets.QWidget | None = None,
+    *,
+    suffix: str = ".txt",
+    file_filter: str | None = None,
+) -> list[str]:
+    """Return a list of files with ``suffix`` chosen by the user.
 
     A small dialog lets the user pick between selecting individual files or a
-    directory.  When a directory is chosen all ``.txt`` files inside it and any
+    directory.  When a directory is chosen all matching files inside it and any
     sub-directories are returned sorted alphabetically.
     """
+
+    if file_filter is None:
+        file_filter = f"{suffix.upper().lstrip('.')} files (*{suffix});;All files (*)"
 
     box = QtWidgets.QMessageBox(parent)
     box.setWindowTitle("Select Input")
@@ -123,14 +131,15 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None) -> list[str]
             parent,
             "Select measurement files",
             "",
-            "Text files (*.txt);;All files (*)",
+            file_filter,
         )
     elif clicked == folder_btn:
         directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder")
         if directory:
+            suf = suffix.lower()
             for root, _dirs, files in os.walk(directory):
                 for name in files:
-                    if name.lower().endswith(".txt"):
+                    if name.lower().endswith(suf):
                         paths.append(os.path.join(root, name))
             paths.sort()
     return list(paths)
