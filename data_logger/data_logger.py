@@ -8,6 +8,7 @@ from typing import Any, cast, List
 from collections import deque
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
+from PyQt6.QtCore import QMutexLocker
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .logger_ui import UiMainWindow
@@ -198,49 +199,39 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.serial is None or not self.serial.canReadLine():
             return
 
-        self.lock.lock()
-        raw = self.serial.readLine()
-        # PyQt6 returns a QByteArray; at runtime bytes(raw) works fine.
-        raw_bytes = bytes(raw)            # type: ignore[arg-type]
-        self.port_response = raw_bytes.decode('ascii')
+        with QMutexLocker(self.lock):
+            raw = self.serial.readLine()
+            # PyQt6 returns a QByteArray; at runtime bytes(raw) works fine.
+            raw_bytes = bytes(raw)            # type: ignore[arg-type]
+            self.port_response = raw_bytes.decode('ascii')
 
-        now = time.perf_counter()
-        if self.last_sample_time is not None:
-            dt = now - self.last_sample_time
-            if dt > 0:
-                rate = 1.0 / dt
-                self._rate_window.append(rate)
-                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-        self.last_sample_time = now
+            now = time.perf_counter()
+            if self.last_sample_time is not None:
+                dt = now - self.last_sample_time
+                if dt > 0:
+                    rate = 1.0 / dt
+                    self._rate_window.append(rate)
+                    self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+            self.last_sample_time = now
 
-        if self.logging_on and not self.paused:
-            assert self.log_file is not None
+            if self.logging_on:
+                assert self.log_file is not None
 
-            # strip leading '>' if present, then write
-            self.log_file.write(self.port_response.lstrip(">"))
-            # Flush immediately so data is not lost if the application crashes
-            # and so other tools can tail the log as it is written.
-            self.log_file.flush()
-            self.sample_idx += 1
-            cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
-            cast(Any, self.ui).progressBar_logging.setToolTip(
-                f"{self.sample_idx}/{self.sample_count} samples"
-            )
+                # strip leading '>' if present, then write
+                self.log_file.write(self.port_response.lstrip(">"))
+                self.sample_idx += 1
+                cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
 
-            if self.sample_rate:
-                remaining_samples = self.sample_count - self.sample_idx
-                self._finish_time = now + remaining_samples / self.sample_rate
+                if self.sample_rate:
+                    remaining_samples = self.sample_count - self.sample_idx
+                    self._finish_time = now + remaining_samples / self.sample_rate
 
-            if self.sample_idx >= self.sample_count:
-                self.log_file.close()
-                self.logging_on = False
-                self.paused = False
-                self.ui.pushButton_record.setText("Record")
-                self.ui.pushButton_record.setToolTip("Start logging")
-                self.ui.pushButton_cancel.setEnabled(False)
-                self._finish_time = None
-
-        self.lock.unlock()
+                if self.sample_idx >= self.sample_count:
+                    self.log_file.close()
+                    self.logging_on = False
+                    self.ui.pushButton_record.setEnabled(True)
+                    self.ui.pushButton_cancel.setEnabled(False)
+                    self._finish_time = None
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
