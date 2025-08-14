@@ -100,11 +100,11 @@ def apply_dark_theme(app: QtWidgets.QApplication) -> None:
     apply_system_theme(app)
 
 
-def select_files_or_folder(parent: QtWidgets.QWidget | None = None) -> list[str]:
-    """Return a list of ``.txt`` files chosen by the user.
+def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = ".txt") -> list[str]:
+    """Return a list of files with extension ``ext`` chosen by the user.
 
     A small dialog lets the user pick between selecting individual files or a
-    directory.  When a directory is chosen all ``.txt`` files inside it and any
+    directory.  When a directory is chosen all matching files inside it and any
     sub-directories are returned sorted alphabetically.
     """
 
@@ -118,19 +118,20 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None) -> list[str]
 
     clicked = box.clickedButton()
     paths: list[str] = []
+    label = ext.lstrip(".").upper()
     if clicked == files_btn:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             parent,
-            "Select measurement files",
+            f"Select {label} files",
             "",
-            "Text files (*.txt);;All files (*)",
+            f"{label} files (*{ext});;All files (*)",
         )
     elif clicked == folder_btn:
         directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder")
         if directory:
             for root, _dirs, files in os.walk(directory):
                 for name in files:
-                    if name.lower().endswith(".txt"):
+                    if name.lower().endswith(ext.lower()):
                         paths.append(os.path.join(root, name))
             paths.sort()
     return list(paths)
