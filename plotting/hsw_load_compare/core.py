@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from ..utils import save_figure
 
 # Defaults
 CORE_BINS = 50
@@ -17,6 +18,8 @@ OUTPUT_DIR = Path.cwd()
 SHOW_PLOTS = True
 SAVE_PLOTS = False
 SAME_HIST_Y = True
+SAVE_FORMAT = "png"
+PNG_DPI = 1000
 
 FNAME_RE = re.compile(
     r"^(?P<comp>.+?)\s+"
@@ -226,7 +229,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         ax_h[0].set_title("Histogram of Hsw vs load")
         fig_h.supylabel("Counts")
-        plots.append((fig_h, "hist_compare.png"))
+        plots.append((fig_h, "hist_compare"))
 
     if cfg["raw"]:
         fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
@@ -251,15 +254,15 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         fig_r.supylabel("Switching Field")
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
-        plots.append((fig_r, "raw_compare.png"))
+        plots.append((fig_r, "raw_compare"))
 
     if cfg_save:
         out_dir.mkdir(parents=True, exist_ok=True)
-        fig_log.savefig(out_dir / "log_compare.png", dpi=300)
+        save_figure(fig_log, out_dir / "log_compare", SAVE_FORMAT, PNG_DPI)
         if cfg["hist"]:
-            fig_h.savefig(out_dir / "hist_compare.png", dpi=300)
+            save_figure(fig_h, out_dir / "hist_compare", SAVE_FORMAT, PNG_DPI)
         if cfg["raw"]:
-            fig_r.savefig(out_dir / "raw_compare.png", dpi=300)
+            save_figure(fig_r, out_dir / "raw_compare", SAVE_FORMAT, PNG_DPI)
 
     if cfg_show:
         plt.show()
@@ -278,4 +281,5 @@ def main(files: List[str], cfg: Dict[str, Any]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = os.path.join(out, fname)
+                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)

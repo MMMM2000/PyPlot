@@ -10,6 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
+from ..utils import save_figure
 
 OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
@@ -18,6 +19,8 @@ PLOT_MODE = "both"  # 'raw', 'processed', 'both'
 MARKER_SIZE = 0.1
 MED_WINDOW = 5
 MA_WINDOW = 20
+SAVE_FORMAT = "png"
+PNG_DPI = 1000
 
 
 class ProgressDialog:
@@ -65,11 +68,11 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
-    fname = f"head{head}_{coils}coils_CH{ch}_sum.png"
+    fname = f"head{head}_{coils}coils_CH{ch}_sum"
     if SAVE_PLOTS:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        fig.savefig(os.path.join(OUTPUT_DIR, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(OUTPUT_DIR, fname), SAVE_FORMAT, PNG_DPI)
+    return fig, f"{fname}.{SAVE_FORMAT}"
 
 
 def main(files: List[str]):
@@ -113,6 +116,7 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = os.path.join(out, Path(fname).stem)
+                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
 
     print('Done.')

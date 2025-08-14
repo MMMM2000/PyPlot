@@ -43,6 +43,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     mode_combo.setCurrentIndex(mode_map.get(orig.PLOT_MODE, 0))
     out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
+    fmt_combo = QtWidgets.QComboBox(); fmt_combo.addItems(["png", "pdf", "svg"]); fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+    dpi_spin = QtWidgets.QSpinBox(); dpi_spin.setRange(72, 3000); dpi_spin.setValue(int(orig.PNG_DPI))
 
     def browse_out() -> None:
         d = QtWidgets.QFileDialog.getExistingDirectory(dialog, "Select output directory", out_dir_edit.text())
@@ -60,6 +62,10 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
     out_layout.addWidget(out_dir_edit, 4, 0)
     out_layout.addWidget(browse_btn, 4, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Format:"), 5, 0)
+    out_layout.addWidget(fmt_combo, 5, 1)
+    out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 6, 0)
+    out_layout.addWidget(dpi_spin, 6, 1)
 
     proc_group = QtWidgets.QGroupBox("Processed curve")
     proc_layout = QtWidgets.QGridLayout(proc_group)
@@ -93,6 +99,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "out_dir": out_dir_edit.text(),
         "med_window": med_spin.value(),
         "ma_window": ma_spin.value(),
+        "format": fmt_combo.currentText(),
+        "dpi": dpi_spin.value(),
     }
     return paths, cfg
 
@@ -139,6 +147,8 @@ def main() -> None:
     orig.OUTPUT_DIR = cfg["out_dir"]
     orig.MED_WINDOW = int(cfg["med_window"])
     orig.MA_WINDOW = int(cfg["ma_window"])
+    orig.SAVE_FORMAT = cfg["format"]
+    orig.PNG_DPI = int(cfg["dpi"])
 
     orig.main(paths)
 

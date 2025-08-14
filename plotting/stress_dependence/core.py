@@ -6,6 +6,7 @@ from typing import List, Dict, Any, Tuple, cast
 from PyQt6 import QtWidgets
 
 from ..config import load_config
+from ..utils import save_figure
 
 import numpy as np
 import pandas as pd
@@ -51,6 +52,8 @@ PROC_MSIZE = 0.5
 PROC_ALPHA = 0.5
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
+SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
+PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
 MAX_SHOW = 8
 
 
@@ -231,11 +234,11 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {samp} {anneal} {var}.png"
+    fname = f"{comp} {title} {samp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), SAVE_FORMAT, PNG_DPI)
+    return fig, f"{fname}.{SAVE_FORMAT}"
 
 def main(files: List[str]):
     data = load_data(files)
@@ -282,6 +285,7 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = os.path.join(out, Path(fname).stem)
+                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
 
     print(f'Done: processed {total} plots.')

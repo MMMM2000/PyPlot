@@ -19,6 +19,7 @@ from tqdm import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
+from ..utils import save_figure
 
 _CFG = load_config().get("stress_sensitivity", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
@@ -33,6 +34,8 @@ MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
 MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
+SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
+PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
 MAX_SHOW = 8
 
 BASE_LOAD = float(_CFG.get("BASE_LOAD", 2.5))
@@ -223,11 +226,11 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {sample} {anneal} {var}.png"
+    fname = f"{comp} {title} {sample} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), SAVE_FORMAT, PNG_DPI)
+    return fig, f"{fname}.{SAVE_FORMAT}"
 
 
 def _draw_mini_dependence(
@@ -390,11 +393,11 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {anneal} {var}.png"
+    fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), SAVE_FORMAT, PNG_DPI)
+    return fig, f"{fname}.{SAVE_FORMAT}"
 
 
 def main(files: List[str]) -> None:
@@ -443,7 +446,8 @@ def main(files: List[str]) -> None:
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = os.path.join(out, Path(fname).stem)
+                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
 
     print(f'Done: processed {total} plots.')
 

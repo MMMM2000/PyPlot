@@ -1,6 +1,22 @@
 from PyQt6 import QtWidgets, QtGui, QtCore
 import os
 import sys
+from pathlib import Path
+from matplotlib.figure import Figure
+
+
+def save_figure(fig: Figure, base_path: str | Path, fmt: str = "png", dpi: int = 1000) -> None:
+    """Save ``fig`` to ``base_path`` with format ``fmt``.
+
+    ``base_path`` should omit the file extension. ``dpi`` is only applied when
+    saving PNG files to allow high-resolution outputs.
+    """
+
+    path = f"{base_path}.{fmt}"
+    if fmt.lower() == "png":
+        fig.savefig(path, dpi=dpi, format=fmt)
+    else:
+        fig.savefig(path, format=fmt)
 
 
 def _dark_palette(accent: QtGui.QColor) -> QtGui.QPalette:

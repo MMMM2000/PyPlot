@@ -214,6 +214,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.sample_rate = sum(self._rate_window) / len(self._rate_window)
             self.last_sample_time = now
 
+            if self.paused:
+                return
             if self.logging_on:
                 assert self.log_file is not None
 
