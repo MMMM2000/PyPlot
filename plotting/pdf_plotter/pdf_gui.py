@@ -55,6 +55,11 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     """
     if PdfReader is None:
         raise RuntimeError("PyPDF2 not installed. Install with: pip install PyPDF2")
+    if not os.path.exists(path):
+        base = os.path.basename(path)
+        alt = os.path.join(os.path.dirname(path), "pdf_data", base)
+        if os.path.exists(alt):
+            path = alt
     rows: List[NumberRow] = []
     reader = PdfReader(path)
     num = r"-?\d+(?:[.,]\d+)?"
@@ -83,34 +88,79 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
 # -----------------------------------------------------------------------------
 # A single plot window using Matplotlib for display
 # -----------------------------------------------------------------------------
+class _ScaledCanvas(FigureCanvasQTAgg):
+    """A canvas that keeps a fixed aspect ratio and scales the figure."""
+
+    def __init__(self, fig: Figure):
+        super().__init__(fig)
+        self._aspect = fig.get_figwidth() / fig.get_figheight()
+        policy = QtWidgets.QSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding
+        )
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def set_aspect(self, aspect: float) -> None:
+        self._aspect = aspect
+        self.updateGeometry()
+
+    def heightForWidth(self, width: int) -> int:  # type: ignore[override]
+        return int(width / self._aspect)
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        size = event.size()
+        w = size.width()
+        h = int(w / self._aspect)
+        if h != size.height():
+            self.resize(w, h)
+        dpi = self.figure.dpi
+        self.figure.set_size_inches(w / dpi, h / dpi)
+        super().resizeEvent(event)
+
+
 class PlotWindow(QtWidgets.QMainWindow):
     """Top level window holding a Matplotlib plot."""
 
     instances: "weakref.WeakSet[PlotWindow]" = weakref.WeakSet()
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: "PdfPlotterWindow" | None = None) -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        controller: "PdfPlotterWindow" | None = None,
+    ) -> None:
         super().__init__(parent)
         PlotWindow.instances.add(self)
         self.controller = controller
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
         self.fig = Figure()
-        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.canvas = _ScaledCanvas(self.fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
         central = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(central)
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas)
-        layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
         self.setCentralWidget(central)
 
-    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
+    def apply_fixed_plot_size(
+        self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False
+    ) -> None:
         dpi = self.logicalDpiX() or 100.0
         wpx = int(round(fig_w_in * dpi))
         hpx = int(round(fig_h_in * dpi))
-        self.canvas.setFixedSize(wpx, hpx)
+        screen = QtWidgets.QApplication.primaryScreen().availableGeometry()
+        if wpx > screen.width() or hpx > screen.height():
+            scale = min(screen.width() / wpx, screen.height() / hpx)
+            wpx = int(wpx * scale)
+            hpx = int(hpx * scale)
+            fig_w_in = wpx / dpi
+            fig_h_in = hpx / dpi
+        self.fig.set_size_inches(fig_w_in, fig_h_in)
+        self.canvas.set_aspect(fig_w_in / fig_h_in)
+        self.canvas.resize(wpx, hpx)
         if resize_window:
-            self.resize(self.sizeHint())
+            self.resize(wpx, hpx + self.toolbar.height())
         else:
             self.updateGeometry()
 
@@ -273,12 +323,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.browse_out_btn = QtWidgets.QPushButton("Browse…")
         self.browse_out_btn.clicked.connect(self._browse_out)
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
-        self.png_cb = QtWidgets.QCheckBox("PNG")
-        self.png_cb.setChecked(True)
-        fmt_box = self._hbox(self.png_cb)
+        self.fmt_combo = QtWidgets.QComboBox()
+        self.fmt_combo.addItems(["PNG", "SVG", "PDF"])
+        fmt_box = self._hbox(self.fmt_combo)
         self.dpi_spin = _NoWheelSpinBox()
-        self.dpi_spin.setRange(72, 600)
-        self.dpi_spin.setValue(300)
+        self.dpi_spin.setRange(72, 5000)
+        self.dpi_spin.setValue(1000)
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm
@@ -524,7 +574,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         selected = [cb.text() for cb in self.y_checks if cb.isChecked()]
         if not selected:
             selected = ["T1+T2"]
-        y_label = " / ".join(selected)
+        y_label = " / ".join(selected) + " (arb. u.)"
         x_label = x_name
         mode = self.mode_combo.currentText()
         if mode == "Combined":
@@ -610,15 +660,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         out_dir = self.out_dir.text()
         if not out_dir:
             return
-        if not self.png_cb.isChecked():
-            QtWidgets.QMessageBox.information(self, "No format", "Enable PNG output.")
-            return
         os.makedirs(out_dir, exist_ok=True)
         base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
         fig = self._create_matplotlib_fig(lines, title, x_label, y_label)
-        fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
+        fmt = self.fmt_combo.currentText().lower()
+        fig.savefig(f"{base_path}.{fmt}", dpi=int(self.dpi_spin.value()))
 
     def save_current(self) -> None:
         if not self._last_lines:
