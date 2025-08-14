@@ -9,17 +9,9 @@ from collections import deque
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtSerialPort import QSerialPortInfo
 
-if __package__ is None or __package__ == "":
-    module_dir = Path(__file__).resolve().parent
-    sys.path.append(str(module_dir))
-    sys.path.append(str(module_dir.parent))
-    from logger_ui import UiMainWindow
-    from file_name_builder import FileNameBuilderWidget, InfoLineEdit
-    from serial_port import serial_connection
-else:
-    from .logger_ui import UiMainWindow
-    from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
-    from .serial_port import serial_connection
+from .logger_ui import UiMainWindow
+from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
+from .serial_port import serial_connection
 
 from plotting.utils import apply_system_theme
 
