@@ -38,12 +38,17 @@ font should be typed into a terminal exactly as written and confirmed with the
 
 5. **Install dependencies**
    - First upgrade ``pip`` (Python's package installer) with ``python -m pip install --upgrade pip``.
-   - Install the required packages with ``pip install -r requirements.txt``. Make
+   - Project dependencies and their pinned versions are defined in ``pyproject.toml``.
+   - Install the pinned set of packages with ``pip install -r requirements.txt``. Make
      sure you are in the repository folder so ``requirements.txt`` is found.
+   - The ``requirements.txt`` file is generated from ``pyproject.toml`` using ``pip-compile``
+     from [pip-tools](https://github.com/jazzband/pip-tools). To update dependencies,
+     modify ``pyproject.toml`` and run ``pip-compile pyproject.toml``.
    - Alternatively run ``pip install -e .`` to install the project in editable mode.
 
 6. **Start the launcher**
-   - Run ``python launcher.py`` to open the graphical tool window.
+   - Run ``python -m launcher`` to open the graphical tool window.
+   - After installation you can also use the ``launcher`` command.
 
 Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ``activate`` command from step 4 before running ``python`` or ``pip`` again.
@@ -51,8 +56,8 @@ Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ## Building standalone executables
 
 The Python tools can be bundled into native applications with
-[PyInstaller](https://pyinstaller.org/).  This dependency is included in
-`requirements.txt` so no extra setup is required. After activating the virtual
+[PyInstaller](https://pyinstaller.org/).  This dependency is declared in
+``pyproject.toml`` and installed via the generated ``requirements.txt`` so no extra setup is required. After activating the virtual
 environment and installing the requirements you can create platform specific
 packages with the provided `launcher.spec` which bundles required data files.
 
@@ -89,7 +94,7 @@ A small demo using [Plotly](https://plotly.com/python/) shows how to create an
 editable figure and save it for later tweaks.  Run the script with:
 
 ```bash
-python plotting/plotly_demo.py
+python -m plotting.plotly_demo
 ```
 
 The plot opens in your default browser with editing enabled.  An HTML file
@@ -110,7 +115,7 @@ plotting tools (Stress Dependence, Temperature Sensitivity and others).
 Select an item and press **Run** to launch it:
 
 ```bash
-python3 launcher.py
+python -m launcher
 ```
 
 
@@ -151,7 +156,7 @@ labels automatically.
 
 Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  Run the plotter with:
 ```bash
-python3 plotting/stress_dependence/stress_gui.py
+python -m plotting.stress_dependence.stress_gui
 ```
 
 ## Plotting stress sensitivity data
@@ -166,7 +171,7 @@ behaviour across all samples in a compact layout.
 
 Run the script with:
 ```bash
-python3 plotting/stress_sensitivity/sens_gui.py
+python -m plotting.stress_sensitivity.sens_gui
 ```
 
 ## Plotting temperature sensitivity data
@@ -191,7 +196,7 @@ and moving-average windows.
 
 Run the script with:
 ```bash
-python3 plotting/temperature_sensitivity/temp_gui.py
+python -m plotting.temperature_sensitivity.temp_gui
 ```
 
 ## Plotting temperature dependence data
@@ -204,7 +209,7 @@ supports plotting the usual T1/T2 derived quantities.
 
 Run the script with:
 ```bash
-python3 plotting/temperature_dependence/temp_dep_gui.py
+python -m plotting.temperature_dependence.temp_dep_gui
 ```
 
 ## Comparing Hsw distributions by load
@@ -213,7 +218,7 @@ python3 plotting/temperature_dependence/temp_dep_gui.py
 
 Run the script with:
 ```bash
-python3 plotting/hsw_load_compare/load_compare_gui.py
+python -m plotting.hsw_load_compare.load_compare_gui
 ```
 
 ## Plotting Maxion continuous measurements
@@ -222,7 +227,7 @@ python3 plotting/hsw_load_compare/load_compare_gui.py
 
 Run the script with:
 ```bash
-python3 plotting/maxion_continuous/maxion_gui.py
+python -m plotting.maxion_continuous.maxion_gui
 ```
 
 ## Hsw distribution analysis
@@ -231,7 +236,7 @@ python3 plotting/maxion_continuous/maxion_gui.py
 
 Launch it with:
 ```bash
-python3 plotting/hsw_distribution/distribution_gui.py
+python -m plotting.hsw_distribution.distribution_gui
 ```
 
 ## Plotting PDF data
@@ -247,7 +252,7 @@ sizes, and saving (format, DPI, output directory, and figure size) with an optio
 Try it from the master launcher or run directly:
 
 ```bash
-python3 plotting/pdf_plotter/pdf_gui.py
+python -m plotting.pdf_plotter.pdf_gui
 ```
 
 A sample PDF is provided in the `sample_data` folder for quick testing.
@@ -266,7 +271,7 @@ uses rounded buttons for a modern look.
 Launch the logger with:
 
 ```bash
-python3 data_logger/data_logger.py
+python -m data_logger.data_logger
 ```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
@@ -279,14 +284,22 @@ The port list shows each device's full description to make selection easier.
 ## Requirements
 
 This project depends on `PyQt6`, `matplotlib`, `numpy` and `pandas`.
-Install the dependencies with:
+Install the pinned dependencies with:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Alternatively the project can be installed in editable mode to make all
-modules importable without modifying `sys.path`:
+The ``requirements.txt`` file is autogenerated from ``pyproject.toml`` using
+``pip-compile`` and should not be edited manually. To update a dependency,
+modify ``pyproject.toml`` and regenerate the file:
+
+```bash
+pip-compile pyproject.toml
+```
+
+Alternatively the project can be installed in editable mode to make all modules
+importable without modifying ``sys.path``:
 
 ```bash
 pip install -e .
@@ -319,7 +332,7 @@ lists the most common problems and how to solve them.
 | Problem | Cause | Solution |
 |---------|-------|----------|
 | ``'python' is not recognized`` | Python was not added to ``PATH`` during installation. | Reinstall Python and select *Add python.exe to PATH* or call it via its full path. |
-| ``No such file or directory: requirements.txt`` | The command was run from the wrong folder. | Change into the repository directory that contains ``requirements.txt`` before running ``pip``. |
+| ``No such file or directory: requirements.txt`` | The file was not generated or the command was run from the wrong folder. | Run ``pip-compile pyproject.toml`` to generate it or change into the repository directory that contains ``requirements.txt`` before running ``pip``. |
 | ``PermissionError`` when activating ``.venv`` on Windows | PowerShell execution policy blocks scripts. | Run ``Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`` and then activate again. |
 | ``pip`` not found or very old | ``pip`` was not installed or is outdated. | Run ``python -m ensurepip --upgrade`` followed by ``python -m pip install --upgrade pip``. |
 

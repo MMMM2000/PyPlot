@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import time
 import math
+import re
 from typing import Any, cast, List
 from collections import deque
 
@@ -10,17 +11,9 @@ from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtCore import QMutexLocker
 from PyQt6.QtSerialPort import QSerialPortInfo
 
-if __package__ is None or __package__ == "":
-    module_dir = Path(__file__).resolve().parent
-    sys.path.append(str(module_dir))
-    sys.path.append(str(module_dir.parent))
-    from logger_ui import UiMainWindow
-    from file_name_builder import FileNameBuilderWidget, InfoLineEdit
-    from serial_port import serial_connection
-else:
-    from .logger_ui import UiMainWindow
-    from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
-    from .serial_port import serial_connection
+from .logger_ui import UiMainWindow
+from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
+from .serial_port import serial_connection
 
 from plotting.utils import apply_system_theme
 
@@ -93,6 +86,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = 2000
         self.sample_idx = 0
         self.logging_on = False
+        self.paused = False  # when True, data is read but not written
         self.sample_rate: float | None = None
         self._rate_window: deque[float] = deque(maxlen=1000)
         self.last_sample_time: float | None = None
@@ -102,6 +96,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
         cast(Any, self.ui).progressBar_logging.setValue(0)
+        cast(Any, self.ui).progressBar_logging.setToolTip("")
         self.ui.checkBox_subdir.setChecked(False)
 
         os.makedirs(self.log_dir, exist_ok=True)
@@ -128,7 +123,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.update_baudrate)
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
+        self.ui.pushButton_record.setToolTip("Start logging")
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
+        self.ui.pushButton_cancel.setToolTip("Stop logging")
         refresh_btn = getattr(self.ui, "pushButton_refresh_ports", None)
         if refresh_btn is not None:
             refresh_btn.clicked.connect(self.populate_ports)
@@ -245,6 +242,10 @@ class MainWindow(QtWidgets.QMainWindow):
         label = getattr(self.ui, "label_time_estimate", None)
         if label is None:
             return
+        if self.paused:
+            self._last_time_secs = None
+            label.setText("Time remaining: Paused")
+            return
         if self.sample_rate:
             remaining = self.ui.spinBox_log_sample_count.value()
             if self.logging_on and self._finish_time is not None:
@@ -279,7 +280,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.serial.write(cmd.encode('ascii'))
 
     def start_logging(self):
-        """Open the selected log file and begin writing incoming samples."""
+        """Open the selected log file, begin logging, or toggle pause."""
+        if self.logging_on:
+            self.paused = not self.paused
+            if self.paused:
+                self.ui.pushButton_record.setText("Resume")
+                self.ui.pushButton_record.setToolTip("Resume logging")
+                self._finish_time = None
+            else:
+                self.ui.pushButton_record.setText("Pause")
+                self.ui.pushButton_record.setToolTip("Pause logging")
+            self.update_time_estimate()
+            return
+
         file_base = self.ui.lineEdit_log_file.text().strip()
         if not file_base:
             return
@@ -290,6 +303,7 @@ class MainWindow(QtWidgets.QMainWindow):
             parts = file_base.split()
             if len(parts) > 1:
                 folder = " ".join(parts[:-1])
+                folder = re.sub(r'[<>:"/\\|?*]', "_", folder)
                 target_dir = os.path.join(self.root_log_dir, folder)
         os.makedirs(target_dir, exist_ok=True)
         full_path = os.path.join(target_dir, f"{file_base}.txt")
@@ -322,7 +336,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 mode = "w"
 
         try:
-            self.log_file = open(full_path, mode)
+            # Use line buffering so each newline is written promptly
+            self.log_file = open(full_path, mode, buffering=1)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to open {full_path}: {exc}"
@@ -330,15 +345,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.sample_count = self.ui.spinBox_log_sample_count.value()
-        self.sample_idx   = 0
-        self.logging_on   = True
+        self.sample_idx = 0
+        self.logging_on = True
+        self.paused = False
         self._finish_time = None
 
-        self.ui.pushButton_record.setEnabled(False)
+        self.ui.pushButton_record.setText("Pause")
+        self.ui.pushButton_record.setToolTip("Pause logging")
         self.ui.pushButton_cancel.setEnabled(True)
 
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).progressBar_logging.setValue(0)
+        cast(Any, self.ui).progressBar_logging.setToolTip(
+            f"0/{self.sample_count} samples"
+        )
         self.update_time_estimate()
 
     def cancel_logging(self):
@@ -349,8 +369,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.log_file.close()
         self.logging_on = False
-        self.ui.pushButton_record.setEnabled(True)
+        self.paused = False
+        self.ui.pushButton_record.setText("Record")
+        self.ui.pushButton_record.setToolTip("Start logging")
         self.ui.pushButton_cancel.setEnabled(False)
+        cast(Any, self.ui).progressBar_logging.setToolTip("")
         self._finish_time = None
         self.update_time_estimate()
 

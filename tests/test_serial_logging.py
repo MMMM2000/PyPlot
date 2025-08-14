@@ -85,6 +85,36 @@ def test_read_from_port_logs_data(tmp_path: Path):
     assert window.sample_idx == 1
 
 
+def test_paused_skips_writing(tmp_path: Path):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(log_dir=str(tmp_path))
+
+    class FakeSerial:
+        def __init__(self):
+            self.lines = [b">123\n"]
+
+        def canReadLine(self):
+            return bool(self.lines)
+
+        def readLine(self):
+            return self.lines.pop(0)
+
+    window.serial = FakeSerial()
+    window.logging_on = True
+    window.paused = True
+    window.log_file = open(tmp_path / 'out.txt', 'w')
+    window.sample_count = 1
+    window.sample_idx = 0
+
+    window.read_from_port()
+
+    assert not window.log_file.closed
+    window.log_file.close()
+    assert (tmp_path / 'out.txt').read_text() == ""
+    assert window.sample_idx == 0
+
+
 def test_use_subdir_creates_folder(tmp_path):
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
