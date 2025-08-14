@@ -92,7 +92,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = 2000
         self.sample_idx = 0
         self.logging_on = False
-        self.paused = False
+        self.paused = False  # when True, data is read but not written
         self.sample_rate: float | None = None
         self._rate_window: deque[float] = deque(maxlen=1000)
         self.last_sample_time: float | None = None
