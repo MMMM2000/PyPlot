@@ -4,18 +4,20 @@ version = "0.1.0"
 description = "PyQt6 data logging and plotting utilities"
 authors = [{name = "Unknown"}]
 dependencies = [
-    "PyQt6",
-    "matplotlib",
-    "numpy",
-    "pandas",
-    "PyPDF2",
-    "pyqtgraph",
-    "plotly",
+    "PyQt6==6.9.1",
+    "matplotlib==3.10.3",
+    "numpy==2.3.2",
+    "pandas==2.3.1",
+    "PyPDF2==3.0.1",
+    "pyqtgraph==0.13.7",
+    "plotly==6.2.0",
+    "tqdm==4.67.1",
+    "pyinstaller==6.15.0",
 ]
 requires-python = ">=3.8"
 
 [project.optional-dependencies]
-test = ["pytest"]
+test = ["pytest==8.2.2"]
 
 [project.scripts]
 launcher = "launcher:main"
