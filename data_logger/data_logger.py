@@ -3,23 +3,16 @@ import os
 from pathlib import Path
 import time
 import math
+import re
 from typing import Any, cast, List
 from collections import deque
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtSerialPort import QSerialPortInfo
 
-if __package__ is None or __package__ == "":
-    module_dir = Path(__file__).resolve().parent
-    sys.path.append(str(module_dir))
-    sys.path.append(str(module_dir.parent))
-    from logger_ui import UiMainWindow
-    from file_name_builder import FileNameBuilderWidget, InfoLineEdit
-    from serial_port import serial_connection
-else:
-    from .logger_ui import UiMainWindow
-    from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
-    from .serial_port import serial_connection
+from .logger_ui import UiMainWindow
+from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
+from .serial_port import serial_connection
 
 from plotting.utils import apply_system_theme
 
@@ -225,6 +218,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # strip leading '>' if present, then write
             self.log_file.write(self.port_response.lstrip(">"))
+            # Flush immediately so data is not lost if the application crashes
+            # and so other tools can tail the log as it is written.
+            self.log_file.flush()
             self.sample_idx += 1
             cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
             cast(Any, self.ui).progressBar_logging.setToolTip(
@@ -316,6 +312,7 @@ class MainWindow(QtWidgets.QMainWindow):
             parts = file_base.split()
             if len(parts) > 1:
                 folder = " ".join(parts[:-1])
+                folder = re.sub(r'[<>:"/\\|?*]', "_", folder)
                 target_dir = os.path.join(self.root_log_dir, folder)
         os.makedirs(target_dir, exist_ok=True)
         full_path = os.path.join(target_dir, f"{file_base}.txt")
@@ -348,7 +345,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 mode = "w"
 
         try:
-            self.log_file = open(full_path, mode)
+            # Use line buffering so each newline is written promptly
+            self.log_file = open(full_path, mode, buffering=1)
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to open {full_path}: {exc}"
