@@ -136,7 +136,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Loaded data: list of (path, rows)
         self.data: List[Tuple[str, List[NumberRow]]] = []
 
-        # Track plot windows and last plotted data
+        # Track plot windows and last plotted data. ``plot_win`` is kept for
+        # backward compatibility with older code expecting a single window.
         self.plot_wins: List[PlotWindow] = []
         self.plot_win: PlotWindow | None = None
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
