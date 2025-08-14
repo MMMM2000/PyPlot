@@ -92,6 +92,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.sample_count = 2000
         self.sample_idx = 0
         self.logging_on = False
+        self.paused = False
         self.sample_rate: float | None = None
         self._rate_window: deque[float] = deque(maxlen=1000)
         self.last_sample_time: float | None = None
@@ -101,6 +102,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
         cast(Any, self.ui).progressBar_logging.setValue(0)
+        cast(Any, self.ui).progressBar_logging.setToolTip("")
         self.ui.checkBox_subdir.setChecked(False)
 
         os.makedirs(self.log_dir, exist_ok=True)
@@ -127,7 +129,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.update_baudrate)
         self.ui.pushButton_send_command.clicked.connect(self.send_command)
         self.ui.pushButton_record.clicked.connect(self.start_logging)
+        self.ui.pushButton_record.setToolTip("Start logging")
         self.ui.pushButton_cancel.clicked.connect(self.cancel_logging)
+        self.ui.pushButton_cancel.setToolTip("Stop logging")
         refresh_btn = getattr(self.ui, "pushButton_refresh_ports", None)
         if refresh_btn is not None:
             refresh_btn.clicked.connect(self.populate_ports)
@@ -216,13 +220,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.sample_rate = sum(self._rate_window) / len(self._rate_window)
         self.last_sample_time = now
 
-        if self.logging_on:
+        if self.logging_on and not self.paused:
             assert self.log_file is not None
 
             # strip leading '>' if present, then write
             self.log_file.write(self.port_response.lstrip(">"))
             self.sample_idx += 1
             cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
+            cast(Any, self.ui).progressBar_logging.setToolTip(
+                f"{self.sample_idx}/{self.sample_count} samples"
+            )
 
             if self.sample_rate:
                 remaining_samples = self.sample_count - self.sample_idx
@@ -231,7 +238,9 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.sample_idx >= self.sample_count:
                 self.log_file.close()
                 self.logging_on = False
-                self.ui.pushButton_record.setEnabled(True)
+                self.paused = False
+                self.ui.pushButton_record.setText("Record")
+                self.ui.pushButton_record.setToolTip("Start logging")
                 self.ui.pushButton_cancel.setEnabled(False)
                 self._finish_time = None
 
@@ -245,6 +254,10 @@ class MainWindow(QtWidgets.QMainWindow):
         """Update the estimated logging time display."""
         label = getattr(self.ui, "label_time_estimate", None)
         if label is None:
+            return
+        if self.paused:
+            self._last_time_secs = None
+            label.setText("Time remaining: Paused")
             return
         if self.sample_rate:
             remaining = self.ui.spinBox_log_sample_count.value()
@@ -280,7 +293,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.serial.write(cmd.encode('ascii'))
 
     def start_logging(self):
-        """Open the selected log file and begin writing incoming samples."""
+        """Open the selected log file, begin logging, or toggle pause."""
+        if self.logging_on:
+            self.paused = not self.paused
+            if self.paused:
+                self.ui.pushButton_record.setText("Resume")
+                self.ui.pushButton_record.setToolTip("Resume logging")
+                self._finish_time = None
+            else:
+                self.ui.pushButton_record.setText("Pause")
+                self.ui.pushButton_record.setToolTip("Pause logging")
+            self.update_time_estimate()
+            return
+
         file_base = self.ui.lineEdit_log_file.text().strip()
         if not file_base:
             return
@@ -331,15 +356,20 @@ class MainWindow(QtWidgets.QMainWindow):
             return
 
         self.sample_count = self.ui.spinBox_log_sample_count.value()
-        self.sample_idx   = 0
-        self.logging_on   = True
+        self.sample_idx = 0
+        self.logging_on = True
+        self.paused = False
         self._finish_time = None
 
-        self.ui.pushButton_record.setEnabled(False)
+        self.ui.pushButton_record.setText("Pause")
+        self.ui.pushButton_record.setToolTip("Pause logging")
         self.ui.pushButton_cancel.setEnabled(True)
 
         cast(Any, self.ui).progressBar_logging.setMaximum(self.sample_count)
         cast(Any, self.ui).progressBar_logging.setValue(0)
+        cast(Any, self.ui).progressBar_logging.setToolTip(
+            f"0/{self.sample_count} samples"
+        )
         self.update_time_estimate()
 
     def cancel_logging(self):
@@ -350,8 +380,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.log_file.close()
         self.logging_on = False
-        self.ui.pushButton_record.setEnabled(True)
+        self.paused = False
+        self.ui.pushButton_record.setText("Record")
+        self.ui.pushButton_record.setToolTip("Start logging")
         self.ui.pushButton_cancel.setEnabled(False)
+        cast(Any, self.ui).progressBar_logging.setToolTip("")
         self._finish_time = None
         self.update_time_estimate()
 
