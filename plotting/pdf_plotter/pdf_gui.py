@@ -10,8 +10,9 @@ from typing import Any, Dict, Iterable, List, Tuple
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import numpy as np
-import pyqtgraph as pg
+import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
 try:  # optional dependency
     from PyPDF2 import PdfReader
@@ -115,106 +116,38 @@ class LabelDialog(QtWidgets.QDialog):
 
 
 # -----------------------------------------------------------------------------
-# A single plot window using PyQtGraph for display
+# A single plot window using Matplotlib for display
 # -----------------------------------------------------------------------------
-class PlotWindow(QtWidgets.QWidget):
-    """Top level window holding a PyQtGraph plot and a small toolbar."""
+class PlotWindow(QtWidgets.QMainWindow):
+    """Top level window holding a Matplotlib plot."""
 
     instances: "weakref.WeakSet[PlotWindow]" = weakref.WeakSet()
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: PdfPlotterWindow | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: "PdfPlotterWindow" | None = None) -> None:
         super().__init__(parent)
         PlotWindow.instances.add(self)
-
         self.controller = controller
-        self.axis_locked: bool = False
-        self._saved_limits: Tuple[Tuple[float, float], Tuple[float, float]] | None = None
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
-
-        self.plot_widget = pg.PlotWidget()
-        self.plot_widget.showGrid(x=True, y=True)
-
-        self.custom_title = ""
-        self.custom_x_label = ""
-        self.custom_y_label = ""
-        self.fig_size = (8.0, 5.0)
-        self._fig_inited = False
-        self._target_aspect: float | None = None
-
-        self.toolbar = QtWidgets.QToolBar(self)
-        edit_act = QtGui.QAction("Labels…", self)
-        edit_act.triggered.connect(self._edit_labels)
-        self.toolbar.addAction(edit_act)
-
-        self.lock_act = QtGui.QAction("Lock Axes", self)
-        self.lock_act.setCheckable(True)
-        self.lock_act.setChecked(False)
-        self.lock_act.toggled.connect(self._toggle_lock)
-        self.toolbar.addAction(self.lock_act)
-
-        export_act = QtGui.QAction("Export Matplotlib", self)
-        export_act.triggered.connect(self._export_matplotlib)
-        self.toolbar.addAction(export_act)
-
-        self.dark_act = QtGui.QAction("Dark mode", self)
-        self.dark_act.setCheckable(True)
-        self.dark_act.setChecked(False)
-        self.dark_act.toggled.connect(self._apply_theme)
-        self.toolbar.addAction(self.dark_act)
-
-        layout = QtWidgets.QVBoxLayout(self)
+        self.fig = Figure()
+        self.canvas = FigureCanvasQTAgg(self.fig)
+        self.toolbar = NavigationToolbar2QT(self.canvas, self)
+        central = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(central)
         layout.addWidget(self.toolbar)
-        layout.addWidget(self.plot_widget)
+        layout.addWidget(self.canvas)
         layout.setSizeConstraint(QtWidgets.QLayout.SizeConstraint.SetFixedSize)
-        self._apply_theme(False)
-
-    def _export_matplotlib(self) -> None:
-        if self.controller is not None:
-            self.controller._save_window(self)
-
-    def _apply_theme(self, on: bool) -> None:
-        bg = "k" if on else "w"
-        fg = "w" if on else "k"
-        self.plot_widget.setBackground(bg)
-        pi = self.plot_widget.getPlotItem()
-        for name in ("bottom", "left"):
-            ax = pi.getAxis(name)
-            ax.setPen(pg.mkPen(fg))
-            ax.setTextPen(pg.mkPen(fg))
-        pi.showGrid(x=True, y=True, alpha=0.3)
+        self.setCentralWidget(central)
 
     def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
-        """Resize the underlying widget to roughly match the requested figure size."""
         dpi = self.logicalDpiX() or 100.0
         wpx = int(round(fig_w_in * dpi))
         hpx = int(round(fig_h_in * dpi))
-        self.plot_widget.setFixedSize(wpx, hpx)
+        self.canvas.setFixedSize(wpx, hpx)
         if resize_window:
             self.resize(self.sizeHint())
         else:
             self.updateGeometry()
-
-    def _toggle_lock(self, on: bool) -> None:
-        self.axis_locked = on
-        if on:
-            self._saved_limits = self.plot_widget.viewRange()
-        else:
-            self._saved_limits = None
-
-    def _edit_labels(self) -> None:
-        plot_item = self.plot_widget.getPlotItem()
-        dlg = LabelDialog(
-            self.custom_title or plot_item.titleLabel.text,
-            self.custom_x_label or plot_item.getAxis("bottom").labelText,
-            self.custom_y_label or plot_item.getAxis("left").labelText,
-            self,
-        )
-        if dlg.exec() == QtWidgets.QDialog.DialogCode.Accepted:
-            self.custom_title, self.custom_x_label, self.custom_y_label = dlg.get_values()
-            self.plot_widget.setTitle(self.custom_title)
-            self.plot_widget.setLabel("bottom", self.custom_x_label)
-            self.plot_widget.setLabel("left", self.custom_y_label)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         try:
@@ -222,66 +155,6 @@ class PlotWindow(QtWidgets.QWidget):
         except Exception:
             pass
         super().closeEvent(event)
-
-
-# -----------------------------------------------------------------------------
-# Window manager to apply current settings to selected plot windows
-# -----------------------------------------------------------------------------
-class WindowManagerDialog(QtWidgets.QDialog):
-    """Select plot windows to apply current settings to."""
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Window Manager")
-        self.resize(420, 320)
-        layout = QtWidgets.QVBoxLayout(self)
-        info = QtWidgets.QLabel(
-            "Select plot windows to re-apply CURRENT settings (style, labels, figure size). Data stays the same."
-        )
-        info.setWordWrap(True)
-        layout.addWidget(info)
-        self.list = QtWidgets.QListWidget()
-        self.list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.MultiSelection)
-        layout.addWidget(self.list)
-        btns = QtWidgets.QHBoxLayout()
-        self.refresh_btn = QtWidgets.QPushButton("Refresh")
-        self.apply_btn = QtWidgets.QPushButton("Apply to selected")
-        btns.addWidget(self.refresh_btn)
-        btns.addWidget(self.apply_btn)
-        layout.addLayout(btns)
-
-        self.refresh_btn.clicked.connect(self.refresh)
-        self.apply_btn.clicked.connect(self.apply_to_selected)
-
-        self.refresh()
-
-    def refresh(self) -> None:
-        self.list.clear()
-        for w in list(PlotWindow.instances):
-            pi = w.plot_widget.getPlotItem()
-            title = pi.titleLabel.text or "(untitled)"
-            it = QtWidgets.QListWidgetItem(title)
-            it.setData(QtCore.Qt.ItemDataRole.UserRole, w)
-            self.list.addItem(it)
-
-    def apply_to_selected(self) -> None:
-        parent = self.parent()
-        if not isinstance(parent, PdfPlotterWindow):
-            self.reject()
-            return
-        selected_items: List[QtWidgets.QListWidgetItem] = []
-        for i in range(self.list.count()):
-            it = self.list.item(i)
-            if it is not None and it.isSelected():
-                selected_items.append(it)
-        if not selected_items:
-            QtWidgets.QMessageBox.information(self, "No selection", "Select one or more plot windows.")
-            return
-        for it in selected_items:
-            w = it.data(QtCore.Qt.ItemDataRole.UserRole) if it is not None else None
-            if isinstance(w, PlotWindow) and getattr(w, "_last_lines", None):
-                parent._plot_to_window(w, w._last_lines, w._last_title)
-        self.accept()
 
 
 # -----------------------------------------------------------------------------
@@ -298,10 +171,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Loaded data: list of (path, rows)
         self.data: List[Tuple[str, List[NumberRow]]] = []
 
-        # Track plot windows
+        # Track plot windows and last plotted data
         self.plot_win: PlotWindow | None = None
         self.plot_wins: List[PlotWindow] = []
-        self.last_plot_window: PlotWindow | None = None
+        self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
+        self._last_title: str = ""
 
         # Make the settings UI scrollable
         outer = QtWidgets.QVBoxLayout(self)
@@ -492,11 +366,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.auto_cb.setChecked(True)
         self.plot_btn = QtWidgets.QPushButton("Plot")
         self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.manager_btn = QtWidgets.QPushButton("Window Manager…")
         self.plot_btn.clicked.connect(self.plot)
         self.clear_btn.clicked.connect(self.clear_plot)
-        self.manager_btn.clicked.connect(self.open_manager)
-        btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn, self.manager_btn)
+        btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn)
 
         self._sync_labels_from_choices()
         # Ensure the plot controls are always visible without scrolling by placing the
@@ -529,8 +401,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return mm / to_mm[to_unit]
 
     def _apply_dark_global(self, on: bool) -> None:
-        for w in list(PlotWindow.instances):
-            w.dark_act.setChecked(on)
+        # Dark mode is applied when creating new plots
         self._maybe_auto_plot()
 
     def _resolved_color(self, base: QtGui.QColor, dark: bool) -> str:
@@ -538,6 +409,58 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if dark and c.lightness() < 128:
             c = c.lighter(170)
         return c.name()
+
+    def _line_colors(self, n: int) -> List[str]:
+        """Return ``n`` distinct colors starting with the chosen color."""
+        base = self._resolved_color(self._color, self.dark_cb.isChecked())
+        cycle = [c for c in plt.rcParams["axes.prop_cycle"].by_key().get("color", []) if c.lower() != base.lower()]
+        if n - 1 > len(cycle):
+            reps = (n - 1 - 1) // len(cycle) + 1 if cycle else 0
+            cycle = (cycle * (reps + 1))[: n - 1]
+        else:
+            cycle = cycle[: n - 1]
+        return [base] + cycle
+
+    def _draw_on_axes(self, ax: Any, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> None:
+        """Draw the given lines onto a Matplotlib Axes."""
+        fig = ax.figure
+        dark = self.dark_cb.isChecked()
+        bg = "black" if dark else "white"
+        fg = "white" if dark else "black"
+        fig.patch.set_facecolor(bg)
+        ax.set_facecolor(bg)
+
+        ls = "None" if self.line_style.currentText() == "None" else self.line_style.currentText()
+        marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
+        lines = list(lines)
+        colors = self._line_colors(len(lines))
+        for (label, x, y), color in zip(lines, colors):
+            ax.plot(
+                x,
+                y,
+                linestyle=ls,
+                marker=marker,
+                linewidth=float(self.line_width.value()),
+                markersize=float(self.marker_size.value()),
+                color=color,
+                label=label,
+            )
+
+        x_lab = self.x_label_edit.text()
+        units = self.y_units_edit.text().strip()
+        y_lab = self.y_label_edit.text().strip()
+        if units:
+            y_lab = f"{y_lab} ({units})"
+        ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()), color=fg)
+        ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()), color=fg)
+        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
+        ax.set_title(title, fontsize=int(self.title_fs.value()), color=fg)
+        if self.legend_cb.isChecked():
+            ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+        ax.tick_params(labelsize=int(self.tick_fs.value()), colors=fg)
+        for spine in ax.spines.values():
+            spine.set_color(fg)
+        fig.tight_layout()
 
     def _on_units_changed(self, new_unit: str) -> None:
         old_unit = getattr(self, "_current_units", new_unit)
@@ -672,54 +595,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
     def _plot_to_window(self, win: PlotWindow, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> None:
         fig_w, fig_h = self._figure_size_inches()
-        win._target_aspect = max(fig_w, 1e-9) / max(fig_h, 1e-9)
-        size_changed = (fig_w, fig_h) != tuple(win.fig_size)
-        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=size_changed)
-        if size_changed:
-            win.fig_size = (fig_w, fig_h)
-        if not win._fig_inited:
-            win.fig_size = (fig_w, fig_h)
-            win._fig_inited = True
-
-        saved = None
-        if win.axis_locked:
-            saved = win._saved_limits or win.plot_widget.viewRange()
-
-        pw = win.plot_widget
-        pw.clear()
-        win._apply_theme(win.dark_act.isChecked())
-
-        ls = self.line_style.currentText()
-        marker = self.marker_style.currentText()
-        pen_width = float(self.line_width.value())
-        symbol_size = float(self.marker_size.value())
-        for i, (label, x, y) in enumerate(lines):
-            color = self._resolved_color(self._color, win.dark_act.isChecked()) if i == 0 else None
-            pen = pg.mkPen(color=color, width=pen_width, style=QtCore.Qt.PenStyle.SolidLine)
-            pw.plot(
-                x,
-                y,
-                pen=None if ls == "None" else pen,
-                symbol=None if marker == "None" else marker,
-                symbolSize=symbol_size,
-                name=label,
-            )
-
-        x_lab = self.x_label_edit.text()
-        units = self.y_units_edit.text().strip()
-        y_lab = self.y_label_edit.text().strip()
-        if units:
-            y_lab = f"{y_lab} ({units})"
-        pw.setLabel("bottom", x_lab)
-        pw.setLabel("left", y_lab)
-        pw.setTitle(title)
-        pw.showGrid(self.grid_cb.isChecked(), self.grid_cb.isChecked())
-        if saved is not None:
-            pw.setXRange(*saved[0], padding=0)
-            pw.setYRange(*saved[1], padding=0)
-        if self.legend_cb.isChecked():
-            pw.addLegend(offset=(30, 30))
-
+        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=True)
+        win.fig.clf()
+        ax = win.fig.add_subplot(111)
+        self._draw_on_axes(ax, lines, title)
+        win.canvas.draw()
         win._last_lines = [(lbl, np.asarray(x, dtype=float), np.asarray(y, dtype=float)) for (lbl, x, y) in lines]
         win._last_title = title
 
@@ -727,38 +607,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         fig_w, fig_h = self._figure_size_inches()
         fig = Figure(figsize=(fig_w, fig_h))
         ax = fig.add_subplot(111)
-        fig.patch.set_facecolor("white")
-        ax.set_facecolor("white")
-
-        ls = 'None' if self.line_style.currentText() == "None" else self.line_style.currentText()
-        marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
-
-        for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
-            ax.plot(
-                x,
-                y,
-                linestyle=ls,
-                marker=marker,
-                linewidth=float(self.line_width.value()),
-                markersize=float(self.marker_size.value()),
-                color=color,
-                label=label,
-            )
-
-        x_lab = self.x_label_edit.text()
-        units = self.y_units_edit.text().strip()
-        y_lab = self.y_label_edit.text().strip()
-        if units:
-            y_lab = f"{y_lab} ({units})"
-        ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()))
-        ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()))
-        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
-        if self.legend_cb.isChecked():
-            ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
-        ax.tick_params(labelsize=int(self.tick_fs.value()))
-        fig.tight_layout()
+        self._draw_on_axes(ax, lines, title)
         return fig
 
     def _save_plotly_html(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str, base_path: str) -> None:
@@ -774,8 +623,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             mode = "markers"
         elif ls != "None" and marker == "None":
             mode = "lines"
-        for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
+        lines = list(lines)
+        colors = self._line_colors(len(lines))
+        for (label, x, y), color in zip(lines, colors):
             fig.add_trace(
                 go.Scatter(x=x, y=y, mode=mode, name=label, line=dict(color=color), marker=dict(color=color))
             )
@@ -787,7 +637,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         fig.update_layout(title=title, xaxis_title=x_lab, yaxis_title=y_lab, template="plotly_white")
         fig.write_html(f"{base_path}.html")
 
-    def _save_window(self, win: PlotWindow) -> None:
+    def _save_lines(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> None:
         out_dir = self.out_dir.text()
         if not out_dir:
             return
@@ -795,20 +645,20 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             QtWidgets.QMessageBox.information(self, "No format", "Select at least one output format.")
             return
         os.makedirs(out_dir, exist_ok=True)
-        base = win._last_title or "plot"
+        base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
         if self.png_cb.isChecked():
-            fig = self._create_matplotlib_fig(win._last_lines, win._last_title)
+            fig = self._create_matplotlib_fig(lines, title)
             fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
         if self.html_cb.isChecked():
-            self._save_plotly_html(win._last_lines, win._last_title, base_path)
+            self._save_plotly_html(lines, title, base_path)
 
     def save_current(self) -> None:
-        if self.last_plot_window is None:
+        if not self._last_lines:
             QtWidgets.QMessageBox.information(self, "No data", "Nothing to save.")
             return
-        self._save_window(self.last_plot_window)
+        self._save_lines(self._last_lines, self._last_title)
 
     def plot(self) -> None:
         if not self.data:
@@ -827,7 +677,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if mode == "Combined":
             if self.plot_win is None:
                 self.plot_win = PlotWindow(None, controller=self)
-            self.plot_win.dark_act.setChecked(self.dark_cb.isChecked())
             lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
             for path, sets in lines_by_file.items():
                 base = os.path.basename(path)
@@ -840,17 +689,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 title = f"{' / '.join(selected)} vs {x_name} — {base}"
             self._plot_to_window(self.plot_win, lines, title)
             self.plot_win.show()
-            self.last_plot_window = self.plot_win
+            self._last_lines = self.plot_win._last_lines
+            self._last_title = title
             if self.save_cb.isChecked():
-                self._save_window(self.plot_win)
+                self._save_lines(self._last_lines, self._last_title)
         else:  # Separate
             for w in self.plot_wins:
                 w.close()
             self.plot_wins = []
             for path, sets in lines_by_file.items():
                 win = PlotWindow(None, controller=self)
-                win.dark_act.setChecked(self.dark_cb.isChecked())
-                lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
+                lines = []
                 base = os.path.basename(path)
                 for y_name, xs, ys in sets:
                     label = f"{base} {y_name}"
@@ -859,19 +708,20 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 self._plot_to_window(win, lines, title)
                 win.show()
                 self.plot_wins.append(win)
-                self.last_plot_window = win
+                self._last_lines = win._last_lines
+                self._last_title = title
                 if self.save_cb.isChecked():
-                    self._save_window(win)
+                    self._save_lines(self._last_lines, self._last_title)
 
     def clear_plot(self) -> None:
         if self.plot_win:
-            self.plot_win.plot_widget.clear()
+            self.plot_win.close()
+            self.plot_win = None
         for w in self.plot_wins:
-            w.plot_widget.clear()
-
-    def open_manager(self) -> None:
-        dlg = WindowManagerDialog(self)
-        dlg.exec()
+            w.close()
+        self.plot_wins = []
+        self._last_lines = []
+        self._last_title = ""
 
 
 # -----------------------------------------------------------------------------
