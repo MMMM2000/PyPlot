@@ -99,6 +99,7 @@ class UiMainWindow(object):
         self.progressBar_logging = QtWidgets.QProgressBar()
         self.pushButton_cancel = QtWidgets.QPushButton("Cancel")
         self.checkBox_subdir = QtWidgets.QCheckBox("Use subfolder")
+        self.checkBox_subdir.setToolTip('Unsupported characters (<>:"/\\|?*) are replaced with underscores.')
         log_layout.addWidget(self.progressBar_logging, 4, 0, 1, 2)
         log_layout.addWidget(self.pushButton_cancel, 4, 2)
         log_layout.addWidget(self.checkBox_subdir, 4, 3)
