@@ -104,9 +104,14 @@ interactive figure can be reopened and modified at any time.
 ## Experiments
 
 The ``experiments`` folder holds interface prototypes that are separate from the
-core Python code.  It currently contains a Tauri, React and Tailwind CSS sample
-that communicates with a small Python backend.  See its README for setup
-instructions.
+core Python code. It now includes a simple data plotter GUI experiment alongside
+other prototypes. Launch it with:
+
+```bash
+python experiments/data_plotter.py
+```
+
+See the folder's README for additional setup instructions.
 
 ## Master launcher
 
@@ -261,9 +266,8 @@ A sample PDF is provided in the `sample_data` folder for quick testing.
 
 `data_logger/data_logger.py` records serial data to a file.  By default logs
 are stored in a `python_plot_logs` directory inside the current user's home
-folder so the path works on any system.  You can change the location at
-runtime with the `--log-dir` option or the `LOG_DIR` environment variable.  The
-script also exposes constants for the pre-filled command string and suggested
+folder so the path works on any system.  You can change the location via the
+`LOG_DIR` environment variable.  The script also exposes constants for the pre-filled command string and suggested
 file name.  Inside the GUI you can browse to a different directory at any time.
 The interface follows the host operating system's light or dark appearance and
 uses rounded buttons for a modern look.
@@ -303,13 +307,6 @@ importable without modifying ``sys.path``:
 
 ```bash
 pip install -e .
-```
-
-The `plot-cli` command installed by the package provides a simple wrapper
-around the available plotting GUIs. List the supported tools with:
-
-```bash
-plot-cli --help
 ```
 
 Default settings for the stress dependence and temperature sensitivity plotters

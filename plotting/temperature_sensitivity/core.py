@@ -170,10 +170,10 @@ def detect_outliers(
 ) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
-    Parameters are tuned to flag only extreme values.  Per file the *quantile*
-    range (``(1-quantile)/2`` to ``1-(1-quantile)/2``) is computed and expanded
-    by ``factor`` relative to the median.  Points lying farther than this
-    distance are considered outliers.
+    For each point only a small window of neighboring values is considered
+    when calculating the median and quantile range.  This prevents transient
+    regions at the start or end of a measurement from skewing the statistics for
+    the entire series.
     """
 
     if not (0 < quantile < 1):
@@ -182,19 +182,18 @@ def detect_outliers(
     out_rows = []
     low_q = (1 - quantile) / 2
     high_q = 1 - low_q
+    window = 21  # current point ±10 neighbors
     for fname, grp in df.groupby("filename"):
         series = grp[column].dropna()
         if series.empty:
             continue
-        med = series.median()
-        q_low = series.quantile(low_q)
-        q_high = series.quantile(high_q)
+        med = series.rolling(window, center=True, min_periods=1).median()
+        q_low = series.rolling(window, center=True, min_periods=1).quantile(low_q)
+        q_high = series.rolling(window, center=True, min_periods=1).quantile(high_q)
         rng = q_high - q_low
-        if rng <= 0:
-            continue
-        mask = np.abs(series - med) > factor * rng
+        mask = (np.abs(series - med) > factor * rng) & (rng > 0)
         if mask.any():
-            out_rows.append(grp.loc[mask])
+            out_rows.append(grp.loc[mask.index[mask]])
 
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
