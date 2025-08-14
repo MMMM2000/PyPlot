@@ -13,6 +13,8 @@ import numpy as np
 import pyqtgraph as pg
 from matplotlib.figure import Figure
 
+pg.setConfigOptions(antialias=True)
+
 try:  # optional dependency
     from PyPDF2 import PdfReader
 except Exception:  # pragma: no cover
@@ -133,6 +135,11 @@ class PlotWindow(QtWidgets.QWidget):
         self._last_title: str = ""
 
         self.plot_widget = pg.PlotWidget()
+        # ensure the on-screen view matches Matplotlib export
+        self.plot_widget.setAntialiasing(True)
+        pi = self.plot_widget.getPlotItem()
+        pi.layout.setSpacing(0)
+        pi.getViewBox().setDefaultPadding(0.0)
         self.plot_widget.showGrid(x=True, y=True)
 
         self.custom_title = ""
@@ -693,27 +700,41 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         marker = self.marker_style.currentText()
         pen_width = float(self.line_width.value())
         symbol_size = float(self.marker_size.value())
+        fg = "w" if win.dark_act.isChecked() else "k"
         for i, (label, x, y) in enumerate(lines):
             color = self._resolved_color(self._color, win.dark_act.isChecked()) if i == 0 else None
-            pen = pg.mkPen(color=color, width=pen_width, style=QtCore.Qt.PenStyle.SolidLine)
-            pw.plot(
+            pen = pg.mkPen(
+                color=color,
+                width=pen_width,
+                style=QtCore.Qt.PenStyle.SolidLine,
+                cap=QtCore.Qt.PenCapStyle.RoundCap,
+                join=QtCore.Qt.PenJoinStyle.RoundJoin,
+            )
+            curve = pw.plot(
                 x,
                 y,
                 pen=None if ls == "None" else pen,
                 symbol=None if marker == "None" else marker,
                 symbolSize=symbol_size,
                 name=label,
+                antialias=True,
             )
+            curve.setDownsampling(auto=False)
 
         x_lab = self.x_label_edit.text()
         units = self.y_units_edit.text().strip()
         y_lab = self.y_label_edit.text().strip()
         if units:
             y_lab = f"{y_lab} ({units})"
-        pw.setLabel("bottom", x_lab)
-        pw.setLabel("left", y_lab)
-        pw.setTitle(title)
-        pw.showGrid(self.grid_cb.isChecked(), self.grid_cb.isChecked())
+        label_style = {"color": fg, "font-size": f"{int(self.label_fs.value())}pt"}
+        pw.setLabel("bottom", x_lab, **label_style)
+        pw.setLabel("left", y_lab, **label_style)
+        pw.setTitle(title, color=fg, size=f"{int(self.title_fs.value())}pt")
+        tick_font = QtGui.QFont()
+        tick_font.setPointSize(int(self.tick_fs.value()))
+        for name in ("bottom", "left"):
+            pw.getPlotItem().getAxis(name).setStyle(tickFont=tick_font)
+        pw.showGrid(self.grid_cb.isChecked(), self.grid_cb.isChecked(), alpha=0.3)
         if saved is not None:
             pw.setXRange(*saved[0], padding=0)
             pw.setYRange(*saved[1], padding=0)
@@ -723,18 +744,28 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         win._last_lines = [(lbl, np.asarray(x, dtype=float), np.asarray(y, dtype=float)) for (lbl, x, y) in lines]
         win._last_title = title
 
-    def _create_matplotlib_fig(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> Figure:
+    def _create_matplotlib_fig(
+        self,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        *,
+        xlim: Tuple[float, float] | None = None,
+        ylim: Tuple[float, float] | None = None,
+        dark: bool = False,
+    ) -> Figure:
         fig_w, fig_h = self._figure_size_inches()
         fig = Figure(figsize=(fig_w, fig_h))
         ax = fig.add_subplot(111)
-        fig.patch.set_facecolor("white")
-        ax.set_facecolor("white")
+        bg = "black" if dark else "white"
+        fg = "white" if dark else "black"
+        fig.patch.set_facecolor(bg)
+        ax.set_facecolor(bg)
 
         ls = 'None' if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
 
         for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
+            color = self._resolved_color(self._color, dark) if i == 0 else None
             ax.plot(
                 x,
                 y,
@@ -744,6 +775,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 markersize=float(self.marker_size.value()),
                 color=color,
                 label=label,
+                antialiased=True,
+                solid_capstyle="round",
+                solid_joinstyle="round",
             )
 
         x_lab = self.x_label_edit.text()
@@ -751,21 +785,45 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         y_lab = self.y_label_edit.text().strip()
         if units:
             y_lab = f"{y_lab} ({units})"
-        ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()))
-        ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()))
-        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
+        ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()), color=fg)
+        ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()), color=fg)
+        ax.grid(
+            self.grid_cb.isChecked(),
+            which="both",
+            linestyle="--",
+            alpha=0.4,
+            color=fg,
+        )
+        ax.set_title(title, fontsize=int(self.title_fs.value()), color=fg)
         if self.legend_cb.isChecked():
-            ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
-        ax.tick_params(labelsize=int(self.tick_fs.value()))
+            leg = ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+            leg.get_frame().set_facecolor(bg)
+            leg.get_frame().set_edgecolor(fg)
+            for text in leg.get_texts():
+                text.set_color(fg)
+        ax.tick_params(labelsize=int(self.tick_fs.value()), colors=fg)
+        for spine in ax.spines.values():
+            spine.set_color(fg)
+        if xlim is not None and ylim is not None:
+            ax.set_xlim(xlim)
+            ax.set_ylim(ylim)
         fig.tight_layout()
+        fig.subplots_adjust(hspace=0, wspace=0)
         return fig
 
-    def _save_plotly_html(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str, base_path: str) -> None:
+    def _save_plotly_html(
+        self,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        base_path: str,
+        *,
+        dark: bool = False,
+    ) -> None:
         try:
             import plotly.graph_objects as go
         except Exception:  # pragma: no cover - optional
             return
+        template = "plotly_dark" if dark else "plotly_white"
         fig = go.Figure()
         ls = self.line_style.currentText()
         marker = self.marker_style.currentText()
@@ -775,7 +833,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         elif ls != "None" and marker == "None":
             mode = "lines"
         for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
+            color = self._resolved_color(self._color, dark) if i == 0 else None
             fig.add_trace(
                 go.Scatter(x=x, y=y, mode=mode, name=label, line=dict(color=color), marker=dict(color=color))
             )
@@ -784,7 +842,14 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         y_lab = self.y_label_edit.text().strip()
         if units:
             y_lab = f"{y_lab} ({units})"
-        fig.update_layout(title=title, xaxis_title=x_lab, yaxis_title=y_lab, template="plotly_white")
+        fg = "white" if dark else "black"
+        fig.update_layout(
+            title=title,
+            xaxis_title=x_lab,
+            yaxis_title=y_lab,
+            template=template,
+            font=dict(color=fg),
+        )
         fig.write_html(f"{base_path}.html")
 
     def _save_window(self, win: PlotWindow) -> None:
@@ -799,10 +864,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
         if self.png_cb.isChecked():
-            fig = self._create_matplotlib_fig(win._last_lines, win._last_title)
+            xlim, ylim = win.plot_widget.viewRange()
+            fig = self._create_matplotlib_fig(
+                win._last_lines,
+                win._last_title,
+                xlim=tuple(xlim),
+                ylim=tuple(ylim),
+                dark=win.dark_act.isChecked(),
+            )
             fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
         if self.html_cb.isChecked():
-            self._save_plotly_html(win._last_lines, win._last_title, base_path)
+            self._save_plotly_html(win._last_lines, win._last_title, base_path, dark=win.dark_act.isChecked())
 
     def save_current(self) -> None:
         if self.last_plot_window is None:
