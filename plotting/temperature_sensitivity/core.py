@@ -18,6 +18,7 @@ from matplotlib.typing import ColorType
 
 from ..config import load_config
 from .. import common
+from ..utils import save_figure
 
 # Load default configuration
 _CFG = load_config().get("temperature_sensitivity", {})
@@ -40,6 +41,8 @@ OFFSET = 0.25
 JITTER_SPAN = 0.25
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
+SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
+PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
 BASELINE_MODE = _CFG.get("BASELINE_MODE", "none")
 if BASELINE_MODE not in {"none", "zero_25", "both"}:
     # backwards compatibility for old ZERO_25_BASELINE flag
@@ -403,11 +406,11 @@ def plot_variable(
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {anneal} {var}.png"
+    fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
-    return fig, fname
+        save_figure(fig, os.path.join(out_dir, fname), SAVE_FORMAT, PNG_DPI)
+    return fig, f"{fname}.{SAVE_FORMAT}"
 
 
 from ..common import maybe_handle_outliers
@@ -472,6 +475,7 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    base = os.path.join(out, Path(fname).stem)
+                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
 
     print(f'Done: processed {total} plots.')
