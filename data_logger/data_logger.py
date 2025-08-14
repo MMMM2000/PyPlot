@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import time
 import math
+import re
 from typing import Any, cast, List
 from collections import deque
 
@@ -283,6 +284,7 @@ class MainWindow(QtWidgets.QMainWindow):
             parts = file_base.split()
             if len(parts) > 1:
                 folder = " ".join(parts[:-1])
+                folder = re.sub(r'[<>:"/\\|?*]', "_", folder)
                 target_dir = os.path.join(self.root_log_dir, folder)
         os.makedirs(target_dir, exist_ok=True)
         full_path = os.path.join(target_dir, f"{file_base}.txt")

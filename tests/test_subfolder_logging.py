@@ -29,3 +29,20 @@ def test_subfolder_creation(tmp_path, monkeypatch):
     assert window.log_dir == str(tmp_path / "FeSiBP 156_2 s2-1b 74mA")
     assert (tmp_path / "FeSiBP 156_2 s2-1b 74mA" / "FeSiBP 156_2 s2-1b 74mA 2,5a.txt").exists()
     window.cancel_logging()
+
+
+def test_subfolder_name_sanitized(tmp_path, monkeypatch):
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+    window = MainWindow(log_dir=str(tmp_path))
+    window.ui.checkBox_subdir.setChecked(True)
+
+    def save(*args, **kwargs):
+        return str(tmp_path / "bad<>sub s2-1a 74mA 2,5a.txt"), ""
+
+    monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", save)
+    window.ui.lineEdit_log_file.setText("bad<>sub s2-1a 74mA 2,5a")
+    window.start_logging()
+    assert window.log_dir == str(tmp_path / "bad__sub s2-1a 74mA")
+    assert (tmp_path / "bad__sub s2-1a 74mA" / "bad<>sub s2-1a 74mA 2,5a.txt").exists()
+    window.cancel_logging()
