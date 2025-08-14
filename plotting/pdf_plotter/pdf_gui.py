@@ -11,6 +11,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 import numpy as np
 import pyqtgraph as pg
+from matplotlib import rcParams
 from matplotlib.figure import Figure
 
 try:  # optional dependency
@@ -133,7 +134,11 @@ class PlotWindow(QtWidgets.QWidget):
         self._last_title: str = ""
 
         self.plot_widget = pg.PlotWidget()
-        self.plot_widget.showGrid(x=True, y=True)
+        self.plot_widget.setAntialiasing(True)
+        pi = self.plot_widget.getPlotItem()
+        pi.layout.setContentsMargins(0, 0, 0, 0)
+        pi.layout.setSpacing(0)
+        pi.getViewBox().setDefaultPadding(0.0)
 
         self.custom_title = ""
         self.custom_x_label = ""
@@ -182,7 +187,8 @@ class PlotWindow(QtWidgets.QWidget):
             ax = pi.getAxis(name)
             ax.setPen(pg.mkPen(fg))
             ax.setTextPen(pg.mkPen(fg))
-        pi.showGrid(x=True, y=True, alpha=0.3)
+        grid_on = self.controller.grid_cb.isChecked() if self.controller else True
+        pi.showGrid(x=grid_on, y=grid_on, alpha=0.3)
 
     def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
         """Resize the underlying widget to roughly match the requested figure size."""
@@ -693,48 +699,81 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         marker = self.marker_style.currentText()
         pen_width = float(self.line_width.value())
         symbol_size = float(self.marker_size.value())
+        base_color = self._resolved_color(self._color, win.dark_act.isChecked())
+        cycle = rcParams["axes.prop_cycle"].by_key().get("color", [])
+        colors = [base_color] + list(cycle)
+        bg = "#000000" if win.dark_act.isChecked() else "#ffffff"
+        fg = "#ffffff" if win.dark_act.isChecked() else "#000000"
         for i, (label, x, y) in enumerate(lines):
-            color = self._resolved_color(self._color, win.dark_act.isChecked()) if i == 0 else None
-            pen = pg.mkPen(color=color, width=pen_width, style=QtCore.Qt.PenStyle.SolidLine)
-            pw.plot(
+            color = colors[i % len(colors)] if colors else None
+            pen = pg.mkPen(
+                color=color,
+                width=pen_width,
+                style=QtCore.Qt.PenStyle.SolidLine,
+                cap=QtCore.Qt.PenCapStyle.RoundCap,
+                join=QtCore.Qt.PenJoinStyle.RoundJoin,
+            )
+            curve = pw.plot(
                 x,
                 y,
                 pen=None if ls == "None" else pen,
                 symbol=None if marker == "None" else marker,
                 symbolSize=symbol_size,
+                symbolBrush=color if marker != "None" else None,
+                symbolPen=pen if marker != "None" else None,
                 name=label,
+                antialias=True,
             )
+            curve.setDownsampling(auto=False)
 
         x_lab = self.x_label_edit.text()
         units = self.y_units_edit.text().strip()
         y_lab = self.y_label_edit.text().strip()
         if units:
             y_lab = f"{y_lab} ({units})"
-        pw.setLabel("bottom", x_lab)
-        pw.setLabel("left", y_lab)
-        pw.setTitle(title)
-        pw.showGrid(self.grid_cb.isChecked(), self.grid_cb.isChecked())
+        label_fs = int(self.label_fs.value())
+        tick_fs = int(self.tick_fs.value())
+        title_fs = int(self.title_fs.value())
+        font_family = "DejaVu Sans"
+        pw.setLabel("bottom", x_lab, **{"color": fg, "size": f"{label_fs}pt", "family": font_family})
+        pw.setLabel("left", y_lab, **{"color": fg, "size": f"{label_fs}pt", "family": font_family})
+        pw.setTitle(title, color=fg, size=f"{title_fs}pt", family=font_family)
+        pw.getAxis("bottom").setTickFont(QtGui.QFont(font_family, tick_fs))
+        pw.getAxis("left").setTickFont(QtGui.QFont(font_family, tick_fs))
+        pw.showGrid(self.grid_cb.isChecked(), self.grid_cb.isChecked(), alpha=0.3)
         if saved is not None:
             pw.setXRange(*saved[0], padding=0)
             pw.setYRange(*saved[1], padding=0)
         if self.legend_cb.isChecked():
-            pw.addLegend(offset=(30, 30))
+            legend = pw.addLegend(offset=(30, 30))
+            legend.setPen(pg.mkPen(fg))
+            legend.setBrush(pg.mkBrush(bg))
 
         win._last_lines = [(lbl, np.asarray(x, dtype=float), np.asarray(y, dtype=float)) for (lbl, x, y) in lines]
         win._last_title = title
 
-    def _create_matplotlib_fig(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str) -> Figure:
+    def _create_matplotlib_fig(
+        self,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        view_range: Tuple[Tuple[float, float], Tuple[float, float]] | None = None,
+        dark: bool = False,
+    ) -> Figure:
         fig_w, fig_h = self._figure_size_inches()
         fig = Figure(figsize=(fig_w, fig_h))
         ax = fig.add_subplot(111)
-        fig.patch.set_facecolor("white")
-        ax.set_facecolor("white")
+        bg = "black" if dark else "white"
+        fg = "white" if dark else "black"
+        fig.patch.set_facecolor(bg)
+        ax.set_facecolor(bg)
 
-        ls = 'None' if self.line_style.currentText() == "None" else self.line_style.currentText()
+        ls = "None" if self.line_style.currentText() == "None" else self.line_style.currentText()
         marker = None if self.marker_style.currentText() == "None" else self.marker_style.currentText()
-
+        base_color = self._color.name()
+        cycle = rcParams["axes.prop_cycle"].by_key().get("color", [])
+        colors = [base_color] + list(cycle)
         for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
+            color = colors[i % len(colors)] if colors else None
             ax.plot(
                 x,
                 y,
@@ -744,6 +783,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 markersize=float(self.marker_size.value()),
                 color=color,
                 label=label,
+                solid_capstyle="round",
+                solid_joinstyle="round",
             )
 
         x_lab = self.x_label_edit.text()
@@ -751,14 +792,35 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         y_lab = self.y_label_edit.text().strip()
         if units:
             y_lab = f"{y_lab} ({units})"
-        ax.set_xlabel(x_lab, fontsize=int(self.label_fs.value()))
-        ax.set_ylabel(y_lab, fontsize=int(self.label_fs.value()))
-        ax.grid(self.grid_cb.isChecked(), which="both", linestyle="--", alpha=0.4)
-        ax.set_title(title, fontsize=int(self.title_fs.value()))
+        label_fs = int(self.label_fs.value())
+        tick_fs = int(self.tick_fs.value())
+        title_fs = int(self.title_fs.value())
+        font_family = "DejaVu Sans"
+        ax.set_xlabel(x_lab, fontsize=label_fs, fontfamily=font_family, color=fg)
+        ax.set_ylabel(y_lab, fontsize=label_fs, fontfamily=font_family, color=fg)
+        ax.grid(
+            self.grid_cb.isChecked(),
+            which="both",
+            linestyle="--",
+            alpha=0.3,
+            color=fg,
+        )
+        ax.set_title(title, fontsize=title_fs, fontfamily=font_family, color=fg)
         if self.legend_cb.isChecked():
-            ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
-        ax.tick_params(labelsize=int(self.tick_fs.value()))
+            leg = ax.legend(loc=self.legend_loc.currentText(), fontsize=int(self.legend_fs.value()))
+            leg.get_frame().set_facecolor(bg)
+            leg.get_frame().set_edgecolor(fg)
+            for text in leg.get_texts():
+                text.set_color(fg)
+        ax.tick_params(labelsize=tick_fs, colors=fg)
+        for spine in ax.spines.values():
+            spine.set_color(fg)
+        ax.margins(x=0, y=0)
+        if view_range is not None:
+            ax.set_xlim(*view_range[0])
+            ax.set_ylim(*view_range[1])
         fig.tight_layout()
+        fig.subplots_adjust(hspace=0)
         return fig
 
     def _save_plotly_html(self, lines: Iterable[Tuple[str, np.ndarray, np.ndarray]], title: str, base_path: str) -> None:
@@ -774,8 +836,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             mode = "markers"
         elif ls != "None" and marker == "None":
             mode = "lines"
+        base_color = self._color.name()
+        cycle = rcParams["axes.prop_cycle"].by_key().get("color", [])
+        colors = [base_color] + list(cycle)
         for i, (label, x, y) in enumerate(lines):
-            color = self._color.name() if i == 0 else None
+            color = colors[i % len(colors)] if colors else None
             fig.add_trace(
                 go.Scatter(x=x, y=y, mode=mode, name=label, line=dict(color=color), marker=dict(color=color))
             )
@@ -799,7 +864,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)
         if self.png_cb.isChecked():
-            fig = self._create_matplotlib_fig(win._last_lines, win._last_title)
+            fig = self._create_matplotlib_fig(
+                win._last_lines,
+                win._last_title,
+                win.plot_widget.viewRange(),
+                win.dark_act.isChecked(),
+            )
             fig.savefig(f"{base_path}.png", dpi=int(self.dpi_spin.value()))
         if self.html_cb.isChecked():
             self._save_plotly_html(win._last_lines, win._last_title, base_path)
