@@ -21,10 +21,9 @@ test = ["pytest==8.2.2"]
 
 [project.scripts]
 launcher = "launcher:main"
-plot-cli = "plotting.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["data_logger", "plotting"]
+include = ["data_logger", "plotting", "experiments"]
 
 [tool.setuptools.package-data]
 plotting = ["default_config.json"]

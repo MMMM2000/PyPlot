@@ -103,10 +103,7 @@ interactive figure can be reopened and modified at any time.
 
 ## Experiments
 
-The ``experiments`` folder holds interface prototypes that are separate from the
-core Python code.  It currently contains a Tauri, React and Tailwind CSS sample
-that communicates with a small Python backend.  See its README for setup
-instructions.
+The `experiments` folder holds interface prototypes that are separate from the core Python code. It currently contains an experimental data plotter that combines file selection, outlier checking and launching plotting scripts from a single window.
 
 ## Master launcher
 
@@ -117,6 +114,8 @@ Select an item and press **Run** to launch it:
 ```bash
 python -m launcher
 ```
+
+Outlier detection evaluates each data point against the median of its local neighbourhood (±10 samples) to avoid flagging transient regions.
 
 
 ## Data logger
@@ -303,13 +302,6 @@ importable without modifying ``sys.path``:
 
 ```bash
 pip install -e .
-```
-
-The `plot-cli` command installed by the package provides a simple wrapper
-around the available plotting GUIs. List the supported tools with:
-
-```bash
-plot-cli --help
 ```
 
 Default settings for the stress dependence and temperature sensitivity plotters

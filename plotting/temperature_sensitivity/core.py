@@ -162,18 +162,20 @@ def load_data(files: List[str]) -> pd.DataFrame:
     return data
 
 
+
 def detect_outliers(
     df: pd.DataFrame,
     column: str = "sum",
     quantile: float = 0.9,
     factor: float = 3.0,
+    window: int = 10,
 ) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
-    Parameters are tuned to flag only extreme values.  Per file the *quantile*
-    range (``(1-quantile)/2`` to ``1-(1-quantile)/2``) is computed and expanded
-    by ``factor`` relative to the median.  Points lying farther than this
-    distance are considered outliers.
+    For each point only values within ``window`` steps to the left and right on
+    the X axis are considered. The median and quantile range are computed from
+    this local subset. Points deviating from the median more than ``factor``
+    times the quantile range are flagged as outliers.
     """
 
     if not (0 < quantile < 1):
@@ -183,19 +185,21 @@ def detect_outliers(
     low_q = (1 - quantile) / 2
     high_q = 1 - low_q
     for fname, grp in df.groupby("filename"):
-        series = grp[column].dropna()
-        if series.empty:
-            continue
-        med = series.median()
-        q_low = series.quantile(low_q)
-        q_high = series.quantile(high_q)
-        rng = q_high - q_low
-        if rng <= 0:
-            continue
-        mask = np.abs(series - med) > factor * rng
-        if mask.any():
-            out_rows.append(grp.loc[mask])
-
+        sub = grp.dropna(subset=[column]).sort_values("line").reset_index(drop=True)
+        vals = sub[column]
+        lines = sub["line"]
+        for i, val in enumerate(vals):
+            start = max(0, i - window)
+            end = min(len(vals), i + window + 1)
+            neigh = vals.iloc[start:end]
+            med = neigh.median()
+            q_low = neigh.quantile(low_q)
+            q_high = neigh.quantile(high_q)
+            rng = q_high - q_low
+            if rng <= 0:
+                continue
+            if abs(val - med) > factor * rng:
+                out_rows.append(grp[grp["line"] == lines.iloc[i]])
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
     return pd.DataFrame(columns=df.columns)
