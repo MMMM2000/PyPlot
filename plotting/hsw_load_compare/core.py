@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from .. import common
 
 # Defaults
 CORE_BINS = 50
@@ -161,7 +162,9 @@ def main(files: List[str], cfg: Dict[str, Any]):
     x_min, x_max = all_centers.min(), all_centers.max()
     fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
     fig_log.subplots_adjust(hspace=0)
-    plots: List[Tuple[Figure, str]] = [(fig_log, "log_compare.png")]
+    plots: List[Tuple[Figure, str]] = [
+        (fig_log, f"log_compare.{common.SAVE_FORMAT}")
+    ]
     if nrows == 1:
         ax_log = [ax_log]
     log_x_vals = []
@@ -226,7 +229,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         ax_h[0].set_title("Histogram of Hsw vs load")
         fig_h.supylabel("Counts")
-        plots.append((fig_h, "hist_compare.png"))
+        plots.append((fig_h, f"hist_compare.{common.SAVE_FORMAT}"))
 
     if cfg["raw"]:
         fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
@@ -251,15 +254,27 @@ def main(files: List[str], cfg: Dict[str, Any]):
             ax.tick_params(axis="x", bottom=False, labelbottom=False)
         fig_r.supylabel("Switching Field")
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
-        plots.append((fig_r, "raw_compare.png"))
+        plots.append((fig_r, f"raw_compare.{common.SAVE_FORMAT}"))
 
     if cfg_save:
         out_dir.mkdir(parents=True, exist_ok=True)
-        fig_log.savefig(out_dir / "log_compare.png", dpi=300)
+        fig_log.savefig(
+            out_dir / f"log_compare.{common.SAVE_FORMAT}",
+            dpi=common.SAVE_DPI,
+            format=common.SAVE_FORMAT,
+        )
         if cfg["hist"]:
-            fig_h.savefig(out_dir / "hist_compare.png", dpi=300)
+            fig_h.savefig(
+                out_dir / f"hist_compare.{common.SAVE_FORMAT}",
+                dpi=common.SAVE_DPI,
+                format=common.SAVE_FORMAT,
+            )
         if cfg["raw"]:
-            fig_r.savefig(out_dir / "raw_compare.png", dpi=300)
+            fig_r.savefig(
+                out_dir / f"raw_compare.{common.SAVE_FORMAT}",
+                dpi=common.SAVE_DPI,
+                format=common.SAVE_FORMAT,
+            )
 
     if cfg_show:
         plt.show()
@@ -278,4 +293,8 @@ def main(files: List[str], cfg: Dict[str, Any]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    fig.savefig(
+                        os.path.join(out, fname),
+                        dpi=common.SAVE_DPI,
+                        format=common.SAVE_FORMAT,
+                    )

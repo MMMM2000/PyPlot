@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from .. import common
 from ..common import maybe_handle_outliers_series
 
 OUTPUT_DIR = os.getcwd()
@@ -65,10 +66,14 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
     ax.grid(True)
     ax.legend()
     fig.tight_layout()
-    fname = f"head{head}_{coils}coils_CH{ch}_sum.png"
+    fname = f"head{head}_{coils}coils_CH{ch}_sum.{common.SAVE_FORMAT}"
     if SAVE_PLOTS:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
-        fig.savefig(os.path.join(OUTPUT_DIR, fname), dpi=300)
+        fig.savefig(
+            os.path.join(OUTPUT_DIR, fname),
+            dpi=common.SAVE_DPI,
+            format=common.SAVE_FORMAT,
+        )
     return fig, fname
 
 
@@ -113,6 +118,10 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    fig.savefig(
+                        os.path.join(out, fname),
+                        dpi=common.SAVE_DPI,
+                        format=common.SAVE_FORMAT,
+                    )
 
     print('Done.')

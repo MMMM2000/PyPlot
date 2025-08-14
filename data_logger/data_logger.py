@@ -216,6 +216,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if self.logging_on:
                 assert self.log_file is not None
+                if self.paused:
+                    return
 
                 # strip leading '>' if present, then write
                 self.log_file.write(self.port_response.lstrip(">"))

@@ -403,10 +403,14 @@ def plot_variable(
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {anneal} {var}.png"
+    fname = f"{comp} {anneal} {var}.{common.SAVE_FORMAT}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
+        fig.savefig(
+            os.path.join(out_dir, fname),
+            dpi=common.SAVE_DPI,
+            format=common.SAVE_FORMAT,
+        )
     return fig, fname
 
 
@@ -472,6 +476,10 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    fig.savefig(
+                        os.path.join(out, fname),
+                        dpi=common.SAVE_DPI,
+                        format=common.SAVE_FORMAT,
+                    )
 
     print(f'Done: processed {total} plots.')

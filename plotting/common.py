@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import pandas as pd
 
+# Default save options used across plotting modules.  ``SAVE_DPI`` controls the
+# resolution when saving raster formats such as PNG while ``SAVE_FORMAT``
+# selects the image format/extension.  Users may adjust these globals before
+# invoking the plotting functions to override the defaults.
+SAVE_DPI: int = 1000
+SAVE_FORMAT: str = "png"
+
 # Flags controlled by the master launcher
 # ``CHECK_OUTLIERS`` enables outlier detection while ``AUTO_REMOVE_OUTLIERS``
 # skips the confirmation dialog and removes detected outliers automatically.

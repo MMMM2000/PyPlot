@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
 from ..config import load_config
+from .. import common
 from ..common import maybe_handle_outliers
 
 _CFG = load_config().get("temperature_dependence", {})
@@ -174,10 +175,14 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     ax.legend()
     fig.tight_layout()
 
-    fname = f"{comp} {sample} {anneal} {var}.png"
+    fname = f"{comp} {sample} {anneal} {var}.{common.SAVE_FORMAT}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
+        fig.savefig(
+            os.path.join(out_dir, fname),
+            dpi=common.SAVE_DPI,
+            format=common.SAVE_FORMAT,
+        )
     return fig, fname
 
 
@@ -217,6 +222,10 @@ def main(files: List[str]) -> None:
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    fig.savefig(
+                        os.path.join(out, fname),
+                        dpi=common.SAVE_DPI,
+                        format=common.SAVE_FORMAT,
+                    )
 
     print("Done.")

@@ -16,6 +16,7 @@ from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 from matplotlib.collections import PathCollection
 from matplotlib.typing import ColorType
+from .. import common
 from ..common import maybe_handle_outliers
 from matplotlib.figure import Figure
 
@@ -231,10 +232,14 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fname = f"{comp} {title} {samp} {anneal} {var}.png"
+    fname = f"{comp} {title} {samp} {anneal} {var}.{common.SAVE_FORMAT}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
-        fig.savefig(os.path.join(out_dir, fname), dpi=300)
+        fig.savefig(
+            os.path.join(out_dir, fname),
+            dpi=common.SAVE_DPI,
+            format=common.SAVE_FORMAT,
+        )
     return fig, fname
 
 def main(files: List[str]):
@@ -282,6 +287,10 @@ def main(files: List[str]):
             if out:
                 os.makedirs(out, exist_ok=True)
                 for fig, fname in plots:
-                    fig.savefig(os.path.join(out, fname), dpi=300)
+                    fig.savefig(
+                        os.path.join(out, fname),
+                        dpi=common.SAVE_DPI,
+                        format=common.SAVE_FORMAT,
+                    )
 
     print(f'Done: processed {total} plots.')
