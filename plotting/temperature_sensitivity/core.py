@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, cast
+from typing import List, Dict, Any, Tuple, cast, Callable
 
 from PyQt6 import QtWidgets, QtCore
 
@@ -167,12 +167,16 @@ def detect_outliers(
     column: str = "sum",
     quantile: float = 0.9,
     factor: float = 3.0,
+    *,
+    progress: Callable[[int, int], None] | None = None,
 ) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
     Outliers are determined locally for each point using at most the 10
     neighbouring values on either side. This prevents early transient regions
-    from affecting later measurements in the same file.
+    from affecting later measurements in the same file.  When ``progress`` is
+    provided it is called with the number of processed rows and the total
+    length, enabling optional progress reporting.
     """
 
     if not (0 < quantile < 1):
@@ -182,6 +186,8 @@ def detect_outliers(
     low_q = (1 - quantile) / 2
     high_q = 1 - low_q
 
+    total = len(df)
+    count = 0
     for fname, grp in df.groupby("filename"):
         sub = grp[[column]].dropna().reset_index()
         values = sub[column].to_numpy()
@@ -195,10 +201,11 @@ def detect_outliers(
             q_low = np.quantile(window, low_q)
             q_high = np.quantile(window, high_q)
             rng = q_high - q_low
-            if rng <= 0:
-                continue
-            if abs(val - med) > factor * rng:
+            if rng > 0 and abs(val - med) > factor * rng:
                 out_rows.append(grp.loc[[sub["index"].iloc[idx]]])
+            count += 1
+            if progress:
+                progress(count, total)
 
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)

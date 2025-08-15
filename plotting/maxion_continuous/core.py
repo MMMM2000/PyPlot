@@ -53,6 +53,30 @@ def load_file(path: str) -> pd.DataFrame:
     return pd.read_csv(path, sep=";", header=None, names=cols, engine="python", on_bad_lines="skip")
 
 
+def load_data(files: List[str]) -> pd.DataFrame:
+    files = sorted(files)
+    dfs: List[pd.DataFrame] = []
+    for fn in files:
+        head, coils = parse_name(Path(fn).stem)
+        df = load_file(fn)
+        for ch in (1, 2, 3):
+            y = df[f"ch{ch}_t1"] + df[f"ch{ch}_t2"]
+            sub = pd.DataFrame(
+                {
+                    "sum": y,
+                    "line": np.arange(len(y)),
+                    "filename": f"{Path(fn).name}_CH{ch}",
+                    "head": head,
+                    "coils": coils,
+                    "channel": ch,
+                }
+            )
+            dfs.append(sub)
+    if not dfs:
+        raise FileNotFoundError("No files selected")
+    return pd.concat(dfs, ignore_index=True)
+
+
 def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, str]:
     fig, ax = plt.subplots(figsize=(9, 4))
     x = np.arange(len(y))
