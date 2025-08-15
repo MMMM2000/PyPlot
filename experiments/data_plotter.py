@@ -1,6 +1,13 @@
 from __future__ import annotations
 
+import inspect
+import sys
+from pathlib import Path
 from typing import Any, Dict, Tuple
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from PyQt6 import QtWidgets
 
@@ -11,12 +18,18 @@ from plotting.stress_dependence import core as stress_core
 from plotting.stress_sensitivity import core as sens_core
 from plotting.temperature_sensitivity import core as temp_core
 from plotting.temperature_dependence import core as temp_dep_core
+from plotting.hsw_load_compare import core as load_core
+from plotting.hysteresis_loops import core as loops_core
+from plotting.maxion_continuous import core as maxion_core
 
 MODULES: Dict[str, Tuple[Any, str]] = {
     "Stress Dependence": (stress_core, "stress_dependence"),
     "Stress Sensitivity": (sens_core, "stress_sensitivity"),
     "Temperature Sensitivity": (temp_core, "temperature_sensitivity"),
     "Temperature Dependence": (temp_dep_core, "temperature_dependence"),
+    "HSW Load Compare": (load_core, "hsw_load_compare"),
+    "Hysteresis Loops": (loops_core, "hysteresis_loops"),
+    "Maxion Continuous": (maxion_core, "maxion_continuous"),
 }
 
 
@@ -130,7 +143,10 @@ class DataPlotter(QtWidgets.QDialog):
         cfg = self.gather_config()
         self.apply_config(module, cfg)
         try:
-            module.main(self.files)
+            if len(inspect.signature(module.main).parameters) > 1:
+                module.main(self.files, cfg)
+            else:
+                module.main(self.files)
         except Exception as exc:  # pragma: no cover - GUI feedback
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
 

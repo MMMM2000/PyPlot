@@ -6,6 +6,9 @@ from typing import List, Tuple, Sequence
 import numpy as np
 import matplotlib.pyplot as plt
 
+MODE = "Combined"
+SHOW_PLOTS = True
+
 
 def load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path, usecols=(0, 1))
@@ -116,3 +119,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True):
     if show:
         plt.show()
     return figs
+
+
+def main(files: List[str]) -> None:
+    plot_loops(files, mode=MODE, show=SHOW_PLOTS)

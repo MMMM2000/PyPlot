@@ -56,5 +56,34 @@
     "MA_WINDOW": 20,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1000
+  },
+  "hsw_load_compare": {
+    "CORE_BINS": 50,
+    "CORE_MIN": 3,
+    "show": true,
+    "save": false,
+    "out_dir": "./output",
+    "TT": true,
+    "HH": true,
+    "hist": true,
+    "share_y": true,
+    "raw": true,
+    "SAVE_FORMAT": "png",
+    "PNG_DPI": 1000
+  },
+  "hysteresis_loops": {
+    "MODE": "Combined",
+    "SHOW_PLOTS": true
+  },
+  "maxion_continuous": {
+    "OUTPUT_DIR": "./output",
+    "SHOW_PLOTS": true,
+    "SAVE_PLOTS": false,
+    "PLOT_MODE": "both",
+    "MARKER_SIZE": 0.1,
+    "MED_WINDOW": 5,
+    "MA_WINDOW": 20,
+    "SAVE_FORMAT": "png",
+    "PNG_DPI": 1000
   }
 }
