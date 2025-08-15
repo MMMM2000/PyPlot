@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, cast
+from typing import List, Dict, Any, Tuple, cast, Callable
 
 from PyQt6 import QtWidgets, QtCore
 
@@ -167,6 +167,7 @@ def detect_outliers(
     column: str = "sum",
     quantile: float = 0.9,
     factor: float = 3.0,
+    progress: Callable[[int, int], None] | None = None,
 ) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
@@ -182,6 +183,9 @@ def detect_outliers(
     low_q = (1 - quantile) / 2
     high_q = 1 - low_q
 
+    total = int(df[column].count())
+    processed = 0
+
     for fname, grp in df.groupby("filename"):
         sub = grp[[column]].dropna().reset_index()
         values = sub[column].to_numpy()
@@ -196,9 +200,15 @@ def detect_outliers(
             q_high = np.quantile(window, high_q)
             rng = q_high - q_low
             if rng <= 0:
+                processed += 1
+                if progress:
+                    progress(processed, total)
                 continue
             if abs(val - med) > factor * rng:
                 out_rows.append(grp.loc[[sub["index"].iloc[idx]]])
+            processed += 1
+            if progress:
+                progress(processed, total)
 
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
