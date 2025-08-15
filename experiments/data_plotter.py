@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Tuple
+import inspect
+import pathlib
+import sys
 
 from PyQt6 import QtWidgets
+
+if __package__ is None or __package__ == "":
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
 from plotting.config import load_config
 from plotting.temperature_sensitivity.core import detect_outliers
@@ -11,12 +17,16 @@ from plotting.stress_dependence import core as stress_core
 from plotting.stress_sensitivity import core as sens_core
 from plotting.temperature_sensitivity import core as temp_core
 from plotting.temperature_dependence import core as temp_dep_core
+from plotting.hsw_load_compare import core as hsw_core
+from plotting.maxion_continuous import core as maxion_core
 
 MODULES: Dict[str, Tuple[Any, str]] = {
     "Stress Dependence": (stress_core, "stress_dependence"),
     "Stress Sensitivity": (sens_core, "stress_sensitivity"),
     "Temperature Sensitivity": (temp_core, "temperature_sensitivity"),
     "Temperature Dependence": (temp_dep_core, "temperature_dependence"),
+    "HSW Load Compare": (hsw_core, "hsw_load_compare"),
+    "Maxion Continuous": (maxion_core, "maxion_continuous"),
 }
 
 
@@ -58,13 +68,14 @@ class DataPlotter(QtWidgets.QDialog):
         self.populate_settings(self.combo.currentText())
 
     def populate_settings(self, name: str) -> None:
+        module, cfg_key = MODULES[name]
         for i in reversed(range(self.settings_layout.count())):
             item = self.settings_layout.takeAt(i)
             w = item.widget()
             if w is not None:
                 w.deleteLater()
         self.cfg_widgets.clear()
-        _, cfg_key = MODULES[name]
+        self.outlier_btn.setEnabled(hasattr(module, "load_data"))
         for key, value in self.cfg.get(cfg_key, {}).items():
             if isinstance(value, bool):
                 widget: QtWidgets.QWidget = QtWidgets.QCheckBox()
@@ -110,6 +121,9 @@ class DataPlotter(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
             return
         module, _ = MODULES[self.combo.currentText()]
+        if not hasattr(module, "load_data"):
+            QtWidgets.QMessageBox.warning(self, "Unsupported", "Outlier check not available.")
+            return
         try:
             df = module.load_data(self.files)
         except Exception as exc:  # pragma: no cover - GUI feedback
@@ -130,7 +144,10 @@ class DataPlotter(QtWidgets.QDialog):
         cfg = self.gather_config()
         self.apply_config(module, cfg)
         try:
-            module.main(self.files)
+            if len(inspect.signature(module.main).parameters) > 1:
+                module.main(self.files, cfg)
+            else:
+                module.main(self.files)
         except Exception as exc:  # pragma: no cover - GUI feedback
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
 
