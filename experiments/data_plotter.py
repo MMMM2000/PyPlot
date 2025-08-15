@@ -1,23 +1,45 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+import sys
+import inspect
+from importlib import import_module
+from pathlib import Path
+from typing import Any, Dict, Tuple, cast
+
+# Ensure the repository root is on ``sys.path`` when run as a script
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from PyQt6 import QtWidgets
 
 from plotting.config import load_config
 from plotting.temperature_sensitivity.core import detect_outliers
 from plotting.utils import apply_system_theme
-from plotting.stress_dependence import core as stress_core
-from plotting.stress_sensitivity import core as sens_core
-from plotting.temperature_sensitivity import core as temp_core
-from plotting.temperature_dependence import core as temp_dep_core
 
-MODULES: Dict[str, Tuple[Any, str]] = {
-    "Stress Dependence": (stress_core, "stress_dependence"),
-    "Stress Sensitivity": (sens_core, "stress_sensitivity"),
-    "Temperature Sensitivity": (temp_core, "temperature_sensitivity"),
-    "Temperature Dependence": (temp_dep_core, "temperature_dependence"),
-}
+
+def _discover_modules() -> Dict[str, Tuple[Any, str]]:
+    modules: Dict[str, Tuple[Any, str]] = {}
+    pkg_dir = ROOT / "plotting"
+    for item in pkg_dir.iterdir():
+        core_file = item / "core.py"
+        if not core_file.is_file():
+            continue
+        mod_name = item.name
+        mod = import_module(f"plotting.{mod_name}.core")
+        main = getattr(mod, "main", None)
+        if main is None:
+            continue
+        sig = inspect.signature(main)
+        # Only include modules whose ``main`` accepts a single ``files`` argument
+        if len(sig.parameters) != 1:
+            continue
+        label = mod_name.replace("_", " ").title()
+        modules[label] = (mod, mod_name)
+    return dict(sorted(modules.items()))
+
+
+MODULES: Dict[str, Tuple[Any, str]] = _discover_modules()
 
 
 class DataPlotter(QtWidgets.QDialog):
@@ -32,6 +54,7 @@ class DataPlotter(QtWidgets.QDialog):
         self.combo = QtWidgets.QComboBox()
         self.combo.addItems(MODULES.keys())
         self.combo.currentTextChanged.connect(self.populate_settings)
+        self.combo.currentTextChanged.connect(self._update_outlier_btn)
         layout.addWidget(self.combo)
 
         file_layout = QtWidgets.QHBoxLayout()
@@ -56,13 +79,15 @@ class DataPlotter(QtWidgets.QDialog):
 
         self.cfg = load_config()
         self.populate_settings(self.combo.currentText())
+        self._update_outlier_btn(self.combo.currentText())
 
     def populate_settings(self, name: str) -> None:
         for i in reversed(range(self.settings_layout.count())):
             item = self.settings_layout.takeAt(i)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
         self.cfg_widgets.clear()
         _, cfg_key = MODULES[name]
         for key, value in self.cfg.get(cfg_key, {}).items():
@@ -86,7 +111,7 @@ class DataPlotter(QtWidgets.QDialog):
         for key, widget in self.cfg_widgets.items():
             if isinstance(widget, QtWidgets.QCheckBox):
                 cfg[key] = widget.isChecked()
-            else:
+            elif isinstance(widget, QtWidgets.QLineEdit):
                 text = widget.text()
                 try:
                     cfg[key] = int(text)
@@ -110,6 +135,13 @@ class DataPlotter(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
             return
         module, _ = MODULES[self.combo.currentText()]
+        if not hasattr(module, "load_data"):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Unsupported",
+                "Outlier detection not available for this plotter.",
+            )
+            return
         try:
             df = module.load_data(self.files)
         except Exception as exc:  # pragma: no cover - GUI feedback
@@ -121,6 +153,10 @@ class DataPlotter(QtWidgets.QDialog):
             "Outlier check",
             f"{len(out_df)} outliers detected.",
         )
+
+    def _update_outlier_btn(self, name: str) -> None:
+        module, _ = MODULES[name]
+        self.outlier_btn.setEnabled(hasattr(module, "load_data"))
 
     def run_plotter(self) -> None:
         if not self.files:
@@ -141,6 +177,8 @@ def main() -> None:
     if app is None:
         app = QtWidgets.QApplication([])
         owns_app = True
+    else:
+        app = cast(QtWidgets.QApplication, app)
     apply_system_theme(app)
     dlg = DataPlotter()
     dlg.show()
