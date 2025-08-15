@@ -48,7 +48,6 @@ font should be typed into a terminal exactly as written and confirmed with the
 
 6. **Start the launcher**
    - Run ``python -m launcher`` to open the graphical tool window.
-   - After installation you can also use the ``launcher`` command.
 
 Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ``activate`` command from step 4 before running ``python`` or ``pip`` again.
@@ -88,25 +87,12 @@ bundle.
 React or Tauri experiments are **not** required for the Python tools.  They live
 in the `experiments` directory and have their own dependencies and build steps.
 
-## Plotly interactive example
-
-A small demo using [Plotly](https://plotly.com/python/) shows how to create an
-editable figure and save it for later tweaks.  Run the script with:
-
-```bash
-python -m plotting.plotly_demo
-```
-
-The plot opens in your default browser with editing enabled.  An HTML file
-named ``plotly_demo.html`` is also written to the current directory so the
-interactive figure can be reopened and modified at any time.
-
 ## Experiments
 
 The ``experiments`` folder holds interface prototypes that are separate from the
-core Python code.  It currently contains a Tauri, React and Tailwind CSS sample
-that communicates with a small Python backend.  See its README for setup
-instructions.
+core Python code. It currently includes an experimental **data plotter** that
+lets you choose a plotting script, select input files and tweak configuration
+options in a persistent window. Run it with ``python -m experiments.data_plotter``.
 
 ## Master launcher
 
@@ -154,10 +140,7 @@ the microwire was connected.  Throughout this project ``a`` is referred to as
 the *marked end* while ``b`` is the *unmarked end*.  Plot titles include these
 labels automatically.
 
-Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).  Run the plotter with:
-```bash
-python -m plotting.stress_dependence.stress_gui
-```
+Several flags control what variables are plotted and whether the plots are displayed (`SHOW_PLOTS`) or saved (`SAVE_PLOTS`).
 
 ## Plotting stress sensitivity data
 
@@ -169,10 +152,6 @@ their means are shown and the difference between 17.5 g and 2.5 g unloading 
 annotated for every sample. The plot therefore compares the full stress
 behaviour across all samples in a compact layout.
 
-Run the script with:
-```bash
-python -m plotting.stress_sensitivity.sens_gui
-```
 
 ## Plotting temperature sensitivity data
 
@@ -194,10 +173,6 @@ generate both variants. If a file named **25-100C** is present a processed
 continuous measurement can be displayed for each sample using adjustable median
 and moving-average windows.
 
-Run the script with:
-```bash
-python -m plotting.temperature_sensitivity.temp_gui
-```
 
 ## Plotting temperature dependence data
 
@@ -207,37 +182,21 @@ temperatures. Name the continuous file **25-100C** so it is detected
 automatically. The GUI can display raw points, processed curves or both and
 supports plotting the usual T1/T2 derived quantities.
 
-Run the script with:
-```bash
-python -m plotting.temperature_dependence.temp_dep_gui
-```
 
 ## Comparing Hsw distributions by load
 
 `plotting/hsw_load_compare/load_compare_gui.py` stacks probability density plots for a set of ascending measurement files.  The GUI lets you choose whether to display TT and/or HH curves, show raw data and histograms and keep histogram Y axes shared or independent.
 
-Run the script with:
-```bash
-python -m plotting.hsw_load_compare.load_compare_gui
-```
 
 ## Plotting Maxion continuous measurements
 
 `plotting/maxion_continuous/maxion_gui.py` visualizes Maxion continuous measurement files and allows plotting raw and/or processed curves for all three channels.  Figures can be displayed and optionally saved.
 
-Run the script with:
-```bash
-python -m plotting.maxion_continuous.maxion_gui
-```
 
 ## Hsw distribution analysis
 
 `plotting/hsw_distribution/distribution_gui.py` applies a Histogram-Core filter to TT and HH (or T1 and T2) measurements, then plots raw curves, count histograms and probability density curves.  You can choose the column naming scheme in the options dialog.
 
-Launch it with:
-```bash
-python -m plotting.hsw_distribution.distribution_gui
-```
 
 ## Plotting PDF data
 
@@ -249,30 +208,18 @@ styles, colors, sizes, legend control, grid, custom axis labels and title, text
 sizes, and saving (format, DPI, output directory, and figure size) with an optional
 “save on plot” toggle.
 
-Try it from the master launcher or run directly:
-
-```bash
-python -m plotting.pdf_plotter.pdf_gui
-```
-
 A sample PDF is provided in the `sample_data` folder for quick testing.
 
 ## Data logger
 
 `data_logger/data_logger.py` records serial data to a file.  By default logs
 are stored in a `python_plot_logs` directory inside the current user's home
-folder so the path works on any system.  You can change the location at
-runtime with the `--log-dir` option or the `LOG_DIR` environment variable.  The
-script also exposes constants for the pre-filled command string and suggested
+folder so the path works on any system.  You can change the location via the
+`LOG_DIR` environment variable. The script also exposes constants for the pre-filled command string and suggested
 file name.  Inside the GUI you can browse to a different directory at any time.
 The interface follows the host operating system's light or dark appearance and
 uses rounded buttons for a modern look.
 
-Launch the logger with:
-
-```bash
-python -m data_logger.data_logger
-```
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
 The built-in name builder supports stress and temperature templates and offers
@@ -303,13 +250,6 @@ importable without modifying ``sys.path``:
 
 ```bash
 pip install -e .
-```
-
-The `plot-cli` command installed by the package provides a simple wrapper
-around the available plotting GUIs. List the supported tools with:
-
-```bash
-plot-cli --help
 ```
 
 Default settings for the stress dependence and temperature sensitivity plotters

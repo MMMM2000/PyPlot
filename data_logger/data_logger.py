@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 import math
 import re
-from typing import Any, cast, List
+from typing import Any, cast
 from collections import deque
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
@@ -22,10 +22,9 @@ from plotting.utils import apply_system_theme
 #
 # 1) LOG_DIR: default directory where logged data will be stored. Modify this
 #    path to your preferred location. The value can still be overridden via
-#    the --log-dir command line option or the LOG_DIR environment variable.
+#    the LOG_DIR environment variable.
 # Use a logs folder in the user's home directory by default. This path works on
-# all platforms and can be overridden via the ``LOG_DIR`` environment variable
-# or the ``--log-dir`` command line option.
+# all platforms and can be overridden via the ``LOG_DIR`` environment variable.
 LOG_DIR = str(Path.home() / "python_plot_logs")
 
 # 2) DEFAULT_PORT_COMMAND: command pre-filled in the command box when the GUI
@@ -379,7 +378,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finish_time = None
         self.update_time_estimate()
 
-def main(argv: List[str] | None = None) -> QtWidgets.QWidget:
+def main(log_dir: str | None = None) -> QtWidgets.QWidget:
     """Launch the data logger window and return the created widget.
 
     When called from another running Qt application (e.g. :class:`launcher.MasterLauncher`)
@@ -388,16 +387,7 @@ def main(argv: List[str] | None = None) -> QtWidgets.QWidget:
     event loop continues running in this case.
     """
 
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Serial data logger (PyQt6)")
-    parser.add_argument(
-        "--log-dir",
-        help="Directory to save logs [env: LOG_DIR]",
-    )
-    args = parser.parse_args(argv)
-
-    log_dir = args.log_dir or DEFAULT_LOG_DIR
+    log_dir = log_dir or DEFAULT_LOG_DIR
 
     app = QtWidgets.QApplication.instance()
     owns_app = False
