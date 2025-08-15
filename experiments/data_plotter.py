@@ -1,23 +1,36 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Tuple
+import importlib
+import inspect
+import pkgutil
+import sys
+from pathlib import Path
+from typing import Any, Dict, Tuple, cast
 
 from PyQt6 import QtWidgets
 
-from plotting.config import load_config
-from plotting.temperature_sensitivity.core import detect_outliers
-from plotting.utils import apply_system_theme
-from plotting.stress_dependence import core as stress_core
-from plotting.stress_sensitivity import core as sens_core
-from plotting.temperature_sensitivity import core as temp_core
-from plotting.temperature_dependence import core as temp_dep_core
+sys.path.append(str(Path(__file__).resolve().parents[1]))
 
-MODULES: Dict[str, Tuple[Any, str]] = {
-    "Stress Dependence": (stress_core, "stress_dependence"),
-    "Stress Sensitivity": (sens_core, "stress_sensitivity"),
-    "Temperature Sensitivity": (temp_core, "temperature_sensitivity"),
-    "Temperature Dependence": (temp_dep_core, "temperature_dependence"),
-}
+from plotting.config import load_config  # noqa: E402
+from plotting.temperature_sensitivity.core import detect_outliers  # noqa: E402
+from plotting.utils import apply_system_theme  # noqa: E402
+
+
+def _discover_modules() -> Dict[str, Tuple[Any, str]]:
+    modules: Dict[str, Tuple[Any, str]] = {}
+    base = Path(__file__).resolve().parents[1] / "plotting"
+    for mod in pkgutil.iter_modules([str(base)]):
+        try:
+            core = importlib.import_module(f"plotting.{mod.name}.core")
+        except ModuleNotFoundError:
+            continue
+        if hasattr(core, "main"):
+            label = mod.name.replace("_", " ").title()
+            modules[label] = (core, mod.name)
+    return modules
+
+
+MODULES: Dict[str, Tuple[Any, str]] = _discover_modules()
 
 
 class DataPlotter(QtWidgets.QDialog):
@@ -25,7 +38,7 @@ class DataPlotter(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Data Plotter (Experimental)")
         self.files: list[str] = []
-        self.cfg_widgets: Dict[str, QtWidgets.QWidget] = {}
+        self.cfg_widgets: Dict[str, QtWidgets.QCheckBox | QtWidgets.QLineEdit] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
 
@@ -60,15 +73,17 @@ class DataPlotter(QtWidgets.QDialog):
     def populate_settings(self, name: str) -> None:
         for i in reversed(range(self.settings_layout.count())):
             item = self.settings_layout.takeAt(i)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+            if item is not None:
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
         self.cfg_widgets.clear()
         _, cfg_key = MODULES[name]
         for key, value in self.cfg.get(cfg_key, {}).items():
             if isinstance(value, bool):
-                widget: QtWidgets.QWidget = QtWidgets.QCheckBox()
-                widget.setChecked(value)
+                cb = QtWidgets.QCheckBox()
+                cb.setChecked(value)
+                widget: QtWidgets.QCheckBox | QtWidgets.QLineEdit = cb
             else:
                 widget = QtWidgets.QLineEdit(str(value))
             self.settings_layout.addRow(key, widget)
@@ -87,6 +102,7 @@ class DataPlotter(QtWidgets.QDialog):
             if isinstance(widget, QtWidgets.QCheckBox):
                 cfg[key] = widget.isChecked()
             else:
+                assert isinstance(widget, QtWidgets.QLineEdit)
                 text = widget.text()
                 try:
                     cfg[key] = int(text)
@@ -130,7 +146,10 @@ class DataPlotter(QtWidgets.QDialog):
         cfg = self.gather_config()
         self.apply_config(module, cfg)
         try:
-            module.main(self.files)
+            if len(inspect.signature(module.main).parameters) > 1:
+                module.main(self.files, cfg)
+            else:
+                module.main(self.files)
         except Exception as exc:  # pragma: no cover - GUI feedback
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
 
@@ -141,7 +160,7 @@ def main() -> None:
     if app is None:
         app = QtWidgets.QApplication([])
         owns_app = True
-    apply_system_theme(app)
+    apply_system_theme(cast(QtWidgets.QApplication, app))
     dlg = DataPlotter()
     dlg.show()
     if owns_app:

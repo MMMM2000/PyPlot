@@ -56,5 +56,30 @@
     "MA_WINDOW": 20,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1000
+  },
+  "hsw_load_compare": {
+    "CORE_BINS": 50,
+    "CORE_MIN": 3,
+    "out_dir": "./output",
+    "show": true,
+    "save": false,
+    "TT": true,
+    "HH": true,
+    "hist": true,
+    "raw": true,
+    "share_y": true,
+    "SAVE_FORMAT": "png",
+    "PNG_DPI": 1000
+  },
+  "maxion_continuous": {
+    "OUTPUT_DIR": "./output",
+    "SHOW_PLOTS": true,
+    "SAVE_PLOTS": false,
+    "PLOT_MODE": "both",
+    "MARKER_SIZE": 0.1,
+    "MED_WINDOW": 5,
+    "MA_WINDOW": 20,
+    "SAVE_FORMAT": "png",
+    "PNG_DPI": 1000
   }
 }
