@@ -197,6 +197,13 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
         op.lt_exec('layer -i 2; type scat; set %C -l 0; set %C -d 0;')  # raw b
         op.lt_exec('layer -i 3; type linsym;')                           # mean a: line+symbol
         op.lt_exec('layer -i 4; type linsym;')                           # mean b
+        # Re-apply symbol/line sizes after type conversion
+        try:
+            p_raw_a.symbol.size = RAW_SYMBOL_SIZE; p_raw_b.symbol.size = RAW_SYMBOL_SIZE  # type: ignore[attr-defined]
+            p_mean_a.symbol.size = MEAN_SYMBOL_SIZE; p_mean_b.symbol.size = MEAN_SYMBOL_SIZE  # type: ignore[attr-defined]
+            p_mean_a.line.width = MEAN_LINE_WIDTH;   p_mean_b.line.width = MEAN_LINE_WIDTH  # type: ignore[attr-defined]
+        except Exception:
+            pass
 
         # Anti-aliasing
         for cmd in ['page.antialias=1;', 'layer -aa 1;']:
@@ -207,8 +214,12 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
         op.lt_exec('lab -xb "Applied load (g)";')
         op.lt_exec('lab -yl "{}";'.format(LABELS[var]))
 
-        # Hide top X and right Y axes using property-style commands (avoids dialogs)
+        # Hide top X and right Y axes (property commands first)
         for cmd in ['layer.x.showAxes=1;', 'layer.y.showAxes=1;', 'layer.x.topticks=0;', 'layer.y.rightticks=0;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        # Then enforce via axis switches if needed (some templates override showAxes)
+        for cmd in ['axis -t 0;', 'axis -r 0;']:
             try: op.lt_exec(cmd)
             except Exception: pass
 
