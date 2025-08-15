@@ -53,6 +53,26 @@ def load_file(path: str) -> pd.DataFrame:
     return pd.read_csv(path, sep=";", header=None, names=cols, engine="python", on_bad_lines="skip")
 
 
+def load_data(files: List[str]) -> pd.DataFrame:
+    """Load measurement files into a DataFrame for outlier detection."""
+    dfs = []
+    for fn in files:
+        df = load_file(fn)
+        for ch in (1, 2, 3):
+            series = df[f"ch{ch}_t1"] + df[f"ch{ch}_t2"]
+            sub = pd.DataFrame(
+                {
+                    "sum": series,
+                    "filename": f"{Path(fn).name}_CH{ch}",
+                    "line": np.arange(len(series)),
+                }
+            )
+            dfs.append(sub)
+    if not dfs:
+        raise FileNotFoundError("No files selected")
+    return pd.concat(dfs, ignore_index=True)
+
+
 def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, str]:
     fig, ax = plt.subplots(figsize=(9, 4))
     x = np.arange(len(y))
