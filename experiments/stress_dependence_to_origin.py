@@ -171,41 +171,38 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
     gp = op.new_graph(template='scatter')
     gl = gp[0]
 
-    # Force plot types explicitly (use ints for columns to keep type checkers happy)
-    p_raw_a  = gl.add_plot(w_raw_a,  coly='B', colx='A')  # add as default then convert via LabTalk
-    p_raw_b  = gl.add_plot(w_raw_b,  coly='B', colx='A')  # add as default then convert via LabTalk
-    p_mean_a = gl.add_plot(w_mean_a, coly='B', colx='A')    # add then convert to line+symbol
-    p_mean_b = gl.add_plot(w_mean_b, coly='B', colx='A')    # add then convert to line+symbol
+    # Add with explicit plot types: raw=scatter, mean=line+symbol
+    # Using Origin's API: 's' -> Scatter, 'y' -> Line Symbols
+    p_raw_a  = gl.add_plot(w_raw_a,  coly='B', colx='A', type='s')
+    p_raw_b  = gl.add_plot(w_raw_b,  coly='B', colx='A', type='s')
+    p_mean_a = gl.add_plot(w_mean_a, coly='B', colx='A', type='y')
+    p_mean_b = gl.add_plot(w_mean_b, coly='B', colx='A', type='y')
 
-    # Style
+    # Style using supported Plot properties/commands
     try:
-        p_raw_a.color = RAW_COLORS["a"]; p_raw_b.color = RAW_COLORS["b"]  # type: ignore[attr-defined]
-        p_mean_a.color = MEAN_COLORS["a"]; p_mean_b.color = MEAN_COLORS["b"]  # type: ignore[attr-defined]
-        p_raw_a.symbol.size = RAW_SYMBOL_SIZE; p_raw_b.symbol.size = RAW_SYMBOL_SIZE  # type: ignore[attr-defined]
-        # Ensure raw has NO connecting line
-        p_raw_a.line.width = 0; p_raw_b.line.width = 0  # type: ignore[attr-defined]
-        p_mean_a.symbol.size = MEAN_SYMBOL_SIZE; p_mean_b.symbol.size = MEAN_SYMBOL_SIZE  # type: ignore[attr-defined]
-        p_mean_a.line.width = MEAN_LINE_WIDTH;   p_mean_b.line.width = MEAN_LINE_WIDTH  # type: ignore[attr-defined]
+        # Colors
+        p_raw_a.color = RAW_COLORS["a"]; p_raw_b.color = RAW_COLORS["b"]
+        p_mean_a.color = MEAN_COLORS["a"]; p_mean_b.color = MEAN_COLORS["b"]
+        # Symbol sizes
+        p_raw_a.symbol_size = RAW_SYMBOL_SIZE; p_raw_b.symbol_size = RAW_SYMBOL_SIZE
+        p_mean_a.symbol_size = MEAN_SYMBOL_SIZE; p_mean_b.symbol_size = MEAN_SYMBOL_SIZE
+        # Symbols filled to match Matplotlib markers
+        try:
+            p_mean_a.symbol_interior = 1; p_mean_b.symbol_interior = 1
+        except Exception:
+            pass
+        # Ensure raw has NO connecting line; set mean line widths
+        p_raw_a.set_cmd('-l 0', '-d 0'); p_raw_b.set_cmd('-l 0', '-d 0')
+        p_mean_a.set_cmd(f'-w {MEAN_LINE_WIDTH}')
+        p_mean_b.set_cmd(f'-w {MEAN_LINE_WIDTH}')
     except Exception:
         pass
 
     try:
         gl.rescale()
         gp.activate()
-        # Convert plot types via LabTalk (Origin 2025b-safe)
-        op.lt_exec('layer -i 1; type scat; set %C -l 0; set %C -d 0;')  # raw a: scatter, no line, no drop lines
-        op.lt_exec('layer -i 2; type scat; set %C -l 0; set %C -d 0;')  # raw b
-        op.lt_exec('layer -i 3; type linsym;')                           # mean a: line+symbol
-        op.lt_exec('layer -i 4; type linsym;')                           # mean b
-        # Re-apply symbol/line sizes after type conversion
-        try:
-            p_raw_a.symbol.size = RAW_SYMBOL_SIZE; p_raw_b.symbol.size = RAW_SYMBOL_SIZE  # type: ignore[attr-defined]
-            p_mean_a.symbol.size = MEAN_SYMBOL_SIZE; p_mean_b.symbol.size = MEAN_SYMBOL_SIZE  # type: ignore[attr-defined]
-            p_mean_a.line.width = MEAN_LINE_WIDTH;   p_mean_b.line.width = MEAN_LINE_WIDTH  # type: ignore[attr-defined]
-        except Exception:
-            pass
 
-        # Anti-aliasing
+        # Anti-aliasing (page + layer)
         for cmd in ['page.antialias=1;', 'layer -aa 1;']:
             try: op.lt_exec(cmd)
             except Exception: pass
@@ -213,8 +210,14 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
         # Axis labels
         op.lt_exec('lab -xb "Applied load (g)";')
         op.lt_exec('lab -yl "{}";'.format(LABELS[var]))
+        # Clear top X and right Y axis titles just in case
+        try:
+            op.lt_exec('lab -xt "";')
+            op.lt_exec('lab -yr "";')
+        except Exception:
+            pass
 
-        # Hide top X and right Y axes (property commands first)
+        # Hide top X and right Y axes (ticks+labels)
         for cmd in ['layer.x.showAxes=1;', 'layer.y.showAxes=1;', 'layer.x.topticks=0;', 'layer.y.rightticks=0;']:
             try: op.lt_exec(cmd)
             except Exception: pass
@@ -223,8 +226,12 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
             try: op.lt_exec(cmd)
             except Exception: pass
 
-        # Auto legend from Long Names
+        # Legend (from Long Names), place bottom-right
         op.lt_exec('legend; legend -r;')
+        # Try common bottom-right placements; ignore errors if not supported
+        for cmd in ['legend -p 5;', 'legend -p br;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
 
         # Title
         op.lt_exec('title -s "{}";'.format(title.replace('"', "'")))
