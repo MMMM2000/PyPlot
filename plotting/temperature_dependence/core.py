@@ -191,6 +191,11 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
     """Create an Origin graph matching the Matplotlib style."""
 
     import originpro as op  # lazy import
+    # Ensure Origin UI is shown
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     comp = df["composition"].iat[0]
     sample = df["sample"].iat[0]

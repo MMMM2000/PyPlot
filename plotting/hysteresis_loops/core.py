@@ -74,6 +74,11 @@ def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> plt.Figure
 
 def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
     import originpro as op  # lazy import
+    # Ensure Origin UI is visible when plotting
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     book = op.new_book('w', lname="Hysteresis (Python)")
     book.activate()
@@ -107,6 +112,11 @@ def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) 
 
 def _origin_plot_separate(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
     import originpro as op  # lazy import
+    # Ensure Origin UI is visible when plotting
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     book = op.new_book('w', lname="Hysteresis (Python)")
     book.activate()

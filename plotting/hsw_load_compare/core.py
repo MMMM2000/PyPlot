@@ -152,6 +152,11 @@ def main(files: List[str], cfg: Dict[str, Any]):
             hist_data[load] = build_histograms(filt)
         try:
             import originpro as op
+            # Ensure Origin UI is shown
+            try:
+                op.set_show()
+            except Exception:
+                pass
             book = op.new_book('w', lname="HSW Compare (Python)")
             book.activate()
             # One layer per load

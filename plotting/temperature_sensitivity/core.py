@@ -440,6 +440,11 @@ def plot_variable_origin(
     """Create an Origin graph roughly matching the Matplotlib style."""
 
     import originpro as op  # lazy import
+    # Ensure Origin UI is shown
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]

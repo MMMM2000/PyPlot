@@ -99,6 +99,11 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
     import originpro as op  # lazy import
+    # Ensure Origin UI is shown
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     x = np.arange(len(y))
     book = op.new_book('w', lname="Maxion (Python)")

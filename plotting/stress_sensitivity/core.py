@@ -412,6 +412,11 @@ def plot_samples_origin(
     """Create an Origin graph approximating the Matplotlib multi-sample view."""
 
     import originpro as op  # lazy import
+    # Ensure Origin UI is shown when creating books/graphs
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     comp = df['composition'].iat[0]
     title = df['title'].iat[0]

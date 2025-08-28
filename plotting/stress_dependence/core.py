@@ -291,6 +291,11 @@ def _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title: str, var: str) -> N
     """Create an Origin graph mirroring the Matplotlib style."""
 
     import originpro as op  # Imported lazily
+    # Ensure Origin UI is shown
+    try:
+        op.set_show()
+    except Exception:
+        pass
 
     book = op.new_book('w', lname="Stress Dependence (Python)")
     book.activate()
