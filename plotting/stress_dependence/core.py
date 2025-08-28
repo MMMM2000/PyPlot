@@ -320,7 +320,8 @@ def _origin_build_graph(
     try:
         op.lt_exec('legend -tt;')
         op.lt_exec('legend -d;')
-        op.lt_exec('legend.x1 = layer.x.from + 0.2;')
+        # Nudge legend a bit to the right to avoid crossing the axis
+        op.lt_exec('legend.x1 = layer.x.from + 1.0;')
         op.lt_exec('legend.y1 = layer.y.to - 0.2;')
     except Exception:
         pass
@@ -411,11 +412,20 @@ def _origin_build_graph(
         except Exception:
             pass
 
+    # Ensure mean line width is applied even if property set is ignored
+    try:
+        op.lt_exec('layer -s 3;')
+        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
+        op.lt_exec('layer -s 4;')
+        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
+    except Exception:
+        pass
+
     # Finalize legend formatting and placement (top-left)
     try:
         # Ensure the graph/page title is present; also drop a layer title fallback
         op.lt_exec(f'title -s "{esc}";')
-        op.lt_exec(f'text -s 50 97 "{esc}";')
+        op.lt_exec(f'text -s 50 98 "{esc}";')
         op.lt_exec('legend -tt;')
         op.lt_exec('legend -d;')
         op.lt_exec('legend.x1 = layer.x.from + 0.2;')
