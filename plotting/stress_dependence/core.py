@@ -359,6 +359,8 @@ def _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title: str, var: str) -> N
             op.lt_exec('layer -aa 1;')
             op.lt_exec('lab -xb "Applied load (g)";')
             op.lt_exec(f'lab -yl "{LABELS[var]}";')
+            op.lt_exec('layer.x.showAxes=1; layer.y.showAxes=1;')
+            op.lt_exec('title;')
             op.lt_exec(f'title -s "{esc}";')
             op.lt_exec('legend;')
             op.lt_exec('legend.textcolor=1;')
