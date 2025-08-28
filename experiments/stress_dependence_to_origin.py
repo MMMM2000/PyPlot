@@ -208,16 +208,33 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
         pra.set_cmd('-l 0', '-d 0'); prb.set_cmd('-l 0', '-d 0')
         pma.set_cmd(f'-w {MEAN_LINE_WIDTH}'); pmb.set_cmd(f'-w {MEAN_LINE_WIDTH}')
 
-        # Solid fill for mean symbols, square shape, fill color follows line
+        # Solid filled square symbols for mean lines
         for cmd in [
             'symbol -k 2;',           # square
             'symbol -f 1;',           # solid interior
-            'symbol -fc auto;',       # fill color = Auto (line color)
         ]:
             try:
                 pma.set_cmd(cmd); pmb.set_cmd(cmd)
             except Exception:
                 pass
+
+        def _hex_to_rgb(h: str) -> tuple[int,int,int]:
+            h = h.lstrip('#')
+            return (int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))
+
+        r1,g1,b1 = _hex_to_rgb(MEAN_COLORS['a'])
+        r2,g2,b2 = _hex_to_rgb(MEAN_COLORS['b'])
+        # Set line, symbol edge, and symbol fill colors explicitly
+        for plot, (rr,gg,bb) in [(pma,(r1,g1,b1)), (pmb,(r2,g2,b2))]:
+            for cmd in [
+                f'set %C -lc {rr},{gg},{bb};',
+                f'set %C -c {rr},{gg},{bb};',
+                f'set %C -fc {rr},{gg},{bb};',
+            ]:
+                try:
+                    plot.set_cmd(cmd)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -259,7 +276,7 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
 
         # Legend (from Long Names). Reset and place; avoid any text insertion.
         op.lt_exec('legend; legend -r;')
-        for cmd in ['legend -p 5;', 'legend']:
+        for cmd in ['legend -p 5;']:
             try: op.lt_exec(cmd)
             except Exception: pass
 
