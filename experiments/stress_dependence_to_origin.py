@@ -1,8 +1,8 @@
-# pyright: reportArgumentType=false, reportAttributeAccessIssue=false, reportOptionalMemberAccess=false, reportUnboundVariable=false
-r"""
+"""
 stress_dependence_to_origin.py
 ------------------------------
-Origin version of your "stress dependence" plot.
+Origin version of the "stress dependence" plot to mirror the Matplotlib
+look-and-feel as closely as possible.
 
 Behavior
 --------
@@ -37,7 +37,7 @@ import originpro as op
 # -------------------------- Defaults / knobs --------------------------
 BASELINE_MODE = "first"          # "first" or "min"
 OFFSET = 0.5                     # half-shift for a/b means on X
-JITTER_SPAN = 0.5                # raw jitter ± range
+JITTER_SPAN = 0.5                # jitter span for raw points
 RAW_COLORS = {"a": "#45A1D6", "b": "#F09C67"}
 MEAN_COLORS = {"a": "#00306E", "b": "#965308"}
 RAW_SYMBOL_SIZE = 1              # Origin points
@@ -47,7 +47,7 @@ OUT_DIR = Path("./origin_output")
 SHOW_ORIGIN = True               # show Origin UI by default
 # ---------------------------------------------------------------------
 
-# Correct filename parsing (raw string with single backslashes in regex constructs)
+# File name parsing
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
     r"(?P<title>\S+)\s+"
@@ -59,9 +59,10 @@ FNAME_RE = re.compile(
 LABELS = {
     "T1": "T1 (µs)",
     "T2": "T2 (µs)",
-    "dT": "ΔT (µs)",
+    "dT": "T2 − T1 (µs)",
     "sum": "T1+T2 (µs)",
 }
+
 
 def parse_metadata(stem: str) -> Dict[str, str] | None:
     m = FNAME_RE.match(stem)
@@ -70,6 +71,18 @@ def parse_metadata(stem: str) -> Dict[str, str] | None:
     d = m.groupdict()
     d["load"] = float(d["load"].replace(",", "."))
     return d  # composition, title, sample_end, anneal, load, dir
+
+
+def _format_sample_end(sample_end: str) -> str:
+    """Return a human‑readable sample end label.
+
+    Example: "s2-2a" -> "s2-2 (marked end)", "s2-2b" -> "s2-2 (unmarked end)".
+    """
+    if sample_end.endswith("a"):
+        return f"{sample_end[:-1]} (marked end)"
+    if sample_end.endswith("b"):
+        return f"{sample_end[:-1]} (unmarked end)"
+    return sample_end
 
 
 def load_data(files: List[str]) -> pd.DataFrame:
@@ -140,7 +153,7 @@ def nice_title(grp: pd.DataFrame, var: str) -> str:
         grp["sample_end"].iat[0],
         grp["anneal"].iat[0],
     )
-    return f"{comp} {title} {samp} {anneal} — {LABELS[var]}"
+    return f"{comp} {title} {_format_sample_end(samp)} {anneal} — {LABELS[var]}"
 
 
 def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
@@ -226,12 +239,13 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
             try: op.lt_exec(cmd)
             except Exception: pass
 
-        # Legend (from Long Names), place bottom-right
+        # Legend (from Long Names). Reset and place with numeric position.
+        # Avoid 'legend -p br' which can add literal "br" text on some systems.
         op.lt_exec('legend; legend -r;')
-        # Try common bottom-right placements; ignore errors if not supported
-        for cmd in ['legend -p 5;', 'legend -p br;']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
+        try:
+            op.lt_exec('legend -p 1;')  # top-left inside
+        except Exception:
+            pass
 
         # Title
         op.lt_exec('title -s "{}";'.format(title.replace('"', "'")))
@@ -331,3 +345,4 @@ if __name__ == "__main__":
 
     project_path = OUT_DIR / "stress_dependence_batch.opju"
     run(files, var=args.var, project_path=project_path)
+
