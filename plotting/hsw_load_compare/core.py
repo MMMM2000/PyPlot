@@ -10,6 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..utils import save_figure
+from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
 CORE_BINS = 50
@@ -20,6 +21,7 @@ SAVE_PLOTS = False
 SAME_HIST_Y = True
 SAVE_FORMAT = "png"
 PNG_DPI = 1000
+BACKEND = "matplotlib"
 
 FNAME_RE = re.compile(
     r"^(?P<comp>.+?)\s+"
@@ -131,6 +133,11 @@ def load_file(path: str):
 
 
 def main(files: List[str], cfg: Dict[str, Any]):
+    backend = cfg.get("BACKEND", BACKEND)
+    if not wants_matplotlib(backend):
+        if wants_origin(backend):
+            print("Origin backend not implemented for hsw_load_compare.")
+        return
     cfg_show = cfg["show"]
     cfg_save = cfg["save"]
     out_dir = Path(cfg["out_dir"]).expanduser()

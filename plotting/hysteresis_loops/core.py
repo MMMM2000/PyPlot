@@ -5,9 +5,13 @@ from typing import List, Tuple, Sequence
 
 import numpy as np
 import matplotlib.pyplot as plt
+from ..backends import wants_matplotlib, wants_origin
+from ..config import load_config
 
-MODE = "Combined"
-SHOW_PLOTS = True
+_CFG = load_config().get("hysteresis_loops", {})
+MODE = _CFG.get("MODE", "Combined")
+SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
+BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
 
 def load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -68,12 +72,17 @@ def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> plt.Figure
     return fig
 
 
-def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True):
+def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, backend: str = BACKEND):
     """Plot hysteresis loops.
 
     mode: "Combined" (one axes with legend), "Stacked" (zero spacing),
           or "Separate" (one window per file).
     """
+    if not wants_matplotlib(backend):
+        if wants_origin(backend):
+            print("Origin backend not implemented for hysteresis loops.")
+        return None
+
     loaded: List[Tuple[str, np.ndarray, np.ndarray]] = []
     for path in paths:
         x, y = load_loop(path)
@@ -121,5 +130,5 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True):
     return figs
 
 
-def main(files: List[str]) -> None:
-    plot_loops(files, mode=MODE, show=SHOW_PLOTS)
+def main(files: List[str], backend: str = BACKEND) -> None:
+    plot_loops(files, mode=MODE, show=SHOW_PLOTS and wants_matplotlib(backend), backend=backend)
