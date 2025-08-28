@@ -61,7 +61,7 @@ BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 # Origin styling knobs (roughly matching Matplotlib appearance)
 ORIGIN_RAW_SYMBOL_SIZE = 1
 ORIGIN_MEAN_SYMBOL_SIZE = 8
-ORIGIN_MEAN_LINE_WIDTH = 3
+ORIGIN_MEAN_LINE_WIDTH = 2
 
 
 class ProgressDialog:
@@ -274,7 +274,17 @@ def _origin_compute_tables(grp: pd.DataFrame, var: str):
     means["Y"] = means[var] - base
     mean_a = means[means["dir"] == "a"][ ["X", "Y"] ].reset_index(drop=True)
     mean_b = means[means["dir"] == "b"][ ["X", "Y"] ].reset_index(drop=True)
-    delta = float(mean_a.loc[mean_a["X"].idxmax(), "Y"]) if not mean_a.empty else float("nan")
+    # Delta = last (max load) minus first (min load) for direction 'a'
+    if not mean_a.empty:
+        first_x = float(mean_a["X"].min())
+        last_x = float(mean_a["X"].max())
+        # Use raw means (no baseline) to compute actual delta
+        m_a_raw = means[means["dir"] == "a"].set_index("X")
+        start_val = float(m_a_raw.loc[first_x, var])
+        end_val = float(m_a_raw.loc[last_x, var])
+        delta = end_val - start_val
+    else:
+        delta = float("nan")
     return raw_a, raw_b, mean_a, mean_b, delta
 
 
@@ -306,6 +316,16 @@ def _origin_build_graph(
     except Exception:
         pass
 
+    # Legend improvements: text follows plot color and position at top-left
+    try:
+        op.lt_exec('legend -tt;')
+        op.lt_exec('legend -d;')
+        op.lt_exec('legend.x1 = layer.x.from + 0.2;')
+        op.lt_exec('legend.y1 = layer.y.to - 0.2;')
+    except Exception:
+        pass
+
+
     book = op.new_book('w', lname="Stress Dependence (Python)")
     book.activate()
 
@@ -320,10 +340,10 @@ def _origin_build_graph(
             pass
         return wks
 
-    w_raw_a = push_xy(raw_a, "raw_a", "a raw")
-    w_raw_b = push_xy(raw_b, "raw_b", "b raw")
-    w_mean_a = push_xy(mean_a, "mean_a", "a mean")
-    w_mean_b = push_xy(mean_b, "mean_b", "b mean")
+    w_raw_a = push_xy(raw_a, "raw_a", "raw ↑")
+    w_raw_b = push_xy(raw_b, "raw_b", "raw ↓")
+    w_mean_a = push_xy(mean_a, "mean_a", "mean ↑")
+    w_mean_b = push_xy(mean_b, "mean_b", "mean ↓")
 
     gp = op.new_graph(template='scatter')
     gl = gp[0]
@@ -350,10 +370,15 @@ def _origin_build_graph(
             pmb.line_width = ORIGIN_MEAN_LINE_WIDTH
         except Exception:
             pass
-        # Prefer properties; avoid LT dialogs
-        for plot in (pma, pmb):
+        # Ensure mean markers match line colors
+        for _plot, _col in ((pma, MEAN_COLORS["a"]), (pmb, MEAN_COLORS["b"])):
+            for _attr in ("symbol_color", "symbol_edge_color", "symbol_fill_color"):
+                try:
+                    setattr(_plot, _attr, _col)
+                except Exception:
+                    pass
             try:
-                plot.symbol_shape = 2  # circle
+                _plot.symbol_shape = 2  # circle
             except Exception:
                 pass
     except Exception:
@@ -386,13 +411,40 @@ def _origin_build_graph(
         except Exception:
             pass
 
+    # Finalize legend formatting and placement (top-left)
+    try:
+        # Ensure the graph/page title is present; also drop a layer title fallback
+        op.lt_exec(f'title -s "{esc}";')
+        op.lt_exec(f'text -s 50 97 "{esc}";')
+        op.lt_exec('legend -tt;')
+        op.lt_exec('legend -d;')
+        op.lt_exec('legend.x1 = layer.x.from + 0.2;')
+        op.lt_exec('legend.y1 = layer.y.to - 0.2;')
+    except Exception:
+        pass
+
+    # Ensure only bottom/left tick labels are shown and add readable Δ box.
+    try:
+        op.lt_exec('layer.x.showAxes=1;')
+        op.lt_exec('layer.y.showAxes=1;')
+        op.lt_exec('layer.x.showLabels=1;')
+        op.lt_exec('layer.y.showLabels=1;')
+        op.lt_exec(f'text -s 95 5 "Δ={delta:.2f}µs";')
+    except Exception:
+        pass
+
 
 def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     """Generate an Origin plot for the given variable."""
 
     raw_a, raw_b, mean_a, mean_b, delta = _origin_compute_tables(grp, var)
-    title = _origin_title(grp, var)
-    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title, var, delta)
+    # Build a clear title matching the Matplotlib figure
+    comp = grp["composition"].iat[0]
+    t = grp["title"].iat[0]
+    samp = grp["sample_end"].iat[0]
+    anneal = grp["anneal"].iat[0]
+    graph_title = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
+    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, graph_title, var, delta)
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)
