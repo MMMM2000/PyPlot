@@ -13,6 +13,7 @@ from matplotlib.figure import Figure
 from ..config import load_config
 from ..common import maybe_handle_outliers
 from ..utils import save_figure
+from ..backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("temperature_dependence", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
@@ -28,6 +29,8 @@ SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
+MAX_SHOW = 8
+BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
 RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
 OVERALL_COLOR = "#6B6B6B"
@@ -184,7 +187,10 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     return fig, f"{fname}.{SAVE_FORMAT}"
 
 
-def main(files: List[str]) -> None:
+def main(files: List[str], backend: str = BACKEND) -> None:
+    if not wants_matplotlib(backend) and wants_origin(backend):
+        print('Origin backend not implemented for temperature_dependence.')
+        return
     data = load_data(files)
     data = maybe_handle_outliers(data)
     total = len(PLOT_VARS)
@@ -193,8 +199,9 @@ def main(files: List[str]) -> None:
     for var in PLOT_VARS:
         if progress and getattr(progress, "cancelled", False):
             break
-        fig, fname = plot_variable(data, var, SAVE_PLOTS, OUTPUT_DIR)
-        plots.append((fig, fname))
+        if wants_matplotlib(backend):
+            fig, fname = plot_variable(data, var, SAVE_PLOTS, OUTPUT_DIR)
+            plots.append((fig, fname))
         if progress:
             progress.update()
     if progress and not getattr(progress, "cancelled", False):
@@ -203,12 +210,12 @@ def main(files: List[str]) -> None:
         plt.close("all")
         print("Cancelled.")
         return
-    if SHOW_PLOTS:
+    if wants_matplotlib(backend) and SHOW_PLOTS:
         plt.show()
     else:
         plt.close("all")
 
-    if (not SAVE_PLOTS) and plots and QtWidgets.QApplication.instance() is not None:
+    if wants_matplotlib(backend) and (not SAVE_PLOTS) and plots and QtWidgets.QApplication.instance() is not None:
         reply = QtWidgets.QMessageBox.question(
             None,
             "Save Plots",

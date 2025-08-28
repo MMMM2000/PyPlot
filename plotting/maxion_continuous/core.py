@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
 from ..utils import save_figure
+from ..backends import wants_matplotlib, wants_origin
 
 OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
@@ -21,6 +22,7 @@ MED_WINDOW = 5
 MA_WINDOW = 20
 SAVE_FORMAT = "png"
 PNG_DPI = 1000
+BACKEND = "matplotlib"
 
 
 class ProgressDialog:
@@ -95,7 +97,11 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
     return fig, f"{fname}.{SAVE_FORMAT}"
 
 
-def main(files: List[str]):
+def main(files: List[str], backend: str = BACKEND):
+    if not wants_matplotlib(backend):
+        if wants_origin(backend):
+            print('Origin backend not implemented for maxion_continuous.')
+        return
     total = len(files) * 3
     progress = ProgressDialog(total) if total else None
     plots: List[Tuple[Figure, str]] = []

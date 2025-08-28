@@ -7,6 +7,7 @@ from PyQt6 import QtWidgets
 
 from ..config import load_config
 from ..utils import save_figure
+from ..backends import wants_matplotlib, wants_origin
 
 import numpy as np
 import pandas as pd
@@ -55,6 +56,12 @@ SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
 MAX_SHOW = 8
+BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+
+# Origin styling knobs (roughly matching Matplotlib appearance)
+ORIGIN_RAW_SYMBOL_SIZE = 1
+ORIGIN_MEAN_SYMBOL_SIZE = 8
+ORIGIN_MEAN_LINE_WIDTH = 3
 
 
 class ProgressDialog:
@@ -240,13 +247,170 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         save_figure(fig, os.path.join(out_dir, fname), SAVE_FORMAT, PNG_DPI)
     return fig, f"{fname}.{SAVE_FORMAT}"
 
-def main(files: List[str]):
+
+def _origin_compute_tables(grp: pd.DataFrame, var: str):
+    """Return jittered raw data and means for Origin plotting."""
+
+    means = grp.groupby(["dir", "load"], as_index=False).agg({var: "mean"})
+    first = float(means["load"].min())
+    if BASELINE_MODE == "first":
+        base = float(
+            means.loc[(means["dir"] == "a") & (means["load"] == first), var].iloc[0]
+        )
+    else:
+        base = float(means.loc[means["dir"] == "a", var].min())
+
+    rng = np.random.default_rng(0)
+    x_center = grp["load"] + grp["dir"].map({"a": -OFFSET, "b": +OFFSET})
+    x = x_center + rng.uniform(-JITTER_SPAN, +JITTER_SPAN, size=len(grp))
+    y = grp[var] - base
+
+    raw = pd.DataFrame({"X": x, "Y": y, "dir": grp["dir"].to_numpy()})
+    raw_a = raw[raw["dir"] == "a"][ ["X", "Y"] ].reset_index(drop=True)
+    raw_b = raw[raw["dir"] == "b"][ ["X", "Y"] ].reset_index(drop=True)
+
+    means = means.sort_values(["dir", "load"]).copy()
+    means["X"] = means["load"]
+    means["Y"] = means[var] - base
+    mean_a = means[means["dir"] == "a"][ ["X", "Y"] ].reset_index(drop=True)
+    mean_b = means[means["dir"] == "b"][ ["X", "Y"] ].reset_index(drop=True)
+    return raw_a, raw_b, mean_a, mean_b
+
+
+def _origin_title(grp: pd.DataFrame, var: str) -> str:
+    comp, title, samp, anneal = (
+        grp["composition"].iat[0],
+        grp["title"].iat[0],
+        grp["sample_end"].iat[0],
+        grp["anneal"].iat[0],
+    )
+    return f"{comp} {title} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
+
+
+def _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title: str, var: str) -> None:
+    """Create an Origin graph mirroring the Matplotlib style."""
+
+    import originpro as op  # Imported lazily
+
+    book = op.new_book('w', lname="Stress Dependence (Python)")
+    book.activate()
+
+    def push_xy(df: pd.DataFrame, lname: str, legend_label: str):
+        wks = op.new_sheet('w', lname=lname)
+        wks.from_df(df)
+        wks.cols_axis('XY')
+        try:
+            wks.activate()
+            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+        except Exception:
+            pass
+        return wks
+
+    w_raw_a = push_xy(raw_a, "raw_a", "a raw")
+    w_raw_b = push_xy(raw_b, "raw_b", "b raw")
+    w_mean_a = push_xy(mean_a, "mean_a", "a mean")
+    w_mean_b = push_xy(mean_b, "mean_b", "b mean")
+
+    gp = op.new_graph(template='scatter')
+    gl = gp[0]
+    p_raw_a = gl.add_plot(w_raw_a, coly=1, colx=0, type='s')
+    p_raw_b = gl.add_plot(w_raw_b, coly=1, colx=0, type='s')
+    p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
+    p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
+
+    try:
+        pra = p_raw_a
+        prb = p_raw_b
+        pma = p_mean_a
+        pmb = p_mean_b
+        pra.color = RAW_COLORS["a"]
+        prb.color = RAW_COLORS["b"]
+        pma.color = MEAN_COLORS["a"]
+        pmb.color = MEAN_COLORS["b"]
+        pra.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
+        prb.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
+        pma.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
+        pmb.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
+        pra.set_cmd('-l 0', '-d 0')
+        prb.set_cmd('-l 0', '-d 0')
+        pma.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
+        pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
+        for cmd in ['symbol -k 2;', 'symbol -f 1;']:
+            try:
+                pma.set_cmd(cmd); pmb.set_cmd(cmd)
+            except Exception:
+                pass
+        def _hex_to_rgb(h: str) -> tuple[int,int,int]:
+            h = h.lstrip('#')
+            return (int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))
+        r1,g1,b1 = _hex_to_rgb(MEAN_COLORS['a'])
+        r2,g2,b2 = _hex_to_rgb(MEAN_COLORS['b'])
+        for plot, (rr,gg,bb) in [(pma,(r1,g1,b1)), (pmb,(r2,g2,b2))]:
+            for cmd in [
+                f'set %C -lc {rr},{gg},{bb};',
+                f'set %C -c {rr},{gg},{bb};',
+                f'set %C -fc {rr},{gg},{bb};',
+            ]:
+                try:
+                    plot.set_cmd(cmd)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
+        gl.rescale()
+        gp.activate()
+        for cmd in ['page.antialias=1;', 'layer -aa 1;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        op.lt_exec('lab -xb "Applied load (g)";')
+        op.lt_exec('lab -yl "{}";'.format(LABELS[var]))
+        for cmd in ['lab -xt "";', 'lab -yr "";']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        for cmd in [
+            'layer.x.showAxes=1;',
+            'layer.y.showAxes=1;',
+            'layer.x.topticks=0;',
+            'layer.y.rightticks=0;',
+            'axis -t 0;',
+            'axis -r 0;',
+            'label -xt "";',
+            'label -yr "";',
+        ]:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        for cmd in ['ticklabels -t 0;', 'ticklabels -r 0;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        op.lt_exec('legend; legend -r;')
+        for cmd in ['legend -p 5;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        esc = title.replace('"', "'")
+        op.lt_exec(f'title -s "{esc}";')
+        for cmd in ['label -n gttl -r;', 'label -n ptl -r;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+    except Exception:
+        pass
+
+
+def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
+    """Generate an Origin plot for the given variable."""
+
+    raw_a, raw_b, mean_a, mean_b = _origin_compute_tables(grp, var)
+    title = _origin_title(grp, var)
+    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title, var)
+
+def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)
     data = maybe_handle_outliers(data)
     groups = data.groupby(['composition','title','sample_end','anneal'])
     total = len(groups) * len(PLOT_VARS)
-    do_show = SHOW_PLOTS and (total <= MAX_SHOW)
-    if SHOW_PLOTS and not do_show:
+    do_show = SHOW_PLOTS and wants_matplotlib(backend) and (total <= MAX_SHOW)
+    if SHOW_PLOTS and wants_matplotlib(backend) and not do_show:
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
@@ -255,8 +419,14 @@ def main(files: List[str]):
         for var in PLOT_VARS:
             if progress and getattr(progress, 'cancelled', False):
                 break
-            fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
-            plots.append((fig, fname))
+            if wants_matplotlib(backend):
+                fig, fname = plot_variable(grp, var, SAVE_PLOTS, OUTPUT_DIR)
+                plots.append((fig, fname))
+            if wants_origin(backend):
+                try:
+                    plot_variable_origin(grp, var)
+                except Exception as e:
+                    print(f"Origin plot failed: {e}")
             if progress:
                 progress.update()
         if progress and getattr(progress, 'cancelled', False):
@@ -268,24 +438,26 @@ def main(files: List[str]):
         print('Cancelled.')
         return
 
-    if do_show:
-        plt.show()
+    if wants_matplotlib(backend):
+        if do_show:
+            plt.show()
+        else:
+            plt.close('all')
+        if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
+            reply = QtWidgets.QMessageBox.question(
+                None,
+                "Save Plots",
+                "Save generated plots?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
+                if out:
+                    os.makedirs(out, exist_ok=True)
+                    for fig, fname in plots:
+                        base = os.path.join(out, Path(fname).stem)
+                        save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
     else:
         plt.close('all')
-
-    if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
-        reply = QtWidgets.QMessageBox.question(
-            None,
-            "Save Plots",
-            "Save generated plots?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
-            if out:
-                os.makedirs(out, exist_ok=True)
-                for fig, fname in plots:
-                    base = os.path.join(out, Path(fname).stem)
-                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
 
     print(f'Done: processed {total} plots.')

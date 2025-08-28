@@ -5,6 +5,7 @@
     "PLOT_DT": false,
     "PLOT_T1": false,
     "PLOT_T2": false,
+    "BACKEND": "matplotlib",
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
     "PLOT_PROCESSED": false,
@@ -19,6 +20,7 @@
     "PLOT_DT": false,
     "PLOT_T1": false,
     "PLOT_T2": false,
+    "BACKEND": "matplotlib",
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
     "INCLUDE_DEPENDENCE": false,
@@ -34,6 +36,7 @@
     "PLOT_DT": false,
     "PLOT_T1": false,
     "PLOT_T2": false,
+    "BACKEND": "matplotlib",
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
     "BASELINE_MODE": "none",
@@ -49,6 +52,7 @@
     "PLOT_DT": false,
     "PLOT_T1": false,
     "PLOT_T2": false,
+    "BACKEND": "matplotlib",
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
     "PLOT_MODE": "raw",
@@ -68,12 +72,14 @@
     "hist": true,
     "share_y": true,
     "raw": true,
+    "BACKEND": "matplotlib",
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1000
   },
   "hysteresis_loops": {
     "MODE": "Combined",
-    "SHOW_PLOTS": true
+    "SHOW_PLOTS": true,
+    "BACKEND": "matplotlib"
   },
   "maxion_continuous": {
     "OUTPUT_DIR": "./output",
@@ -83,6 +89,7 @@
     "MARKER_SIZE": 0.1,
     "MED_WINDOW": 5,
     "MA_WINDOW": 20,
+    "BACKEND": "matplotlib",
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1000
   }

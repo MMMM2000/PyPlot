@@ -19,6 +19,7 @@ from matplotlib.typing import ColorType
 from ..config import load_config
 from .. import common
 from ..utils import save_figure
+from ..backends import wants_matplotlib, wants_origin
 
 # Load default configuration
 _CFG = load_config().get("temperature_sensitivity", {})
@@ -52,6 +53,7 @@ MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
 MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
+BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
 LABELS = {
     "T1": "T1 (µs)",
@@ -430,14 +432,14 @@ def plot_variable(
 from ..common import maybe_handle_outliers
 
 
-def main(files: List[str]):
+def main(files: List[str], backend: str = BACKEND):
     data = load_data(files)
     data = maybe_handle_outliers(data)
     groups = data.groupby(['composition', 'anneal'])
     modes = [BASELINE_MODE] if BASELINE_MODE != "both" else ["none", "zero_25"]
     total = len(groups) * len(PLOT_VARS) * len(modes)
-    do_show = SHOW_PLOTS and (total <= MAX_SHOW)
-    if SHOW_PLOTS and not do_show:
+    do_show = SHOW_PLOTS and wants_matplotlib(backend) and (total <= MAX_SHOW)
+    if SHOW_PLOTS and wants_matplotlib(backend) and not do_show:
         print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
@@ -447,20 +449,23 @@ def main(files: List[str]):
             for mode in modes:
                 if progress and getattr(progress, 'cancelled', False):
                     break
-                fig, fname = plot_variable(
-                    grp,
-                    var,
-                    SAVE_PLOTS,
-                    OUTPUT_DIR,
-                    baseline_mode=mode,
-                    include_cont=INCLUDE_CONTINUOUS,
-                    med_window=MED_WINDOW,
-                    ma_window=MA_WINDOW,
-                )
-                if BASELINE_MODE == "both":
-                    stem, ext = os.path.splitext(fname)
-                    fname = f"{stem}_{mode}{ext}"
-                plots.append((fig, fname))
+                if wants_matplotlib(backend):
+                    fig, fname = plot_variable(
+                        grp,
+                        var,
+                        SAVE_PLOTS,
+                        OUTPUT_DIR,
+                        baseline_mode=mode,
+                        include_cont=INCLUDE_CONTINUOUS,
+                        med_window=MED_WINDOW,
+                        ma_window=MA_WINDOW,
+                    )
+                    if BASELINE_MODE == "both":
+                        stem, ext = os.path.splitext(fname)
+                        fname = f"{stem}_{mode}{ext}"
+                    plots.append((fig, fname))
+                if wants_origin(backend):
+                    print('Origin backend not implemented for temperature_sensitivity.')
                 if progress:
                     progress.update()
             if progress and getattr(progress, 'cancelled', False):
@@ -474,22 +479,24 @@ def main(files: List[str]):
         print('Cancelled.')
         return
 
-    if do_show:
-        plt.show()
+    if wants_matplotlib(backend):
+        if do_show:
+            plt.show()
+        else:
+            plt.close('all')
+        if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
+            reply = non_modal_question(
+                "Save Plots",
+                "Save generated plots?",
+            )
+            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
+                out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
+                if out:
+                    os.makedirs(out, exist_ok=True)
+                    for fig, fname in plots:
+                        base = os.path.join(out, Path(fname).stem)
+                        save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
     else:
         plt.close('all')
-
-    if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
-        reply = non_modal_question(
-            "Save Plots",
-            "Save generated plots?",
-        )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
-            if out:
-                os.makedirs(out, exist_ok=True)
-                for fig, fname in plots:
-                    base = os.path.join(out, Path(fname).stem)
-                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
 
     print(f'Done: processed {total} plots.')
