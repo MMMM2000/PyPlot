@@ -33,6 +33,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+    backend_combo.setCurrentIndex(0)
     out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
     browse_btn = QtWidgets.QPushButton("Browse")
 
@@ -47,9 +49,11 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
-    out_layout.addWidget(out_dir_edit, 3, 0)
-    out_layout.addWidget(browse_btn, 3, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
+    out_layout.addWidget(backend_combo, 2, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
+    out_layout.addWidget(out_dir_edit, 4, 0)
+    out_layout.addWidget(browse_btn, 4, 1)
 
 
 
@@ -72,6 +76,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
         "out_dir": out_dir_edit.text(),
+        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
     }
     return paths, cfg
 
@@ -117,7 +122,7 @@ def main() -> None:
     orig.OUTPUT_DIR = cfg["out_dir"]
     orig.INCLUDE_DEPENDENCE = False
 
-    orig.main(paths)
+    orig.main(paths, backend=cfg["backend"])
 
 
 if __name__ == "__main__":

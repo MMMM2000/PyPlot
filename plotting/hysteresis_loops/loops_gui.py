@@ -53,26 +53,29 @@ def ask_files() -> List[str]:
     return paths
 
 
-def ask_mode() -> str:
+def ask_mode() -> tuple[str, str]:
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle("Hysteresis Loop Settings")
     layout = QtWidgets.QVBoxLayout(dialog)
     combo = QtWidgets.QComboBox()
     combo.addItems(["Combined", "Separate", "Stacked"])
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
     layout.addWidget(QtWidgets.QLabel("Plot mode:"))
     layout.addWidget(combo)
+    layout.addWidget(QtWidgets.QLabel("Backend:"))
+    layout.addWidget(backend_combo)
     run_btn = QtWidgets.QPushButton("Plot")
     run_btn.clicked.connect(dialog.accept)
     layout.addWidget(run_btn)
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         sys.exit(0)
-    return combo.currentText()
+    return combo.currentText(), ["matplotlib", "origin", "both"][backend_combo.currentIndex()]
 
 
 def main() -> None:
     files = ask_files()
-    mode = ask_mode()
-    core.plot_loops(files, mode=mode, show=True)
+    mode, backend = ask_mode()
+    core.plot_loops(files, mode=mode, show=True, backend=backend)
 
 
 if __name__ == "__main__":  # pragma: no cover

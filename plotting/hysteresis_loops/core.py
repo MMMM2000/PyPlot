@@ -72,15 +72,84 @@ def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> plt.Figure
     return fig
 
 
+def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
+    import originpro as op  # lazy import
+
+    book = op.new_book('w', lname="Hysteresis (Python)")
+    book.activate()
+    gp = op.new_graph(template='line')
+    gl = gp[0]
+
+    base_title = None
+    for path, x, y in loaded:
+        base, _t, label = _parse_meta(path)
+        if base_title is None:
+            base_title = base
+        wks = op.new_sheet('w', lname=label)
+        wks.from_list(0, x)
+        wks.from_list(1, y)
+        wks.cols_axis('XY')
+        gl.add_plot(wks, coly=1, colx=0, type='y')
+
+    try:
+        gp.activate()
+        op.lt_exec('page.antialias=1;')
+        op.lt_exec('layer -aa 1;')
+        op.lt_exec('lab -xb "H (A/m)";')
+        op.lt_exec('lab -yl "F (Wb)";')
+        if base_title:
+            esc = base_title.replace('"', "'")
+            op.lt_exec(f'title -s "{esc}";')
+        op.lt_exec('legend;')
+    except Exception:
+        pass
+
+
+def _origin_plot_separate(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
+    import originpro as op  # lazy import
+
+    book = op.new_book('w', lname="Hysteresis (Python)")
+    book.activate()
+    for path, x, y in loaded:
+        base, _t, label = _parse_meta(path)
+        wks = op.new_sheet('w', lname=label)
+        wks.from_list(0, x)
+        wks.from_list(1, y)
+        wks.cols_axis('XY')
+        gp = op.new_graph(template='line')
+        gl = gp[0]
+        gl.add_plot(wks, coly=1, colx=0, type='y')
+        try:
+            gp.activate()
+            op.lt_exec('page.antialias=1;')
+            op.lt_exec('layer -aa 1;')
+            esc = (f"{base} - {label}").replace('"', "'")
+            op.lt_exec(f'title -s "{esc}";')
+            op.lt_exec('lab -xb "H (A/m)";')
+            op.lt_exec('lab -yl "F (Wb)";')
+        except Exception:
+            pass
+
+
 def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, backend: str = BACKEND):
     """Plot hysteresis loops.
 
     mode: "Combined" (one axes with legend), "Stacked" (zero spacing),
           or "Separate" (one window per file).
     """
-    if not wants_matplotlib(backend):
-        if wants_origin(backend):
-            print("Origin backend not implemented for hysteresis loops.")
+    if not wants_matplotlib(backend) and wants_origin(backend):
+        loaded: List[Tuple[str, np.ndarray, np.ndarray]] = []
+        for path in paths:
+            x, y = load_loop(path)
+            loaded.append((path, x, y))
+        m = mode.lower()
+        if m == "combined":
+            _origin_plot_combined(loaded)
+        elif m == "separate":
+            _origin_plot_separate(loaded)
+        else:
+            # Fallback: combined when 'stacked' requested (multi-layer stacking is complex)
+            _origin_plot_combined(loaded)
         return None
 
     loaded: List[Tuple[str, np.ndarray, np.ndarray]] = []

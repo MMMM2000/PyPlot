@@ -402,6 +402,131 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     return fig, f"{fname}.{SAVE_FORMAT}"
 
 
+def plot_samples_origin(
+    df: pd.DataFrame,
+    var: str,
+    include_dep: bool = INCLUDE_DEPENDENCE,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> None:
+    """Create an Origin graph approximating the Matplotlib multi-sample view."""
+
+    import originpro as op  # lazy import
+
+    comp = df['composition'].iat[0]
+    title = df['title'].iat[0]
+    anneal = df['anneal'].iat[0]
+
+    samples = sorted(df['sample_end'].unique())
+    sample_idx = {s: i + 1 for i, s in enumerate(samples)}
+
+    # Build raw points and means for b-direction only, baseline at BASE_LOAD
+    frames_raw_odd = []
+    frames_raw_even = []
+    mean_lines: list[tuple[pd.DataFrame, str]] = []
+    cont_lines: list[pd.DataFrame] = []
+
+    for s in samples:
+        sub = df[(df['sample_end'] == s) & (df['dir'] == 'b')].copy()
+        if sub.empty:
+            continue
+        base_mean = sub[sub['load'] == BASE_LOAD][var].mean()
+        if np.isnan(base_mean):
+            base_mean = 0.0
+        loads_sorted = sorted(sub['load'].unique())
+        n_loads = len(loads_sorted)
+        center = sample_idx[s]
+        x_start = center - CURVE_WIDTH / 2
+        seg_width = (CURVE_WIDTH / n_loads) if n_loads else CURVE_WIDTH
+        seg_starts = {load: x_start + i * seg_width for i, load in enumerate(loads_sorted)}
+        seg_ends = {load: seg_starts[load] + seg_width for load in loads_sorted}
+        centers = {load: (seg_starts[load] + seg_ends[load]) / 2 for load in loads_sorted}
+        # raw
+        rng = np.random.default_rng(0)
+        sub['x'] = sub.apply(lambda r: rng.uniform(seg_starts[r['load']], seg_ends[r['load']]), axis=1)
+        sub['y'] = sub[var] - base_mean
+        # split odd/even by ordinal index
+        parity = {load: (i % 2) for i, load in enumerate(loads_sorted)}
+        odd = sub[sub['load'].map(lambda l: parity[l] == 1)][['x', 'y']].rename(columns={'x': 'X', 'y': 'Y'})
+        even = sub[sub['load'].map(lambda l: parity[l] == 0)][['x', 'y']].rename(columns={'x': 'X', 'y': 'Y'})
+        frames_raw_odd.append(odd)
+        frames_raw_even.append(even)
+        # means
+        m = sub.groupby('load').agg(x_center=('x', 'mean'), y=('y', 'mean')).reset_index()
+        mean_df = m[['x_center', 'y']].rename(columns={'x_center': 'X', 'y': 'Y'})
+        mean_color = MEAN_COLORS.get(s[-1], 'black')
+        mean_lines.append((mean_df, mean_color))
+        # processed dependence
+        if include_dep:
+            dep = sub.sort_values('load')
+            med = dep['y'].rolling(med_window, center=True, min_periods=1).median()
+            proc = med.rolling(ma_window, center=True, min_periods=1).mean()
+            x_vals = dep['load'].map(centers)
+            cont_lines.append(pd.DataFrame({'X': x_vals, 'Y': proc}))
+
+    raw_odd = pd.concat(frames_raw_odd, ignore_index=True) if frames_raw_odd else pd.DataFrame(columns=['X','Y'])
+    raw_even = pd.concat(frames_raw_even, ignore_index=True) if frames_raw_even else pd.DataFrame(columns=['X','Y'])
+
+    # Push to Origin
+    book = op.new_book('w', lname="Stress Sens (Python)")
+    book.activate()
+    gp = op.new_graph(template='scatter')
+    gl = gp[0]
+
+    if not raw_odd.empty:
+        w = op.new_sheet('w', lname='raw_odd')
+        w.from_df(raw_odd)
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        try:
+            p.color = RAW_ALT_COLORS[1]
+        except Exception:
+            pass
+    if not raw_even.empty:
+        w = op.new_sheet('w', lname='raw_even')
+        w.from_df(raw_even)
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        try:
+            p.color = RAW_ALT_COLORS[0]
+        except Exception:
+            pass
+
+    for mean_df, color in mean_lines:
+        w = op.new_sheet('w', lname='mean')
+        w.from_df(mean_df)
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        try:
+            p.color = color
+            p.set_cmd('-k 2')
+        except Exception:
+            pass
+
+    for cont_df in cont_lines:
+        w = op.new_sheet('w', lname='cont')
+        w.from_df(cont_df)
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        try:
+            p.color = 'black'
+        except Exception:
+            pass
+
+    try:
+        gl.rescale()
+        gp.activate()
+        op.lt_exec('page.antialias=1;')
+        op.lt_exec('layer -aa 1;')
+        op.lt_exec('lab -xb "Sample";')
+        op.lt_exec(f'lab -yl "{LABELS[var]}";')
+        esc = (f"{comp} {title} {anneal} - {LABELS[var]}").replace('"', "'")
+        op.lt_exec(f'title -s "{esc}";')
+        op.lt_exec('legend;')
+    except Exception:
+        pass
+
+
 def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)
     data = maybe_handle_outliers(data)
@@ -422,7 +547,10 @@ def main(files: List[str], backend: str = BACKEND) -> None:
                 if fname:
                     plots.append((fig, fname))
             if wants_origin(backend):
-                print('Origin backend not implemented for stress_sensitivity.')
+                try:
+                    plot_samples_origin(grp, var, include_dep=INCLUDE_DEPENDENCE, med_window=MED_WINDOW, ma_window=MA_WINDOW)
+                except Exception as e:
+                    print(f"Origin plot failed: {e}")
             if progress:
                 progress.update()
         if progress and getattr(progress, 'cancelled', False):

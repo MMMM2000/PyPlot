@@ -105,6 +105,19 @@ python -m launcher
 ```
 
 
+## Backends: Matplotlib and Origin
+
+All plotting tools can render graphs with Matplotlib, Origin, or both:
+
+- In every plotting dialog, use the new "Backend" selector to choose `Matplotlib`, `Origin`, or `Both`.
+- Default is `Matplotlib` so behavior remains unchanged unless you switch it.
+- Advanced users can also set the per‑tool `BACKEND` in `plotting/default_config.json` or call the core APIs directly, e.g. `core.main(files, backend="origin")` or `backend="both"`.
+
+Notes on Origin output:
+- Origin graphs are generated with the `originpro` Python package and attempt to mirror the Matplotlib look (colors, markers, lines, titles, labels, legend).
+- Support is complete for Stress Dependence and added to Temperature Dependence, Temperature Sensitivity, Stress Sensitivity, Hysteresis Loops, and Maxion continuous plots.
+- HSW Load Compare currently outputs the ln(dp/dh) vs reduced field panels to Origin; histograms and raw panels stay Matplotlib‑only for now.
+
 ## Data logger
 
 The data logger window allows recording measurements and saving them to text

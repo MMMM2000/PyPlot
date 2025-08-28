@@ -37,6 +37,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+    backend_combo.setCurrentIndex(0)
     baseline_combo = QtWidgets.QComboBox()
     baseline_combo.addItems(["None", "Zero 25\u00b0C", "Both"])
     baseline_map = {"none": 0, "zero_25": 1, "both": 2}
@@ -57,9 +59,11 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout.addWidget(save_cb, 1, 0)
     out_layout.addWidget(QtWidgets.QLabel("Baseline:"), 2, 0)
     out_layout.addWidget(baseline_combo, 2, 1)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-    out_layout.addWidget(out_dir_edit, 4, 0)
-    out_layout.addWidget(browse_btn, 4, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Backend:"), 3, 0)
+    out_layout.addWidget(backend_combo, 3, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 4, 0)
+    out_layout.addWidget(out_dir_edit, 5, 0)
+    out_layout.addWidget(browse_btn, 5, 1)
 
     cont_group = QtWidgets.QGroupBox("Continuous data")
     cont_layout = QtWidgets.QGridLayout(cont_group)
@@ -96,6 +100,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "include_cont": cont_cb.isChecked(),
         "med_window": med_spin.value(),
         "ma_window": ma_spin.value(),
+        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
     }
     return paths, cfg
 
@@ -144,7 +149,7 @@ def main() -> None:
     orig.MED_WINDOW = int(cfg["med_window"])
     orig.MA_WINDOW = int(cfg["ma_window"])
 
-    orig.main(paths)
+    orig.main(paths, backend=cfg["backend"])
 
 
 if __name__ == "__main__":

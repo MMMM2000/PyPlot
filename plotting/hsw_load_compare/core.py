@@ -134,9 +134,65 @@ def load_file(path: str):
 
 def main(files: List[str], cfg: Dict[str, Any]):
     backend = cfg.get("BACKEND", BACKEND)
-    if not wants_matplotlib(backend):
-        if wants_origin(backend):
-            print("Origin backend not implemented for hsw_load_compare.")
+    if not wants_matplotlib(backend) and wants_origin(backend):
+        # Compute histograms as in Matplotlib path
+        records = []
+        for p in files:
+            md, raw, filtered, mask = load_file(p)
+            if md is None:
+                print(f"Skipping {p}")
+                continue
+            records.append((md, raw, filtered, mask))
+        if not records:
+            raise SystemExit("No valid ascending-load files selected.")
+        records.sort(key=lambda t: t[0]["load"])
+        hist_data: Dict[float, Dict[str, Dict[str, np.ndarray]]] = {}
+        for md, _raw, filt, _mask in records:
+            load = md["load"]
+            hist_data[load] = build_histograms(filt)
+        try:
+            import originpro as op
+            book = op.new_book('w', lname="HSW Compare (Python)")
+            book.activate()
+            # One layer per load
+            gp = op.new_graph(template='scatter')
+            gl0 = gp[0]
+            first = True
+            for load, data in hist_data.items():
+                gl = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
+                first = False
+                for col, color in (("TT", "#1f77b4"), ("HH", "#ff7f0e")):
+                    h = data[col]
+                    valid = h["dp"] > 0
+                    x = (1 - h["centers"][valid]) ** 1.5
+                    y = np.log(h["dp"][valid])
+                    w = op.new_sheet('w', lname=f'{col}_{load:g}')
+                    w.from_list(0, x.tolist())
+                    w.from_list(1, y.tolist())
+                    w.cols_axis('XY')
+                    p = gl.add_plot(w, coly=1, colx=0, type='y')
+                    try:
+                        p.color = color
+                        p.set_cmd('-k 2')
+                    except Exception:
+                        pass
+                try:
+                    gl.rescale()
+                except Exception:
+                    pass
+            try:
+                gp.activate()
+                op.lt_exec('page.antialias=1;')
+                op.lt_exec('layer -aa 1;')
+                op.lt_exec('lab -xb "$\\Delta h^{3/2}$";')
+                op.lt_exec('lab -yl "ln(dp/dh)";')
+                op.lt_exec('legend;')
+            except Exception:
+                pass
+            if cfg.get("hist") or cfg.get("raw"):
+                print("Note: Origin output currently includes only the log-compare panels.")
+        except Exception as e:
+            print(f"Origin plot failed: {e}")
         return
     cfg_show = cfg["show"]
     cfg_save = cfg["save"]

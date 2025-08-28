@@ -429,6 +429,140 @@ def plot_variable(
     return fig, f"{fname}.{SAVE_FORMAT}"
 
 
+def plot_variable_origin(
+    df: pd.DataFrame,
+    var: str,
+    baseline_mode: str = BASELINE_MODE,
+    include_cont: bool = INCLUDE_CONTINUOUS,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> None:
+    """Create an Origin graph roughly matching the Matplotlib style."""
+
+    import originpro as op  # lazy import
+
+    comp = df['composition'].iat[0]
+    anneal = df['anneal'].iat[0]
+    samples = sorted(df['sample'].unique())
+    sample_idx = {s: i + 1 for i, s in enumerate(samples)}
+    df = df.copy()
+    df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
+
+    raw = df[~df['continuous']].copy()
+    cont = df[df['continuous']].copy()
+
+    means = raw.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
+    baseline = means[means['temp'] == 25].set_index('sample_idx')[var].to_dict()
+
+    raw['x_center'] = raw['sample_idx'] + raw['temp'].map({25: -OFFSET, 100: OFFSET}).fillna(0)
+    rng = np.random.default_rng(0)
+    raw['X'] = raw['x_center'] + rng.uniform(-JITTER_SPAN, JITTER_SPAN, len(raw))
+    if baseline_mode == 'zero_25':
+        raw['Y'] = raw.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+        means[var] = means.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+        if include_cont and not cont.empty:
+            cont['Y'] = cont.apply(lambda r: r[var] - baseline.get(sample_idx.get(r['sample'], 0.0), 0.0), axis=1)
+    else:
+        raw['Y'] = raw[var]
+        if include_cont and not cont.empty:
+            cont['Y'] = cont[var]
+
+    # Build Origin graph
+    book = op.new_book('w', lname="Temp Sens (Python)")
+    book.activate()
+    gp = op.new_graph(template='scatter')
+    gl = gp[0]
+
+    # Raw scatter for 25C and 100C
+    for t, color in ((25, RAW_COLORS.get(25, '#45A1D6')), (100, RAW_COLORS.get(100, '#F09C67'))):
+        sub = raw[raw['temp'] == t][['X', 'Y']]
+        if sub.empty:
+            continue
+        w = op.new_sheet('w', lname=f'raw_{t}')
+        w.from_df(sub.reset_index(drop=True))
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        try:
+            p.color = color
+        except Exception:
+            pass
+
+    # Mean markers per temperature
+    for t, color in ((25, MEAN_COLORS.get(25, 'black')), (100, MEAN_COLORS.get(100, 'black'))):
+        m = means[means['temp'] == t]
+        if m.empty:
+            continue
+        mdf = pd.DataFrame({'X': m['sample_idx'], 'Y': m[var]})
+        w = op.new_sheet('w', lname=f'mean_{t}')
+        w.from_df(mdf.reset_index(drop=True))
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        try:
+            p.color = MEAN_COLORS.get( 'a' if t==25 else 'b', color)
+            p.set_cmd('-k 2')  # circle marker type
+        except Exception:
+            pass
+
+    # Connect 25C and 100C per sample when no continuous data
+    if not cont.empty:
+        cont_samples = set(cont['sample'].unique())
+    else:
+        cont_samples = set()
+    piv = means.pivot(index='sample_idx', columns='temp', values=var)
+    if 25 in piv.columns and 100 in piv.columns:
+        for idx, row in piv.dropna(subset=[25, 100]).iterrows():
+            if samples[int(idx)-1] in cont_samples:
+                continue
+            w = op.new_sheet('w', lname=f'link_{int(idx)}')
+            w.from_list(0, [idx, idx])
+            w.from_list(1, [row[25], row[100]])
+            w.cols_axis('XY')
+            p = gl.add_plot(w, coly=1, colx=0, type='y')
+            try:
+                p.color = 'black'
+                p.set_cmd('-w 1')
+            except Exception:
+                pass
+
+    # Continuous processed per sample
+    if include_cont and not cont.empty:
+        for s in samples:
+            sub = cont[cont['sample'] == s].sort_values('temp')
+            if sub.empty:
+                continue
+            med = sub['Y'].rolling(med_window, center=True, min_periods=1).median()
+            proc = med.rolling(ma_window, center=True, min_periods=1).mean()
+            start = sub['temp'].iloc[0]
+            end = sub['temp'].iloc[-1]
+            x_start = sample_idx[s] - MEAN_SHIFT
+            x_end = sample_idx[s] + MEAN_SHIFT
+            scale = (x_end - x_start) / (end - start) if end != start else 1.0
+            x_vals = (sub['temp'] - start) * scale + x_start
+            w = op.new_sheet('w', lname=f'cont_{s}')
+            w.from_list(0, x_vals.to_numpy())
+            w.from_list(1, proc.to_numpy())
+            w.cols_axis('XY')
+            p = gl.add_plot(w, coly=1, colx=0, type='y')
+            try:
+                p.color = 'black'
+                p.set_cmd('-w 1')
+            except Exception:
+                pass
+
+    try:
+        gl.rescale()
+        gp.activate()
+        op.lt_exec('page.antialias=1;')
+        op.lt_exec('layer -aa 1;')
+        op.lt_exec('lab -xb "Sample";')
+        op.lt_exec(f'lab -yl "{LABELS[var]}";')
+        esc = (f"{comp} {anneal} - {LABELS[var]}").replace('"', "'")
+        op.lt_exec(f'title -s "{esc}";')
+        op.lt_exec('legend;')
+    except Exception:
+        pass
+
+
 from ..common import maybe_handle_outliers
 
 
@@ -465,7 +599,17 @@ def main(files: List[str], backend: str = BACKEND):
                         fname = f"{stem}_{mode}{ext}"
                     plots.append((fig, fname))
                 if wants_origin(backend):
-                    print('Origin backend not implemented for temperature_sensitivity.')
+                    try:
+                        plot_variable_origin(
+                            grp,
+                            var,
+                            baseline_mode=mode,
+                            include_cont=INCLUDE_CONTINUOUS,
+                            med_window=MED_WINDOW,
+                            ma_window=MA_WINDOW,
+                        )
+                    except Exception as e:
+                        print(f"Origin plot failed: {e}")
                 if progress:
                     progress.update()
             if progress and getattr(progress, 'cancelled', False):

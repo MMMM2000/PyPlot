@@ -55,9 +55,13 @@ def ask_options() -> Dict[str, Any]:
     out_layout = QtWidgets.QGridLayout(out_group)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
-    out_layout.addWidget(out_dir_edit, 3, 0)
-    out_layout.addWidget(browse_btn, 3, 1)
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+    backend_combo.setCurrentIndex(0)
+    out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
+    out_layout.addWidget(backend_combo, 2, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
+    out_layout.addWidget(out_dir_edit, 4, 0)
+    out_layout.addWidget(browse_btn, 4, 1)
 
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
@@ -79,6 +83,7 @@ def ask_options() -> Dict[str, Any]:
         "show": show_cb.isChecked(),
         "save": save_cb.isChecked(),
         "out_dir": out_dir_edit.text(),
+        "BACKEND": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
     }
 
 

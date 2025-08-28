@@ -61,11 +61,15 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     out_group = QtWidgets.QGroupBox("Output")
     out_layout = QtWidgets.QGridLayout(out_group)
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+    backend_combo.setCurrentIndex(0)
     out_layout.addWidget(show_cb, 0, 0)
     out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 2, 0)
-    out_layout.addWidget(out_dir_edit, 3, 0)
-    out_layout.addWidget(browse_btn, 3, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
+    out_layout.addWidget(backend_combo, 2, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
+    out_layout.addWidget(out_dir_edit, 4, 0)
+    out_layout.addWidget(browse_btn, 4, 1)
 
     proc_group = QtWidgets.QGroupBox("Processed curve")
     proc_layout = QtWidgets.QGridLayout(proc_group)
@@ -103,6 +107,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "processed": proc_cb.isChecked(),
         "med_window": med_spin.value(),
         "ma_window": ma_spin.value(),
+        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
     }
     return paths, cfg
 
@@ -151,7 +156,7 @@ def main() -> None:
     orig.MED_WINDOW = int(cfg["med_window"])
     orig.MA_WINDOW = int(cfg["ma_window"])
 
-    orig.main(paths)
+    orig.main(paths, backend=cfg["backend"])
 
 
 if __name__ == "__main__":

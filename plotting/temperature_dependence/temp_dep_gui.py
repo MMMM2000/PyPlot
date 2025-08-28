@@ -37,6 +37,8 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
 
     show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
     save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+    backend_combo.setCurrentIndex(0)
     mode_combo = QtWidgets.QComboBox()
     mode_combo.addItems(["Raw", "Processed", "Both"])
     mode_map = {"raw": 0, "processed": 1, "both": 2}
@@ -59,13 +61,15 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
     out_layout.addWidget(save_cb, 1, 0)
     out_layout.addWidget(QtWidgets.QLabel("Mode:"), 2, 0)
     out_layout.addWidget(mode_combo, 2, 1)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-    out_layout.addWidget(out_dir_edit, 4, 0)
-    out_layout.addWidget(browse_btn, 4, 1)
-    out_layout.addWidget(QtWidgets.QLabel("Format:"), 5, 0)
-    out_layout.addWidget(fmt_combo, 5, 1)
-    out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 6, 0)
-    out_layout.addWidget(dpi_spin, 6, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Backend:"), 3, 0)
+    out_layout.addWidget(backend_combo, 3, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 4, 0)
+    out_layout.addWidget(out_dir_edit, 5, 0)
+    out_layout.addWidget(browse_btn, 5, 1)
+    out_layout.addWidget(QtWidgets.QLabel("Format:"), 6, 0)
+    out_layout.addWidget(fmt_combo, 6, 1)
+    out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 7, 0)
+    out_layout.addWidget(dpi_spin, 7, 1)
 
     proc_group = QtWidgets.QGroupBox("Processed curve")
     proc_layout = QtWidgets.QGridLayout(proc_group)
@@ -101,6 +105,7 @@ def ask_user() -> tuple[List[str], Dict[str, Any]]:
         "ma_window": ma_spin.value(),
         "format": fmt_combo.currentText(),
         "dpi": dpi_spin.value(),
+        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
     }
     return paths, cfg
 
@@ -150,7 +155,7 @@ def main() -> None:
     orig.SAVE_FORMAT = cfg["format"]
     orig.PNG_DPI = int(cfg["dpi"])
 
-    orig.main(paths)
+    orig.main(paths, backend=cfg["backend"])
 
 
 if __name__ == "__main__":

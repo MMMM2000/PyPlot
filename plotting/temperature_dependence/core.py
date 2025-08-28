@@ -187,10 +187,82 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     return fig, f"{fname}.{SAVE_FORMAT}"
 
 
+def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
+    """Create an Origin graph matching the Matplotlib style."""
+
+    import originpro as op  # lazy import
+
+    comp = df["composition"].iat[0]
+    sample = df["sample"].iat[0]
+    anneal = df["anneal"].iat[0]
+
+    # Prepare data tables
+    raw_cont = df[df["continuous"]].sort_values("temp")[["temp", var]].rename(columns={"temp": "X", var: "Y"})
+    raw_disc = df[~df["continuous"]][["temp", var]].copy()
+    if not raw_disc.empty:
+        jitter = np.random.uniform(-JITTER_SPAN, JITTER_SPAN, len(raw_disc))
+        raw_disc["X"] = raw_disc["temp"].astype(float) + jitter
+        raw_disc["Y"] = raw_disc[var].astype(float)
+        raw_disc = raw_disc[["X", "Y"]]
+    # Processed line
+    proc = pd.DataFrame(columns=["X", "Y"])
+    if not raw_cont.empty and PLOT_MODE in ("processed", "both"):
+        sub = raw_cont.copy()
+        med = sub["Y"].rolling(MED_WINDOW, center=True, min_periods=1).median()
+        sub["Y"] = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+        proc = sub.rename(columns={"temp": "X"})
+
+    # Push to Origin and build the graph
+    book = op.new_book('w', lname="Temp Dependence (Python)")
+    book.activate()
+    gp = op.new_graph(template='scatter')
+    gl = gp[0]
+
+    if PLOT_MODE in ("raw", "both") and not raw_cont.empty:
+        w_cont = op.new_sheet('w', lname="raw_cont")
+        w_cont.from_df(raw_cont)
+        w_cont.cols_axis('XY')
+        p_cont = gl.add_plot(w_cont, coly=1, colx=0, type='s')
+        try:
+            p_cont.color = OVERALL_COLOR
+            p_cont.set_cmd('-c 15')  # circle
+        except Exception:
+            pass
+    if PLOT_MODE in ("raw", "both") and not raw_disc.empty:
+        w_disc = op.new_sheet('w', lname="raw_disc")
+        w_disc.from_df(raw_disc)
+        w_disc.cols_axis('XY')
+        p_disc = gl.add_plot(w_disc, coly=1, colx=0, type='s')
+        try:
+            p_disc.color = RAW_COLORS.get(25, '#45A1D6')
+        except Exception:
+            pass
+    if PLOT_MODE in ("processed", "both") and not proc.empty:
+        w_proc = op.new_sheet('w', lname="processed")
+        w_proc.from_df(proc)
+        w_proc.cols_axis('XY')
+        p_proc = gl.add_plot(w_proc, coly=1, colx=0, type='y')
+        try:
+            p_proc.color = PROC_COLOR
+            p_proc.set_cmd(f'-w {PROC_LW}')
+        except Exception:
+            pass
+
+    try:
+        gl.rescale()
+        gp.activate()
+        op.lt_exec('page.antialias=1;')
+        op.lt_exec('layer -aa 1;')
+        op.lt_exec('lab -xb "Temperature (\u00B0C)";')
+        op.lt_exec(f'lab -yl "{LABELS[var]}";')
+        esc = (f"{comp} {sample} {anneal} - {LABELS[var]}").replace('"', "'")
+        op.lt_exec(f'title -s "{esc}";')
+        op.lt_exec('legend;')
+    except Exception:
+        pass
+
+
 def main(files: List[str], backend: str = BACKEND) -> None:
-    if not wants_matplotlib(backend) and wants_origin(backend):
-        print('Origin backend not implemented for temperature_dependence.')
-        return
     data = load_data(files)
     data = maybe_handle_outliers(data)
     total = len(PLOT_VARS)
@@ -202,6 +274,11 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         if wants_matplotlib(backend):
             fig, fname = plot_variable(data, var, SAVE_PLOTS, OUTPUT_DIR)
             plots.append((fig, fname))
+        if wants_origin(backend):
+            try:
+                plot_variable_origin(data, var)
+            except Exception as e:
+                print(f"Origin plot failed: {e}")
         if progress:
             progress.update()
     if progress and not getattr(progress, "cancelled", False):
