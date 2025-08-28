@@ -249,7 +249,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
 
 
 def _origin_compute_tables(grp: pd.DataFrame, var: str):
-    """Return jittered raw data and means for Origin plotting."""
+    """Return jittered raw data, means and delta for Origin plotting."""
 
     means = grp.groupby(["dir", "load"], as_index=False).agg({var: "mean"})
     first = float(means["load"].min())
@@ -274,7 +274,8 @@ def _origin_compute_tables(grp: pd.DataFrame, var: str):
     means["Y"] = means[var] - base
     mean_a = means[means["dir"] == "a"][ ["X", "Y"] ].reset_index(drop=True)
     mean_b = means[means["dir"] == "b"][ ["X", "Y"] ].reset_index(drop=True)
-    return raw_a, raw_b, mean_a, mean_b
+    delta = float(mean_a.loc[mean_a["X"].idxmax(), "Y"]) if not mean_a.empty else float("nan")
+    return raw_a, raw_b, mean_a, mean_b, delta
 
 
 def _origin_title(grp: pd.DataFrame, var: str) -> str:
@@ -287,7 +288,15 @@ def _origin_title(grp: pd.DataFrame, var: str) -> str:
     return f"{comp} {title} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
 
 
-def _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title: str, var: str) -> None:
+def _origin_build_graph(
+    raw_a,
+    raw_b,
+    mean_a,
+    mean_b,
+    title: str,
+    var: str,
+    delta: float,
+) -> None:
     """Create an Origin graph mirroring the Matplotlib style."""
 
     import originpro as op  # Imported lazily
@@ -353,29 +362,37 @@ def _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title: str, var: str) -> N
     try:
         gl.rescale()
         gp.activate()
-        esc = title.replace('"', "'")
-        try:
-            op.lt_exec('page.antialias=1;')
-            op.lt_exec('layer -aa 1;')
-            op.lt_exec('lab -xb "Applied load (g)";')
-            op.lt_exec(f'lab -yl "{LABELS[var]}";')
-            op.lt_exec('layer.x.showAxes=1; layer.y.showAxes=1;')
-            op.lt_exec('title;')
-            op.lt_exec(f'title -s "{esc}";')
-            op.lt_exec('legend;')
-            op.lt_exec('legend.textcolor=1;')
-        except Exception:
-            pass
     except Exception:
         pass
+    esc = title.replace('"', "'")
+    commands = [
+        'page.antialias=1;',
+        'layer -aa 1;',
+        'lab -xb "Applied load (g)";',
+        f'lab -yl "{LABELS[var]}";',
+        'lab -xt "";',
+        'lab -yr "";',
+        'layer.x.showAxes=1;',
+        'layer.y.showAxes=1;',
+        'title;',
+        f'title -s "{esc}";',
+        'legend;',
+        'legend.textcolor=1;',
+        f'text -s 95 5 "Δ={delta:.2f}µs";',
+    ]
+    for cmd in commands:
+        try:
+            op.lt_exec(cmd)
+        except Exception:
+            pass
 
 
 def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     """Generate an Origin plot for the given variable."""
 
-    raw_a, raw_b, mean_a, mean_b = _origin_compute_tables(grp, var)
+    raw_a, raw_b, mean_a, mean_b, delta = _origin_compute_tables(grp, var)
     title = _origin_title(grp, var)
-    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title, var)
+    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title, var, delta)
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)
