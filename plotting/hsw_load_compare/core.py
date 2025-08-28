@@ -173,7 +173,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
                     p = gl.add_plot(w, coly=1, colx=0, type='y')
                     try:
                         p.color = color
-                        p.set_cmd('-k 2')
+                        p.symbol_shape = 2
                     except Exception:
                         pass
                 try:

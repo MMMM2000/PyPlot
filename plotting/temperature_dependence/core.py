@@ -225,7 +225,7 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
         p_cont = gl.add_plot(w_cont, coly=1, colx=0, type='s')
         try:
             p_cont.color = OVERALL_COLOR
-            p_cont.set_cmd('-c 15')  # circle
+            p_cont.symbol_shape = 2  # circle
         except Exception:
             pass
     if PLOT_MODE in ("raw", "both") and not raw_disc.empty:
@@ -244,7 +244,7 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
         p_proc = gl.add_plot(w_proc, coly=1, colx=0, type='y')
         try:
             p_proc.color = PROC_COLOR
-            p_proc.set_cmd(f'-w {PROC_LW}')
+            p_proc.line_width = PROC_LW
         except Exception:
             pass
 

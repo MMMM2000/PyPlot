@@ -499,7 +499,7 @@ def plot_variable_origin(
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         try:
             p.color = MEAN_COLORS.get( 'a' if t==25 else 'b', color)
-            p.set_cmd('-k 2')  # circle marker type
+            p.symbol_shape = 2  # circle marker type
         except Exception:
             pass
 
@@ -520,7 +520,7 @@ def plot_variable_origin(
             p = gl.add_plot(w, coly=1, colx=0, type='y')
             try:
                 p.color = 'black'
-                p.set_cmd('-w 1')
+                p.line_width = 1
             except Exception:
                 pass
 
@@ -545,7 +545,7 @@ def plot_variable_origin(
             p = gl.add_plot(w, coly=1, colx=0, type='y')
             try:
                 p.color = 'black'
-                p.set_cmd('-w 1')
+                p.line_width = 1
             except Exception:
                 pass
 

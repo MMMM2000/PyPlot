@@ -331,68 +331,29 @@ def _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title: str, var: str) -> N
         prb.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
         pma.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
         pmb.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
-        pra.set_cmd('-l 0', '-d 0')
-        prb.set_cmd('-l 0', '-d 0')
-        pma.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-        pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-        for cmd in ['symbol -k 2;', 'symbol -f 1;']:
+        try:
+            pma.line_width = ORIGIN_MEAN_LINE_WIDTH
+            pmb.line_width = ORIGIN_MEAN_LINE_WIDTH
+        except Exception:
+            pass
+        # Prefer properties; avoid LT dialogs
+        for plot in (pma, pmb):
             try:
-                pma.set_cmd(cmd); pmb.set_cmd(cmd)
+                plot.symbol_shape = 2  # circle
             except Exception:
                 pass
-        def _hex_to_rgb(h: str) -> tuple[int,int,int]:
-            h = h.lstrip('#')
-            return (int(h[0:2],16), int(h[2:4],16), int(h[4:6],16))
-        r1,g1,b1 = _hex_to_rgb(MEAN_COLORS['a'])
-        r2,g2,b2 = _hex_to_rgb(MEAN_COLORS['b'])
-        for plot, (rr,gg,bb) in [(pma,(r1,g1,b1)), (pmb,(r2,g2,b2))]:
-            for cmd in [
-                f'set %C -lc {rr},{gg},{bb};',
-                f'set %C -c {rr},{gg},{bb};',
-                f'set %C -fc {rr},{gg},{bb};',
-            ]:
-                try:
-                    plot.set_cmd(cmd)
-                except Exception:
-                    pass
     except Exception:
         pass
 
     try:
         gl.rescale()
         gp.activate()
-        for cmd in ['page.antialias=1;', 'layer -aa 1;']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
-        op.lt_exec('lab -xb "Applied load (g)";')
-        op.lt_exec('lab -yl "{}";'.format(LABELS[var]))
-        for cmd in ['lab -xt "";', 'lab -yr "";']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
-        for cmd in [
-            'layer.x.showAxes=1;',
-            'layer.y.showAxes=1;',
-            'layer.x.topticks=0;',
-            'layer.y.rightticks=0;',
-            'axis -t 0;',
-            'axis -r 0;',
-            'label -xt "";',
-            'label -yr "";',
-        ]:
-            try: op.lt_exec(cmd)
-            except Exception: pass
-        for cmd in ['ticklabels -t 0;', 'ticklabels -r 0;']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
-        op.lt_exec('legend; legend -r;')
-        for cmd in ['legend -p 5;']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
+        # Keep only safe, non-dialog commands
         esc = title.replace('"', "'")
-        op.lt_exec(f'title -s "{esc}";')
-        for cmd in ['label -n gttl -r;', 'label -n ptl -r;']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
+        try:
+            op.lt_exec(f'title -s "{esc}";')
+        except Exception:
+            pass
     except Exception:
         pass
 

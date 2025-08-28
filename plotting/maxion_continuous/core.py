@@ -123,7 +123,7 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
         w_proc.cols_axis('XY')
         p = gl.add_plot(w_proc, coly=1, colx=0, type='y')
         try:
-            p.set_cmd('-w 1')
+            p.line_width = 1
         except Exception:
             pass
 
