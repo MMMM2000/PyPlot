@@ -28,7 +28,7 @@ import glob
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
@@ -56,7 +56,7 @@ FNAME_RE = re.compile(
     r"(?P<load>\d+(?:,\d+)?)(?P<dir>[ab])$"
 )
 
-LABELS = {
+LABELS: Dict[str, str] = {
     "T1": "T1 (µs)",
     "T2": "T2 (µs)",
     "dT": "T2 − T1 (µs)",
@@ -64,12 +64,12 @@ LABELS = {
 }
 
 
-def parse_metadata(stem: str) -> Dict[str, str] | None:
+def parse_metadata(stem: str) -> Dict[str, Any] | None:
     m = FNAME_RE.match(stem)
     if not m:
         return None
-    d = m.groupdict()
-    d["load"] = float(d["load"].replace(",", "."))
+    d: Dict[str, Any] = m.groupdict()
+    d["load"] = float(str(d["load"]).replace(",", "."))
     return d  # composition, title, sample_end, anneal, load, dir
 
 
@@ -117,10 +117,8 @@ def load_data(files: List[str]) -> pd.DataFrame:
 
 
 def compute_tables(grp: pd.DataFrame, var: str):
-    # Compute means with explicit DataFrame typing for static checkers
-    means: pd.DataFrame = (
-        grp.groupby(["dir", "load"], as_index=False)[var].mean()
-    )
+    # Compute means (explicit DataFrame to keep type checkers happy)
+    means = grp.groupby(["dir", "load"], as_index=False).agg({var: "mean"})
     first = float(means["load"].min())
     if BASELINE_MODE == "first":
         base = float(means.loc[(means["dir"] == "a") & (means["load"] == first), var].iloc[0])
@@ -185,29 +183,41 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
     gl = gp[0]
 
     # Add with explicit plot types: raw=scatter, mean=line+symbol
-    # Using Origin's API: 's' -> Scatter, 'y' -> Line Symbols
-    p_raw_a  = gl.add_plot(w_raw_a,  coly='B', colx='A', type='s')
-    p_raw_b  = gl.add_plot(w_raw_b,  coly='B', colx='A', type='s')
-    p_mean_a = gl.add_plot(w_mean_a, coly='B', colx='A', type='y')
-    p_mean_b = gl.add_plot(w_mean_b, coly='B', colx='A', type='y')
+    # Using numeric column indexes to satisfy Pylance (A=0, B=1)
+    p_raw_a  = gl.add_plot(w_raw_a,  coly=1, colx=0, type='s')
+    p_raw_b  = gl.add_plot(w_raw_b,  coly=1, colx=0, type='s')
+    p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
+    p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
 
-    # Style using supported Plot properties/commands
+    # Styling (Origin exposes dynamic attributes; use Any for mypy/pylance)
     try:
+        pra = p_raw_a  # type: ignore[assignment]
+        prb = p_raw_b  # type: ignore[assignment]
+        pma = p_mean_a  # type: ignore[assignment]
+        pmb = p_mean_b  # type: ignore[assignment]
+
         # Colors
-        p_raw_a.color = RAW_COLORS["a"]; p_raw_b.color = RAW_COLORS["b"]
-        p_mean_a.color = MEAN_COLORS["a"]; p_mean_b.color = MEAN_COLORS["b"]
+        pra.color = RAW_COLORS["a"]; prb.color = RAW_COLORS["b"]
+        pma.color = MEAN_COLORS["a"]; pmb.color = MEAN_COLORS["b"]
+
         # Symbol sizes
-        p_raw_a.symbol_size = RAW_SYMBOL_SIZE; p_raw_b.symbol_size = RAW_SYMBOL_SIZE
-        p_mean_a.symbol_size = MEAN_SYMBOL_SIZE; p_mean_b.symbol_size = MEAN_SYMBOL_SIZE
-        # Symbols filled to match Matplotlib markers
-        try:
-            p_mean_a.symbol_interior = 1; p_mean_b.symbol_interior = 1
-        except Exception:
-            pass
+        pra.symbol_size = RAW_SYMBOL_SIZE; prb.symbol_size = RAW_SYMBOL_SIZE
+        pma.symbol_size = MEAN_SYMBOL_SIZE; pmb.symbol_size = MEAN_SYMBOL_SIZE
+
         # Ensure raw has NO connecting line; set mean line widths
-        p_raw_a.set_cmd('-l 0', '-d 0'); p_raw_b.set_cmd('-l 0', '-d 0')
-        p_mean_a.set_cmd(f'-w {MEAN_LINE_WIDTH}')
-        p_mean_b.set_cmd(f'-w {MEAN_LINE_WIDTH}')
+        pra.set_cmd('-l 0', '-d 0'); prb.set_cmd('-l 0', '-d 0')
+        pma.set_cmd(f'-w {MEAN_LINE_WIDTH}'); pmb.set_cmd(f'-w {MEAN_LINE_WIDTH}')
+
+        # Solid fill for mean symbols, square shape, fill color follows line
+        for cmd in [
+            'symbol -k 2;',           # square
+            'symbol -f 1;',           # solid interior
+            'symbol -fc auto;',       # fill color = Auto (line color)
+        ]:
+            try:
+                pma.set_cmd(cmd); pmb.set_cmd(cmd)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -224,31 +234,43 @@ def build_origin_graph(raw_a, raw_b, mean_a, mean_b, title, var):
         op.lt_exec('lab -xb "Applied load (g)";')
         op.lt_exec('lab -yl "{}";'.format(LABELS[var]))
         # Clear top X and right Y axis titles just in case
-        try:
-            op.lt_exec('lab -xt "";')
-            op.lt_exec('lab -yr "";')
-        except Exception:
-            pass
-
-        # Hide top X and right Y axes (ticks+labels)
-        for cmd in ['layer.x.showAxes=1;', 'layer.y.showAxes=1;', 'layer.x.topticks=0;', 'layer.y.rightticks=0;']:
-            try: op.lt_exec(cmd)
-            except Exception: pass
-        # Then enforce via axis switches if needed (some templates override showAxes)
-        for cmd in ['axis -t 0;', 'axis -r 0;']:
+        for cmd in ['lab -xt "";', 'lab -yr "";']:
             try: op.lt_exec(cmd)
             except Exception: pass
 
-        # Legend (from Long Names). Reset and place with numeric position.
-        # Avoid 'legend -p br' which can add literal "br" text on some systems.
+        # Hide top X and right Y axes (ticks+labels). Try several knobs to
+        # defeat template overrides.
+        for cmd in [
+            'layer.x.showAxes=1;',   # bottom only
+            'layer.y.showAxes=1;',   # left only
+            'layer.x.topticks=0;',
+            'layer.y.rightticks=0;',
+            'axis -t 0;',            # hide top axis
+            'axis -r 0;',            # hide right axis
+            'label -xt "";',         # ensure top axis title empty
+            'label -yr "";',         # ensure right axis title empty
+        ]:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+        # Fallback: explicitly set tick label display to none
+        for cmd in ['ticklabels -t 0;', 'ticklabels -r 0;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
+
+        # Legend (from Long Names). Reset and place; avoid any text insertion.
         op.lt_exec('legend; legend -r;')
-        try:
-            op.lt_exec('legend -p 1;')  # top-left inside
-        except Exception:
-            pass
+        for cmd in ['legend -p 5;', 'legend']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
 
-        # Title
-        op.lt_exec('title -s "{}";'.format(title.replace('"', "'")))
+        # Title (layer title centered above plot)
+        esc = title.replace('"', "'")
+        op.lt_exec(f'title -s "{esc}";')
+        # If some template previously created a text label named gttl/ptl, try
+        # to remove it to avoid duplicated/unexpected text.
+        for cmd in ['label -n gttl -r;', 'label -n ptl -r;']:
+            try: op.lt_exec(cmd)
+            except Exception: pass
     except Exception:
         pass
 
@@ -345,4 +367,3 @@ if __name__ == "__main__":
 
     project_path = OUT_DIR / "stress_dependence_batch.opju"
     run(files, var=args.var, project_path=project_path)
-
