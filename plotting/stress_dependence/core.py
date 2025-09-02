@@ -395,6 +395,18 @@ def _origin_build_graph(
     try:
         gl.rescale()
         gp.activate()
+        # Expand X limits so jittered 'a' raw data are not clipped
+        try:
+            xmin = float(min(raw_a["X"].min(), raw_b["X"].min(),
+                             mean_a["X"].min(), mean_b["X"].min()))
+            xmax = float(max(raw_a["X"].max(), raw_b["X"].max(),
+                             mean_a["X"].max(), mean_b["X"].max()))
+            pad = 0.2
+            import originpro as op
+            op.lt_exec(f"layer.x.from = {xmin - pad};")
+            op.lt_exec(f"layer.x.to = {xmax + pad};")
+        except Exception:
+            pass
     except Exception:
         pass
     esc = title.replace('"', "'")
@@ -432,12 +444,15 @@ def _origin_build_graph(
         pass
     # Finalize legend formatting and placement (top-left)
     try:
-        # Ensure the graph/page title is present; also drop a text fallback
+        # Ensure a visible graph title
         op.lt_exec(f'title -s "{esc}";')
-        op.lt_exec(f'text -s 50 98 "{esc}";')
+        op.lt_exec('title;')  # toggle to show if hidden by template
+        op.lt_exec('layer.title.show=1;')
+        # Additional fallback text object near the top center
+        op.lt_exec(f'text -s 50 97 "{esc}";')
         # Make legend text follow plot colors and place it inside frame
         op.lt_exec('legend -tt;')
-        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.06;')
+        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.10;')
         op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.05;')
     except Exception:
         pass
