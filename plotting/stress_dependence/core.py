@@ -401,7 +401,7 @@ def _origin_build_graph(
                              mean_a["X"].min(), mean_b["X"].min()))
             xmax = float(max(raw_a["X"].max(), raw_b["X"].max(),
                              mean_a["X"].max(), mean_b["X"].max()))
-            pad = 0.2
+            pad = 0.6
             import originpro as op
             op.lt_exec(f"layer.x.from = {xmin - pad};")
             op.lt_exec(f"layer.x.to = {xmax + pad};")
@@ -433,27 +433,40 @@ def _origin_build_graph(
         ra, ga, ba = _hex_to_rgb(MEAN_COLORS['a'])
         rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
         op.lt_exec('layer -s 3;')
-        op.lt_exec(f'set %C -c color({ra},{ga},{ba});')
-        op.lt_exec(f'set %C -cf color({ra},{ga},{ba});')
-        op.lt_exec(f'set %C -k color({ra},{ga},{ba});')
+        op.lt_exec(f'set %C -c rgb({ra},{ga},{ba});')
+        op.lt_exec(f'set %C -cf rgb({ra},{ga},{ba});')
+        op.lt_exec(f'set %C -k rgb({ra},{ga},{ba});')
         op.lt_exec('layer -s 4;')
-        op.lt_exec(f'set %C -c color({rb},{gb},{bb});')
-        op.lt_exec(f'set %C -cf color({rb},{gb},{bb});')
-        op.lt_exec(f'set %C -k color({rb},{gb},{bb});')
+        op.lt_exec(f'set %C -c rgb({rb},{gb},{bb});')
+        op.lt_exec(f'set %C -cf rgb({rb},{gb},{bb});')
+        op.lt_exec(f'set %C -k rgb({rb},{gb},{bb});')
     except Exception:
         pass
     # Finalize legend formatting and placement (top-left)
     try:
-        # Ensure a visible graph title
+        # Ensure a visible graph title via Origin API and fallback text
+        try:
+            lbl = gl.label('Title')
+            try:
+                lbl.text = title
+            except Exception:
+                pass
+            for attr in ('visible', 'show'):
+                try:
+                    setattr(lbl, attr, True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         op.lt_exec(f'title -s "{esc}";')
-        op.lt_exec('title;')  # toggle to show if hidden by template
-        op.lt_exec('layer.title.show=1;')
-        # Additional fallback text object near the top center
+        # Fallback text near top center (layer percent coordinates)
         op.lt_exec(f'text -s 50 97 "{esc}";')
-        # Make legend text follow plot colors and place it inside frame
+        # Legend: color-coded and safely inset from Y-axis
         op.lt_exec('legend -tt;')
-        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.10;')
-        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.05;')
+        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.20;')
+        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.20;')
+        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
+        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
     except Exception:
         pass
 
