@@ -67,6 +67,12 @@ ORIGIN_LEGEND_X_PCT = 8   # % from left
 ORIGIN_LEGEND_Y_PCT = 92  # % from bottom (near top)
 
 
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    """Convert a hex ``#RRGGBB`` color into an ``(r,g,b)`` tuple."""
+    c = color.lstrip('#')
+    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
+
+
 class ProgressDialog:
     """Fallback progress indicator used when no GUI is provided."""
 
@@ -319,15 +325,7 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    # Legend improvements: text follows plot color and position at top-left
-    try:
-        op.lt_exec('legend -tt;')
-        op.lt_exec('legend -d;')
-        # Use percentage coordinates so placement is independent of data range
-        op.lt_exec(f'legend.x1 = {ORIGIN_LEGEND_X_PCT};')
-        op.lt_exec(f'legend.y1 = {ORIGIN_LEGEND_Y_PCT};')
-    except Exception:
-        pass
+    # Defer legend tweaking until after plots are added.
 
 
     book = op.new_book('w', lname="Stress Dependence (Python)")
@@ -409,11 +407,8 @@ def _origin_build_graph(
         'lab -yr "";',
         'layer.x.showAxes=1;',
         'layer.y.showAxes=1;',
-        'title;',
         f'title -s "{esc}";',
-        'legend;',
         'legend.textcolor=1;',
-        f'text -s 95 5 "Δ={delta:.2f}µs";',
     ]
     for cmd in commands:
         try:
@@ -421,24 +416,29 @@ def _origin_build_graph(
         except Exception:
             pass
 
-    # Ensure mean line width is applied even if property set is ignored
+    # Force mean marker colors (fill/edge) to match their lines
     try:
+        ra, ga, ba = _hex_to_rgb(MEAN_COLORS['a'])
+        rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
         op.lt_exec('layer -s 3;')
-        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
+        op.lt_exec(f'set %C -c color({ra},{ga},{ba});')
+        op.lt_exec(f'set %C -cf color({ra},{ga},{ba});')
+        op.lt_exec(f'set %C -k color({ra},{ga},{ba});')
         op.lt_exec('layer -s 4;')
-        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
+        op.lt_exec(f'set %C -c color({rb},{gb},{bb});')
+        op.lt_exec(f'set %C -cf color({rb},{gb},{bb});')
+        op.lt_exec(f'set %C -k color({rb},{gb},{bb});')
     except Exception:
         pass
-
     # Finalize legend formatting and placement (top-left)
     try:
-        # Ensure the graph/page title is present; also drop a layer title fallback
+        # Ensure the graph/page title is present; also drop a text fallback
         op.lt_exec(f'title -s "{esc}";')
         op.lt_exec(f'text -s 50 98 "{esc}";')
+        # Make legend text follow plot colors and place it inside frame
         op.lt_exec('legend -tt;')
-        op.lt_exec('legend -d;')
-        op.lt_exec(f'legend.x1 = {ORIGIN_LEGEND_X_PCT};')
-        op.lt_exec(f'legend.y1 = {ORIGIN_LEGEND_Y_PCT};')
+        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.06;')
+        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.05;')
     except Exception:
         pass
 
@@ -522,3 +522,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         plt.close('all')
 
     print(f'Done: processed {total} plots.')
+
+
+
+
