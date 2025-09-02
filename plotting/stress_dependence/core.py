@@ -427,7 +427,8 @@ def _origin_build_graph(
         'layer.x.gridMajor=1;',
         'layer.y.gridMajor=1;',
         f'title -s "{esc}";',
-        'legend.textcolor=1;',
+        # Keep legend text black for readability (Matplotlib-like)
+        'legend.textcolor=0;',
     ]
     for cmd in commands:
         try:
@@ -435,30 +436,38 @@ def _origin_build_graph(
         except Exception:
             pass
 
-    # Force symbol colors to configured palette (raw + mean)
+    # Force symbol colors and sizes to configured palette (raw + mean)
     try:
         # Raw up (plot 1)
         r, g, b = _hex_to_rgb(RAW_COLORS['a'])
         op.lt_exec('layer -s 1;')
         op.lt_exec(f'set %C -c rgb({r},{g},{b});')
         op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+        # small raw symbols
+        op.lt_exec(f'set %C -z {ORIGIN_RAW_SYMBOL_SIZE};')
         # Raw down (plot 2)
         r, g, b = _hex_to_rgb(RAW_COLORS['b'])
         op.lt_exec('layer -s 2;')
         op.lt_exec(f'set %C -c rgb({r},{g},{b});')
         op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+        op.lt_exec(f'set %C -z {ORIGIN_RAW_SYMBOL_SIZE};')
         # Mean up (plot 3)
         ra, ga, ba = _hex_to_rgb(MEAN_COLORS['a'])
         op.lt_exec('layer -s 3;')
         op.lt_exec(f'set %C -c rgb({ra},{ga},{ba});')
         op.lt_exec(f'set %C -cf rgb({ra},{ga},{ba});')
         op.lt_exec(f'set %C -k rgb({ra},{ga},{ba});')
+        op.lt_exec(f'set %C -z {ORIGIN_MEAN_SYMBOL_SIZE};')
+        # Thicker mean lines
+        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
         # Mean down (plot 4)
         rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
         op.lt_exec('layer -s 4;')
         op.lt_exec(f'set %C -c rgb({rb},{gb},{bb});')
         op.lt_exec(f'set %C -cf rgb({rb},{gb},{bb});')
         op.lt_exec(f'set %C -k rgb({rb},{gb},{bb});')
+        op.lt_exec(f'set %C -z {ORIGIN_MEAN_SYMBOL_SIZE};')
+        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
     except Exception:
         pass
     # Finalize legend formatting and placement (top-left)
@@ -480,13 +489,14 @@ def _origin_build_graph(
         op.lt_exec(f'title -s "{esc}";')
         # Fallback text near top center (layer percent coordinates)
         op.lt_exec(f'text -s 50 97 "{esc}";')
-        # Legend: color-coded and safely inset from Y-axis
+        # Legend: black text, colored swatches, positioned to avoid overlap
         op.lt_exec('legend -tt;')
-        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.30;')
-        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.30;')
-        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
-        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
-        op.lt_exec('legend.textcolor=1;')
+        # place near top-left with small inset
+        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.15;')
+        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.15;')
+        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.08;')
+        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.08;')
+        op.lt_exec('legend.textcolor=0;')
         op.lt_exec('legend.update;')
     except Exception:
         pass
