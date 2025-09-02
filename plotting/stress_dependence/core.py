@@ -62,6 +62,9 @@ BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 ORIGIN_RAW_SYMBOL_SIZE = 1
 ORIGIN_MEAN_SYMBOL_SIZE = 8
 ORIGIN_MEAN_LINE_WIDTH = 2
+# Legend placement inside Origin layer in percent to avoid touching axes
+ORIGIN_LEGEND_X_PCT = 8   # % from left
+ORIGIN_LEGEND_Y_PCT = 92  # % from bottom (near top)
 
 
 class ProgressDialog:
@@ -320,9 +323,9 @@ def _origin_build_graph(
     try:
         op.lt_exec('legend -tt;')
         op.lt_exec('legend -d;')
-        # Nudge legend a bit to the right to avoid crossing the axis
-        op.lt_exec('legend.x1 = layer.x.from + 1.0;')
-        op.lt_exec('legend.y1 = layer.y.to - 0.2;')
+        # Use percentage coordinates so placement is independent of data range
+        op.lt_exec(f'legend.x1 = {ORIGIN_LEGEND_X_PCT};')
+        op.lt_exec(f'legend.y1 = {ORIGIN_LEGEND_Y_PCT};')
     except Exception:
         pass
 
@@ -348,6 +351,12 @@ def _origin_build_graph(
 
     gp = op.new_graph(template='scatter')
     gl = gp[0]
+    # Try to set the graph title using the OriginPython API. Some templates
+    # may ignore this; a LabTalk fallback is applied later.
+    try:
+        gl.label('Title').text = title
+    except Exception:
+        pass
     p_raw_a = gl.add_plot(w_raw_a, coly=1, colx=0, type='s')
     p_raw_b = gl.add_plot(w_raw_b, coly=1, colx=0, type='s')
     p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
@@ -428,8 +437,8 @@ def _origin_build_graph(
         op.lt_exec(f'text -s 50 98 "{esc}";')
         op.lt_exec('legend -tt;')
         op.lt_exec('legend -d;')
-        op.lt_exec('legend.x1 = layer.x.from + 0.2;')
-        op.lt_exec('legend.y1 = layer.y.to - 0.2;')
+        op.lt_exec(f'legend.x1 = {ORIGIN_LEGEND_X_PCT};')
+        op.lt_exec(f'legend.y1 = {ORIGIN_LEGEND_Y_PCT};')
     except Exception:
         pass
 
