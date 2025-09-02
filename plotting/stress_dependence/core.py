@@ -378,8 +378,13 @@ def _origin_build_graph(
             pmb.line_width = ORIGIN_MEAN_LINE_WIDTH
         except Exception:
             pass
-        # Ensure mean markers match line colors
-        for _plot, _col in ((pma, MEAN_COLORS["a"]), (pmb, MEAN_COLORS["b"])):
+        # Ensure markers and legend swatches match plot colors
+        for _plot, _col in (
+            (pra, RAW_COLORS["a"]),
+            (prb, RAW_COLORS["b"]),
+            (pma, MEAN_COLORS["a"]),
+            (pmb, MEAN_COLORS["b"]),
+        ):
             for _attr in ("symbol_color", "symbol_edge_color", "symbol_fill_color"):
                 try:
                     setattr(_plot, _attr, _col)
@@ -419,6 +424,8 @@ def _origin_build_graph(
         'lab -yr "";',
         'layer.x.showAxes=1;',
         'layer.y.showAxes=1;',
+        'layer.x.gridMajor=1;',
+        'layer.y.gridMajor=1;',
         f'title -s "{esc}";',
         'legend.textcolor=1;',
     ]
@@ -479,6 +486,8 @@ def _origin_build_graph(
         op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.30;')
         op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
         op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
+        op.lt_exec('legend.textcolor=1;')
+        op.lt_exec('legend.update;')
     except Exception:
         pass
 
