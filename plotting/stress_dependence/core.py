@@ -428,14 +428,26 @@ def _origin_build_graph(
         except Exception:
             pass
 
-    # Force mean marker colors (fill/edge) to match their lines
+    # Force symbol colors to configured palette (raw + mean)
     try:
+        # Raw up (plot 1)
+        r, g, b = _hex_to_rgb(RAW_COLORS['a'])
+        op.lt_exec('layer -s 1;')
+        op.lt_exec(f'set %C -c rgb({r},{g},{b});')
+        op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+        # Raw down (plot 2)
+        r, g, b = _hex_to_rgb(RAW_COLORS['b'])
+        op.lt_exec('layer -s 2;')
+        op.lt_exec(f'set %C -c rgb({r},{g},{b});')
+        op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+        # Mean up (plot 3)
         ra, ga, ba = _hex_to_rgb(MEAN_COLORS['a'])
-        rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
         op.lt_exec('layer -s 3;')
         op.lt_exec(f'set %C -c rgb({ra},{ga},{ba});')
         op.lt_exec(f'set %C -cf rgb({ra},{ga},{ba});')
         op.lt_exec(f'set %C -k rgb({ra},{ga},{ba});')
+        # Mean down (plot 4)
+        rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
         op.lt_exec('layer -s 4;')
         op.lt_exec(f'set %C -c rgb({rb},{gb},{bb});')
         op.lt_exec(f'set %C -cf rgb({rb},{gb},{bb});')
@@ -463,8 +475,8 @@ def _origin_build_graph(
         op.lt_exec(f'text -s 50 97 "{esc}";')
         # Legend: color-coded and safely inset from Y-axis
         op.lt_exec('legend -tt;')
-        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.20;')
-        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.20;')
+        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.30;')
+        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.30;')
         op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
         op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.07;')
     except Exception:
