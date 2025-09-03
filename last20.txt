@@ -1,0 +1,20 @@
+    except Exception:
+        pass
+
+    # Ensure only bottom/left tick labels are shown and add readable Î” box.
+    try:
+        op.lt_exec('layer.x.showAxes=1;')
+        op.lt_exec('layer.y.showAxes=1;')
+        op.lt_exec('layer.x.showLabels=1;')
+        op.lt_exec('layer.y.showLabels=1;')
+        op.lt_exec(f"text -s 95 5 \"?={delta:.2f} µs\";")
+    except Exception:
+        pass
+
+    # Add a second, explicit Î” annotation in case the first try block was
+    # ignored by the template. Placed in the same position as Matplotlib.
+    try:
+        op.lt_exec(f"text -s 95 5 \"?={delta:.2f} µs\";")
+    except Exception:
+        pass
+

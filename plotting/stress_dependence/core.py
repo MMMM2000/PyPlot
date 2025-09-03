@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, cast
@@ -98,10 +98,10 @@ FNAME_RE = re.compile(
 )
 
 LABELS = {
-    "T1": "T1 (µs)",
-    "T2": "T2 (µs)",
-    "dT": "T2–T1 (µs)",
-    "sum": "T1+T2 (µs)",
+    "T1": "T1 (Âµs)",
+    "T2": "T2 (Âµs)",
+    "dT": "T2â€“T1 (Âµs)",
+    "sum": "T1+T2 (Âµs)",
 }
 
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
@@ -197,10 +197,10 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     fig, ax = plt.subplots(figsize=(9,5))
     ax.scatter(df.loc[df.dir=='a','x'], df.loc[df.dir=='a','y'],
                c=RAW_COLORS['a'], marker=RAW_MARKER,
-               s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw ↑')
+               s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw â†‘')
     ax.scatter(df.loc[df.dir=='b','x'], df.loc[df.dir=='b','y'],
                c=RAW_COLORS['b'], marker=RAW_MARKER,
-               s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw ↓')
+               s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw â†“')
 
     if PLOT_PROCESSED:
         desc = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
@@ -211,18 +211,18 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
             ax.scatter(sub['x'], sub['y_proc'],
                        c=PROC_COLORS[d], marker=PROC_MARKER,
                        s=PROC_MSIZE, alpha=PROC_ALPHA,
-                       label=f"{desc} {'↑' if d=='a' else '↓'}")
+                       label=f"{desc} {'â†‘' if d=='a' else 'â†“'}")
 
     ax.plot(means.loc[means.dir=='a','load'], means.loc[means.dir=='a','y'],
             MEAN_MARKER+'-', c=MEAN_COLORS['a'],
-            markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean ↑')
+            markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean â†‘')
     ax.plot(means.loc[means.dir=='b','load'], means.loc[means.dir=='b','y'],
             MEAN_MARKER+'-', c=MEAN_COLORS['b'],
-            markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean ↓')
+            markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean â†“')
 
     maxl = df['load'].max()
     delta = means.loc[(means.dir=='a')&(means.load==maxl),'y'].iloc[0]
-    ax.text(0.95, 0.05, f"Δ={delta:.2f}µs",
+    ax.text(0.95, 0.05, f"Î”={delta:.2f}Âµs",
             transform=ax.transAxes, ha='right', va='bottom',
             fontsize=12, bbox=dict(facecolor='white', alpha=0.6))
 
@@ -230,7 +230,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{x:g}"))
     ax.set_xlabel('Applied load (g)')
     ax.set_ylabel(LABELS[var])
-    ax.set_title(f"{comp} {title} {format_sample_end(samp)} {anneal} — {LABELS[var]}")
+    ax.set_title(f"{comp} {title} {format_sample_end(samp)} {anneal} â€” {LABELS[var]}")
     ax.grid(True)
 
     legend = ax.legend(loc='best')
@@ -305,7 +305,7 @@ def _origin_title(grp: pd.DataFrame, var: str) -> str:
         grp["sample_end"].iat[0],
         grp["anneal"].iat[0],
     )
-    return f"{comp} {title} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
+    return f"{comp} {title} {format_sample_end(samp)} {anneal} â€” {LABELS[var]}"
 
 
 def _origin_build_graph(
@@ -343,10 +343,10 @@ def _origin_build_graph(
             pass
         return wks
 
-    w_raw_a = push_xy(raw_a, "raw_a", "raw ↑")
-    w_raw_b = push_xy(raw_b, "raw_b", "raw ↓")
-    w_mean_a = push_xy(mean_a, "mean_a", "mean ↑")
-    w_mean_b = push_xy(mean_b, "mean_b", "mean ↓")
+    w_raw_a = push_xy(raw_a, "raw_a", "raw â†‘")
+    w_raw_b = push_xy(raw_b, "raw_b", "raw â†“")
+    w_mean_a = push_xy(mean_a, "mean_a", "mean â†‘")
+    w_mean_b = push_xy(mean_b, "mean_b", "mean â†“")
 
     gp = op.new_graph(template='scatter')
     gl = gp[0]
@@ -369,6 +369,11 @@ def _origin_build_graph(
         prb.color = RAW_COLORS["b"]
         pma.color = MEAN_COLORS["a"]
         pmb.color = MEAN_COLORS["b"]
+        # Ensure symbol fill matches line colors (Origin default keeps fill white)
+        r, g, b = _hex_to_rgb(RAW_COLORS['a']); pra.set_cmd(f'-cf rgb({r},{g},{b})')
+        r, g, b = _hex_to_rgb(RAW_COLORS['b']); prb.set_cmd(f'-cf rgb({r},{g},{b})')
+        r, g, b = _hex_to_rgb(MEAN_COLORS['a']); pma.set_cmd(f'-cf rgb({r},{g},{b})')
+        r, g, b = _hex_to_rgb(MEAN_COLORS['b']); pmb.set_cmd(f'-cf rgb({r},{g},{b})')
         # Symbol shapes: use circle for all for consistency and make them solid
         for p in (pra, prb, pma, pmb):
             try:
@@ -453,33 +458,33 @@ def _origin_build_graph(
             pass
         op.lt_exec(f'title -s "{esc}";')
         # Fallback text near top center (layer percent coordinates)
-        op.lt_exec(f'text -s 50 97 "{esc}";')
+        op.lt_exec(f'text -s 50 93 "{esc}";')
         # Legend: black text, colored swatches, positioned to avoid overlap
         op.lt_exec('legend -tt;')
         # place near top-left with small inset
         op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.12;')
         op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.12;')
-        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.06;')
-        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.06;')
+        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.15;')
+        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.15;')
         op.lt_exec('legend.textcolor=0;')
         op.lt_exec('legend.update;')
     except Exception:
         pass
 
-    # Ensure only bottom/left tick labels are shown and add readable Δ box.
+    # Ensure only bottom/left tick labels are shown and add readable Î” box.
     try:
         op.lt_exec('layer.x.showAxes=1;')
         op.lt_exec('layer.y.showAxes=1;')
         op.lt_exec('layer.x.showLabels=1;')
         op.lt_exec('layer.y.showLabels=1;')
-        op.lt_exec(f'text -s 95 5 "Δ={delta:.2f}µs";')
+        op.lt_exec(f"text -s 95 5 \"Delta={delta:.2f} us\";")
     except Exception:
         pass
 
-    # Add a second, explicit Δ annotation in case the first try block was
+    # Add a second, explicit Î” annotation in case the first try block was
     # ignored by the template. Placed in the same position as Matplotlib.
     try:
-        op.lt_exec(f'text -s 95 5 "Δ={delta:.2f} µs";')
+        op.lt_exec(f"text -s 95 5 \"Delta={delta:.2f} us\";")
     except Exception:
         pass
 
@@ -494,7 +499,7 @@ def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     samp = grp["sample_end"].iat[0]
     anneal = grp["anneal"].iat[0]
     title_to_use = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
-    graph_title = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
+
     _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use, var, delta)
 
 def main(files: List[str], backend: str = BACKEND) -> None:
