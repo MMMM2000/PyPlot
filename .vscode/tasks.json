@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build OriginC",
+      "type": "shell",
+      "command": "\"${env:ORIGIN_EXE}\" -h -rs run.section(\"${workspaceFolder}\\originc\\scripts\\build.OGS\", Main)",
+      "problemMatcher": []
+    },
+    {
+      "label": "Run Origin one-click dialog",
+      "type": "shell",
+      "command": "\"${env:ORIGIN_EXE}\" -RS run.section(\"${workspaceFolder}\\originc\\scripts\\run_dialog.OGS\", Main)",
+      "problemMatcher": []
+    }
+  ]
+}
+

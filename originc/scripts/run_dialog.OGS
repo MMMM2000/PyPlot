@@ -1,0 +1,17 @@
+[Main]
+type -b "Select the CSV (8 columns: X_raw_a..Y_mean_b)";
+getfile *.csv csv$; if(0==exist(csv$)) return;
+
+getstring (title) "Graph Title:" ttl$;
+getstring (xlabel) "X Axis Title:" xl$;
+getstring (ylabel) "Y Axis Title:" yl$;
+getnumber (delta) "Delta (µs):" dlt;
+
+type -b "Optionally pick a graph template (.otp). Cancel = default plot";
+getfile -m *.otp otp$; if(0==exist(otp$)) otp$="";
+
+type -b "Optionally pick export PNG path. Cancel = skip export";
+getfile -s *.png exp$; if(0==exist(exp$)) exp$="";
+
+plot_stress_csv(csv$, ttl$, xl$, yl$, dlt, otp$, exp$);
+

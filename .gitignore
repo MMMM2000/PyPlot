@@ -6,7 +6,9 @@ __pycache__/
 .DS_Store
 
 # VS Code settings
-.vscode/
+.vscode/*
+!.vscode/tasks.json
+!.vscode/settings.json
 
 # JetBrains IDEs
 .idea/**
@@ -29,3 +31,12 @@ experiments/tauri_data_logger/src-tauri/target/
 # Build artifacts
 build/
 dist/
+
+# Origin & temp artifacts
+*.opj
+*.opju
+*.og?
+OriginC/OC??Tmp*/
+*.opju_backup
+*.tmp
+.DS_Store
