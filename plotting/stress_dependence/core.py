@@ -59,7 +59,8 @@ MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
 # Origin styling knobs (roughly matching Matplotlib appearance)
-ORIGIN_RAW_SYMBOL_SIZE = 1
+# Increase raw symbol size so points are clearly visible in Origin.
+ORIGIN_RAW_SYMBOL_SIZE = 3
 ORIGIN_MEAN_SYMBOL_SIZE = 8
 ORIGIN_MEAN_LINE_WIDTH = 2
 # Legend placement inside Origin layer in percent to avoid touching axes
@@ -492,10 +493,10 @@ def _origin_build_graph(
         # Legend: black text, colored swatches, positioned to avoid overlap
         op.lt_exec('legend -tt;')
         # place near top-left with small inset
-        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.15;')
-        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.15;')
-        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.08;')
-        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.08;')
+        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.12;')
+        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.12;')
+        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.06;')
+        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.06;')
         op.lt_exec('legend.textcolor=0;')
         op.lt_exec('legend.update;')
     except Exception:
@@ -511,6 +512,13 @@ def _origin_build_graph(
     except Exception:
         pass
 
+    # Add a second, explicit Δ annotation in case the first try block was
+    # ignored by the template. Placed in the same position as Matplotlib.
+    try:
+        op.lt_exec(f'text -s 95 5 "Δ={delta:.2f} µs";')
+    except Exception:
+        pass
+
 
 def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     """Generate an Origin plot for the given variable."""
@@ -521,8 +529,9 @@ def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     t = grp["title"].iat[0]
     samp = grp["sample_end"].iat[0]
     anneal = grp["anneal"].iat[0]
+    title_to_use = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
     graph_title = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
-    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, graph_title, var, delta)
+    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use if 'title_to_use' in locals() else graph_title, var, delta)
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)
