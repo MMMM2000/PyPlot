@@ -1,7 +1,7 @@
 import os
 from PyQt6 import QtWidgets
 
-from data_logger.data_logger import MainWindow
+from data_logging.data_logger.data_logger import MainWindow
 
 
 def test_subfolder_creation(tmp_path, monkeypatch):

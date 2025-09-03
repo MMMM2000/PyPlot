@@ -16,9 +16,11 @@ zmeny od V3:
 """
 
 import sys
-from PyQt5 import QtCore, QtWidgets, QtSerialPort
-from PyQt5.QtWidgets import QFileDialog
-from mainwindow_GUI import Ui_MainWindow
+from PyQt6 import QtCore, QtWidgets, QtSerialPort
+from PyQt6.QtWidgets import QFileDialog
+
+from .mainwindow_ui import Ui_MainWindow
+from plotting.utils import apply_system_theme
 
 import numpy as np
 import matplotlib
@@ -33,10 +35,10 @@ plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = "Palatino Linotype"
 plt.rcParams["font.size"] = 14
 
-class MainWindow_prog(QtWidgets.QMainWindow):
-    
+class MainWindow(QtWidgets.QMainWindow):
+
     def __init__(self):
-        super(MainWindow_prog, self).__init__()
+        super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         self.odpoved_portu = ''
@@ -176,7 +178,7 @@ class MainWindow_prog(QtWidgets.QMainWindow):
             
             print(self.ser_mcu)
             
-            if self.ser_mcu.open(QtCore.QIODevice.ReadWrite):
+            if self.ser_mcu.open(QtCore.QIODevice.OpenModeFlag.ReadWrite):
                     print('Port pripojený')
                     self.ser_mcu.clear()
                     self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
@@ -599,18 +601,33 @@ class MainWindow_prog(QtWidgets.QMainWindow):
     def closeEvent(self, event):
         if self.ser_mcu.isOpen():
             self.handle_pushButton_pripojPort_clicked()
-            #self.ser_mcu.close()
+            # self.ser_mcu.close()
             print("Sériový port zatvorený")
-            
+
         event.accept()
 
-if __name__ == "__main__":
-    if not QtWidgets.QApplication.instance():
+
+WINDOWS: list[QtWidgets.QWidget] = []
+
+
+def main() -> QtWidgets.QWidget:
+    app = QtWidgets.QApplication.instance()
+    owns_app = False
+    if app is None:
         app = QtWidgets.QApplication(sys.argv)
-    else:
-        app = QtWidgets.QApplication.instance()
-    print("Aplikácia spustená.")
-    application = MainWindow_prog()
-    application.show()
-    sys.exit(app.exec())  
+        owns_app = True
+
+    apply_system_theme(app)
+
+    window = MainWindow()
+    window.show()
+    WINDOWS.append(window)
+
+    if owns_app:
+        sys.exit(app.exec())
+    return window
+
+
+if __name__ == "__main__":
+    main()
     

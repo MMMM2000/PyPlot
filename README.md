@@ -227,13 +227,17 @@ A sample PDF is provided in the `sample_data` folder for quick testing.
 
 ## Data logger
 
-`data_logger/data_logger.py` records serial data to a file.  By default logs
+`data_logging/data_logger/data_logger.py` records serial data to a file.  By default logs
 are stored in a `python_plot_logs` directory inside the current user's home
 folder so the path works on any system.  You can change the location via the
 `LOG_DIR` environment variable. The script also exposes constants for the pre-filled command string and suggested
 file name.  Inside the GUI you can browse to a different directory at any time.
 The interface follows the host operating system's light or dark appearance and
 uses rounded buttons for a modern look.
+
+`data_logging/current_annealing_logger/current_annealing_logger.py` provides a
+PyQt6 interface for current annealing experiments and also adapts to light or
+dark system themes.
 
 
 Use the drop-down boxes to select the serial port and baud rate, then press **Connect to port**.  The **Record** button (or pressing **Enter** in the log-file field) prompts for a file name and stores the log in the directory shown in the *Directory* field.  Log files are always saved with a *.txt* extension.
