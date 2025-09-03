@@ -362,39 +362,36 @@ def _origin_build_graph(
     p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
 
     try:
-        pra = p_raw_a
-        prb = p_raw_b
-        pma = p_mean_a
-        pmb = p_mean_b
+        # Configure plots using OriginPro Python API to avoid template quirks.
+        pra = p_raw_a; prb = p_raw_b; pma = p_mean_a; pmb = p_mean_b
+        # Colors
         pra.color = RAW_COLORS["a"]
         prb.color = RAW_COLORS["b"]
         pma.color = MEAN_COLORS["a"]
         pmb.color = MEAN_COLORS["b"]
+        # Symbol shapes: use circle for all for consistency and make them solid
+        for p in (pra, prb, pma, pmb):
+            try:
+                p.symbol_kind = 2  # circle
+                p.symbol_interior = 1  # solid fill
+            except Exception:
+                pass
+        # Sizes
         pra.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
         prb.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
         pma.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
         pmb.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
+        # Lines: raw without line, means with thicker line
         try:
-            pma.line_width = ORIGIN_MEAN_LINE_WIDTH
-            pmb.line_width = ORIGIN_MEAN_LINE_WIDTH
+            pra.set_cmd('-l 0')
+            prb.set_cmd('-l 0')
         except Exception:
             pass
-        # Ensure markers and legend swatches match plot colors
-        for _plot, _col in (
-            (pra, RAW_COLORS["a"]),
-            (prb, RAW_COLORS["b"]),
-            (pma, MEAN_COLORS["a"]),
-            (pmb, MEAN_COLORS["b"]),
-        ):
-            for _attr in ("symbol_color", "symbol_edge_color", "symbol_fill_color"):
-                try:
-                    setattr(_plot, _attr, _col)
-                except Exception:
-                    pass
-            try:
-                _plot.symbol_shape = 2  # circle
-            except Exception:
-                pass
+        try:
+            pma.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
+            pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -437,44 +434,7 @@ def _origin_build_graph(
         except Exception:
             pass
 
-    # Force symbol colors and sizes to configured palette (raw + mean)
-    try:
-        # Raw up (plot 1)
-        r, g, b = _hex_to_rgb(RAW_COLORS['a'])
-        op.lt_exec('layer -s 1;')
-        # ensure visible symbols: circle, no connecting line
-        op.lt_exec('set %C -k 2;')
-        op.lt_exec('set %C -l 0;')
-        op.lt_exec(f'set %C -c rgb({r},{g},{b});')
-        op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-        op.lt_exec(f'set %C -z {ORIGIN_RAW_SYMBOL_SIZE};')
-        # Raw down (plot 2)
-        r, g, b = _hex_to_rgb(RAW_COLORS['b'])
-        op.lt_exec('layer -s 2;')
-        op.lt_exec('set %C -k 2;')
-        op.lt_exec('set %C -l 0;')
-        op.lt_exec(f'set %C -c rgb({r},{g},{b});')
-        op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-        op.lt_exec(f'set %C -z {ORIGIN_RAW_SYMBOL_SIZE};')
-        # Mean up (plot 3)
-        ra, ga, ba = _hex_to_rgb(MEAN_COLORS['a'])
-        op.lt_exec('layer -s 3;')
-        op.lt_exec('set %C -l 1;')
-        op.lt_exec(f'set %C -c rgb({ra},{ga},{ba});')
-        op.lt_exec(f'set %C -cf rgb({ra},{ga},{ba});')
-        op.lt_exec(f'set %C -z {ORIGIN_MEAN_SYMBOL_SIZE};')
-        # Thicker mean lines
-        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
-        # Mean down (plot 4)
-        rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
-        op.lt_exec('layer -s 4;')
-        op.lt_exec('set %C -l 1;')
-        op.lt_exec(f'set %C -c rgb({rb},{gb},{bb});')
-        op.lt_exec(f'set %C -cf rgb({rb},{gb},{bb});')
-        op.lt_exec(f'set %C -z {ORIGIN_MEAN_SYMBOL_SIZE};')
-        op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
-    except Exception:
-        pass
+    # Styling of plots handled via Python API above; keep LabTalk minimal.
     # Finalize legend formatting and placement (top-left)
     try:
         # Ensure a visible graph title via Origin API and fallback text
