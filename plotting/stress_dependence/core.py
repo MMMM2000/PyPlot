@@ -59,8 +59,8 @@ MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
 # Origin styling knobs (roughly matching Matplotlib appearance)
-# Increase raw symbol size so points are clearly visible in Origin.
-ORIGIN_RAW_SYMBOL_SIZE = 3
+# Raw symbol size (keep small as requested)
+ORIGIN_RAW_SYMBOL_SIZE = 1
 ORIGIN_MEAN_SYMBOL_SIZE = 8
 ORIGIN_MEAN_LINE_WIDTH = 2
 # Legend placement inside Origin layer in percent to avoid touching axes
@@ -442,31 +442,35 @@ def _origin_build_graph(
         # Raw up (plot 1)
         r, g, b = _hex_to_rgb(RAW_COLORS['a'])
         op.lt_exec('layer -s 1;')
+        # ensure visible symbols: circle, no connecting line
+        op.lt_exec('set %C -k 2;')
+        op.lt_exec('set %C -l 0;')
         op.lt_exec(f'set %C -c rgb({r},{g},{b});')
         op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-        # small raw symbols
         op.lt_exec(f'set %C -z {ORIGIN_RAW_SYMBOL_SIZE};')
         # Raw down (plot 2)
         r, g, b = _hex_to_rgb(RAW_COLORS['b'])
         op.lt_exec('layer -s 2;')
+        op.lt_exec('set %C -k 2;')
+        op.lt_exec('set %C -l 0;')
         op.lt_exec(f'set %C -c rgb({r},{g},{b});')
         op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
         op.lt_exec(f'set %C -z {ORIGIN_RAW_SYMBOL_SIZE};')
         # Mean up (plot 3)
         ra, ga, ba = _hex_to_rgb(MEAN_COLORS['a'])
         op.lt_exec('layer -s 3;')
+        op.lt_exec('set %C -l 1;')
         op.lt_exec(f'set %C -c rgb({ra},{ga},{ba});')
         op.lt_exec(f'set %C -cf rgb({ra},{ga},{ba});')
-        op.lt_exec(f'set %C -k rgb({ra},{ga},{ba});')
         op.lt_exec(f'set %C -z {ORIGIN_MEAN_SYMBOL_SIZE};')
         # Thicker mean lines
         op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
         # Mean down (plot 4)
         rb, gb, bb = _hex_to_rgb(MEAN_COLORS['b'])
         op.lt_exec('layer -s 4;')
+        op.lt_exec('set %C -l 1;')
         op.lt_exec(f'set %C -c rgb({rb},{gb},{bb});')
         op.lt_exec(f'set %C -cf rgb({rb},{gb},{bb});')
-        op.lt_exec(f'set %C -k rgb({rb},{gb},{bb});')
         op.lt_exec(f'set %C -z {ORIGIN_MEAN_SYMBOL_SIZE};')
         op.lt_exec(f'set %C -w {ORIGIN_MEAN_LINE_WIDTH};')
     except Exception:
@@ -531,7 +535,7 @@ def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     anneal = grp["anneal"].iat[0]
     title_to_use = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
     graph_title = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
-    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use if 'title_to_use' in locals() else graph_title, var, delta)
+    _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use, var, delta)
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)
