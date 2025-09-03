@@ -23,7 +23,7 @@ test = ["pytest==8.2.2"]
 launcher = "launcher:main"
 
 [tool.setuptools.packages.find]
-include = ["data_logger", "plotting"]
+include = ["data_logging", "plotting"]
 
 [tool.setuptools.package-data]
 plotting = ["default_config.json"]

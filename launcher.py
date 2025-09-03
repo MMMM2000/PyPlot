@@ -5,7 +5,8 @@ from typing import Callable, Dict
 
 from PyQt6 import QtWidgets
 
-from data_logger import data_logger
+from data_logging import data_logger
+from data_logging.current_annealing_logger import current_annealing_logger
 from plotting import common
 from plotting.hsw_distribution import distribution_gui
 from plotting.hsw_load_compare import load_compare_gui
@@ -33,6 +34,7 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
 
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
     "Serial Data Logger": data_logger.main,
+    "Current Annealing Logger": current_annealing_logger.main,
 }
 
 

@@ -3,8 +3,8 @@ from pathlib import Path
 import os
 from PyQt6 import QtWidgets
 
-from data_logger.data_logger import MainWindow
-import data_logger.serial_port as serial_port
+from data_logging.data_logger.data_logger import MainWindow
+import data_logging.data_logger.serial_port as serial_port
 
 
 def test_serial_port_context_opens_and_closes(monkeypatch):
