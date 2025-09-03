@@ -5,7 +5,6 @@ static void lt(const string& s){ LT_execute(s); }
 
 // csv has 8 columns:
 // X_raw_a, Y_raw_a, X_raw_b, Y_raw_b, X_mean_a, Y_mean_a, X_mean_b, Y_mean_b
-// All label strings must be ASCII in this minimal version.
 bool plot_stress_csv(string csv, string title, string xlabel, string ylabel,
                      double delta, string template_otp, string export_png)
 {
@@ -15,7 +14,7 @@ bool plot_stress_csv(string csv, string title, string xlabel, string ylabel,
     int rc = wks.ImportASCII(csv);
     if (rc != 0) return false;
 
-    // Mark XY designations (optional but nice)
+    // Mark XY designations (optional)
     for (int i = 0; i < 8; i += 2) {
         Column cx = wks.Columns(i);
         Column cy = wks.Columns(i + 1);
@@ -32,8 +31,8 @@ bool plot_stress_csv(string csv, string title, string xlabel, string ylabel,
     lt("range r3=" + base + "(5,6);"); // mean a
     lt("range r4=" + base + "(7,8);"); // mean b
 
-    // 2) Create graph: first series with plotxy (creates graph), then append others with layer -i
-    lt("plotxy iy:=r1 plot:=202;"); // scatter
+    // 2) Create graph: first series with plotxy (creates graph), then append others
+    lt("plotxy iy:=r1 plot:=202;");        // scatter
     lt("layer -i r2; layer -i r3; layer -i r4;");
 
     // 3) Basic styling (you can move all of this into a .otp later)
@@ -45,19 +44,13 @@ bool plot_stress_csv(string csv, string title, string xlabel, string ylabel,
     lt("set p1 -cl 0xE69F00; set p3 -cl 0xE69F00;");                   // 'a' series = orange
     lt("set p2 -cl 0x56B4E9; set p4 -cl 0x56B4E9;");                   // 'b' series = blue
 
-    // 4) Labels, title, annotate Delta (use string var to avoid locale issues)
+    // 4) Labels & rescale
     LT_set_str("ttl$", title);
     LT_set_str("xl$", xlabel);
     LT_set_str("yl$", ylabel);
-    LT_set_var("dlt", delta);
-
     lt("title -s ttl$;");
     lt("layer.x.title$=xl$; layer.y.title$=yl$;");
     lt("layer -a;");    // rescale
-
-    // Compose text safely even if decimal uses comma
-    lt("string __t$=\"Delta=\"+$(dlt,.2)+\" us\";");
-    lt("text -s 95 5 __t$;");
 
     // 5) Optional export
     if (!export_png.IsEmpty()) {
