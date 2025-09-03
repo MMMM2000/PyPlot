@@ -293,3 +293,36 @@ lists the most common problems and how to solve them.
 
 If you still encounter issues, consider searching the exact error message online
 or ask someone familiar with Python for help.
+
+## Origin 2025b final visualization (OC + X-Function ready)
+
+This repo includes an Origin C plotter for the **stress dependence** figures.
+
+### Build (once per session)
+1. Set env var (PowerShell):  
+   `setx ORIGIN_EXE "C:\\Program Files\\OriginLab\\Origin 2025b\\Origin.exe"`
+2. VS Code → **Terminal → Run Task → Build OriginC**.
+
+### Quick manual run
+VS Code → **Terminal → Run Task → Run Origin one-click dialog**  
+Pick CSV, fill Title/X/Y/Δ, optional .otp template, optional PNG export.
+
+**CSV schema** (8 columns):
+
+
+X_raw_a, Y_raw_a, X_raw_b, Y_raw_b, X_mean_a, Y_mean_a, X_mean_b, Y_mean_b
+
+
+### From Python (preferred)
+After computing the 4 XY tables + Δ in Python, call:
+```python
+from python.oc_bridge import export_and_plot_in_oc
+
+csv_path = export_and_plot_in_oc(
+    grp, var,
+    (raw_a, raw_b, mean_a, mean_b, delta),
+    out_dir="build/oc_exports",
+    template="C:/path/to/your_template.otp",      # optional
+    export_png="C:/path/to/output.png"            # optional
+)
+```

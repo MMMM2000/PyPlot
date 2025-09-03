@@ -1,0 +1,4 @@
+[Main]
+run.LoadOC("%(wd)\\originc\\src\\stress_dep.c", 16); // compile & link (rebuild)
+exit;
+
