@@ -397,30 +397,27 @@ def _origin_build_graph(
     # Ensure graph window is active for subsequent LabTalk commands
     gp.activate()
 
-    # Basic plot appearance: circle symbols with solid fill and desired sizes
+    # Style plots via OriginPython properties to avoid LabTalk color resets
     try:
-        for plot_obj, size in (
-            (p_raw_a, ORIGIN_RAW_SYMBOL_SIZE),
-            (p_raw_b, ORIGIN_RAW_SYMBOL_SIZE),
-            (p_mean_a, ORIGIN_MEAN_SYMBOL_SIZE),
-            (p_mean_b, ORIGIN_MEAN_SYMBOL_SIZE),
+        for plot_obj, size, col in (
+            (p_raw_a, ORIGIN_RAW_SYMBOL_SIZE, RAW_COLORS["a"]),
+            (p_raw_b, ORIGIN_RAW_SYMBOL_SIZE, RAW_COLORS["b"]),
+            (p_mean_a, ORIGIN_MEAN_SYMBOL_SIZE, MEAN_COLORS["a"]),
+            (p_mean_b, ORIGIN_MEAN_SYMBOL_SIZE, MEAN_COLORS["b"]),
         ):
-            plot_obj.symbol_kind = 2  # circle
-            plot_obj.symbol_interior = 1  # solid fill
+            plot_obj.symbol_shape = 2  # circle
             plot_obj.symbol_size = size
+            plot_obj.color = col  # line and edge
+            plot_obj.symbol_edge_color = col
+            plot_obj.symbol_fill_color = col
+        p_raw_a.line_width = 0
+        p_raw_b.line_width = 0
+        p_mean_a.line_width = ORIGIN_MEAN_LINE_WIDTH
+        p_mean_b.line_width = ORIGIN_MEAN_LINE_WIDTH
     except Exception:
         pass
 
-    # Hide lines for raw data and thicken mean curves
-    try:
-        p_raw_a.set_cmd('-l 0')
-        p_raw_b.set_cmd('-l 0')
-        p_mean_a.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-        p_mean_b.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-    except Exception:
-        pass
-
-    # Set axes labels and grid lines before applying colors/legend
+    # Axis labels and grid lines
     esc = title.replace('"', "'")
     for cmd in (
         'page.antialias=1;',
@@ -440,40 +437,21 @@ def _origin_build_graph(
         except Exception:
             pass
 
-    # Apply explicit RGB colors via LabTalk for each dataset
-    def _lt_color(idx: int, col: str) -> None:
-        r = int(col[1:3], 16)
-        g = int(col[3:5], 16)
-        b = int(col[5:7], 16)
+    # Build legend with color-matched entries
+    try:
+        legend_title = title.split(" \u2014 ")[0]
+        legend = gl.label('Legend')
+        legend.text = (
+            f"{legend_title}\n"
+            "\\l(1)\\c(1) raw ↑\n"
+            "\\l(2)\\c(2) raw ↓\n"
+            "\\l(3)\\c(3) mean ↑\n"
+            "\\l(4)\\c(4) mean ↓"
+        )
         try:
-            op.lt_exec(f"layer -s {idx};")
-            op.lt_exec("symbol -kf 1;")
-            op.lt_exec("set %C -k 1;")
-            op.lt_exec(f"set %C -c rgb({r},{g},{b});")
-            op.lt_exec(f"set %C -cf rgb({r},{g},{b});")
+            op.lt_exec('legend.update=0;')
         except Exception:
             pass
-
-    _lt_color(1, RAW_COLORS['a'])
-    _lt_color(2, RAW_COLORS['b'])
-    _lt_color(3, MEAN_COLORS['a'])
-    _lt_color(4, MEAN_COLORS['b'])
-
-    # Final legend text with sample name and color-matched entries
-    try:
-        arrow_up = '\u2191'
-        arrow_down = '\u2193'
-        legend_title = title.split(" \u2014 ")[0].replace('"', "'")
-        legend_lines = [
-            legend_title,
-            f"\\l(1)\\c(1) raw {arrow_up}",
-            f"\\l(2)\\c(2) raw {arrow_down}",
-            f"\\l(3)\\c(3) mean {arrow_up}",
-            f"\\l(4)\\c(4) mean {arrow_down}",
-        ]
-        legend_text = '%(CRLF)'.join(legend_lines)
-        op.lt_exec('legend.update=0;')
-        op.lt_exec(f'legend.text$ = "{legend_text}";')
     except Exception:
         pass
 
