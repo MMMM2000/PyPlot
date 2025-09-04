@@ -65,12 +65,12 @@ ORIGIN_MEAN_SYMBOL_SIZE = 8
 ORIGIN_MEAN_LINE_WIDTH = 2
 # Legend placement is now handled automatically in Origin; no manual offsets
 
-# Normalize label texts to ASCII to avoid encoding issues in Origin
+# Axis/legend labels with micro symbol (use unicode escape to be safe)
 LABELS = {
-    "T1": "T1 (us)",
-    "T2": "T2 (us)",
-    "dT": "T2-T1 (us)",
-    "sum": "T1+T2 (us)",
+    "T1": "T1 (\u03BCs)",
+    "T2": "T2 (\u03BCs)",
+    "dT": "T2-T1 (\u03BCs)",
+    "sum": "T1+T2 (\u03BCs)",
 }
 
 
@@ -103,12 +103,6 @@ FNAME_RE = re.compile(
     r"(?P<load>\d+(?:,\d+)?)(?P<dir>[ab])$"
 )
 
-LABELS = {
-    "T1": "T1 (Âµs)",
-    "T2": "T2 (Âµs)",
-    "dT": "T2â€“T1 (Âµs)",
-    "sum": "T1+T2 (Âµs)",
-}
 
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
     """Parse measurement metadata from a file name stem.
@@ -240,6 +234,15 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     ax.grid(True)
 
     legend = ax.legend(loc='best')
+    # Normalize legend texts to use arrows instead of direction letters
+    try:
+        texts = legend.get_texts()
+        repl = ['raw ?', 'raw ?', 'mean ?', 'mean ?']
+        for i, newt in enumerate(repl):
+            if i < len(texts):
+                texts[i].set_text(newt)
+    except Exception:
+        pass
     for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if isinstance(handle, Line2D):
             rawcol = handle.get_color()
@@ -349,10 +352,10 @@ def _origin_build_graph(
             pass
         return wks
 
-    w_raw_a = push_xy(raw_a, "raw_a", "raw â†‘")
-    w_raw_b = push_xy(raw_b, "raw_b", "raw â†“")
-    w_mean_a = push_xy(mean_a, "mean_a", "mean â†‘")
-    w_mean_b = push_xy(mean_b, "mean_b", "mean â†“")
+    w_raw_a = push_xy(raw_a, "raw_a", "raw up")
+    w_raw_b = push_xy(raw_b, "raw_b", "raw down")
+    w_mean_a = push_xy(mean_a, "mean_a", "mean up")
+    w_mean_b = push_xy(mean_b, "mean_b", "mean down")
 
     gp = op.new_graph(template='scatter')
     gl = gp[0]
@@ -367,10 +370,10 @@ def _origin_build_graph(
     p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
     p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
 
-    # Force clean legend labels (ASCII) in case template/workbook overrides
+    # Force clean legend labels (ASCII only) in case template/workbook overrides
     try:
         for _w, _lbl in (
-            (w_raw_a, 'raw a'), (w_raw_b, 'raw b'), (w_mean_a, 'mean a'), (w_mean_b, 'mean b')
+            (w_raw_a, 'raw up'), (w_raw_b, 'raw down'), (w_mean_a, 'mean up'), (w_mean_b, 'mean down')
         ):
             try:
                 _w.activate()
@@ -407,10 +410,35 @@ def _origin_build_graph(
             pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
         except Exception:
             pass
-        # Group plots so Origin can auto-assign consistent colors per direction
+        # Group plots by direction, then manually set colors so they are stable
         try:
             op.lt_exec('layer -s 1 3; layer -g;')  # group raw_a with mean_a
             op.lt_exec('layer -s 2 4; layer -g;')  # group raw_b with mean_b
+        except Exception:
+            pass
+        # Also set plot-level colors (line/symbol) so style panels show them
+        try:
+            pra.color = RAW_COLORS["a"]
+            prb.color = RAW_COLORS["b"]
+            pma.color = MEAN_COLORS["a"]
+            pmb.color = MEAN_COLORS["b"]
+        except Exception:
+            pass
+        # Set symbol fill and edge/line colors explicitly (prevents all-black)
+        try:
+            r, g, b = _hex_to_rgb(RAW_COLORS['a']); pra.set_cmd(f'-c rgb({r},{g},{b})'); pra.set_cmd(f'-cf rgb({r},{g},{b})')
+            r, g, b = _hex_to_rgb(RAW_COLORS['b']); prb.set_cmd(f'-c rgb({r},{g},{b})'); prb.set_cmd(f'-cf rgb({r},{g},{b})')
+            r, g, b = _hex_to_rgb(MEAN_COLORS['a']); pma.set_cmd(f'-c rgb({r},{g},{b})'); pma.set_cmd(f'-cf rgb({r},{g},{b})')
+            r, g, b = _hex_to_rgb(MEAN_COLORS['b']); pmb.set_cmd(f'-c rgb({r},{g},{b})'); pmb.set_cmd(f'-cf rgb({r},{g},{b})')
+            # Explicit per-plot color via LabTalk selection (extra safety)
+            r, g, b = _hex_to_rgb(RAW_COLORS['a'])
+            op.lt_exec('layer -s 1;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            r, g, b = _hex_to_rgb(RAW_COLORS['b'])
+            op.lt_exec('layer -s 2;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            r, g, b = _hex_to_rgb(MEAN_COLORS['a'])
+            op.lt_exec('layer -s 3;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            r, g, b = _hex_to_rgb(MEAN_COLORS['b'])
+            op.lt_exec('layer -s 4;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
         except Exception:
             pass
     except Exception:
@@ -447,7 +475,6 @@ def _origin_build_graph(
         'layer.y.gridMajor=1;',
         f'title -s "{esc}";',
         # Keep legend text black for readability (Matplotlib-like)
-        'legend.textcolor=0;',
     ]
     for cmd in commands:
         try:
@@ -478,10 +505,46 @@ def _origin_build_graph(
         # Add test texts using two different positions to probe visibility
         op.lt_exec('text -p 50 93 "titletest1";')
         op.lt_exec('text -p 50 96 "titletest2";')
-        # Legend: black text, colored swatches; let Origin place it automatically
+        # Legend: text-only (no symbols). First line is the sample/title,
+        # then we add four colored text lines using the plot colors.
         op.lt_exec('legend -tt;')
-        op.lt_exec('legend.textcolor=0;')
+        op.lt_exec(f'legend.text$ = "{esc}";')
         op.lt_exec('legend.update;')
+        # Place colored text lines near the legend area (percent coords)
+        try:
+            ra_r, ra_g, ra_b = _hex_to_rgb(RAW_COLORS['a'])
+            rb_r, rb_g, rb_b = _hex_to_rgb(RAW_COLORS['b'])
+            ma_r, ma_g, ma_b = _hex_to_rgb(MEAN_COLORS['a'])
+            mb_r, mb_g, mb_b = _hex_to_rgb(MEAN_COLORS['b'])
+            op.lt_exec('text -n l_raw_up   -p 17 90 "raw ↑";')
+            op.lt_exec(f'l_raw_up.color=rgb({ra_r},{ra_g},{ra_b});')
+            op.lt_exec('text -n l_raw_down -p 17 87 "raw ↓";')
+            op.lt_exec(f'l_raw_down.color=rgb({rb_r},{rb_g},{rb_b});')
+            op.lt_exec('text -n l_mean_up  -p 17 84 "mean ↑";')
+            op.lt_exec(f'l_mean_up.color=rgb({ma_r},{ma_g},{ma_b});')
+            op.lt_exec('text -n l_mean_down -p 17 81 "mean ↓";')
+            op.lt_exec(f'l_mean_down.color=rgb({mb_r},{mb_g},{mb_b});')
+        except Exception:
+            pass
+        # Re-assert plot colors after legend adjustments (some templates reset)
+        try:
+            r, g, b = _hex_to_rgb(RAW_COLORS['a'])
+            op.lt_exec('layer -s 1;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            r, g, b = _hex_to_rgb(RAW_COLORS['b'])
+            op.lt_exec('layer -s 2;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            r, g, b = _hex_to_rgb(MEAN_COLORS['a'])
+            op.lt_exec('layer -s 3;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            r, g, b = _hex_to_rgb(MEAN_COLORS['b'])
+            op.lt_exec('layer -s 4;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+        except Exception:
+            pass
+        # Add sample line as an extra legend row if title remains hidden
+        # Try to display data labels for the last (mean ?) plot
+        try:
+            op.lt_exec('layer -s 4;')
+            op.lt_exec('set %C -l 1;')
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -581,6 +644,8 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         plt.close('all')
 
     print(f'Done: processed {total} plots.')
+
+
 
 
 
