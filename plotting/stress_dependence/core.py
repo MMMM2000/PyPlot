@@ -397,7 +397,7 @@ def _origin_build_graph(
     # Ensure graph window is active for subsequent LabTalk commands
     gp.activate()
 
-    # Style plots via OriginPython properties to avoid LabTalk color resets
+    # Style plots via OriginPython properties; LabTalk will reapply colors later
     try:
         for plot_obj, size, col in (
             (p_raw_a, ORIGIN_RAW_SYMBOL_SIZE, RAW_COLORS["a"]),
@@ -443,15 +443,28 @@ def _origin_build_graph(
         legend = gl.label('Legend')
         legend.text = (
             f"{legend_title}\n"
-            "\\l(1)\\c(1) raw ↑\n"
-            "\\l(2)\\c(2) raw ↓\n"
-            "\\l(3)\\c(3) mean ↑\n"
-            "\\l(4)\\c(4) mean ↓"
+            "\\c(1) raw ↑\n"
+            "\\c(2) raw ↓\n"
+            "\\c(3) mean ↑\n"
+            "\\c(4) mean ↓"
         )
         try:
             op.lt_exec('legend.update=0;')
         except Exception:
             pass
+    except Exception:
+        pass
+
+    # Reapply colors and solid symbol fill via LabTalk so means are not black
+    try:
+        colors = [RAW_COLORS["a"], RAW_COLORS["b"], MEAN_COLORS["a"], MEAN_COLORS["b"]]
+        for idx, hexcol in enumerate(colors, start=1):
+            r = int(hexcol[1:3], 16)
+            g = int(hexcol[3:5], 16)
+            b = int(hexcol[5:7], 16)
+            op.lt_exec(
+                f"layer -i {idx}; set %C -c color({r},{g},{b}); set %C -cf color({r},{g},{b}); set %C -kf 0;"
+            )
     except Exception:
         pass
 
