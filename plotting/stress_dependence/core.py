@@ -450,9 +450,10 @@ def _origin_build_graph(
             g = int(col[3:5], 16)
             b = int(col[5:7], 16)
             try:
-                op.lt_exec(
-                    f"layer -s {idx}; set %C -c rgb({r},{g},{b}); set %C -cf rgb({r},{g},{b});"
-                )
+                op.lt_exec(f"layer -s {idx};")
+                op.lt_exec("set %C -k 1;")
+                op.lt_exec(f"set %C -c rgb({r},{g},{b});")
+                op.lt_exec(f"set %C -cf rgb({r},{g},{b});")
             except Exception:
                 pass
         _lt_set(1, RAW_COLORS["a"])
@@ -538,34 +539,6 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    # Reapply explicit colors after any LabTalk commands that may have reset
-    # them (e.g., enabling data labels above)
-    try:
-        for _p, _col in (
-            (pra, RAW_COLORS["a"]),
-            (prb, RAW_COLORS["b"]),
-            (pma, MEAN_COLORS["a"]),
-            (pmb, MEAN_COLORS["b"]),
-        ):
-            for _attr in (
-                "color",
-                "edgecolor",
-                "symbol_color",
-                "fillcolor",
-                "line_color",
-            ):
-                try:
-                    setattr(_p, _attr, _col)
-                except Exception:
-                    pass
-        # Reapply LabTalk colors so fills/lines don't revert to black
-        _lt_set(1, RAW_COLORS["a"])
-        _lt_set(2, RAW_COLORS["b"])
-        _lt_set(3, MEAN_COLORS["a"])
-        _lt_set(4, MEAN_COLORS["b"])
-    except Exception:
-        pass
-
     # Ensure only bottom/left tick labels are shown and add readable Δ box.
     try:
         op.lt_exec('layer.x.showAxes=1;')
@@ -606,6 +579,33 @@ def _origin_build_graph(
     # ignored by the template. Placed in the same position as Matplotlib.
     try:
         op.lt_exec(f"text -p 95 5 \"Delta={delta:.2f} us\";")
+    except Exception:
+        pass
+
+    # Reapply explicit colors after all LabTalk operations in case any
+    # of them reset dataset styling back to black.
+    try:
+        for _p, _col in (
+            (pra, RAW_COLORS["a"]),
+            (prb, RAW_COLORS["b"]),
+            (pma, MEAN_COLORS["a"]),
+            (pmb, MEAN_COLORS["b"]),
+        ):
+            for _attr in (
+                "color",
+                "edgecolor",
+                "symbol_color",
+                "fillcolor",
+                "line_color",
+            ):
+                try:
+                    setattr(_p, _attr, _col)
+                except Exception:
+                    pass
+        _lt_set(1, RAW_COLORS["a"])
+        _lt_set(2, RAW_COLORS["b"])
+        _lt_set(3, MEAN_COLORS["a"])
+        _lt_set(4, MEAN_COLORS["b"])
     except Exception:
         pass
 
