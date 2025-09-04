@@ -39,12 +39,14 @@ bool plot_stress_csv(string csv, string title, string xlabel, string ylabel,
     lt("layer -i r2; layer -i r3; layer -i r4;");
 
     // 3) styling (safe defaults; feel free to push all this into a .otp)
-    lt("set p1 -c 202; set p2 -c 202; set p3 -c 200; set p4 -c 200;");
-    lt("set p1 -k 1; set p2 -k 1; set p3 -k 1; set p4 -k 1;");
     lt("set p1 -w 1; set p2 -w 1; set p3 -w 3; set p4 -w 3;");
     lt("set p1 -z 1; set p2 -z 1; set p3 -z 8; set p4 -z 8;");
-    lt("set p1 -cl 0xE69F00; set p3 -cl 0xE69F00;");  // 'a' = orange
-    lt("set p2 -cl 0x56B4E9; set p4 -cl 0x56B4E9;");  // 'b' = blue
+    // raw points (p1, p2) use symbol color; means (p3, p4) use line color
+    lt("set p1 -c rgb(230,159,0); set p3 -cl rgb(230,159,0);");  // 'a' = orange
+    lt("set p2 -c rgb(86,180,233); set p4 -cl rgb(86,180,233);");  // 'b' = blue
+    // refresh legend with sample name and color-matched entries
+    LT_set_str("sname$", sname);
+    lt("legend.text$=sname$+\"\\n\\l(1) raw a\\n\\l(2) raw b\\n\\l(3) mean a\\n\\l(4) mean b\";");
 
     // 4) titles & rescale
     LT_set_str("ttl$", title);
