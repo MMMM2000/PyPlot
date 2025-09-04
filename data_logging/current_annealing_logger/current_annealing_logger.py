@@ -19,7 +19,7 @@ import sys
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtWidgets import QFileDialog
 
-from .mainwindow_ui import Ui_MainWindow
+from .ui_en import Ui_MainWindow
 from plotting.utils import apply_system_theme
 
 import numpy as np
@@ -41,6 +41,21 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        # Window title and size cap for laptop screens
+        self.setWindowTitle("Current Annealing Logger")
+        try:
+            screen = QtWidgets.QApplication.primaryScreen()
+            if screen is not None:
+                avail = screen.availableGeometry()
+                self.resize(
+                    min(self.width() or 880, max(640, avail.width() - 80)),
+                    min(self.height() or 720, max(480, avail.height() - 80)),
+                )
+        except Exception:
+            pass
+        # Provide a sensible default log file path
+        if not self.ui.lineEdit_log_subor.text().strip():
+            self.ui.lineEdit_log_subor.setText("data/anneal_log.txt")
         self.odpoved_portu = ''
         self.prikaz_portu = ''
         self.pripojene = False
@@ -108,7 +123,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.ui.pushButton_spusti_proces.clicked.connect(self.handle_pushButton_spusti_proces_clicked)
         self.ui.lineEdit_log_subor.textChanged.connect(self.handle_lineEdit_log_subor_text_changed)
-        self.ui.pushButton_select_filename.clicked.connect(self.handle_pushButton_select_filename_clicked)
+        self.ui.pushButton_select_filename.clicked.connect(self.handle_select_filename_en)
         
         #nio a tu defaultne enable disable na prvky
         self.ui.frame_nastavenia_procesu.setEnabled(False)
@@ -142,7 +157,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         
         self.f_out = None
-        self.f_name = "data/"+self.ui.lineEdit_log_subor.text()
+        self.f_name = self.ui.lineEdit_log_subor.text()
         
         
         #premenne na kreslenie grafu z dat
@@ -171,19 +186,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
             self.ser_mcu.setPortName('COM' + str(self.cislo_portu))
             self.ser_mcu.setBaudRate(self.baudrate)
-            self.ser_mcu.setFlowControl(QtSerialPort.QSerialPort.NoFlowControl);
-            self.ser_mcu.setDataBits(QtSerialPort.QSerialPort.Data8);
-            self.ser_mcu.setParity(QtSerialPort.QSerialPort.NoParity);
-            self.ser_mcu.setStopBits(QtSerialPort.QSerialPort.OneStop);
+            self.ser_mcu.setFlowControl(QtSerialPort.QSerialPort.FlowControl.NoFlowControl)
+            self.ser_mcu.setDataBits(QtSerialPort.QSerialPort.DataBits.Data8)
+            self.ser_mcu.setParity(QtSerialPort.QSerialPort.Parity.NoParity)
+            self.ser_mcu.setStopBits(QtSerialPort.QSerialPort.StopBits.OneStop)
             
             print(self.ser_mcu)
             
-            if self.ser_mcu.open(QtCore.QIODevice.OpenModeFlag.ReadWrite):
+            if self.ser_mcu.open(QtCore.QIODeviceBase.OpenModeFlag.ReadWrite):
                     print('Port pripojený')
                     self.ser_mcu.clear()
                     self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
                     self.pripojene = True
-                    self.ui.pushButton_pripojPort.setText('Odpoj port')
+                    self.ui.pushButton_pripojPort.setText('Disconnect')
                     self.ui.frame_modus_operandi.setEnabled(True)
                     self.ui.frame_zakladne_nastavenia_portu.setEnabled(False)
                     self.ui.frame_command_and_response.setEnabled(True)
@@ -200,6 +215,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ser_mcu.close()
             self.pripojene = False
             self.ui.pushButton_pripojPort.setText('Pripojiť sa k portu')
+            self.ui.pushButton_pripojPort.setText('Connect to port')
             self.ui.frame_command_and_response.setEnabled(False)
             self.ui.frame_zakladne_nastavenia_portu.setEnabled(True)
             self.ui.frame_nastavenia_procesu.setEnabled(False)
@@ -596,6 +612,20 @@ class MainWindow(QtWidgets.QMainWindow):
             
             self.ui.lineEdit_log_subor.setText(self.f_name)
             
+
+    
+    def handle_select_filename_en(self):
+        self.f_name, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save file",
+            "data",
+            "Text files (*.txt);;All files (*)"
+        )
+
+        if self.f_name:
+            if not self.f_name.endswith(".txt"):
+                self.f_name += ".txt"
+            self.ui.lineEdit_log_subor.setText(self.f_name)
 
     
     def closeEvent(self, event):

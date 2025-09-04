@@ -1,0 +1,33 @@
+    def closeEvent(self, event):
+        if self.ser_mcu.isOpen():
+            self.handle_pushButton_pripojPort_clicked()
+            # self.ser_mcu.close()
+            print("Sériový port zatvorený")
+
+        event.accept()
+
+
+WINDOWS: list[QtWidgets.QWidget] = []
+
+
+def main() -> QtWidgets.QWidget:
+    app = QtWidgets.QApplication.instance()
+    owns_app = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        owns_app = True
+
+    apply_system_theme(app)
+
+    window = MainWindow()
+    window.show()
+    WINDOWS.append(window)
+
+    if owns_app:
+        sys.exit(app.exec())
+    return window
+
+
+if __name__ == "__main__":
+    main()
+    
