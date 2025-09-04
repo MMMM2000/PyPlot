@@ -558,17 +558,7 @@ def _origin_build_graph(
                     setattr(_p, _attr, _col)
                 except Exception:
                     pass
-        # Also apply colors via LabTalk to ensure filled symbol hues
-        def _lt_set(idx: int, col: str) -> None:
-            r = int(col[1:3], 16)
-            g = int(col[3:5], 16)
-            b = int(col[5:7], 16)
-            try:
-                op.lt_exec(
-                    f"layer -s {idx}; set %C -c rgb({r},{g},{b}); set %C -cf rgb({r},{g},{b});"
-                )
-            except Exception:
-                pass
+        # Reapply LabTalk colors so fills/lines don't revert to black
         _lt_set(1, RAW_COLORS["a"])
         _lt_set(2, RAW_COLORS["b"])
         _lt_set(3, MEAN_COLORS["a"])
@@ -598,16 +588,17 @@ def _origin_build_graph(
     try:
         arrow_up = '\u2191'
         arrow_down = '\u2193'
+        legend_title = title.split(" \u2014 ")[0].replace('"', "'")
         legend_lines = [
-            esc,
+            legend_title,
             f"\\l(1) raw {arrow_up}",
             f"\\l(2) raw {arrow_down}",
             f"\\l(3) mean {arrow_up}",
             f"\\l(4) mean {arrow_down}",
         ]
-        op.lt_exec(
-            'legend.update=0; legend.text$ = "' + '%(CRLF)'.join(legend_lines) + '";'
-        )
+        legend_text = '%(CRLF)'.join(legend_lines)
+        op.lt_exec('legend.update=0;')
+        op.lt_exec(f'legend.text$ = "{legend_text}";')
     except Exception:
         pass
 
