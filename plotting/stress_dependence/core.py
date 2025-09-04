@@ -510,29 +510,6 @@ def _origin_build_graph(
             op.lt_exec(cmd)
         except Exception:
             pass
-
-    # Reapply explicit colors after LabTalk commands, which may reset them
-    try:
-        for _p, _col in (
-            (pra, RAW_COLORS["a"]),
-            (prb, RAW_COLORS["b"]),
-            (pma, MEAN_COLORS["a"]),
-            (pmb, MEAN_COLORS["b"]),
-        ):
-            for _attr in (
-                "color",
-                "edgecolor",
-                "symbol_color",
-                "fillcolor",
-                "line_color",
-            ):
-                try:
-                    setattr(_p, _attr, _col)
-                except Exception:
-                    pass
-    except Exception:
-        pass
-
     # Styling of plots handled via Python API above; keep LabTalk minimal.
     try:
         # Ensure a visible graph title via multiple methods (some templates
@@ -558,6 +535,44 @@ def _origin_build_graph(
             op.lt_exec('set %C -l 1;')
         except Exception:
             pass
+    except Exception:
+        pass
+
+    # Reapply explicit colors after any LabTalk commands that may have reset
+    # them (e.g., enabling data labels above)
+    try:
+        for _p, _col in (
+            (pra, RAW_COLORS["a"]),
+            (prb, RAW_COLORS["b"]),
+            (pma, MEAN_COLORS["a"]),
+            (pmb, MEAN_COLORS["b"]),
+        ):
+            for _attr in (
+                "color",
+                "edgecolor",
+                "symbol_color",
+                "fillcolor",
+                "line_color",
+            ):
+                try:
+                    setattr(_p, _attr, _col)
+                except Exception:
+                    pass
+        # Also apply colors via LabTalk to ensure filled symbol hues
+        def _lt_set(idx: int, col: str) -> None:
+            r = int(col[1:3], 16)
+            g = int(col[3:5], 16)
+            b = int(col[5:7], 16)
+            try:
+                op.lt_exec(
+                    f"layer -s {idx}; set %C -c rgb({r},{g},{b}); set %C -cf rgb({r},{g},{b});"
+                )
+            except Exception:
+                pass
+        _lt_set(1, RAW_COLORS["a"])
+        _lt_set(2, RAW_COLORS["b"])
+        _lt_set(3, MEAN_COLORS["a"])
+        _lt_set(4, MEAN_COLORS["b"])
     except Exception:
         pass
 
@@ -590,7 +605,9 @@ def _origin_build_graph(
             f"\\l(3) mean {arrow_up}",
             f"\\l(4) mean {arrow_down}",
         ]
-        op.lt_exec('legend.text$ = "' + '\\n'.join(legend_lines) + '";')
+        op.lt_exec(
+            'legend.update=0; legend.text$ = "' + '%(CRLF)'.join(legend_lines) + '";'
+        )
     except Exception:
         pass
 
