@@ -426,14 +426,20 @@ def _origin_build_graph(
         prb.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
         pma.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
         pmb.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
-        # Explicit colors for both edges and fills
+        # Explicit colors for edges, fills and lines
         for _p, _col in (
             (pra, RAW_COLORS["a"]),
             (prb, RAW_COLORS["b"]),
             (pma, MEAN_COLORS["a"]),
             (pmb, MEAN_COLORS["b"]),
         ):
-            for _attr in ("color", "edgecolor", "symbol_color", "fillcolor"):
+            for _attr in (
+                "color",
+                "edgecolor",
+                "symbol_color",
+                "fillcolor",
+                "line_color",
+            ):
                 try:
                     setattr(_p, _attr, _col)
                 except Exception:
@@ -462,12 +468,6 @@ def _origin_build_graph(
         try:
             pma.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
             pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-        except Exception:
-            pass
-        # Group plots by direction so auto-colors pair correctly
-        try:
-            op.lt_exec('layer -s 1 3; layer -g;')  # group raw_a with mean_a
-            op.lt_exec('layer -s 2 4; layer -g;')  # group raw_b with mean_b
         except Exception:
             pass
     except Exception:
@@ -519,7 +519,13 @@ def _origin_build_graph(
             (pma, MEAN_COLORS["a"]),
             (pmb, MEAN_COLORS["b"]),
         ):
-            for _attr in ("color", "edgecolor", "symbol_color", "fillcolor"):
+            for _attr in (
+                "color",
+                "edgecolor",
+                "symbol_color",
+                "fillcolor",
+                "line_color",
+            ):
                 try:
                     setattr(_p, _attr, _col)
                 except Exception:
@@ -579,12 +585,12 @@ def _origin_build_graph(
         arrow_down = '\u2193'
         legend_lines = [
             esc,
-            f"\\l(1) \\g(1) raw {arrow_up}",
-            f"\\l(2) \\g(2) raw {arrow_down}",
-            f"\\l(3) \\g(3) mean {arrow_up}",
-            f"\\l(4) \\g(4) mean {arrow_down}",
+            f"\\l(1) raw {arrow_up}",
+            f"\\l(2) raw {arrow_down}",
+            f"\\l(3) mean {arrow_up}",
+            f"\\l(4) mean {arrow_down}",
         ]
-        op.lt_exec(f'legend.text$ = "' + "\\n".join(legend_lines) + '";')
+        op.lt_exec('legend.text$ = "' + '\\n'.join(legend_lines) + '";')
     except Exception:
         pass
 
