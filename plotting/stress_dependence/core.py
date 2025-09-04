@@ -63,9 +63,15 @@ BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 ORIGIN_RAW_SYMBOL_SIZE = 1
 ORIGIN_MEAN_SYMBOL_SIZE = 8
 ORIGIN_MEAN_LINE_WIDTH = 2
-# Legend placement inside Origin layer in percent to avoid touching axes
-ORIGIN_LEGEND_X_PCT = 8   # % from left
-ORIGIN_LEGEND_Y_PCT = 92  # % from bottom (near top)
+# Legend placement is now handled automatically in Origin; no manual offsets
+
+# Normalize label texts to ASCII to avoid encoding issues in Origin
+LABELS = {
+    "T1": "T1 (us)",
+    "T2": "T2 (us)",
+    "dT": "T2-T1 (us)",
+    "sum": "T1+T2 (us)",
+}
 
 
 def _hex_to_rgb(color: str) -> tuple[int, int, int]:
@@ -361,19 +367,23 @@ def _origin_build_graph(
     p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
     p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
 
+    # Force clean legend labels (ASCII) in case template/workbook overrides
+    try:
+        for _w, _lbl in (
+            (w_raw_a, 'raw a'), (w_raw_b, 'raw b'), (w_mean_a, 'mean a'), (w_mean_b, 'mean b')
+        ):
+            try:
+                _w.activate()
+                op.lt_exec(f'wks.col2.lname$ = "{_lbl}";')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     try:
         # Configure plots using OriginPro Python API to avoid template quirks.
         pra = p_raw_a; prb = p_raw_b; pma = p_mean_a; pmb = p_mean_b
-        # Colors
-        pra.color = RAW_COLORS["a"]
-        prb.color = RAW_COLORS["b"]
-        pma.color = MEAN_COLORS["a"]
-        pmb.color = MEAN_COLORS["b"]
-        # Ensure symbol fill matches line colors (Origin default keeps fill white)
-        r, g, b = _hex_to_rgb(RAW_COLORS['a']); pra.set_cmd(f'-cf rgb({r},{g},{b})')
-        r, g, b = _hex_to_rgb(RAW_COLORS['b']); prb.set_cmd(f'-cf rgb({r},{g},{b})')
-        r, g, b = _hex_to_rgb(MEAN_COLORS['a']); pma.set_cmd(f'-cf rgb({r},{g},{b})')
-        r, g, b = _hex_to_rgb(MEAN_COLORS['b']); pmb.set_cmd(f'-cf rgb({r},{g},{b})')
+        # Let Origin assign colors automatically; avoid manual color forcing
         # Symbol shapes: use circle for all for consistency and make them solid
         for p in (pra, prb, pma, pmb):
             try:
@@ -395,6 +405,12 @@ def _origin_build_graph(
         try:
             pma.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
             pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
+        except Exception:
+            pass
+        # Group plots so Origin can auto-assign consistent colors per direction
+        try:
+            op.lt_exec('layer -s 1 3; layer -g;')  # group raw_a with mean_a
+            op.lt_exec('layer -s 2 4; layer -g;')  # group raw_b with mean_b
         except Exception:
             pass
     except Exception:
@@ -440,9 +456,10 @@ def _origin_build_graph(
             pass
 
     # Styling of plots handled via Python API above; keep LabTalk minimal.
-    # Finalize legend formatting and placement (top-left)
+    # Finalize legend formatting (auto placement handled by Origin)
     try:
-        # Ensure a visible graph title via Origin API and fallback text
+        # Ensure a visible graph title via multiple methods (some templates
+        # ignore one or the other). Also drop a couple of probe texts.
         try:
             lbl = gl.label('Title')
             try:
@@ -456,16 +473,13 @@ def _origin_build_graph(
                     pass
         except Exception:
             pass
+        # LabTalk graph title
         op.lt_exec(f'title -s "{esc}";')
-        # Fallback text near top center (layer percent coordinates)
-        op.lt_exec(f'text -s 50 93 "{esc}";')
-        # Legend: black text, colored swatches, positioned to avoid overlap
+        # Add test texts using two different positions to probe visibility
+        op.lt_exec('text -p 50 93 "titletest1";')
+        op.lt_exec('text -p 50 96 "titletest2";')
+        # Legend: black text, colored swatches; let Origin place it automatically
         op.lt_exec('legend -tt;')
-        # place near top-left with small inset
-        op.lt_exec('legend.x1 = layer.x.from + (layer.x.to-layer.x.from)*0.12;')
-        op.lt_exec('legend.x  = layer.x.from + (layer.x.to-layer.x.from)*0.12;')
-        op.lt_exec('legend.y1 = layer.y.to   - (layer.y.to-layer.y.from)*0.15;')
-        op.lt_exec('legend.y  = layer.y.to   - (layer.y.to-layer.y.from)*0.15;')
         op.lt_exec('legend.textcolor=0;')
         op.lt_exec('legend.update;')
     except Exception:
@@ -477,14 +491,22 @@ def _origin_build_graph(
         op.lt_exec('layer.y.showAxes=1;')
         op.lt_exec('layer.x.showLabels=1;')
         op.lt_exec('layer.y.showLabels=1;')
-        op.lt_exec(f"text -s 95 5 \"Delta={delta:.2f} us\";")
+        op.lt_exec(f"text -p 95 5 \"Delta={delta:.2f} us\";")
+        # Show unloading mean Y at 17.5 g if available
+        try:
+            if not mean_b.empty:
+                _idx = (mean_b["X"] - 17.5).abs().idxmin()
+                _y175 = float(mean_b.loc[_idx, "Y"])
+                op.lt_exec(f"text -p 95 10 \"Y(b@17.5g)={_y175:.2f} us\";")
+        except Exception:
+            pass
     except Exception:
         pass
 
     # Add a second, explicit Î” annotation in case the first try block was
     # ignored by the template. Placed in the same position as Matplotlib.
     try:
-        op.lt_exec(f"text -s 95 5 \"Delta={delta:.2f} us\";")
+        op.lt_exec(f"text -p 95 5 \"Delta={delta:.2f} us\";")
     except Exception:
         pass
 
