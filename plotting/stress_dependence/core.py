@@ -21,6 +21,9 @@ from matplotlib.typing import ColorType
 from ..common import maybe_handle_outliers
 from matplotlib.figure import Figure
 
+# Ensure a font with broad Unicode coverage so arrows and micro symbols render
+plt.rcParams["font.family"] = "DejaVu Sans"
+
 # Load default configuration
 _CFG = load_config().get("stress_dependence", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
@@ -194,13 +197,25 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         print(f"\nCounts for {var}, {comp} {title} {samp} {anneal}:")
         print(df.groupby(['dir','load']).size().unstack(fill_value=0))
 
-    fig, ax = plt.subplots(figsize=(9,5))
-    ax.scatter(df.loc[df.dir=='a','x'], df.loc[df.dir=='a','y'],
-               c=RAW_COLORS['a'], marker=RAW_MARKER,
-               s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw â†‘')
-    ax.scatter(df.loc[df.dir=='b','x'], df.loc[df.dir=='b','y'],
-               c=RAW_COLORS['b'], marker=RAW_MARKER,
-               s=RAW_MARKER_SIZE, alpha=RAW_ALPHA, label='raw â†“')
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.scatter(
+        df.loc[df.dir == 'a', 'x'],
+        df.loc[df.dir == 'a', 'y'],
+        c=RAW_COLORS['a'],
+        marker=RAW_MARKER,
+        s=RAW_MARKER_SIZE,
+        alpha=RAW_ALPHA,
+        label='raw \u2191',
+    )
+    ax.scatter(
+        df.loc[df.dir == 'b', 'x'],
+        df.loc[df.dir == 'b', 'y'],
+        c=RAW_COLORS['b'],
+        marker=RAW_MARKER,
+        s=RAW_MARKER_SIZE,
+        alpha=RAW_ALPHA,
+        label='raw \u2193',
+    )
 
     if PLOT_PROCESSED:
         desc = f"med{MED_WINDOW}+mwa{MA_WINDOW}"
@@ -208,41 +223,58 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
             sub = df[df.dir==d].sort_values('x').copy()
             sub['y_med'] = sub['y'].rolling(MED_WINDOW, center=True, min_periods=1).median()
             sub['y_proc'] = sub['y_med'].rolling(MA_WINDOW, center=True, min_periods=1).mean()
-            ax.scatter(sub['x'], sub['y_proc'],
-                       c=PROC_COLORS[d], marker=PROC_MARKER,
-                       s=PROC_MSIZE, alpha=PROC_ALPHA,
-                       label=f"{desc} {'â†‘' if d=='a' else 'â†“'}")
+            ax.scatter(
+                sub['x'],
+                sub['y_proc'],
+                c=PROC_COLORS[d],
+                marker=PROC_MARKER,
+                s=PROC_MSIZE,
+                alpha=PROC_ALPHA,
+                label=f"{desc} {'\u2191' if d == 'a' else '\u2193'}",
+            )
 
-    ax.plot(means.loc[means.dir=='a','load'], means.loc[means.dir=='a','y'],
-            MEAN_MARKER+'-', c=MEAN_COLORS['a'],
-            markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean â†‘')
-    ax.plot(means.loc[means.dir=='b','load'], means.loc[means.dir=='b','y'],
-            MEAN_MARKER+'-', c=MEAN_COLORS['b'],
-            markersize=MEAN_MSIZE, linewidth=MEAN_LW, label='mean â†“')
+    ax.plot(
+        means.loc[means.dir == 'a', 'load'],
+        means.loc[means.dir == 'a', 'y'],
+        MEAN_MARKER + '-',
+        c=MEAN_COLORS['a'],
+        markersize=MEAN_MSIZE,
+        linewidth=MEAN_LW,
+        label='mean \u2191',
+    )
+    ax.plot(
+        means.loc[means.dir == 'b', 'load'],
+        means.loc[means.dir == 'b', 'y'],
+        MEAN_MARKER + '-',
+        c=MEAN_COLORS['b'],
+        markersize=MEAN_MSIZE,
+        linewidth=MEAN_LW,
+        label='mean \u2193',
+    )
 
     maxl = df['load'].max()
     delta = means.loc[(means.dir=='a')&(means.load==maxl),'y'].iloc[0]
-    ax.text(0.95, 0.05, f"Î”={delta:.2f}Âµs",
-            transform=ax.transAxes, ha='right', va='bottom',
-            fontsize=12, bbox=dict(facecolor='white', alpha=0.6))
+    ax.text(
+        0.95,
+        0.05,
+        f"\u0394={delta:.2f} \u03BCs",
+        transform=ax.transAxes,
+        ha='right',
+        va='bottom',
+        fontsize=12,
+        bbox=dict(facecolor='white', alpha=0.6),
+    )
 
     ax.set_xticks(sorted(df['load'].unique()))
     ax.xaxis.set_major_formatter(mticker.FuncFormatter(lambda x,_: f"{x:g}"))
     ax.set_xlabel('Applied load (g)')
     ax.set_ylabel(LABELS[var])
-    ax.set_title(f"{comp} {title} {format_sample_end(samp)} {anneal} â€” {LABELS[var]}")
+    ax.set_title(
+        f"{comp} {title} {format_sample_end(samp)} {anneal} \u2014 {LABELS[var]}"
+    )
     ax.grid(True)
 
     legend = ax.legend(loc='best')
-    # Normalize legend texts to use arrows instead of direction letters
-    try:
-        texts = legend.get_texts()
-        repl = ['raw ?', 'raw ?', 'mean ?', 'mean ?']
-        for i, newt in enumerate(repl):
-            if i < len(texts):
-                texts[i].set_text(newt)
-    except Exception:
-        pass
     for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if isinstance(handle, Line2D):
             rawcol = handle.get_color()
@@ -314,7 +346,7 @@ def _origin_title(grp: pd.DataFrame, var: str) -> str:
         grp["sample_end"].iat[0],
         grp["anneal"].iat[0],
     )
-    return f"{comp} {title} {format_sample_end(samp)} {anneal} â€” {LABELS[var]}"
+    return f"{comp} {title} {format_sample_end(samp)} {anneal} \u2014 {LABELS[var]}"
 
 
 def _origin_build_graph(
@@ -385,8 +417,10 @@ def _origin_build_graph(
 
     try:
         # Configure plots using OriginPro Python API to avoid template quirks.
-        pra = p_raw_a; prb = p_raw_b; pma = p_mean_a; pmb = p_mean_b
-        # Let Origin assign colors automatically; avoid manual color forcing
+        pra = p_raw_a
+        prb = p_raw_b
+        pma = p_mean_a
+        pmb = p_mean_b
         # Symbol shapes: use circle for all for consistency and make them solid
         for p in (pra, prb, pma, pmb):
             try:
@@ -410,35 +444,22 @@ def _origin_build_graph(
             pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
         except Exception:
             pass
-        # Group plots by direction, then manually set colors so they are stable
+        # Group plots by direction so auto-colors pair correctly
         try:
             op.lt_exec('layer -s 1 3; layer -g;')  # group raw_a with mean_a
             op.lt_exec('layer -s 2 4; layer -g;')  # group raw_b with mean_b
         except Exception:
             pass
-        # Also set plot-level colors (line/symbol) so style panels show them
+        # Apply explicit colors after grouping to prevent black plots
         try:
-            pra.color = RAW_COLORS["a"]
-            prb.color = RAW_COLORS["b"]
-            pma.color = MEAN_COLORS["a"]
-            pmb.color = MEAN_COLORS["b"]
-        except Exception:
-            pass
-        # Set symbol fill and edge/line colors explicitly (prevents all-black)
-        try:
-            r, g, b = _hex_to_rgb(RAW_COLORS['a']); pra.set_cmd(f'-c rgb({r},{g},{b})'); pra.set_cmd(f'-cf rgb({r},{g},{b})')
-            r, g, b = _hex_to_rgb(RAW_COLORS['b']); prb.set_cmd(f'-c rgb({r},{g},{b})'); prb.set_cmd(f'-cf rgb({r},{g},{b})')
-            r, g, b = _hex_to_rgb(MEAN_COLORS['a']); pma.set_cmd(f'-c rgb({r},{g},{b})'); pma.set_cmd(f'-cf rgb({r},{g},{b})')
-            r, g, b = _hex_to_rgb(MEAN_COLORS['b']); pmb.set_cmd(f'-c rgb({r},{g},{b})'); pmb.set_cmd(f'-cf rgb({r},{g},{b})')
-            # Explicit per-plot color via LabTalk selection (extra safety)
-            r, g, b = _hex_to_rgb(RAW_COLORS['a'])
-            op.lt_exec('layer -s 1;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-            r, g, b = _hex_to_rgb(RAW_COLORS['b'])
-            op.lt_exec('layer -s 2;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-            r, g, b = _hex_to_rgb(MEAN_COLORS['a'])
-            op.lt_exec('layer -s 3;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-            r, g, b = _hex_to_rgb(MEAN_COLORS['b'])
-            op.lt_exec('layer -s 4;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
+            for idx, col in enumerate(
+                [RAW_COLORS['a'], RAW_COLORS['b'], MEAN_COLORS['a'], MEAN_COLORS['b']],
+                start=1,
+            ):
+                r, g, b = _hex_to_rgb(col)
+                op.lt_exec(
+                    f"layer -s {idx}; set %C -c rgb({r},{g},{b}); set %C -cf rgb({r},{g},{b}); set %C -cl rgb({r},{g},{b});"
+                )
         except Exception:
             pass
     except Exception:
@@ -483,10 +504,9 @@ def _origin_build_graph(
             pass
 
     # Styling of plots handled via Python API above; keep LabTalk minimal.
-    # Finalize legend formatting (auto placement handled by Origin)
     try:
         # Ensure a visible graph title via multiple methods (some templates
-        # ignore one or the other). Also drop a couple of probe texts.
+        # ignore one or the other).
         try:
             lbl = gl.label('Title')
             try:
@@ -502,15 +522,7 @@ def _origin_build_graph(
             pass
         # LabTalk graph title as a fallback if the template ignores the API
         op.lt_exec(f'title -s "{esc}";')
-        # Custom legend that keeps the sample name and color-matched entries
-        # for each plotted dataset. "\L(n)" expands to the long name set on the
-        # corresponding worksheet column.
-        op.lt_exec(
-            f'legend.text$ = "{esc}\n\l(1) \L(1)\n\l(2) \L(2)\n\l(3) \L(3)\n\l(4) \L(4)";'
-        )
-        op.lt_exec('legend.update;')
-        # Add sample line as an extra legend row if title remains hidden
-        # Try to display data labels for the last (mean ?) plot
+        # Try to display data labels for the last (mean) plot
         try:
             op.lt_exec('layer -s 4;')
             op.lt_exec('set %C -l 1;')
@@ -519,7 +531,7 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    # Ensure only bottom/left tick labels are shown and add readable Î” box.
+    # Ensure only bottom/left tick labels are shown and add readable Δ box.
     try:
         op.lt_exec('layer.x.showAxes=1;')
         op.lt_exec('layer.y.showAxes=1;')
@@ -537,7 +549,17 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    # Add a second, explicit Î” annotation in case the first try block was
+    # Final legend text with sample name and color-matched entries
+    try:
+        arrow_up = '\u2191'
+        arrow_down = '\u2193'
+        op.lt_exec(
+            f'legend.text$ = "{esc}\n\\l(1) raw {arrow_up}\n\\l(2) raw {arrow_down}\n\\l(3) mean {arrow_up}\n\\l(4) mean {arrow_down}";'
+        )
+    except Exception:
+        pass
+
+    # Add a second, explicit Δ annotation in case the first try block was
     # ignored by the template. Placed in the same position as Matplotlib.
     try:
         op.lt_exec(f"text -p 95 5 \"Delta={delta:.2f} us\";")
@@ -554,7 +576,9 @@ def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     t = grp["title"].iat[0]
     samp = grp["sample_end"].iat[0]
     anneal = grp["anneal"].iat[0]
-    title_to_use = f"{comp} {t} {format_sample_end(samp)} {anneal} — {LABELS[var]}"
+    title_to_use = (
+        f"{comp} {t} {format_sample_end(samp)} {anneal} \u2014 {LABELS[var]}"
+    )
 
     _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use, var, delta)
 
