@@ -76,13 +76,6 @@ LABELS = {
     "sum": "T1+T2 (\u03BCs)",
 }
 
-
-def _hex_to_rgb(color: str) -> tuple[int, int, int]:
-    """Convert a hex ``#RRGGBB`` color into an ``(r,g,b)`` tuple."""
-    c = color.lstrip('#')
-    return int(c[0:2], 16), int(c[2:4], 16), int(c[4:6], 16)
-
-
 class ProgressDialog:
     """Fallback progress indicator used when no GUI is provided."""
 
@@ -450,18 +443,6 @@ def _origin_build_graph(
             op.lt_exec('layer -s 2 4; layer -g;')  # group raw_b with mean_b
         except Exception:
             pass
-        # Apply explicit colors after grouping to prevent black plots
-        try:
-            for idx, col in enumerate(
-                [RAW_COLORS['a'], RAW_COLORS['b'], MEAN_COLORS['a'], MEAN_COLORS['b']],
-                start=1,
-            ):
-                r, g, b = _hex_to_rgb(col)
-                op.lt_exec(
-                    f"layer -s {idx}; set %C -c rgb({r},{g},{b}); set %C -cf rgb({r},{g},{b}); set %C -cl rgb({r},{g},{b});"
-                )
-        except Exception:
-            pass
     except Exception:
         pass
 
@@ -502,6 +483,15 @@ def _origin_build_graph(
             op.lt_exec(cmd)
         except Exception:
             pass
+
+    # Reapply explicit colors after LabTalk commands, which may reset them
+    try:
+        pra.color = RAW_COLORS['a']
+        prb.color = RAW_COLORS['b']
+        pma.color = MEAN_COLORS['a']
+        pmb.color = MEAN_COLORS['b']
+    except Exception:
+        pass
 
     # Styling of plots handled via Python API above; keep LabTalk minimal.
     try:
