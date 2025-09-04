@@ -426,6 +426,33 @@ def _origin_build_graph(
         prb.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
         pma.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
         pmb.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
+        # Explicit colors for both edges and fills
+        for _p, _col in (
+            (pra, RAW_COLORS["a"]),
+            (prb, RAW_COLORS["b"]),
+            (pma, MEAN_COLORS["a"]),
+            (pmb, MEAN_COLORS["b"]),
+        ):
+            for _attr in ("color", "edgecolor", "symbol_color", "fillcolor"):
+                try:
+                    setattr(_p, _attr, _col)
+                except Exception:
+                    pass
+        # Also apply colors via LabTalk to force filled symbol hues
+        def _lt_set(idx: int, col: str) -> None:
+            r = int(col[1:3], 16)
+            g = int(col[3:5], 16)
+            b = int(col[5:7], 16)
+            try:
+                op.lt_exec(
+                    f"layer -s {idx}; set %C -c rgb({r},{g},{b}); set %C -cf rgb({r},{g},{b});"
+                )
+            except Exception:
+                pass
+        _lt_set(1, RAW_COLORS["a"])
+        _lt_set(2, RAW_COLORS["b"])
+        _lt_set(3, MEAN_COLORS["a"])
+        _lt_set(4, MEAN_COLORS["b"])
         # Lines: raw without line, means with thicker line
         try:
             pra.set_cmd('-l 0')
@@ -486,10 +513,17 @@ def _origin_build_graph(
 
     # Reapply explicit colors after LabTalk commands, which may reset them
     try:
-        pra.color = RAW_COLORS['a']
-        prb.color = RAW_COLORS['b']
-        pma.color = MEAN_COLORS['a']
-        pmb.color = MEAN_COLORS['b']
+        for _p, _col in (
+            (pra, RAW_COLORS["a"]),
+            (prb, RAW_COLORS["b"]),
+            (pma, MEAN_COLORS["a"]),
+            (pmb, MEAN_COLORS["b"]),
+        ):
+            for _attr in ("color", "edgecolor", "symbol_color", "fillcolor"):
+                try:
+                    setattr(_p, _attr, _col)
+                except Exception:
+                    pass
     except Exception:
         pass
 
@@ -543,9 +577,14 @@ def _origin_build_graph(
     try:
         arrow_up = '\u2191'
         arrow_down = '\u2193'
-        op.lt_exec(
-            f'legend.text$ = "{esc}\n\\l(1) raw {arrow_up}\n\\l(2) raw {arrow_down}\n\\l(3) mean {arrow_up}\n\\l(4) mean {arrow_down}";'
-        )
+        legend_lines = [
+            esc,
+            f"\\l(1) \\g(1) raw {arrow_up}",
+            f"\\l(2) \\g(2) raw {arrow_down}",
+            f"\\l(3) \\g(3) mean {arrow_up}",
+            f"\\l(4) \\g(4) mean {arrow_down}",
+        ]
+        op.lt_exec(f'legend.text$ = "' + "\\n".join(legend_lines) + '";')
     except Exception:
         pass
 
