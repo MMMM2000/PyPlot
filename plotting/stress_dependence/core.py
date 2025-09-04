@@ -510,6 +510,26 @@ def _origin_build_graph(
         op.lt_exec('legend -tt;')
         op.lt_exec(f'legend.text$ = "{esc}";')
         op.lt_exec('legend.update;')
+        # Place colored text lines anchored to legend box (text-only legend)
+        try:
+            op.lt_exec('double _lx = legend.x1;')
+            op.lt_exec('double _ly = legend.y1;')
+            op.lt_exec('double _dx = (layer.x.to-layer.x.from)*0.02;')
+            op.lt_exec('double _dy = (layer.y.to-layer.y.from)*0.035;')
+            ra_r, ra_g, ra_b = _hex_to_rgb(RAW_COLORS["a"])
+            rb_r, rb_g, rb_b = _hex_to_rgb(RAW_COLORS["b"])
+            ma_r, ma_g, ma_b = _hex_to_rgb(MEAN_COLORS["a"])
+            mb_r, mb_g, mb_b = _hex_to_rgb(MEAN_COLORS["b"])
+            op.lt_exec('text -n l_raw_up    -xy (_lx+_dx) (_ly-1*_dy) "raw ↑";')
+            op.lt_exec(f'l_raw_up.color=rgb({ra_r},{ra_g},{ra_b});')
+            op.lt_exec('text -n l_raw_down  -xy (_lx+_dx) (_ly-2*_dy) "raw ↓";')
+            op.lt_exec(f'l_raw_down.color=rgb({rb_r},{rb_g},{rb_b});')
+            op.lt_exec('text -n l_mean_up   -xy (_lx+_dx) (_ly-3*_dy) "mean ↑";')
+            op.lt_exec(f'l_mean_up.color=rgb({ma_r},{ma_g},{ma_b});')
+            op.lt_exec('text -n l_mean_down -xy (_lx+_dx) (_ly-4*_dy) "mean ↓";')
+            op.lt_exec(f'l_mean_down.color=rgb({mb_r},{mb_g},{mb_b});')
+        except Exception:
+            pass
         # Place colored text lines near the legend area (percent coords)
         try:
             ra_r, ra_g, ra_b = _hex_to_rgb(RAW_COLORS['a'])
