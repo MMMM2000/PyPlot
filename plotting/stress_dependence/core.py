@@ -500,64 +500,15 @@ def _origin_build_graph(
                     pass
         except Exception:
             pass
-        # LabTalk graph title
+        # LabTalk graph title as a fallback if the template ignores the API
         op.lt_exec(f'title -s "{esc}";')
-        # Add test texts using two different positions to probe visibility
-        op.lt_exec('text -p 50 93 "titletest1";')
-        op.lt_exec('text -p 50 96 "titletest2";')
-        # Legend: text-only (no symbols). First line is the sample/title,
-        # then we add four colored text lines using the plot colors.
-        op.lt_exec('legend -tt;')
-        op.lt_exec(f'legend.text$ = "{esc}";')
+        # Custom legend that keeps the sample name and color-matched entries
+        # for each plotted dataset. "\L(n)" expands to the long name set on the
+        # corresponding worksheet column.
+        op.lt_exec(
+            f'legend.text$ = "{esc}\n\l(1) \L(1)\n\l(2) \L(2)\n\l(3) \L(3)\n\l(4) \L(4)";'
+        )
         op.lt_exec('legend.update;')
-        # Place colored text lines anchored to legend box (text-only legend)
-        try:
-            op.lt_exec('double _lx = legend.x1;')
-            op.lt_exec('double _ly = legend.y1;')
-            op.lt_exec('double _dx = (layer.x.to-layer.x.from)*0.02;')
-            op.lt_exec('double _dy = (layer.y.to-layer.y.from)*0.035;')
-            ra_r, ra_g, ra_b = _hex_to_rgb(RAW_COLORS["a"])
-            rb_r, rb_g, rb_b = _hex_to_rgb(RAW_COLORS["b"])
-            ma_r, ma_g, ma_b = _hex_to_rgb(MEAN_COLORS["a"])
-            mb_r, mb_g, mb_b = _hex_to_rgb(MEAN_COLORS["b"])
-            op.lt_exec('text -n l_raw_up    -xy (_lx+_dx) (_ly-1*_dy) "raw ↑";')
-            op.lt_exec(f'l_raw_up.color=rgb({ra_r},{ra_g},{ra_b});')
-            op.lt_exec('text -n l_raw_down  -xy (_lx+_dx) (_ly-2*_dy) "raw ↓";')
-            op.lt_exec(f'l_raw_down.color=rgb({rb_r},{rb_g},{rb_b});')
-            op.lt_exec('text -n l_mean_up   -xy (_lx+_dx) (_ly-3*_dy) "mean ↑";')
-            op.lt_exec(f'l_mean_up.color=rgb({ma_r},{ma_g},{ma_b});')
-            op.lt_exec('text -n l_mean_down -xy (_lx+_dx) (_ly-4*_dy) "mean ↓";')
-            op.lt_exec(f'l_mean_down.color=rgb({mb_r},{mb_g},{mb_b});')
-        except Exception:
-            pass
-        # Place colored text lines near the legend area (percent coords)
-        try:
-            ra_r, ra_g, ra_b = _hex_to_rgb(RAW_COLORS['a'])
-            rb_r, rb_g, rb_b = _hex_to_rgb(RAW_COLORS['b'])
-            ma_r, ma_g, ma_b = _hex_to_rgb(MEAN_COLORS['a'])
-            mb_r, mb_g, mb_b = _hex_to_rgb(MEAN_COLORS['b'])
-            op.lt_exec('text -n l_raw_up   -p 17 90 "raw ↑";')
-            op.lt_exec(f'l_raw_up.color=rgb({ra_r},{ra_g},{ra_b});')
-            op.lt_exec('text -n l_raw_down -p 17 87 "raw ↓";')
-            op.lt_exec(f'l_raw_down.color=rgb({rb_r},{rb_g},{rb_b});')
-            op.lt_exec('text -n l_mean_up  -p 17 84 "mean ↑";')
-            op.lt_exec(f'l_mean_up.color=rgb({ma_r},{ma_g},{ma_b});')
-            op.lt_exec('text -n l_mean_down -p 17 81 "mean ↓";')
-            op.lt_exec(f'l_mean_down.color=rgb({mb_r},{mb_g},{mb_b});')
-        except Exception:
-            pass
-        # Re-assert plot colors after legend adjustments (some templates reset)
-        try:
-            r, g, b = _hex_to_rgb(RAW_COLORS['a'])
-            op.lt_exec('layer -s 1;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-            r, g, b = _hex_to_rgb(RAW_COLORS['b'])
-            op.lt_exec('layer -s 2;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-            r, g, b = _hex_to_rgb(MEAN_COLORS['a'])
-            op.lt_exec('layer -s 3;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-            r, g, b = _hex_to_rgb(MEAN_COLORS['b'])
-            op.lt_exec('layer -s 4;'); op.lt_exec(f'set %C -c rgb({r},{g},{b});'); op.lt_exec(f'set %C -cf rgb({r},{g},{b});')
-        except Exception:
-            pass
         # Add sample line as an extra legend row if title remains hidden
         # Try to display data labels for the last (mean ?) plot
         try:
