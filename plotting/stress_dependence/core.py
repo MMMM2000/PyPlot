@@ -557,24 +557,6 @@ def _origin_build_graph(
     except Exception:
         pass
 
-    # Final legend text with sample name and color-matched entries
-    try:
-        arrow_up = '\u2191'
-        arrow_down = '\u2193'
-        legend_title = title.split(" \u2014 ")[0].replace('"', "'")
-        legend_lines = [
-            legend_title,
-            f"\\l(1) raw {arrow_up}",
-            f"\\l(2) raw {arrow_down}",
-            f"\\l(3) mean {arrow_up}",
-            f"\\l(4) mean {arrow_down}",
-        ]
-        legend_text = '%(CRLF)'.join(legend_lines)
-        op.lt_exec('legend.update=0;')
-        op.lt_exec(f'legend.text$ = "{legend_text}";')
-    except Exception:
-        pass
-
     # Add a second, explicit Δ annotation in case the first try block was
     # ignored by the template. Placed in the same position as Matplotlib.
     try:
@@ -606,6 +588,26 @@ def _origin_build_graph(
         _lt_set(2, RAW_COLORS["b"])
         _lt_set(3, MEAN_COLORS["a"])
         _lt_set(4, MEAN_COLORS["b"])
+    except Exception:
+        pass
+
+    # Final legend text with sample name and color-matched entries. Legend must
+    # be updated after reapplying colors because the LabTalk `layer -s` calls in
+    # `_lt_set` can reset legend entries.
+    try:
+        arrow_up = '\u2191'
+        arrow_down = '\u2193'
+        legend_title = title.split(" \u2014 ")[0].replace('"', "'")
+        legend_lines = [
+            legend_title,
+            f"\\l(1) raw {arrow_up}",
+            f"\\l(2) raw {arrow_down}",
+            f"\\l(3) mean {arrow_up}",
+            f"\\l(4) mean {arrow_down}",
+        ]
+        legend_text = '%(CRLF)'.join(legend_lines)
+        op.lt_exec('legend.update=0;')
+        op.lt_exec(f'legend.text$ = "{legend_text}";')
     except Exception:
         pass
 
