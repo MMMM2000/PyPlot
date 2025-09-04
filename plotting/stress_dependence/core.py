@@ -394,105 +394,35 @@ def _origin_build_graph(
     p_raw_b = gl.add_plot(w_raw_b, coly=1, colx=0, type='s')
     p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
     p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
+    # Ensure graph window is active for subsequent LabTalk commands
+    gp.activate()
 
-    # Force clean legend labels (ASCII only) in case template/workbook overrides
+    # Basic plot appearance: circle symbols with solid fill and desired sizes
     try:
-        for _w, _lbl in (
-            (w_raw_a, 'raw up'), (w_raw_b, 'raw down'), (w_mean_a, 'mean up'), (w_mean_b, 'mean down')
+        for plot_obj, size in (
+            (p_raw_a, ORIGIN_RAW_SYMBOL_SIZE),
+            (p_raw_b, ORIGIN_RAW_SYMBOL_SIZE),
+            (p_mean_a, ORIGIN_MEAN_SYMBOL_SIZE),
+            (p_mean_b, ORIGIN_MEAN_SYMBOL_SIZE),
         ):
-            try:
-                _w.activate()
-                op.lt_exec(f'wks.col2.lname$ = "{_lbl}";')
-            except Exception:
-                pass
+            plot_obj.symbol_kind = 2  # circle
+            plot_obj.symbol_interior = 1  # solid fill
+            plot_obj.symbol_size = size
     except Exception:
         pass
 
+    # Hide lines for raw data and thicken mean curves
     try:
-        # Configure plots using OriginPro Python API to avoid template quirks.
-        pra = p_raw_a
-        prb = p_raw_b
-        pma = p_mean_a
-        pmb = p_mean_b
-        # Symbol shapes: use circle for all for consistency and make them solid
-        for p in (pra, prb, pma, pmb):
-            try:
-                p.symbol_kind = 2  # circle
-                p.symbol_interior = 1  # solid fill
-            except Exception:
-                pass
-        # Sizes
-        pra.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
-        prb.symbol_size = ORIGIN_RAW_SYMBOL_SIZE
-        pma.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
-        pmb.symbol_size = ORIGIN_MEAN_SYMBOL_SIZE
-        # Explicit colors for edges, fills and lines
-        for _p, _col in (
-            (pra, RAW_COLORS["a"]),
-            (prb, RAW_COLORS["b"]),
-            (pma, MEAN_COLORS["a"]),
-            (pmb, MEAN_COLORS["b"]),
-        ):
-            for _attr in (
-                "color",
-                "edgecolor",
-                "symbol_color",
-                "fillcolor",
-                "line_color",
-            ):
-                try:
-                    setattr(_p, _attr, _col)
-                except Exception:
-                    pass
-        # Also apply colors via LabTalk to force filled symbol hues
-        def _lt_set(idx: int, col: str) -> None:
-            r = int(col[1:3], 16)
-            g = int(col[3:5], 16)
-            b = int(col[5:7], 16)
-            try:
-                op.lt_exec(f"layer -s {idx};")
-                op.lt_exec("set %C -k 1;")
-                op.lt_exec(f"set %C -c rgb({r},{g},{b});")
-                op.lt_exec(f"set %C -cf rgb({r},{g},{b});")
-            except Exception:
-                pass
-        _lt_set(1, RAW_COLORS["a"])
-        _lt_set(2, RAW_COLORS["b"])
-        _lt_set(3, MEAN_COLORS["a"])
-        _lt_set(4, MEAN_COLORS["b"])
-        # Lines: raw without line, means with thicker line
-        try:
-            pra.set_cmd('-l 0')
-            prb.set_cmd('-l 0')
-        except Exception:
-            pass
-        try:
-            pma.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-            pmb.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
-        except Exception:
-            pass
+        p_raw_a.set_cmd('-l 0')
+        p_raw_b.set_cmd('-l 0')
+        p_mean_a.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
+        p_mean_b.set_cmd(f'-w {ORIGIN_MEAN_LINE_WIDTH}')
     except Exception:
         pass
 
-    try:
-        gl.rescale()
-        gp.activate()
-        # Expand X limits so jittered 'a' raw data are not clipped
-        try:
-            xmin = float(min(raw_a["X"].min(), raw_b["X"].min(),
-                             mean_a["X"].min(), mean_b["X"].min()))
-            xmax = float(max(raw_a["X"].max(), raw_b["X"].max(),
-                             mean_a["X"].max(), mean_b["X"].max()))
-            pad = 0.6
-            import originpro as op
-            op.lt_exec(f"layer.x.from = {xmin - pad};")
-            op.lt_exec(f"layer.x.to = {xmax + pad};")
-        except Exception:
-            pass
-    except Exception:
-        pass
+    # Set axes labels and grid lines before applying colors/legend
     esc = title.replace('"', "'")
-    commands = [
+    for cmd in (
         'page.antialias=1;',
         'layer -aa 1;',
         'lab -xb "Applied load (g)";',
@@ -504,106 +434,42 @@ def _origin_build_graph(
         'layer.x.gridMajor=1;',
         'layer.y.gridMajor=1;',
         f'title -s "{esc}";',
-        # Keep legend text black for readability (Matplotlib-like)
-    ]
-    for cmd in commands:
+    ):
         try:
             op.lt_exec(cmd)
         except Exception:
             pass
-    # Styling of plots handled via Python API above; keep LabTalk minimal.
-    try:
-        # Ensure a visible graph title via multiple methods (some templates
-        # ignore one or the other).
+
+    # Apply explicit RGB colors via LabTalk for each dataset
+    def _lt_color(idx: int, col: str) -> None:
+        r = int(col[1:3], 16)
+        g = int(col[3:5], 16)
+        b = int(col[5:7], 16)
         try:
-            lbl = gl.label('Title')
-            try:
-                lbl.text = title
-            except Exception:
-                pass
-            for attr in ('visible', 'show'):
-                try:
-                    setattr(lbl, attr, True)
-                except Exception:
-                    pass
+            op.lt_exec(f"layer -s {idx};")
+            op.lt_exec("symbol -kf 1;")
+            op.lt_exec("set %C -k 1;")
+            op.lt_exec(f"set %C -c rgb({r},{g},{b});")
+            op.lt_exec(f"set %C -cf rgb({r},{g},{b});")
         except Exception:
             pass
-        # LabTalk graph title as a fallback if the template ignores the API
-        op.lt_exec(f'title -s "{esc}";')
-        # Try to display data labels for the last (mean) plot
-        try:
-            op.lt_exec('layer -s 4;')
-            op.lt_exec('set %C -l 1;')
-        except Exception:
-            pass
-    except Exception:
-        pass
 
-    # Ensure only bottom/left tick labels are shown and add readable Δ box.
-    try:
-        op.lt_exec('layer.x.showAxes=1;')
-        op.lt_exec('layer.y.showAxes=1;')
-        op.lt_exec('layer.x.showLabels=1;')
-        op.lt_exec('layer.y.showLabels=1;')
-        op.lt_exec(f"text -p 95 5 \"Delta={delta:.2f} us\";")
-        # Show unloading mean Y at 17.5 g if available
-        try:
-            if not mean_b.empty:
-                _idx = (mean_b["X"] - 17.5).abs().idxmin()
-                _y175 = float(mean_b.loc[_idx, "Y"])
-                op.lt_exec(f"text -p 95 10 \"Y(b@17.5g)={_y175:.2f} us\";")
-        except Exception:
-            pass
-    except Exception:
-        pass
+    _lt_color(1, RAW_COLORS['a'])
+    _lt_color(2, RAW_COLORS['b'])
+    _lt_color(3, MEAN_COLORS['a'])
+    _lt_color(4, MEAN_COLORS['b'])
 
-    # Add a second, explicit Δ annotation in case the first try block was
-    # ignored by the template. Placed in the same position as Matplotlib.
-    try:
-        op.lt_exec(f"text -p 95 5 \"Delta={delta:.2f} us\";")
-    except Exception:
-        pass
-
-    # Reapply explicit colors after all LabTalk operations in case any
-    # of them reset dataset styling back to black.
-    try:
-        for _p, _col in (
-            (pra, RAW_COLORS["a"]),
-            (prb, RAW_COLORS["b"]),
-            (pma, MEAN_COLORS["a"]),
-            (pmb, MEAN_COLORS["b"]),
-        ):
-            for _attr in (
-                "color",
-                "edgecolor",
-                "symbol_color",
-                "fillcolor",
-                "line_color",
-            ):
-                try:
-                    setattr(_p, _attr, _col)
-                except Exception:
-                    pass
-        _lt_set(1, RAW_COLORS["a"])
-        _lt_set(2, RAW_COLORS["b"])
-        _lt_set(3, MEAN_COLORS["a"])
-        _lt_set(4, MEAN_COLORS["b"])
-    except Exception:
-        pass
-
-    # Final legend text with sample name and color-matched entries. Legend must
-    # be updated after reapplying colors because the LabTalk `layer -s` calls in
-    # `_lt_set` can reset legend entries.
+    # Final legend text with sample name and color-matched entries
     try:
         arrow_up = '\u2191'
         arrow_down = '\u2193'
         legend_title = title.split(" \u2014 ")[0].replace('"', "'")
         legend_lines = [
             legend_title,
-            f"\\l(1) raw {arrow_up}",
-            f"\\l(2) raw {arrow_down}",
-            f"\\l(3) mean {arrow_up}",
-            f"\\l(4) mean {arrow_down}",
+            f"\\l(1)\\c(1) raw {arrow_up}",
+            f"\\l(2)\\c(2) raw {arrow_down}",
+            f"\\l(3)\\c(3) mean {arrow_up}",
+            f"\\l(4)\\c(4) mean {arrow_down}",
         ]
         legend_text = '%(CRLF)'.join(legend_lines)
         op.lt_exec('legend.update=0;')
