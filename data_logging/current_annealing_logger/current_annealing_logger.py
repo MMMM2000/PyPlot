@@ -16,8 +16,11 @@ zmeny od V3:
 """
 
 import sys
+import os
+from pathlib import Path
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtWidgets import QFileDialog
+from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
 from plotting.utils import apply_system_theme
@@ -34,6 +37,9 @@ fig_size[1] = 10 #10
 plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = "Palatino Linotype"
 plt.rcParams["font.size"] = 14
+
+DEFAULT_LOG_DIR = str(Path.home() / "python_anneal_logs")
+
 
 class MainWindow(QtWidgets.QMainWindow):
 
@@ -53,9 +59,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         except Exception:
             pass
-        # Provide a sensible default log file path
-        if not self.ui.lineEdit_log_subor.text().strip():
-            self.ui.lineEdit_log_subor.setText("data/anneal_log.txt")
+        # Provide sensible defaults for separate directory and file name
+        if hasattr(self.ui, 'lineEdit_log_dir'):
+            if not self.ui.lineEdit_log_dir.text().strip():
+                self.ui.lineEdit_log_dir.setText(DEFAULT_LOG_DIR)
+        if hasattr(self.ui, 'lineEdit_log_file'):
+            if not self.ui.lineEdit_log_file.text().strip():
+                self.ui.lineEdit_log_file.setText("anneal_log")
         self.odpoved_portu = ''
         self.prikaz_portu = ''
         self.pripojene = False
@@ -89,7 +99,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.napatie = True
         
         self.percento_pokles_R = 10
-        self.doba_staly_prud = 10
+        self.doba_staly_prud = 1
         self.hodnota_staly_prud = 10
         self.modus_operandi = 0 #0 - VCp, 1- manual, 2 - automat
         self.proces_on = False
@@ -106,6 +116,14 @@ class MainWindow(QtWidgets.QMainWindow):
         
         print("Číslo portu: COM" + str(self.cislo_portu))
         print("Baudrate: " + str(self.baudrate))
+
+        # Populate modern port list if available
+        self.port_name = ""
+        if hasattr(self.ui, 'comboBox_port'):
+            try:
+                self.populate_ports()
+            except Exception:
+                pass
         
         #prepojenie signalov a slotov
         self.ui.pushButton_pripojPort.clicked.connect(self.handle_pushButton_pripojPort_clicked)
@@ -124,6 +142,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.pushButton_spusti_proces.clicked.connect(self.handle_pushButton_spusti_proces_clicked)
         self.ui.lineEdit_log_subor.textChanged.connect(self.handle_lineEdit_log_subor_text_changed)
         self.ui.pushButton_select_filename.clicked.connect(self.handle_select_filename_en)
+        # Also hook legacy browse button to new unified handler
+        if hasattr(self.ui, 'pushButton_select_filename'):
+            self.ui.pushButton_select_filename.clicked.connect(self.handle_browse_full_file)
+        # New UI pieces: port dropdown and separate log directory/name
+        if hasattr(self.ui, 'comboBox_port'):
+            self.ui.comboBox_port.currentIndexChanged.connect(self.handle_comboBox_port_changed)
+        if hasattr(self.ui, 'pushButton_refresh_ports'):
+            self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
+        if hasattr(self.ui, 'pushButton_browse_dir'):
+            self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
+        if hasattr(self.ui, 'lineEdit_log_dir'):
+            self.ui.lineEdit_log_dir.textChanged.connect(self.sync_full_log_path)
+        if hasattr(self.ui, 'lineEdit_log_file'):
+            self.ui.lineEdit_log_file.textChanged.connect(self.sync_full_log_path)
         
         #nio a tu defaultne enable disable na prvky
         self.ui.frame_nastavenia_procesu.setEnabled(False)
@@ -157,7 +189,7 @@ class MainWindow(QtWidgets.QMainWindow):
         ]
         
         self.f_out = None
-        self.f_name = self.ui.lineEdit_log_subor.text()
+        self.f_name = self.build_log_path() if hasattr(self, 'build_log_path') else self.ui.lineEdit_log_subor.text()
         
         
         #premenne na kreslenie grafu z dat
@@ -184,7 +216,19 @@ class MainWindow(QtWidgets.QMainWindow):
         if(self.pripojene == False):
             print('Pripájam port')
 
-            self.ser_mcu.setPortName('COM' + str(self.cislo_portu))
+            # Use selected port name from dropdown if available
+            port_name = ''
+            if hasattr(self, 'port_name') and self.port_name:
+                port_name = self.port_name
+            else:
+                try:
+                    port_name = 'COM' + str(self.cislo_portu)
+                except Exception:
+                    port_name = ''
+            if not port_name:
+                QtWidgets.QMessageBox.warning(self, "No port", "Please select a serial port")
+                return
+            self.ser_mcu.setPortName(port_name)
             self.ser_mcu.setBaudRate(self.baudrate)
             self.ser_mcu.setFlowControl(QtSerialPort.QSerialPort.FlowControl.NoFlowControl)
             self.ser_mcu.setDataBits(QtSerialPort.QSerialPort.DataBits.Data8)
@@ -229,6 +273,19 @@ class MainWindow(QtWidgets.QMainWindow):
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
         print("Baudrate: " + str(self.baudrate))
 
+    def handle_comboBox_port_changed(self):
+        """Update selected port name from the dropdown."""
+        try:
+            data = self.ui.comboBox_port.currentData()
+            if data:
+                self.port_name = str(data)
+            else:
+                # fallback to the text
+                text = self.ui.comboBox_port.currentText()
+                self.port_name = text.split(" - ")[0]
+        except Exception:
+            pass
+
     def handle_ser_mcu_readyRead(self):
         if(self.ser_mcu.canReadLine()):
             #print("Prisla lajna")
@@ -243,6 +300,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.current_resistance = self.current_voltage/self.current_current_read
                     #na tomto mieste zapiseme data do suboru
                     if(not self.f_out):
+                        try:
+                            from os import makedirs
+                            from os.path import dirname
+                            makedirs(dirname(self.f_name), exist_ok=True)
+                        except Exception:
+                            pass
                         self.f_out = open(self.f_name, "a")
                     if(self.f_out):
                         self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
@@ -336,6 +399,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 print("Spusteny raw VCP mod")
                 
             elif(self.modus_operandi == 1):
+                # Build full log file path and ensure directory exists
+                try:
+                    self.f_name = self.build_log_path()
+                    os.makedirs(os.path.dirname(self.f_name), exist_ok=True)
+                except Exception:
+                    pass
                 self.f_out = open(self.f_name, "a")
                 self.current_increment = 0.001
                 self.current_current_set = 0.001
@@ -354,6 +423,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 print("Spusteny mod manualneho zihania")
                 
             elif(self.modus_operandi == 2):
+                # Build full log file path and ensure directory exists
+                try:
+                    self.f_name = self.build_log_path()
+                    os.makedirs(os.path.dirname(self.f_name), exist_ok=True)
+                except Exception:
+                    pass
                 self.f_out = open(self.f_name, "a")
                 self.current_increment = 0.001
                 self.current_current_set = 0.001
@@ -564,7 +639,11 @@ class MainWindow(QtWidgets.QMainWindow):
             QtWidgets.QApplication.processEvents()
         
     def handle_lineEdit_log_subor_text_changed(self):
-        self.f_name = self.ui.lineEdit_log_subor.text()
+        # Sync f_name from separate directory + file name controls
+        try:
+            self.f_name = self.build_log_path()
+        except Exception:
+            self.f_name = self.ui.lineEdit_log_subor.text()
         print("Zaznam subor:", self.f_name)
     
     def init_graph_window(self):
@@ -577,7 +656,12 @@ class MainWindow(QtWidgets.QMainWindow):
         """
     
         self.fig = plt.figure()
-        self.fig.suptitle(self.f_name.rsplit("/", 1)[-1])
+        try:
+            import os as _os
+            _title = _os.path.basename(self.f_name)
+        except Exception:
+            _title = self.f_name
+        self.fig.suptitle(_title)
     
         self.ax1 = self.fig.add_subplot(211)
         self.ax1.set_xlabel("Current [mA]")
@@ -611,23 +695,93 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.f_name += ".txt"
             
             self.ui.lineEdit_log_subor.setText(self.f_name)
-            
 
-    
+
     def handle_select_filename_en(self):
-        self.f_name, _ = QFileDialog.getSaveFileName(
+        # Choose full path via Save dialog and update new fields when available
+        start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, 'lineEdit_log_dir') else DEFAULT_LOG_DIR
+        fpath, _ = QFileDialog.getSaveFileName(
             self,
             "Save file",
-            "data",
+            start_dir,
             "Text files (*.txt);;All files (*)"
         )
 
-        if self.f_name:
-            if not self.f_name.endswith(".txt"):
-                self.f_name += ".txt"
-            self.ui.lineEdit_log_subor.setText(self.f_name)
+        if fpath:
+            if not fpath.endswith(".txt"):
+                fpath += ".txt"
+            d = os.path.dirname(fpath)
+            b = os.path.splitext(os.path.basename(fpath))[0]
+            if hasattr(self.ui, 'lineEdit_log_dir'):
+                self.ui.lineEdit_log_dir.setText(d)
+            if hasattr(self.ui, 'lineEdit_log_file'):
+                self.ui.lineEdit_log_file.setText(b)
+            self.ui.lineEdit_log_subor.setText(fpath)
 
-    
+    def handle_browse_log_dir(self):
+        start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, 'lineEdit_log_dir') else DEFAULT_LOG_DIR
+        new_dir = QFileDialog.getExistingDirectory(self, "Select log directory", start_dir)
+        if new_dir and hasattr(self.ui, 'lineEdit_log_dir'):
+            self.ui.lineEdit_log_dir.setText(new_dir)
+
+    def handle_browse_full_file(self):
+        # Unified handler to select full path then split into directory + base name
+        start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, 'lineEdit_log_dir') else DEFAULT_LOG_DIR
+        fpath, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save file",
+            start_dir,
+            "Text files (*.txt);;All files (*)"
+        )
+        if fpath:
+            if not fpath.endswith(".txt"):
+                fpath += ".txt"
+            d = os.path.dirname(fpath)
+            b = os.path.splitext(os.path.basename(fpath))[0]
+            if hasattr(self.ui, 'lineEdit_log_dir'):
+                self.ui.lineEdit_log_dir.setText(d)
+            if hasattr(self.ui, 'lineEdit_log_file'):
+                self.ui.lineEdit_log_file.setText(b)
+            self.ui.lineEdit_log_subor.setText(fpath)
+
+    def sync_full_log_path(self):
+        # Update hidden full-path edit and internal f_name
+        full = self.build_log_path()
+        if hasattr(self.ui, 'lineEdit_log_subor'):
+            self.ui.lineEdit_log_subor.setText(full)
+        self.f_name = full
+
+    def build_log_path(self) -> str:
+        try:
+            d = self.ui.lineEdit_log_dir.text().strip()
+            b = self.ui.lineEdit_log_file.text().strip()
+            if not b:
+                b = "anneal_log"
+            if d:
+                os.makedirs(d, exist_ok=True)
+                return os.path.join(d, f"{b}.txt")
+        except Exception:
+            pass
+        # Fallback to legacy full-path field if present
+        try:
+            t = self.ui.lineEdit_log_subor.text().strip()
+            if t:
+                return t
+        except Exception:
+            pass
+        return os.path.join(DEFAULT_LOG_DIR, "anneal_log.txt")
+
+    def populate_ports(self):
+        if hasattr(self.ui, 'comboBox_port'):
+            self.ui.comboBox_port.clear()
+            for info in QSerialPortInfo.availablePorts():
+                label = info.portName()
+                if info.description():
+                    label += f" - {info.description()}"
+                self.ui.comboBox_port.addItem(label, userData=info.portName())
+            if self.ui.comboBox_port.count() > 0:
+                self.port_name = self.ui.comboBox_port.currentData()
+
     def closeEvent(self, event):
         if self.ser_mcu.isOpen():
             self.handle_pushButton_pripojPort_clicked()

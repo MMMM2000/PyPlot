@@ -36,13 +36,21 @@ class Ui_MainWindow(object):
         gb_layout = QtWidgets.QHBoxLayout(gb_serial)
         self.groupBox_zakladne_nastavenia_portu = gb_serial
 
-        # Port number spin
+        # Port selection (modernized): list available ports with names
+        self.label_port = QtWidgets.QLabel("Port:")
+        gb_layout.addWidget(self.label_port)
+        self.comboBox_port = QtWidgets.QComboBox()
+        gb_layout.addWidget(self.comboBox_port)
+        self.pushButton_refresh_ports = QtWidgets.QPushButton("Refresh")
+        gb_layout.addWidget(self.pushButton_refresh_ports)
+
+        # Legacy numeric COM spin kept for compatibility, but hidden
         self.label_cislo_portu = QtWidgets.QLabel("COM:")
-        gb_layout.addWidget(self.label_cislo_portu)
+        self.label_cislo_portu.hide()
         self.spinBox_cislo_portu = QtWidgets.QSpinBox()
         self.spinBox_cislo_portu.setRange(1, 127)
         self.spinBox_cislo_portu.setValue(3)
-        gb_layout.addWidget(self.spinBox_cislo_portu)
+        self.spinBox_cislo_portu.hide()
 
         # Baudrate combo
         self.label_baudrate = QtWidgets.QLabel("Baud:")
@@ -105,14 +113,29 @@ class Ui_MainWindow(object):
         self.groupBox_nastavenia_procesu = gb_proc
         grid = QtWidgets.QGridLayout(gb_proc)
 
-        # Log file selection
+        # Log file location (separate directory and file name)
+        self.label_log_dir = QtWidgets.QLabel("Directory:")
+        self.lineEdit_log_dir = QtWidgets.QLineEdit()
+        self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
+        grid.addWidget(self.label_log_dir, 0, 0)
+        grid.addWidget(self.lineEdit_log_dir, 0, 1)
+        grid.addWidget(self.pushButton_browse_dir, 0, 2)
+
+        self.label_log_file = QtWidgets.QLabel("File name:")
+        self.lineEdit_log_file = QtWidgets.QLineEdit()
+        self.label_extension = QtWidgets.QLabel(".txt")
+        grid.addWidget(self.label_log_file, 1, 0)
+        grid.addWidget(self.lineEdit_log_file, 1, 1)
+        grid.addWidget(self.label_extension, 1, 2)
+
+        # Legacy single-path widgets kept (hidden) for compatibility with code
         self.label_logfile = QtWidgets.QLabel("Log file:")
+        self.label_logfile.hide()
         self.lineEdit_log_subor = QtWidgets.QLineEdit()
         self.lineEdit_log_subor.setPlaceholderText("data/sample.txt")
+        self.lineEdit_log_subor.hide()
         self.pushButton_select_filename = QtWidgets.QPushButton("...")
-        grid.addWidget(self.label_logfile, 0, 0)
-        grid.addWidget(self.lineEdit_log_subor, 0, 1)
-        grid.addWidget(self.pushButton_select_filename, 0, 2)
+        self.pushButton_select_filename.hide()
 
         # Hold current [mA]
         self.label_hodnota_staly_prud = QtWidgets.QLabel("Hold current [mA]:")
@@ -126,7 +149,8 @@ class Ui_MainWindow(object):
         self.label_logfile_doba_staleho_prudu = QtWidgets.QLabel("Hold time [s]:")
         self.spinBox_doba_staly_prud = QtWidgets.QSpinBox()
         self.spinBox_doba_staly_prud.setRange(1, 36000)
-        self.spinBox_doba_staly_prud.setValue(10)
+        # Default hold time 1 second
+        self.spinBox_doba_staly_prud.setValue(1)
         grid.addWidget(self.label_logfile_doba_staleho_prudu, 2, 0)
         grid.addWidget(self.spinBox_doba_staly_prud, 2, 1)
 
