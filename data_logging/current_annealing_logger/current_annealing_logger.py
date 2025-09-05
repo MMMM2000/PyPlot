@@ -182,6 +182,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.checkBox_reverse.toggled.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'spinBox_loops'):
             self.ui.spinBox_loops.valueChanged.connect(self.update_planned_time_label)
+        if hasattr(self.ui, 'checkBox_infinite_loops'):
+            self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
+        if hasattr(self.ui, 'spinBox_step_mA'):
+            self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_file_name_from_preset)
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_planned_time_label)
         self.ui.spinBox_doba_staly_prud.valueChanged.connect(self.update_planned_time_label)
@@ -254,9 +258,27 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.progressBar_process.setValue(0)
         if hasattr(self.ui, 'label_time_remaining'):
             self.ui.label_time_remaining.setText("Time remaining: N/A")
-        
-        
-        
+        # Current step defaults
+        try:
+            self.current_step_mA = self.ui.spinBox_step_mA.value()
+        except Exception:
+            self.current_step_mA = 1
+        self.current_step_A = self.current_step_mA / 1000.0
+
+        # Show initial placeholder plot on the right
+        try:
+            self.init_graph_window()
+            if getattr(self, 'ax1', None) is not None:
+                self.ax1.text(0.5, 0.5, 'No data yet', transform=self.ax1.transAxes,
+                              ha='center', va='center', alpha=0.5)
+            if getattr(self, 'ax2', None) is not None:
+                self.ax2.text(0.5, 0.5, 'No data yet', transform=self.ax2.transAxes,
+                              ha='center', va='center', alpha=0.5)
+            if getattr(self, 'canvas', None) is not None:
+                self.canvas.draw()
+        except Exception:
+            pass
+
     # utilities
     def dbg(self, *args):
         if getattr(self, 'DEBUG', False):
