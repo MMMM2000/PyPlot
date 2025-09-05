@@ -200,6 +200,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.update_planned_time_label()
         except Exception:
             pass
+        # Apply initial mode selection
+        try:
+            if self.ui.radioButton_automatizovane_zihanie.isChecked():
+                self.handle_radioButton_automatizovane_zihanie_clicked()
+            elif self.ui.radioButton_manualne_zihanie.isChecked():
+                self.handle_radioButton_manualne_zihanie_clicked()
+            else:
+                self.handle_radioButton_raw_VCP_clicked()
+        except Exception:
+            pass
         
         #nio a tu defaultne enable disable na prvky
         self.ui.frame_nastavenia_procesu.setEnabled(False)

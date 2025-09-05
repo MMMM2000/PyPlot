@@ -29,7 +29,11 @@ class Ui_MainWindow(object):
         main_layout = QtWidgets.QVBoxLayout(left_panel)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
-        root.addWidget(left_panel, stretch=0)
+        left_scroll = QtWidgets.QScrollArea(self.centralWidget)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        left_scroll.setWidget(left_panel)
+        root.addWidget(left_scroll, stretch=0)
 
         # Right plot container
         self.plot_container = QtWidgets.QFrame(self.centralWidget)
@@ -102,9 +106,10 @@ class Ui_MainWindow(object):
         self.groupBox_modus_operandi = gb_mode
         mode_layout = QtWidgets.QHBoxLayout(gb_mode)
         self.radioButton_raw_VCP = QtWidgets.QRadioButton("Raw VCP")
-        self.radioButton_raw_VCP.setChecked(True)
         self.radioButton_manualne_zihanie = QtWidgets.QRadioButton("Manual annealing")
         self.radioButton_automatizovane_zihanie = QtWidgets.QRadioButton("Automatic annealing")
+        # Default to automatic annealing
+        self.radioButton_automatizovane_zihanie.setChecked(True)
         mode_layout.addWidget(self.radioButton_raw_VCP)
         mode_layout.addWidget(self.radioButton_manualne_zihanie)
         mode_layout.addWidget(self.radioButton_automatizovane_zihanie)
@@ -289,16 +294,28 @@ class Ui_MainWindow(object):
         frame_layout_proc.addWidget(gb_proc)
 
         # ------------------------------------------------------------------
-        # Commands and responses (frame_command_and_response)
+        # Commands and responses (collapsible)
         # ------------------------------------------------------------------
         self.frame_command_and_response = QtWidgets.QFrame(self.centralWidget)
-        self.frame_command_and_response.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.frame_command_and_response.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        self.frame_command_and_response.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         main_layout.addWidget(self.frame_command_and_response)
 
-        gb_cmd = QtWidgets.QGroupBox("Commands and responses", self.frame_command_and_response)
-        self.groupBox_prikazy_a_odpovede = gb_cmd
-        vcmd = QtWidgets.QVBoxLayout(gb_cmd)
+        frame_layout_cmd = QtWidgets.QVBoxLayout(self.frame_command_and_response)
+        frame_layout_cmd.setContentsMargins(0, 0, 0, 0)
+
+        # Toggle header
+        header = QtWidgets.QToolButton()
+        header.setText("Commands and responses")
+        header.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        header.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        header.setCheckable(True)
+        header.setChecked(False)
+        frame_layout_cmd.addWidget(header)
+
+        # Content container
+        self._cmd_container = QtWidgets.QWidget()
+        vcmd = QtWidgets.QVBoxLayout(self._cmd_container)
+        vcmd.setContentsMargins(8, 4, 8, 8)
 
         hl = QtWidgets.QHBoxLayout()
         self.lineEdit_prikaz_portu = QtWidgets.QLineEdit()
@@ -314,9 +331,14 @@ class Ui_MainWindow(object):
         self.label_odpoved_portu.setWordWrap(True)
         vcmd.addWidget(self.label_odpoved_portu)
 
-        frame_layout_cmd = QtWidgets.QVBoxLayout(self.frame_command_and_response)
-        frame_layout_cmd.setContentsMargins(0, 0, 0, 0)
-        frame_layout_cmd.addWidget(gb_cmd)
+        frame_layout_cmd.addWidget(self._cmd_container)
+        self._cmd_container.setVisible(False)
+
+        def _toggle_cmds(checked: bool) -> None:
+            self._cmd_container.setVisible(checked)
+            header.setArrowType(QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
+
+        header.toggled.connect(_toggle_cmds)
 
         # Status bar
         self.statusBar = QtWidgets.QStatusBar(MainWindow)
