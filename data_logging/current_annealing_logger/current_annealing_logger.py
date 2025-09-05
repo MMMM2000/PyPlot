@@ -382,9 +382,18 @@ class MainWindow(QtWidgets.QMainWindow):
             # print(self.odpoved_portu)
             if((self.modus_operandi > 0) and (self.proces_on == True)):
                 if(self.napatie == True):
-                    self.current_voltage = float(self.odpoved_portu.strip())
+                    try:
+                        self.current_voltage = float(self.odpoved_portu.strip())
+                    except ValueError:
+                        # Ignore non-numeric responses (e.g., from config commands)
+                        self.zamok.unlock()
+                        return
                 else:
-                    self.current_current_read = float(self.odpoved_portu.strip())
+                    try:
+                        self.current_current_read = float(self.odpoved_portu.strip())
+                    except ValueError:
+                        self.zamok.unlock()
+                        return
                     try:
                         if abs(self.current_current_read) < 1e-12:
                             raise ZeroDivisionError
@@ -961,8 +970,9 @@ class MainWindow(QtWidgets.QMainWindow):
             layout = container.layout()
             if layout is None:
                 layout = QtWidgets.QVBoxLayout(container)
-                layout.setContentsMargins(4, 4, 4, 4)
-                layout.setSpacing(4)
+                # Zero margins to eliminate bright edge lines and maximize canvas area
+                layout.setContentsMargins(0, 0, 0, 0)
+                layout.setSpacing(0)
             while layout.count():
                 item = layout.takeAt(0)
                 w = item.widget()
@@ -986,7 +996,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 base_rgb = (1, 1, 1)
                 text_rgb = (0, 0, 0)
 
-            self.fig = Figure(facecolor=win_rgb)
+            self.fig = Figure(facecolor=win_rgb, constrained_layout=True)
             self.canvas = FigureCanvas(self.fig) if FigureCanvas is not None else None
             if NavigationToolbar is not None and self.canvas is not None:
                 self.toolbar = NavigationToolbar(self.canvas, container)
@@ -999,7 +1009,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 _title = _os.path.basename(self.f_name)
             except Exception:
                 _title = self.f_name
-            self.fig.suptitle(_title, color=text_rgb)
+            self.fig.suptitle(_title, color=text_rgb, y=0.98)
 
             self.ax1 = self.fig.add_subplot(211)
             self.ax1.set_facecolor(base_rgb)
@@ -1027,11 +1037,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax2.yaxis.label.set_color(text_rgb)
             self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
             self.ax2.add_line(self.line2)
+            # Let Matplotlib compute proper spacing; avoid text overlap
             if self.canvas is not None:
                 self.canvas.draw()
         else:
             # Fallback to separate window
-            self.fig = plt.figure()
+            self.fig = plt.figure(constrained_layout=True)
             self.ax1 = self.fig.add_subplot(211)
             self.ax1.set_xlabel("Current [mA]")
             self.ax1.set_ylabel("Resistance [Ohm]")

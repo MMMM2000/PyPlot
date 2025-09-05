@@ -125,8 +125,10 @@ def run(port: str, baudrate: int, data: Iterable[Tuple[float, float, float]]) ->
                     ser.write(b"0\n")
                     break
             else:
-                # Most configuration commands do not respond
-                ser.write(b"OK\n")
+                # Most configuration commands on the real device do not respond.
+                # Avoid sending spurious text like 'OK' which can confuse loggers
+                # expecting a numeric response next.
+                pass
 
 def thread_main(port: str, baudrate: int, sample_file: Path) -> None:
     data = load_samples(sample_file)

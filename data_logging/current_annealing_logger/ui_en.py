@@ -26,19 +26,35 @@ class Ui_MainWindow(object):
         root.setSpacing(8)
 
         left_panel = QtWidgets.QWidget(self.centralWidget)
+        # Allow the left column to shrink to viewport width without forcing
+        # a horizontal scrollbar in the scroll area.
+        left_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         main_layout = QtWidgets.QVBoxLayout(left_panel)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
         left_scroll = QtWidgets.QScrollArea(self.centralWidget)
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        # Avoid horizontal scrollbar; let content wrap/stack vertically
+        left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setSizeAdjustPolicy(
+            QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
+        )
         left_scroll.setWidget(left_panel)
         root.addWidget(left_scroll, stretch=0)
 
         # Right plot container
         self.plot_container = QtWidgets.QFrame(self.centralWidget)
-        self.plot_container.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        # Remove frame to avoid bright border lines in dark themes
+        self.plot_container.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         self.plot_container.setMinimumWidth(480)
+        self.plot_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         root.addWidget(self.plot_container, stretch=1)
 
         # ------------------------------------------------------------------
@@ -256,9 +272,19 @@ class Ui_MainWindow(object):
         lv = QtWidgets.QGridLayout(self.groupBox_aktualne_hodnoty)
         self.lcdNumber_aktualny_prud_mA = QtWidgets.QLCDNumber()
         self.lcdNumber_aktualny_prud_mA.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
+        self.lcdNumber_aktualny_prud_mA.setDigitCount(6)
+        self.lcdNumber_aktualny_prud_mA.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.label_mA = QtWidgets.QLabel("mA")
         self.lcdNumber_aktualny_odpor = QtWidgets.QLCDNumber()
         self.lcdNumber_aktualny_odpor.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
+        self.lcdNumber_aktualny_odpor.setDigitCount(6)
+        self.lcdNumber_aktualny_odpor.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.label_Ohm = QtWidgets.QLabel("Ohm")
         lv.addWidget(self.lcdNumber_aktualny_prud_mA, 0, 0)
         lv.addWidget(self.label_mA, 0, 1)
