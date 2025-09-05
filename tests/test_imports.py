@@ -7,3 +7,5 @@ def test_packages_importable():
     assert importlib.import_module('data_logging.data_logger')
     assert importlib.import_module('plotting.temperature_dependence')
     assert importlib.import_module('plotting.stress_sensitivity')
+    assert importlib.import_module('emulators')
+    assert importlib.import_module('emulators.current_annealing_emulator')

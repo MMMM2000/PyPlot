@@ -13,6 +13,7 @@ dependencies = [
     "plotly==6.2.0",
     "tqdm==4.67.1",
     "pyinstaller==6.15.0",
+    "pyserial==3.5",
 ]
 requires-python = ">=3.8"
 
@@ -23,7 +24,7 @@ test = ["pytest==8.2.2"]
 launcher = "launcher:main"
 
 [tool.setuptools.packages.find]
-include = ["data_logging", "plotting"]
+include = ["data_logging", "plotting", "emulators"]
 
 [tool.setuptools.package-data]
 plotting = ["default_config.json"]

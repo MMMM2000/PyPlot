@@ -7,6 +7,7 @@ from PyQt6 import QtWidgets
 
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
+from emulators import current_annealing_emulator
 from plotting import common
 from plotting.hsw_distribution import distribution_gui
 from plotting.hsw_load_compare import load_compare_gui
@@ -37,6 +38,10 @@ LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
     "Current Annealing Logger": current_annealing_logger.main,
 }
 
+EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
+    "Current Annealing Emulator": current_annealing_emulator.main,
+}
+
 
 class MasterLauncher(QtWidgets.QDialog):
     def __init__(self) -> None:
@@ -51,8 +56,10 @@ class MasterLauncher(QtWidgets.QDialog):
         self.tabs = QtWidgets.QTabWidget()
         self.log_tab = QtWidgets.QWidget()
         self.plot_tab = QtWidgets.QWidget()
+        self.emu_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.log_tab, "Loggers")
         self.tabs.addTab(self.plot_tab, "Plotting")
+        self.tabs.addTab(self.emu_tab, "Emulators")
 
         self.log_list = QtWidgets.QListWidget()
         for name in LOGGERS:
@@ -78,6 +85,13 @@ class MasterLauncher(QtWidgets.QDialog):
         plot_layout.addWidget(self.outlier_cb)
         plot_layout.addWidget(self.auto_outlier_cb)
 
+        self.emu_list = QtWidgets.QListWidget()
+        for name in EMULATORS:
+            self.emu_list.addItem(name)
+        self.emu_list.setCurrentRow(0)
+        emu_layout = QtWidgets.QVBoxLayout(self.emu_tab)
+        emu_layout.addWidget(self.emu_list)
+
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
 
@@ -93,7 +107,7 @@ class MasterLauncher(QtWidgets.QDialog):
             func = LOGGERS[item.text()]
             common.CHECK_OUTLIERS = False
             common.AUTO_REMOVE_OUTLIERS = False
-        else:
+        elif self.tabs.currentWidget() is self.plot_tab:
             item = self.plot_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select a plotting script")
@@ -105,6 +119,14 @@ class MasterLauncher(QtWidgets.QDialog):
             else:
                 common.CHECK_OUTLIERS = self.outlier_cb.isChecked()
                 common.AUTO_REMOVE_OUTLIERS = self.auto_outlier_cb.isChecked()
+        else:
+            item = self.emu_list.currentItem()
+            if item is None:
+                QtWidgets.QMessageBox.warning(self, "No selection", "Please select an emulator")
+                return
+            func = EMULATORS[item.text()]
+            common.CHECK_OUTLIERS = False
+            common.AUTO_REMOVE_OUTLIERS = False
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
