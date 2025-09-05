@@ -184,6 +184,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_file_name_from_preset)
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_planned_time_label)
         self.ui.spinBox_doba_staly_prud.valueChanged.connect(self.update_planned_time_label)
+        if hasattr(self.ui, 'checkBox_infinite_loops'):
+            self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
+        if hasattr(self.ui, 'spinBox_step_mA'):
+            self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
 
         # Initialize planned estimate and file name once
         try:
@@ -412,7 +416,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.proces_on:
             secs = self.compute_planned_seconds()
             if secs is None:
-                label.setText("Time remaining: N/A")
+                label.setText("Time remaining: ∞")
             else:
                 label.setText(self._format_secs("Time remaining", secs))
             return
@@ -450,11 +454,16 @@ class MainWindow(QtWidgets.QMainWindow):
             hold_s = int(self.ui.spinBox_doba_staly_prud.value())
             loops = int(self.ui.spinBox_loops.value()) if hasattr(self.ui, 'spinBox_loops') else 1
             reverse = bool(self.ui.checkBox_reverse.isChecked()) if hasattr(self.ui, 'checkBox_reverse') else False
+            infinite = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
+            step_mA = int(self.ui.spinBox_step_mA.value()) if hasattr(self.ui, 'spinBox_step_mA') else 1
         except Exception:
             return None
-        up = max(0, max_mA - 1)  # from 1 mA to max
-        down = up if reverse else 0
-        per_loop = up + hold_s + down
+        if infinite:
+            return None
+        # steps up from 1 mA to max in increments of step_mA
+        up_steps = max(0, math.ceil(max(0, max_mA - 1) / max(1, step_mA)))
+        down_steps = up_steps if reverse else 0
+        per_loop = up_steps + hold_s + down_steps
         return per_loop * max(1, loops)
 
     def update_planned_time_label(self):
@@ -485,11 +494,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 max_mA = 0
             parts = [p for p in [comp_s, wire_s, sample_s, f"{max_mA}mA"] if p]
             base = " ".join(parts) if parts else "anneal_log"
+            # Show only preset fields
+            for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample'):
+                if hasattr(self.ui, name):
+                    getattr(self.ui, name).setVisible(True)
+            if hasattr(self.ui, 'label_custom_name'):
+                self.ui.label_custom_name.setVisible(False)
+            if hasattr(self.ui, 'lineEdit_custom_name'):
+                self.ui.lineEdit_custom_name.setVisible(False)
         else:
             custom = getattr(self.ui, 'lineEdit_custom_name', None)
             base = custom.text().strip() if custom is not None and custom.text().strip() else 'anneal_log'
+            # Show only custom name field
+            for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample'):
+                if hasattr(self.ui, name):
+                    getattr(self.ui, name).setVisible(False)
+            if hasattr(self.ui, 'label_custom_name'):
+                self.ui.label_custom_name.setVisible(True)
+            if hasattr(self.ui, 'lineEdit_custom_name'):
+                self.ui.lineEdit_custom_name.setVisible(True)
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.setText(base)
+
+    def handle_step_changed(self):
+        try:
+            self.current_step_mA = int(self.ui.spinBox_step_mA.value())
+        except Exception:
+            self.current_step_mA = 1
+        self.current_step_A = self.current_step_mA/1000.0
+        self.update_planned_time_label()
 
     def handle_pushButton_posli_prikaz_portu_clicked(self):
         self.prikaz_portu = self.ui.lineEdit_prikaz_portu.text() + "\n"
@@ -544,7 +577,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_start_stop_drzania_prudu.setText("Stop prúdu teraz!")
         else:
             self.timer_prud.stop()
-            self.current_increment = -0.001
+            self.current_increment = -self.current_step_A
             self.ciara_color="b"
             self.prud_timer_on = False
             self.ui.pushButton_start_stop_drzania_prudu.setText("Držať prúd teraz!")
@@ -580,7 +613,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.progressBar_process.setValue(0)
                 if hasattr(self.ui, 'label_time_remaining'):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
-                self.current_increment = 0.001
+                self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -602,7 +635,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.proces_on = False
                     self.ui.pushButton_spusti_proces.setText("Start annealing process")
                     return
-                self.current_increment = 0.001
+                self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -610,13 +643,18 @@ class MainWindow(QtWidgets.QMainWindow):
                 # reverse + loop configuration
                 self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
                 self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
+                self.infinite_loops = bool(self.ui.checkBox_infinite_loops.isChecked()) if hasattr(self.ui, 'checkBox_infinite_loops') else False
                 self.loop_idx = 0
                 # progress plan
-                up_steps = max(0, int(self.ui.spinBox_hodnota_staly_prud.value()) - 1)
+                step_mA = self.current_step_mA if hasattr(self, 'current_step_mA') else 1
+                up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_hodnota_staly_prud.value()) - 1) / max(1, step_mA)))
                 hold_steps = int(self.ui.spinBox_doba_staly_prud.value())
                 down_steps = up_steps if self.reverse_enabled else 0
                 per_loop = up_steps + hold_steps + down_steps
-                self.total_steps = max(0, per_loop * int(self.loop_target or 1))
+                if self.infinite_loops:
+                    self.total_steps = 0
+                else:
+                    self.total_steps = max(0, per_loop * int(self.loop_target or 1))
                 self.step_idx = 0
                 if hasattr(self.ui, 'progressBar_process'):
                     if self.total_steps:
@@ -796,7 +834,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.timer_prud.stop()
                 self.prud_timer_on = False
                 if getattr(self, 'reverse_enabled', False):
-                    self.current_increment = -0.001
+                    self.current_increment = -self.current_step_A
                     self.ciara_color = "b"
                 else:
                     self.handle_pushButton_spusti_proces_clicked()
@@ -804,11 +842,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prikaz_portu = self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
             # completed descending to zero? manage loops
-            if getattr(self, 'reverse_enabled', False) and (self.current_current_set < 0.001):
+            if getattr(self, 'reverse_enabled', False) and (self.current_current_set < self.current_step_A):
                 self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
-                if self.loop_idx < int(getattr(self, 'loop_target', 1)):
+                if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
                     # prepare next loop
-                    self.current_increment = 0.001
+                    self.current_increment = self.current_step_A
                     self.current_current_set = 0.001
                     self.ciara_color = "r"
                     self.direction_ascending = True

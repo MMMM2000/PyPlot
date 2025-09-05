@@ -170,9 +170,20 @@ class Ui_MainWindow(object):
         grid.addWidget(self.spinBox_doba_staly_prud, 3, 1)
 
         # Hold/Stop button and elapsed time
+        # Hold button + Step control in one row to save space
+        hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        # Align with Hold current row
-        grid.addWidget(self.pushButton_start_stop_drzania_prudu, 2, 2)
+        hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
+        hold_and_step.addSpacing(8)
+        self.label_step = QtWidgets.QLabel("Step [mA]:")
+        self.spinBox_step_mA = QtWidgets.QSpinBox()
+        self.spinBox_step_mA.setRange(1, 10000)
+        self.spinBox_step_mA.setValue(1)
+        self.spinBox_step_mA.setMaximumWidth(90)
+        hold_and_step.addWidget(self.label_step)
+        hold_and_step.addWidget(self.spinBox_step_mA)
+        hold_and_step.addStretch(1)
+        grid.addLayout(hold_and_step, 2, 2)
 
         self.label_logfile_uplynulo = QtWidgets.QLabel("Elapsed:")
         self.lcdNumber_uplynute_sekundy = QtWidgets.QLCDNumber()
@@ -205,20 +216,27 @@ class Ui_MainWindow(object):
         name_grid.addWidget(self.lineEdit_sample, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = QtWidgets.QLineEdit("")
-        name_grid.addWidget(QtWidgets.QLabel("Custom name:"), 4, 0)
+        self.label_custom_name = QtWidgets.QLabel("Custom name:")
+        name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
+        # Hidden by default; shown only when "Custom" preset is selected
+        self.label_custom_name.hide()
+        self.lineEdit_custom_name.hide()
         grid.addWidget(gb_name, 4, 0, 1, 3)
 
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
         self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
         self.spinBox_loops = QtWidgets.QSpinBox()
-        self.spinBox_loops.setRange(1, 1000)
+        self.spinBox_loops.setRange(1, 100000)
         self.spinBox_loops.setValue(1)
+        self.checkBox_infinite_loops = QtWidgets.QCheckBox("∞")
+        self.checkBox_infinite_loops.setToolTip("Repeat indefinitely")
         rev.addWidget(self.checkBox_reverse)
         rev.addSpacing(12)
         rev.addWidget(QtWidgets.QLabel("Loops:"))
         rev.addWidget(self.spinBox_loops)
+        rev.addWidget(self.checkBox_infinite_loops)
         rev.addStretch(1)
         grid.addLayout(rev, 5, 0, 1, 3)
 
