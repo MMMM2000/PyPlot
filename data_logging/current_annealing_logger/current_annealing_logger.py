@@ -1,18 +1,10 @@
 # -*- coding: utf-8 -*-
-"""
-Paliho program/skript na zihanie s HMP4030, kde je aj raw komunikacia na seriovy port
+"""Current Annealing Logger for HMP4030.
 
-zmeny od V3:
-    
-- doplnena do grafu extrakcia mena suboru z cesty k suboru
-- uzatvaranie suboru po priadani kazdej vzorky
-- system kreslenia prehodeny na modifikaciu dat objektu jedneho plotu v jednom grafe 
-    namiesto pridavania objektov plot-u do grafickeho okna a spolahnutia sa na vykon NB/PC
-- do GUI doplnena aktualna hodnota prudu v mA a odporu v Ohm
-- program po ukonceni sa vrati do 1 V nastavenia
-- doplnene automaticke zihanie s vypinanim do nuly namiesto postupneho chladnutia
-
-
+Modern PyQt6 application that logs voltage/current from an HMP4030 power
+source during current annealing. Includes automatic and manual modes,
+live plotting, file naming presets, port discovery, and robust handling
+of contact loss and device timeouts.
 """
 
 import sys
@@ -31,6 +23,15 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from matplotlib.figure import Figure
+try:
+    from matplotlib.backends.backend_qt5agg import (
+        FigureCanvasQTAgg as FigureCanvas,
+        NavigationToolbar2QT as NavigationToolbar,
+    )
+except Exception:
+    FigureCanvas = None
+    NavigationToolbar = None
 
 
 fig_size = plt.rcParams["figure.figsize"]
@@ -183,6 +184,13 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_file_name_from_preset)
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_planned_time_label)
         self.ui.spinBox_doba_staly_prud.valueChanged.connect(self.update_planned_time_label)
+
+        # Initialize planned estimate and file name once
+        try:
+            self.update_file_name_from_preset()
+            self.update_planned_time_label()
+        except Exception:
+            pass
         
         #nio a tu defaultne enable disable na prvky
         self.ui.frame_nastavenia_procesu.setEnabled(False)
@@ -340,7 +348,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.current_voltage = float(self.odpoved_portu.strip())
                 else:
                     self.current_current_read = float(self.odpoved_portu.strip())
-                    self.current_resistance = self.current_voltage/self.current_current_read
+                    try:
+                        if abs(self.current_current_read) < 1e-12:
+                            raise ZeroDivisionError
+                        self.current_resistance = self.current_voltage/self.current_current_read
+                    except ZeroDivisionError:
+                        if not hasattr(self, '_contact_lost') or not self._contact_lost:
+                            self._contact_lost = True
+                            QtWidgets.QMessageBox.warning(
+                                self,
+                                "Contact lost",
+                                "Measured current is zero. The wire likely burned through. Stopping the process.",
+                            )
+                            if self.proces_on:
+                                self.handle_pushButton_spusti_proces_clicked()
+                        self.zamok.unlock()
+                        return
                     #na tomto mieste zapiseme data do suboru
                     if(not self.f_out):
                         try:
@@ -541,7 +564,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.command_number = 0
             self.vzorka_N = 0
             # print("Proces bezi")
-            self.ui.pushButton_spusti_proces.setText("Zastav proces")
+            self.ui.pushButton_spusti_proces.setText("Stop process")
             if(self.modus_operandi == 0):
                 # print("Spusteny raw VCP mod")
                 pass
@@ -550,7 +573,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Prepare output file with overwrite prompt
                 if not self.prepare_output_file():
                     self.proces_on = False
-                    self.ui.pushButton_spusti_proces.setText("Spusti proces")
+                    self.ui.pushButton_spusti_proces.setText("Start annealing process")
                     return
                 if hasattr(self.ui, 'progressBar_process'):
                     self.ui.progressBar_process.setMaximum(0)
@@ -577,7 +600,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Prepare output file with overwrite prompt
                 if not self.prepare_output_file():
                     self.proces_on = False
-                    self.ui.pushButton_spusti_proces.setText("Spusti proces")
+                    self.ui.pushButton_spusti_proces.setText("Start annealing process")
                     return
                 self.current_increment = 0.001
                 self.current_current_set = 0.001
@@ -626,7 +649,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.pushButton_start_stop_drzania_prudu.setText("Držať prúd teraz!")
             self.send_safe_end_commands()
             # print("Proces zastaveny")
-            self.ui.pushButton_spusti_proces.setText("Spusti proces")
+            self.ui.pushButton_spusti_proces.setText("Start annealing process")
             self.ui.groupBox_nastavenia_procesu.setEnabled(True)
             self.ui.frame_modus_operandi.setEnabled(True)
         
@@ -861,31 +884,77 @@ class MainWindow(QtWidgets.QMainWindow):
         self.n_counter = 0
         """
     
-        self.fig = plt.figure()
-        try:
-            import os as _os
-            _title = _os.path.basename(self.f_name)
-        except Exception:
-            _title = self.f_name
-        self.fig.suptitle(_title)
-    
-        self.ax1 = self.fig.add_subplot(211)
-        self.ax1.set_xlabel("Current [mA]")
-        self.ax1.set_ylabel("Resistance [Ohm]")
-        self.ax1.grid(True)
-        
-        self.line1 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-        self.ax1.add_line(self.line1)
-    
-        self.ax2 = self.fig.add_subplot(212)
-        self.ax2.set_xlabel("N [-]")
-        self.ax2.set_ylabel("Resistance [Ohm]")
-        self.ax2.grid(True)
-        self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-        self.ax2.add_line(self.line2)
-        
-        plt.ion()
-        plt.show()
+        # Create an embedded Matplotlib figure on the right panel
+        if hasattr(self.ui, 'plot_container'):
+            container = self.ui.plot_container
+            layout = container.layout()
+            if layout is None:
+                layout = QtWidgets.QVBoxLayout(container)
+                layout.setContentsMargins(4, 4, 4, 4)
+                layout.setSpacing(4)
+            while layout.count():
+                item = layout.takeAt(0)
+                w = item.widget()
+                if w is not None:
+                    w.deleteLater()
+
+            try:
+                scheme = QtWidgets.QApplication.instance().styleHints().colorScheme()
+                if scheme == QtCore.Qt.ColorScheme.Dark:
+                    matplotlib.style.use('dark_background')
+                else:
+                    matplotlib.style.use('default')
+            except Exception:
+                pass
+
+            self.fig = Figure()
+            self.canvas = FigureCanvas(self.fig) if FigureCanvas is not None else None
+            if NavigationToolbar is not None and self.canvas is not None:
+                self.toolbar = NavigationToolbar(self.canvas, container)
+                layout.addWidget(self.toolbar)
+            if self.canvas is not None:
+                layout.addWidget(self.canvas, stretch=1)
+
+            try:
+                import os as _os
+                _title = _os.path.basename(self.f_name)
+            except Exception:
+                _title = self.f_name
+            self.fig.suptitle(_title)
+
+            self.ax1 = self.fig.add_subplot(211)
+            self.ax1.set_xlabel("Current [mA]")
+            self.ax1.set_ylabel("Resistance [Ohm]")
+            self.ax1.grid(True)
+
+            self.line1 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+            self.ax1.add_line(self.line1)
+
+            self.ax2 = self.fig.add_subplot(212)
+            self.ax2.set_xlabel("N [-]")
+            self.ax2.set_ylabel("Resistance [Ohm]")
+            self.ax2.grid(True)
+            self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+            self.ax2.add_line(self.line2)
+            if self.canvas is not None:
+                self.canvas.draw()
+        else:
+            # Fallback to separate window
+            self.fig = plt.figure()
+            self.ax1 = self.fig.add_subplot(211)
+            self.ax1.set_xlabel("Current [mA]")
+            self.ax1.set_ylabel("Resistance [Ohm]")
+            self.ax1.grid(True)
+            self.line1 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+            self.ax1.add_line(self.line1)
+            self.ax2 = self.fig.add_subplot(212)
+            self.ax2.set_xlabel("N [-]")
+            self.ax2.set_ylabel("Resistance [Ohm]")
+            self.ax2.grid(True)
+            self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+            self.ax2.add_line(self.line2)
+            plt.ion()
+            plt.show()
         
         
     def handle_pushButton_select_filename_clicked(self):
@@ -1053,7 +1122,7 @@ def main() -> QtWidgets.QWidget:
     apply_system_theme(app)
 
     window = MainWindow()
-    window.show()
+    window.showMaximized()
     WINDOWS.append(window)
 
     if owns_app:

@@ -20,9 +20,22 @@ class Ui_MainWindow(object):
         self.centralWidget = QtWidgets.QWidget(MainWindow)
         MainWindow.setCentralWidget(self.centralWidget)
 
-        main_layout = QtWidgets.QVBoxLayout(self.centralWidget)
-        main_layout.setContentsMargins(16, 16, 16, 16)
+        # Root layout: settings on the left, plots on the right
+        root = QtWidgets.QHBoxLayout(self.centralWidget)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(8)
+
+        left_panel = QtWidgets.QWidget(self.centralWidget)
+        main_layout = QtWidgets.QVBoxLayout(left_panel)
+        main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
+        root.addWidget(left_panel, stretch=0)
+
+        # Right plot container
+        self.plot_container = QtWidgets.QFrame(self.centralWidget)
+        self.plot_container.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.plot_container.setMinimumWidth(480)
+        root.addWidget(self.plot_container, stretch=1)
 
         # ------------------------------------------------------------------
         # Serial basics (frame_zakladne_nastavenia_portu)
@@ -183,7 +196,7 @@ class Ui_MainWindow(object):
         # Fields for the "Current annealing" preset
         self.lineEdit_composition = QtWidgets.QLineEdit("Ni51Fe26Ga21")
         self.lineEdit_microwire = QtWidgets.QLineEdit("1_2")
-        self.lineEdit_sample = QtWidgets.QLineEdit("s0")
+        self.lineEdit_sample = QtWidgets.QLineEdit("s1")
         name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
         name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
