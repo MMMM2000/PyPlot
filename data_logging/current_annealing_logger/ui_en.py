@@ -138,12 +138,13 @@ class Ui_MainWindow(object):
         self.pushButton_select_filename.hide()
 
         # Hold current [mA]
-        self.label_hodnota_staly_prud = QtWidgets.QLabel("Hold current [mA]:")
+        self.label_hodnota_staly_prud = QtWidgets.QLabel("Max current [mA]:")
         self.spinBox_hodnota_staly_prud = QtWidgets.QSpinBox()
         self.spinBox_hodnota_staly_prud.setRange(1, 10_000)
         self.spinBox_hodnota_staly_prud.setValue(10)
-        grid.addWidget(self.label_hodnota_staly_prud, 1, 0)
-        grid.addWidget(self.spinBox_hodnota_staly_prud, 1, 1)
+        # Move one row down to avoid overlap with File name
+        grid.addWidget(self.label_hodnota_staly_prud, 2, 0)
+        grid.addWidget(self.spinBox_hodnota_staly_prud, 2, 1)
 
         # Hold time [s]
         self.label_logfile_doba_staleho_prudu = QtWidgets.QLabel("Hold time [s]:")
@@ -151,12 +152,14 @@ class Ui_MainWindow(object):
         self.spinBox_doba_staly_prud.setRange(1, 36000)
         # Default hold time 1 second
         self.spinBox_doba_staly_prud.setValue(1)
-        grid.addWidget(self.label_logfile_doba_staleho_prudu, 2, 0)
-        grid.addWidget(self.spinBox_doba_staly_prud, 2, 1)
+        # Shift down by one row
+        grid.addWidget(self.label_logfile_doba_staleho_prudu, 3, 0)
+        grid.addWidget(self.spinBox_doba_staly_prud, 3, 1)
 
         # Hold/Stop button and elapsed time
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        grid.addWidget(self.pushButton_start_stop_drzania_prudu, 1, 2)
+        # Align with Hold current row
+        grid.addWidget(self.pushButton_start_stop_drzania_prudu, 2, 2)
 
         self.label_logfile_uplynulo = QtWidgets.QLabel("Elapsed:")
         self.lcdNumber_uplynute_sekundy = QtWidgets.QLCDNumber()
@@ -167,7 +170,50 @@ class Ui_MainWindow(object):
         h.addWidget(self.lcdNumber_uplynute_sekundy)
         h.addWidget(self.label_logfile_s)
         h.addStretch(1)
-        grid.addLayout(h, 2, 2)
+        # Align with Hold time row
+        grid.addLayout(h, 3, 2)
+
+        # Name builder (file name preset)
+        gb_name = QtWidgets.QGroupBox("File name preset")
+        name_grid = QtWidgets.QGridLayout(gb_name)
+        self.comboBox_name_preset = QtWidgets.QComboBox()
+        self.comboBox_name_preset.addItems(["Current annealing", "Custom"])
+        name_grid.addWidget(QtWidgets.QLabel("Preset:"), 0, 0)
+        name_grid.addWidget(self.comboBox_name_preset, 0, 1)
+        # Fields for the "Current annealing" preset
+        self.lineEdit_composition = QtWidgets.QLineEdit("Ni51Fe26Ga21")
+        self.lineEdit_microwire = QtWidgets.QLineEdit("1_2")
+        self.lineEdit_sample = QtWidgets.QLineEdit("s0")
+        name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
+        name_grid.addWidget(self.lineEdit_composition, 1, 1)
+        name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
+        name_grid.addWidget(self.lineEdit_microwire, 2, 1)
+        name_grid.addWidget(QtWidgets.QLabel("Sample:"), 3, 0)
+        name_grid.addWidget(self.lineEdit_sample, 3, 1)
+        # Field for the "Custom" preset
+        self.lineEdit_custom_name = QtWidgets.QLineEdit("")
+        name_grid.addWidget(QtWidgets.QLabel("Custom name:"), 4, 0)
+        name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
+        grid.addWidget(gb_name, 4, 0, 1, 3)
+
+        # Reverse sweep and loops controls
+        rev = QtWidgets.QHBoxLayout()
+        self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
+        self.spinBox_loops = QtWidgets.QSpinBox()
+        self.spinBox_loops.setRange(1, 1000)
+        self.spinBox_loops.setValue(1)
+        rev.addWidget(self.checkBox_reverse)
+        rev.addSpacing(12)
+        rev.addWidget(QtWidgets.QLabel("Loops:"))
+        rev.addWidget(self.spinBox_loops)
+        rev.addStretch(1)
+        grid.addLayout(rev, 5, 0, 1, 3)
+
+        # Process progress and time remaining
+        self.progressBar_process = QtWidgets.QProgressBar()
+        grid.addWidget(self.progressBar_process, 6, 0, 1, 3)
+        self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
+        grid.addWidget(self.label_time_remaining, 7, 0, 1, 3)
 
         # Live values group
         self.groupBox_aktualne_hodnoty = QtWidgets.QGroupBox("Live values")
@@ -182,7 +228,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(self.lcdNumber_aktualny_odpor, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_aktualne_hodnoty, 3, 0, 1, 3)
+        grid.addWidget(self.groupBox_aktualne_hodnoty, 8, 0, 1, 3)
 
         # Hold resistance and percent
         hr_layout = QtWidgets.QHBoxLayout()
@@ -198,14 +244,14 @@ class Ui_MainWindow(object):
         hr_layout.addWidget(self.label_resistance_percento_from_hold)
         hr_layout.addWidget(self.label_resistance_percento_from_hold_2)
         hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 4, 0, 1, 3)
+        grid.addLayout(hr_layout, 9, 0, 1, 3)
 
         # Start/Stop process button
         self.pushButton_spusti_proces = QtWidgets.QPushButton("Start annealing process")
         bfont = QtGui.QFont()
         bfont.setPointSize(12)
         self.pushButton_spusti_proces.setFont(bfont)
-        grid.addWidget(self.pushButton_spusti_proces, 5, 0, 1, 3)
+        grid.addWidget(self.pushButton_spusti_proces, 10, 0, 1, 3)
 
         frame_layout_proc = QtWidgets.QVBoxLayout(self.frame_nastavenia_procesu)
         frame_layout_proc.setContentsMargins(0, 0, 0, 0)

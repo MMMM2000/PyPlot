@@ -17,7 +17,9 @@ zmeny od V3:
 
 import sys
 import os
+import time
 from pathlib import Path
+from collections import deque
 from PyQt6 import QtCore, QtWidgets, QtSerialPort
 from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
@@ -77,6 +79,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer.stop();
         self.timer.timeout.connect(self.handle_update_label_odpoved_portu)
         self.timer.start(50)
+        # timer for time remaining label
+        self.time_timer = QtCore.QTimer()
+        self.time_timer.timeout.connect(self.update_time_estimate)
+        self.time_timer.start(1000)
         
         #tu je casovac na prud
         self.sekundy = 0
@@ -113,9 +119,17 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_threshold = 30
         self.direction_ascending = True
         self.sample_ready = False
+        # Debug + progress/time tracking
+        self.DEBUG = False
+        self.sample_rate: float | None = None
+        self._rate_window: deque[float] = deque(maxlen=200)
+        self.last_sample_time: float | None = None
+        self._finish_time: float | None = None
+        self.step_idx = 0
+        self.total_steps = 0
         
-        print("Číslo portu: COM" + str(self.cislo_portu))
-        print("Baudrate: " + str(self.baudrate))
+        # print("Číslo portu: COM" + str(self.cislo_portu))
+        # print("Baudrate: " + str(self.baudrate))
 
         # Populate modern port list if available
         self.port_name = ""
@@ -156,6 +170,19 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_log_dir.textChanged.connect(self.sync_full_log_path)
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.textChanged.connect(self.sync_full_log_path)
+        # Name builder and planned duration estimation
+        if hasattr(self.ui, 'comboBox_name_preset'):
+            self.ui.comboBox_name_preset.currentIndexChanged.connect(self.update_file_name_from_preset)
+        for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample','lineEdit_custom_name'):
+            if hasattr(self.ui, name):
+                getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
+        if hasattr(self.ui, 'checkBox_reverse'):
+            self.ui.checkBox_reverse.toggled.connect(self.update_planned_time_label)
+        if hasattr(self.ui, 'spinBox_loops'):
+            self.ui.spinBox_loops.valueChanged.connect(self.update_planned_time_label)
+        self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_file_name_from_preset)
+        self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_planned_time_label)
+        self.ui.spinBox_doba_staly_prud.valueChanged.connect(self.update_planned_time_label)
         
         #nio a tu defaultne enable disable na prvky
         self.ui.frame_nastavenia_procesu.setEnabled(False)
@@ -208,13 +235,27 @@ class MainWindow(QtWidgets.QMainWindow):
         
         self.line1 = None
         self.line2 = None
+        # Initialize progress UI defaults
+        if hasattr(self.ui, 'progressBar_process'):
+            self.ui.progressBar_process.setMaximum(0)
+            self.ui.progressBar_process.setValue(0)
+        if hasattr(self.ui, 'label_time_remaining'):
+            self.ui.label_time_remaining.setText("Time remaining: N/A")
         
         
         
+    # utilities
+    def dbg(self, *args):
+        if getattr(self, 'DEBUG', False):
+            try:
+                print(*args)
+            except Exception:
+                pass
+
     #definovanie slotov
     def handle_pushButton_pripojPort_clicked(self):
         if(self.pripojene == False):
-            print('Pripájam port')
+            # print('Pripájam port')
 
             # Use selected port name from dropdown if available
             port_name = ''
@@ -235,10 +276,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ser_mcu.setParity(QtSerialPort.QSerialPort.Parity.NoParity)
             self.ser_mcu.setStopBits(QtSerialPort.QSerialPort.StopBits.OneStop)
             
-            print(self.ser_mcu)
+            # print(self.ser_mcu)
             
             if self.ser_mcu.open(QtCore.QIODeviceBase.OpenModeFlag.ReadWrite):
-                    print('Port pripojený')
+                    # print('Port pripojený')
                     self.ser_mcu.clear()
                     self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
                     self.pripojene = True
@@ -248,14 +289,15 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.frame_command_and_response.setEnabled(True)
                     self.handle_radioButton_raw_VCP_clicked()
             else:
-                    print('Pripojenie portu zlyhalo')
+                    # print('Pripojenie portu zlyhalo')
+                    pass
 
         else:
             if self.proces_on == True:
                 self.handle_pushButton_spusti_proces_clicked()
             else:
                 self.send_safe_end_commands()
-            print('Odpájam port')
+            # print('Odpájam port')
             self.ser_mcu.close()
             self.pripojene = False
             self.ui.pushButton_pripojPort.setText('Pripojiť sa k portu')
@@ -267,11 +309,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_spinBox_cislo_portu_valueChanged(self):
         self.cislo_portu = self.ui.spinBox_cislo_portu.value()
-        print("Číslo portu: COM" + str(self.cislo_portu))
+        # print("Číslo portu: COM" + str(self.cislo_portu))
             
     def handle_comboBox_baudrate_currentIndexChanged(self):
         self.baudrate = int(self.ui.comboBox_baudrate.currentText())
-        print("Baudrate: " + str(self.baudrate))
+        # print("Baudrate: " + str(self.baudrate))
 
     def handle_comboBox_port_changed(self):
         """Update selected port name from the dropdown."""
@@ -291,7 +333,8 @@ class MainWindow(QtWidgets.QMainWindow):
             #print("Prisla lajna")
             self.zamok.lock()
             self.odpoved_portu = str(self.ser_mcu.readLine(),'ascii')
-            print(self.odpoved_portu)
+            # reduce console spam
+            # print(self.odpoved_portu)
             if((self.modus_operandi > 0) and (self.proces_on == True)):
                 if(self.napatie == True):
                     self.current_voltage = float(self.odpoved_portu.strip())
@@ -312,6 +355,23 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.f_out.write(self.line)
                         self.f_out.close()
                         self.f_out = None
+
+                        # progress and rate tracking on each sample
+                        now = time.perf_counter()
+                        if self.last_sample_time is not None:
+                            dt = now - self.last_sample_time
+                            if dt > 0:
+                                rate = 1.0 / dt
+                                self._rate_window.append(rate)
+                                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                                if self.total_steps:
+                                    remaining = max(0, self.total_steps - self.step_idx)
+                                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
+                        self.last_sample_time = now
+                        self.step_idx += 1
+                        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
+                            self.ui.progressBar_process.setMaximum(self.total_steps)
+                            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
                 
                 self.sample_ready = True
                 #print("tutaj lala")
@@ -321,6 +381,93 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_update_label_odpoved_portu(self):
         self.ui.label_odpoved_portu.setText(self.odpoved_portu)
 
+    def update_time_estimate(self):
+        label = getattr(self.ui, 'label_time_remaining', None)
+        if label is None:
+            return
+        # Show a planned estimate when idle; measured when running
+        if not self.proces_on:
+            secs = self.compute_planned_seconds()
+            if secs is None:
+                label.setText("Time remaining: N/A")
+            else:
+                label.setText(self._format_secs("Time remaining", secs))
+            return
+        now = time.perf_counter()
+        if self._finish_time is not None:
+            secs = max(0, int(self._finish_time - now + 0.999))
+        else:
+            if not self.sample_rate or not self.total_steps:
+                label.setText("Time remaining: N/A")
+                return
+            remaining = max(0, self.total_steps - self.step_idx)
+            secs = int((remaining / self.sample_rate) + 0.999)
+        label.setText(self._format_secs("Time remaining", secs))
+
+    def _format_secs(self, prefix: str, secs: int) -> str:
+        if secs >= 3600:
+            h = secs // 3600
+            m = (secs % 3600) // 60
+            s = secs % 60
+            return f"{prefix}: {h}h {m:02d}m {s:02d}s"
+        elif secs >= 60:
+            m = secs // 60
+            s = secs % 60
+            return f"{prefix}: {m}m {s:02d}s"
+        else:
+            return f"{prefix}: {secs}s"
+
+    def compute_planned_seconds(self) -> int | None:
+        """Estimate duration based on UI parameters, even when idle.
+
+        Assumes 1 mA per second ramp rate (timer_command = 1000 ms).
+        """
+        try:
+            max_mA = int(self.ui.spinBox_hodnota_staly_prud.value())
+            hold_s = int(self.ui.spinBox_doba_staly_prud.value())
+            loops = int(self.ui.spinBox_loops.value()) if hasattr(self.ui, 'spinBox_loops') else 1
+            reverse = bool(self.ui.checkBox_reverse.isChecked()) if hasattr(self.ui, 'checkBox_reverse') else False
+        except Exception:
+            return None
+        up = max(0, max_mA - 1)  # from 1 mA to max
+        down = up if reverse else 0
+        per_loop = up + hold_s + down
+        return per_loop * max(1, loops)
+
+    def update_planned_time_label(self):
+        label = getattr(self.ui, 'label_time_remaining', None)
+        if label is None:
+            return
+        secs = self.compute_planned_seconds()
+        if secs is None:
+            label.setText("Time remaining: N/A")
+        else:
+            label.setText(self._format_secs("Time remaining", secs))
+
+    def update_file_name_from_preset(self):
+        # Build file name based on naming preset
+        if not hasattr(self.ui, 'comboBox_name_preset'):
+            return
+        preset = self.ui.comboBox_name_preset.currentText().strip().lower()
+        if preset.startswith('current'):
+            comp = getattr(self.ui, 'lineEdit_composition', None)
+            wire = getattr(self.ui, 'lineEdit_microwire', None)
+            sample = getattr(self.ui, 'lineEdit_sample', None)
+            comp_s = comp.text().strip() if comp is not None else ''
+            wire_s = wire.text().strip() if wire is not None else ''
+            sample_s = sample.text().strip() if sample is not None else ''
+            try:
+                max_mA = int(self.ui.spinBox_hodnota_staly_prud.value())
+            except Exception:
+                max_mA = 0
+            parts = [p for p in [comp_s, wire_s, sample_s, f"{max_mA}mA"] if p]
+            base = " ".join(parts) if parts else "anneal_log"
+        else:
+            custom = getattr(self.ui, 'lineEdit_custom_name', None)
+            base = custom.text().strip() if custom is not None and custom.text().strip() else 'anneal_log'
+        if hasattr(self.ui, 'lineEdit_log_file'):
+            self.ui.lineEdit_log_file.setText(base)
+
     def handle_pushButton_posli_prikaz_portu_clicked(self):
         self.prikaz_portu = self.ui.lineEdit_prikaz_portu.text() + "\n"
         self.send_serial_command()
@@ -328,13 +475,13 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_serial_command(self):
         self.ser_mcu.write(bytes(self.prikaz_portu, encoding='ascii'))
         self.ui.label_prikaz_portu.setText(self.prikaz_portu)
-        print('Poslaný príkaz: ' + self.prikaz_portu)
+        # print('Poslaný príkaz: ' + self.prikaz_portu)
         
     def handle_radioButton_raw_VCP_clicked(self):
         self.ui.radioButton_raw_VCP.setChecked(True)
         self.modus_operandi = 0
         self.ui.frame_nastavenia_procesu.setEnabled(False)
-        print("ModOp: raw VCP ", self.modus_operandi)
+        # print("ModOp: raw VCP ", self.modus_operandi)
         
     def handle_radioButton_manualne_zihanie_clicked(self):
         self.ui.radioButton_manualne_zihanie.setChecked(True)
@@ -343,7 +490,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.spinBox_hodnota_staly_prud.setEnabled(False)
         self.ui.spinBox_doba_staly_prud.setEnabled(False)
         self.ui.pushButton_start_stop_drzania_prudu.setEnabled(True)
-        print("ModOp: manualne zihanie ", self.modus_operandi)
+        # print("ModOp: manualne zihanie ", self.modus_operandi)
         
     def handle_radioButton_automatizovane_zihanie_clicked(self):
         self.ui.radioButton_automatizovane_zihanie.setChecked(True)
@@ -352,15 +499,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.spinBox_hodnota_staly_prud.setEnabled(True)
         self.ui.spinBox_doba_staly_prud.setEnabled(True)
         self.ui.pushButton_start_stop_drzania_prudu.setEnabled(False)
-        print("ModOp: automatizovane zihanie ", self.modus_operandi)
+        # print("ModOp: automatizovane zihanie ", self.modus_operandi)
         
     def handle_spinBox_hodnota_staly_prud_valueChanged(self):
         self.hodnota_staly_prud = self.ui.spinBox_hodnota_staly_prud.value()
-        print("Hodnota staleho prudu: ", self.hodnota_staly_prud)
+        # print("Hodnota staleho prudu: ", self.hodnota_staly_prud)
         
     def handle_spinBox_doba_staly_prud_valueChanged(self):
         self.doba_staly_prud = self.ui.spinBox_doba_staly_prud.value()
-        print("Doba staly prud: ", self.doba_staly_prud)
+        # print("Doba staly prud: ", self.doba_staly_prud)
         
     def handle_pushButton_start_stop_drzania_prudu_clicked(self):
         if(self.prud_timer_on == False):
@@ -393,19 +540,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.groupBox_nastavenia_procesu.setEnabled(False)
             self.command_number = 0
             self.vzorka_N = 0
-            print("Proces bezi")
+            # print("Proces bezi")
             self.ui.pushButton_spusti_proces.setText("Zastav proces")
             if(self.modus_operandi == 0):
-                print("Spusteny raw VCP mod")
+                # print("Spusteny raw VCP mod")
+                pass
                 
             elif(self.modus_operandi == 1):
-                # Build full log file path and ensure directory exists
-                try:
-                    self.f_name = self.build_log_path()
-                    os.makedirs(os.path.dirname(self.f_name), exist_ok=True)
-                except Exception:
-                    pass
-                self.f_out = open(self.f_name, "a")
+                # Prepare output file with overwrite prompt
+                if not self.prepare_output_file():
+                    self.proces_on = False
+                    self.ui.pushButton_spusti_proces.setText("Spusti proces")
+                    return
+                if hasattr(self.ui, 'progressBar_process'):
+                    self.ui.progressBar_process.setMaximum(0)
+                    self.ui.progressBar_process.setValue(0)
+                if hasattr(self.ui, 'label_time_remaining'):
+                    self.ui.label_time_remaining.setText("Time remaining: N/A")
                 self.current_increment = 0.001
                 self.current_current_set = 0.001
                 self.temp_resistance_maximum = 0
@@ -420,21 +571,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.init_graph_window()
                 self.send_init_commands()
                 self.timer_command.start(1000)
-                print("Spusteny mod manualneho zihania")
+                # print("Spusteny mod manualneho zihania")
                 
             elif(self.modus_operandi == 2):
-                # Build full log file path and ensure directory exists
-                try:
-                    self.f_name = self.build_log_path()
-                    os.makedirs(os.path.dirname(self.f_name), exist_ok=True)
-                except Exception:
-                    pass
-                self.f_out = open(self.f_name, "a")
+                # Prepare output file with overwrite prompt
+                if not self.prepare_output_file():
+                    self.proces_on = False
+                    self.ui.pushButton_spusti_proces.setText("Spusti proces")
+                    return
                 self.current_increment = 0.001
                 self.current_current_set = 0.001
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
+                # reverse + loop configuration
+                self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
+                self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
+                self.loop_idx = 0
+                # progress plan
+                up_steps = max(0, int(self.ui.spinBox_hodnota_staly_prud.value()) - 1)
+                hold_steps = int(self.ui.spinBox_doba_staly_prud.value())
+                down_steps = up_steps if self.reverse_enabled else 0
+                per_loop = up_steps + hold_steps + down_steps
+                self.total_steps = max(0, per_loop * int(self.loop_target or 1))
+                self.step_idx = 0
+                if hasattr(self.ui, 'progressBar_process'):
+                    if self.total_steps:
+                        self.ui.progressBar_process.setMaximum(self.total_steps)
+                        self.ui.progressBar_process.setValue(0)
+                    else:
+                        self.ui.progressBar_process.setMaximum(0)
                 self.ui.lcdNumber_uplynute_sekundy.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percento_from_hold.setText("0")
@@ -444,7 +610,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.init_graph_window()
                 self.send_init_commands()
                 self.timer_command.start(1000)
-                print("Spusteny mod automatizovaneho zihania")
+                # print("Spusteny mod automatizovaneho zihania")
                 
             else:
                 pass
@@ -459,7 +625,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if(self.modus_operandi == 1):
                 self.ui.pushButton_start_stop_drzania_prudu.setText("Držať prúd teraz!")
             self.send_safe_end_commands()
-            print("Proces zastaveny")
+            # print("Proces zastaveny")
             self.ui.pushButton_spusti_proces.setText("Spusti proces")
             self.ui.groupBox_nastavenia_procesu.setEnabled(True)
             self.ui.frame_modus_operandi.setEnabled(True)
@@ -468,16 +634,17 @@ class MainWindow(QtWidgets.QMainWindow):
         
         #manual zihanie
         if self.modus_operandi == 1:
-            print("Prikaz manualneho zihania cislo ", self.command_number)
+            # print("Prikaz manualneho zihania cislo ", self.command_number)
             self.sample_ready = False
             self.napatie = True
             self.prikaz_portu = "MEAS:VOLT?\n"
             #pre simulator tento prikaz, inak pre zdroj ten prvy
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
-            #pockame na novu vzorku - ano da sa to krajsie, ale teraz je to snadno a rychle
-            while(self.sample_ready == False):
-                self.simple_delay(20)
+            # wait boundedly, allow stopping
+            if not self.wait_for_sample(3000):
+                self.warn_no_response_and_abort()
+                return
                 
             self.sample_ready = False
             self.napatie = False
@@ -485,9 +652,9 @@ class MainWindow(QtWidgets.QMainWindow):
             #pre simulator tento prikaz, inak pre zdroj ten prvy
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
-            #pockame na novu vzorku - ano da sa to krajsie, ale teraz je to snadno a rychle
-            while(self.sample_ready == False):
-                self.simple_delay(20)
+            if not self.wait_for_sample(3000):
+                self.warn_no_response_and_abort()
+                return
                 
             self.curr_value_x = self.current_current_read*1000
             self.curr_value_y = self.current_resistance
@@ -534,16 +701,16 @@ class MainWindow(QtWidgets.QMainWindow):
             
             
         elif self.modus_operandi == 2:
-            print("Prikaz automatizovaneho zihania cislo ", self.command_number)
+            # print("Prikaz automatizovaneho zihania cislo ", self.command_number)
             self.sample_ready = False
             self.napatie = True
             self.prikaz_portu = "MEAS:VOLT?\n"
             #pre simulator tento prikaz, inak pre zdroj ten prvy
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
-            #pockame na novu vzorku - ano da sa to krajsie, ale teraz je to snadno a rychle
-            while(self.sample_ready == False):
-                self.simple_delay(20)
+            if not self.wait_for_sample(3000):
+                self.warn_no_response_and_abort()
+                return
                 
             self.sample_ready = False
             self.napatie = False
@@ -551,9 +718,9 @@ class MainWindow(QtWidgets.QMainWindow):
             #pre simulator tento prikaz, inak pre zdroj ten prvy
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
-            #pockame na novu vzorku - ano da sa to krajsie, ale teraz je to snadno a rychle
-            while(self.sample_ready == False):
-                self.simple_delay(20)
+            if not self.wait_for_sample(3000):
+                self.warn_no_response_and_abort()
+                return
                 
             self.curr_value_x = self.current_current_read*1000
             self.curr_value_y = self.current_resistance
@@ -601,13 +768,31 @@ class MainWindow(QtWidgets.QMainWindow):
             #iteracia prudu
             self.current_current_set += self.current_increment
             
-            #vypnutie ako pri tlacidle
-            if(self.sekundy >= self.doba_staly_prud):
-                self.handle_pushButton_spusti_proces_clicked()
+            # end of hold: either reverse (if enabled) or stop
+            if(self.prud_timer_on and (self.sekundy >= self.doba_staly_prud)):
+                self.timer_prud.stop()
+                self.prud_timer_on = False
+                if getattr(self, 'reverse_enabled', False):
+                    self.current_increment = -0.001
+                    self.ciara_color = "b"
+                else:
+                    self.handle_pushButton_spusti_proces_clicked()
             
             self.prikaz_portu = self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
-            
+            # completed descending to zero? manage loops
+            if getattr(self, 'reverse_enabled', False) and (self.current_current_set < 0.001):
+                self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
+                if self.loop_idx < int(getattr(self, 'loop_target', 1)):
+                    # prepare next loop
+                    self.current_increment = 0.001
+                    self.current_current_set = 0.001
+                    self.ciara_color = "r"
+                    self.direction_ascending = True
+                    self.sekundy = 0
+                else:
+                    self.handle_pushButton_spusti_proces_clicked()
+
         else:
             pass
         
@@ -617,7 +802,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
 
     def send_safe_end_commands(self):
-        print("teraz posielam univerzalnu zostavu prikazov pri ukonceni")
+        # print("teraz posielam univerzalnu zostavu prikazov pri ukonceni")
         for i in range(0, len(self.commands_safe_end)):
             self.prikaz_portu = self.commands_safe_end[i]
             self.send_serial_command()
@@ -625,7 +810,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
 
     def send_init_commands(self):
-        print("teraz posielam univerzalnu zostavu prikazov pri spusteni")
+        # print("teraz posielam univerzalnu zostavu prikazov pri spusteni")
         for i in range(0, len(self.commands_init)):
             self.prikaz_portu = self.commands_init[i]
             self.send_serial_command()
@@ -638,13 +823,34 @@ class MainWindow(QtWidgets.QMainWindow):
         while self.wait:
             QtWidgets.QApplication.processEvents()
         
+    def wait_for_sample(self, timeout_ms: int) -> bool:
+        """Spin the event loop until a sample arrives, stop requested, or timeout."""
+        self.wait = False
+        elapsed = 0
+        step = 20
+        while not self.sample_ready and self.proces_on and elapsed < timeout_ms:
+            self.simple_delay(step)
+            elapsed += step
+        ok = self.sample_ready
+        self.sample_ready = False
+        return ok
+
+    def warn_no_response_and_abort(self) -> None:
+        QtWidgets.QMessageBox.warning(
+            self,
+            "No response",
+            "No response from power supply. Is it turned on? Aborting the process.",
+        )
+        if self.proces_on:
+            self.handle_pushButton_spusti_proces_clicked()
+
     def handle_lineEdit_log_subor_text_changed(self):
         # Sync f_name from separate directory + file name controls
         try:
             self.f_name = self.build_log_path()
         except Exception:
             self.f_name = self.ui.lineEdit_log_subor.text()
-        print("Zaznam subor:", self.f_name)
+        # print("Zaznam subor:", self.f_name)
     
     def init_graph_window(self):
         """
@@ -771,6 +977,49 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         return os.path.join(DEFAULT_LOG_DIR, "anneal_log.txt")
 
+    def prepare_output_file(self) -> bool:
+        """Create or prepare the output file, prompting if it exists.
+
+        Returns True if ready to proceed, False if the user canceled.
+        """
+        path = self.build_log_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            pass
+
+        mode = "w"
+        if os.path.exists(path):
+            msg = QtWidgets.QMessageBox(self)
+            msg.setWindowTitle("File exists")
+            msg.setIcon(QtWidgets.QMessageBox.Icon.Question)
+            base = os.path.basename(path)
+            msg.setText(f"'{base}' already exists.")
+            msg.setInformativeText("Choose an action:")
+            replace_btn = msg.addButton("Replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            continue_btn = msg.addButton("Continue", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            cancel_btn = msg.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked is cancel_btn:
+                return False
+            elif clicked is continue_btn:
+                mode = "a"
+            else:
+                mode = "w"
+        try:
+            with open(path, mode):
+                pass
+        except OSError as exc:
+            QtWidgets.QMessageBox.critical(
+                self, "Error", f"Failed to open {path}: {exc}"
+            )
+            return False
+
+        self.f_name = path
+        # subsequent writes will append
+        return True
+
     def populate_ports(self):
         if hasattr(self.ui, 'comboBox_port'):
             self.ui.comboBox_port.clear()
@@ -786,7 +1035,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.ser_mcu.isOpen():
             self.handle_pushButton_pripojPort_clicked()
             # self.ser_mcu.close()
-            print("Sériový port zatvorený")
+            # print("Sériový port zatvorený")
 
         event.accept()
 
