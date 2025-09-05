@@ -10,9 +10,10 @@ of contact loss and device timeouts.
 import sys
 import os
 import time
+import math
 from pathlib import Path
 from collections import deque
-from PyQt6 import QtCore, QtWidgets, QtSerialPort
+from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
 
@@ -936,16 +937,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 if w is not None:
                     w.deleteLater()
 
+            # Align matplotlib colors with Qt palette for a native look
             try:
-                scheme = QtWidgets.QApplication.instance().styleHints().colorScheme()
-                if scheme == QtCore.Qt.ColorScheme.Dark:
-                    matplotlib.style.use('dark_background')
-                else:
-                    matplotlib.style.use('default')
+                app = QtWidgets.QApplication.instance()
+                scheme = app.styleHints().colorScheme()
+                palette = app.palette()
+                win = palette.color(QtGui.QPalette.ColorRole.Window)
+                base = palette.color(QtGui.QPalette.ColorRole.Base)
+                text = palette.color(QtGui.QPalette.ColorRole.Text)
+                win_rgb = (win.redF(), win.greenF(), win.blueF())
+                base_rgb = (base.redF(), base.greenF(), base.blueF())
+                text_rgb = (text.redF(), text.greenF(), text.blueF())
             except Exception:
-                pass
+                scheme = QtCore.Qt.ColorScheme.Light
+                win_rgb = (1, 1, 1)
+                base_rgb = (1, 1, 1)
+                text_rgb = (0, 0, 0)
 
-            self.fig = Figure()
+            self.fig = Figure(facecolor=win_rgb)
             self.canvas = FigureCanvas(self.fig) if FigureCanvas is not None else None
             if NavigationToolbar is not None and self.canvas is not None:
                 self.toolbar = NavigationToolbar(self.canvas, container)
@@ -958,20 +967,32 @@ class MainWindow(QtWidgets.QMainWindow):
                 _title = _os.path.basename(self.f_name)
             except Exception:
                 _title = self.f_name
-            self.fig.suptitle(_title)
+            self.fig.suptitle(_title, color=text_rgb)
 
             self.ax1 = self.fig.add_subplot(211)
+            self.ax1.set_facecolor(base_rgb)
             self.ax1.set_xlabel("Current [mA]")
             self.ax1.set_ylabel("Resistance [Ohm]")
-            self.ax1.grid(True)
+            self.ax1.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
+            for spine in self.ax1.spines.values():
+                spine.set_color(text_rgb)
+            self.ax1.tick_params(colors=text_rgb)
+            self.ax1.xaxis.label.set_color(text_rgb)
+            self.ax1.yaxis.label.set_color(text_rgb)
 
             self.line1 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
             self.ax1.add_line(self.line1)
 
             self.ax2 = self.fig.add_subplot(212)
+            self.ax2.set_facecolor(base_rgb)
             self.ax2.set_xlabel("N [-]")
             self.ax2.set_ylabel("Resistance [Ohm]")
-            self.ax2.grid(True)
+            self.ax2.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
+            for spine in self.ax2.spines.values():
+                spine.set_color(text_rgb)
+            self.ax2.tick_params(colors=text_rgb)
+            self.ax2.xaxis.label.set_color(text_rgb)
+            self.ax2.yaxis.label.set_color(text_rgb)
             self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
             self.ax2.add_line(self.line2)
             if self.canvas is not None:
