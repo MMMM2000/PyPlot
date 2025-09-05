@@ -104,6 +104,23 @@ Select an item and press **Run** to launch it:
 python -m launcher
 ```
 
+## COM port emulators
+
+A virtual **Current Annealing Emulator** can replay recorded data over a
+paired serial port. The emulator feeds values from
+`sample_data/Ni51Fe26Ga21 1_2 s2 1000mA.txt` and returns a zero current
+after the final sample to mimic a burned-through microwire. Launch it
+from the new *Emulators* tab in the master launcher or run it directly
+with:
+
+```bash
+python -m emulators.current_annealing_emulator
+```
+
+Set up a linked pair of COM ports (e.g. with ``socat`` on Linux or
+``com0com`` on Windows) and point the logger at one end while the
+emulator serves the other.
+
 
 ## Backends: Matplotlib and Origin
 
