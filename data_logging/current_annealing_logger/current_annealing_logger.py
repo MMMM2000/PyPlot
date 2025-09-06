@@ -365,7 +365,16 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.frame_modus_operandi.setEnabled(True)
                     self.ui.frame_zakladne_nastavenia_portu.setEnabled(False)
                     self.ui.frame_command_and_response.setEnabled(True)
-                    self.handle_radioButton_raw_VCP_clicked()
+                    # Respect the selected mode rather than forcing raw VCP
+                    try:
+                        if self.ui.radioButton_automatizovane_zihanie.isChecked():
+                            self.handle_radioButton_automatizovane_zihanie_clicked()
+                        elif self.ui.radioButton_manualne_zihanie.isChecked():
+                            self.handle_radioButton_manualne_zihanie_clicked()
+                        else:
+                            self.handle_radioButton_raw_VCP_clicked()
+                    except Exception:
+                        self.handle_radioButton_raw_VCP_clicked()
                     self._show_connect_overlay(False)
             else:
                     # print('Pripojenie portu zlyhalo')
@@ -1051,7 +1060,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 _title = _os.path.basename(self.f_name)
             except Exception:
                 _title = self.f_name
-            self.fig.suptitle(_title, color=text_rgb, y=0.98)
+            # Place the title above the graph area using a Qt label instead of
+            # drawing inside the figure. This keeps it clearly outside axes.
+            self.title_label = QtWidgets.QLabel(_title)
+            self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            # Style to match palette
+            try:
+                self.title_label.setStyleSheet("font-weight: 600; margin: 2px 0 2px 0;")
+                self.title_label.setForegroundRole(QtGui.QPalette.ColorRole.Text)
+            except Exception:
+                pass
+            layout.addWidget(self.title_label)
 
             self.ax1 = self.fig.add_subplot(211)
             self.ax1.set_facecolor(base_rgb)

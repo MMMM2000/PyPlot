@@ -153,17 +153,32 @@ class Ui_MainWindow(object):
         gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_nastavenia_procesu)
         self.groupBox_nastavenia_procesu = gb_proc
         grid = QtWidgets.QGridLayout(gb_proc)
+        # Make the main text fields expand and keep the browse button narrow
+        grid.setColumnStretch(0, 0)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 0)
 
         # Log file location (separate directory and file name)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
+        self.lineEdit_log_dir.setMinimumWidth(360)
+        self.lineEdit_log_dir.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
+        self.pushButton_browse_dir.setMaximumWidth(90)
         grid.addWidget(self.label_log_dir, 0, 0)
         grid.addWidget(self.lineEdit_log_dir, 0, 1)
         grid.addWidget(self.pushButton_browse_dir, 0, 2)
 
         self.label_log_file = QtWidgets.QLabel("File name:")
         self.lineEdit_log_file = QtWidgets.QLineEdit()
+        self.lineEdit_log_file.setMinimumWidth(360)
+        self.lineEdit_log_file.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.label_extension = QtWidgets.QLabel(".txt")
         grid.addWidget(self.label_log_file, 1, 0)
         grid.addWidget(self.lineEdit_log_file, 1, 1)
