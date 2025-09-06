@@ -90,11 +90,14 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
         style = "windowsvista" if scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
         app.setStyle(style)
     elif sys.platform == "darwin":
-        # ``macintosh`` is available on all Qt builds for macOS; ``macos`` was
-        # introduced in Qt 6.5.  ``setStyle`` ignores unknown styles so this
-        # conditional keeps compatibility with older versions.
-        style_name = "macos" if "macos" in QtWidgets.QStyleFactory.keys() else "macintosh"
-        app.setStyle(style_name)
+        # Prefer the modern 'macos' style when available. If not present,
+        # avoid forcing the deprecated 'macintosh' style to suppress Qt's
+        # deprecation warning and let Qt choose the native default.
+        if "macos" in QtWidgets.QStyleFactory.keys():
+            app.setStyle("macos")
+        else:
+            # Leave default style in place (typically macOS native)
+            pass
     else:
         app.setStyle("Fusion")
 

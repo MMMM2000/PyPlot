@@ -187,11 +187,33 @@ class MainWindow(QtWidgets.QMainWindow):
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
         self.ui.comboBox_port.clear()
+        seen: set[str] = set()
+        # 1) OS-reported ports via Qt
         for info in QSerialPortInfo.availablePorts():
-            label = info.portName()
-            if info.description():
-                label += f" - {info.description()}"
-            self.ui.comboBox_port.addItem(label, userData=info.portName())
+            sysloc = info.systemLocation() if hasattr(info, 'systemLocation') else info.portName()
+            name = info.portName()
+            label = name
+            try:
+                if info.description():
+                    label += f" - {info.description()}"
+            except Exception:
+                pass
+            self.ui.comboBox_port.addItem(label, userData=sysloc)
+            seen.add(sysloc)
+        # 2) Extra virtual symlinks (macOS/Linux): /dev/cu.ttyV* and /dev/ttyV*
+        try:
+            import platform
+            from glob import glob
+            if platform.system() in {"Darwin", "Linux"}:
+                extras = sorted(set(glob("/dev/cu.ttyV*") + glob("/dev/ttyV*") + glob(str(Path.cwd() / "ttyV*"))))
+                for path in extras:
+                    sysloc = os.path.abspath(path)
+                    label = f"{os.path.basename(path)} - Virtual pair"
+                    if sysloc not in seen:
+                        self.ui.comboBox_port.addItem(label, userData=sysloc)
+                        seen.add(sysloc)
+        except Exception:
+            pass
         if self.ui.comboBox_port.count() > 0:
             self.port_name = self.ui.comboBox_port.currentData()
 
@@ -789,5 +811,3 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
 
 if __name__ == "__main__":
     main()
-
-
