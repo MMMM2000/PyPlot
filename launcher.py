@@ -13,6 +13,7 @@ from plotting.hsw_distribution import distribution_gui
 from plotting.hsw_load_compare import load_compare_gui
 from plotting.hysteresis_loops import loops_gui
 from plotting.maxion_continuous import maxion_gui
+from plotting.current_annealing import anneal_gui as current_anneal_gui
 from plotting.pdf_plotter import pdf_gui
 from plotting.stress_dependence import stress_gui
 from plotting.stress_sensitivity import sens_gui
@@ -29,6 +30,7 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
     "Temperature Sensitivity": temp_gui.main,
     "Temperature Dependence": temp_dep_gui.main,
     "Stress Sensitivity": sens_gui.main,
+    "Current Annealing": current_anneal_gui.main,
     "PDF Plotter": pdf_gui.main,
     "Hysteresis Loops": loops_gui.main,
 }

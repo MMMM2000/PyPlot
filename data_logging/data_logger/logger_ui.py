@@ -94,7 +94,7 @@ class UiMainWindow(object):
 
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
-        self.lineEdit_log_dir.setMinimumWidth(280)
+        self.lineEdit_log_dir.setMinimumWidth(200)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -106,13 +106,12 @@ class UiMainWindow(object):
 
         log_layout.addWidget(QtWidgets.QLabel("File name:"), 1, 0)
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(280)
-        self.lineEdit_log_file.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
+        self.lineEdit_log_file.setMinimumWidth(200)
+        self.lineEdit_log_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         log_layout.addWidget(self.lineEdit_log_file, 1, 1)
         self.label_extension = QtWidgets.QLabel(".txt")
+        self.label_extension.setFixedWidth(36)
+        self.label_extension.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
         log_layout.addWidget(self.label_extension, 1, 2)
         self.pushButton_build_name = QtWidgets.QPushButton("Build name")
         self.pushButton_build_name.hide()

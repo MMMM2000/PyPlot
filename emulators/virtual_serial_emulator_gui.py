@@ -380,8 +380,10 @@ class Main(QWidget):
         # Mode selection
         self.cmb_mode = QComboBox(); self.cmb_mode.addItems(["Serial Data Logger", "Current Annealing Logger"])
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
-        self.btn_preset = QPushButton("Apply Preset")
-        self.btn_preset.clicked.connect(self.on_apply_preset)
+        # Presets are applied automatically on mode change; remove button
+        # to simplify UI.
+        # self.btn_preset = QPushButton("Apply Preset")
+        # self.btn_preset.clicked.connect(self.on_apply_preset)
         # Baud selection like in data loggers
         self.combo_baud = QComboBox(); self.combo_baud.addItems([
             "921600", "460800", "115200", "57600", "19200", "9600"
@@ -394,6 +396,7 @@ class Main(QWidget):
         self.btn_sample = QPushButton("Browse…")
         self.btn_sample.clicked.connect(self.on_browse_sample)
         self.chk_loop = QCheckBox("Use loop:// (no external port)")
+        self.chk_loop.setToolTip("Enable a software loopback port. Useful when you don't have a real/virtual COM pair. The logger should also select 'loop://' to connect.")
         self.chk_loop.stateChanged.connect(self.on_loop_changed)
         self.btn_start = QPushButton("Start Emulator")
         self.btn_stop = QPushButton("Stop Emulator"); self.btn_stop.setEnabled(False)
@@ -416,15 +419,7 @@ class Main(QWidget):
         eb.addWidget(self.edit_sample, row, 1)
         eb.addWidget(self.btn_sample, row, 2); row += 1
         eb.addWidget(self.chk_loop,  row, 0, 1, 3); row += 1
-        # Mode presets
-        self.btn_preset_pair0 = QPushButton("Emu on ./ttyV0 (logger on ./ttyV1)")
-        self.btn_preset_pair1 = QPushButton("Emu on ./ttyV1 (logger on ./ttyV0)")
-        self.btn_preset_pair0.clicked.connect(lambda: self.on_use_pair_port(self._best_pair_path(0), self._best_pair_path(1)))
-        self.btn_preset_pair1.clicked.connect(lambda: self.on_use_pair_port(self._best_pair_path(1), self._best_pair_path(0)))
-        eb.addWidget(QLabel("Pair preset:"), row, 0)
-        eb.addWidget(self.btn_preset_pair0, row, 1)
-        eb.addWidget(self.btn_preset_pair1, row, 2); row += 1
-        eb.addWidget(self.btn_preset, row, 0); row += 1
+        # (Presets auto-apply on mode change; no extra button here)
         eb.addWidget(self.btn_start, row, 0)
         eb.addWidget(self.btn_stop,  row, 1)
 
@@ -606,14 +601,19 @@ class Main(QWidget):
             self.chk_loop.setChecked(True)
 
     def _update_pair_buttons_enabled(self) -> None:
-        sysname = platform.system()
-        ok_platform = sysname in {"Darwin", "Linux"}
-        have0 = TTY0.exists() or Path("/dev/cu.ttyV0").exists()
-        have1 = TTY1.exists() or Path("/dev/cu.ttyV1").exists()
-        enabled0 = ok_platform and have0
-        enabled1 = ok_platform and have1
-        self.btn_preset_pair0.setEnabled(enabled0)
-        self.btn_preset_pair1.setEnabled(enabled1)
+        # Buttons were removed; keep method for backward calls
+        if hasattr(self, 'btn_preset_pair0') and hasattr(self, 'btn_preset_pair1'):
+            sysname = platform.system()
+            ok_platform = sysname in {"Darwin", "Linux"}
+            have0 = TTY0.exists() or Path("/dev/cu.ttyV0").exists()
+            have1 = TTY1.exists() or Path("/dev/cu.ttyV1").exists()
+            enabled0 = ok_platform and have0
+            enabled1 = ok_platform and have1
+            try:
+                self.btn_preset_pair0.setEnabled(enabled0)
+                self.btn_preset_pair1.setEnabled(enabled1)
+            except Exception:
+                pass
 
     def on_use_pair_port(self, emu_port: str, logger_port: str) -> None:
         if not Path(emu_port).exists():

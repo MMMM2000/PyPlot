@@ -129,6 +129,8 @@ Virtual port pairs:
 - macOS/Linux: click "Create Pair (socat)" to create `./ttyV0 <-> ./ttyV1`. Optional sudo symlinks to `/dev/cu.ttyV*` are supported. Use the emulator's new "Pair preset" buttons to place the emulator on one side and point your logger to the other.
 - Windows: use an installed virtual port pair (driver required; see below) or enable the `loop://` option for internal loopback.
 
+Tip: `loop://` creates a software loopback port provided by pyserial. Enable it in the emulator and select `loop://` in the logger to test without any external ports.
+
 ### Windows: set up virtual COM ports
 
 If you need a paired virtual COM port on Windows, the free HHD tool works well:

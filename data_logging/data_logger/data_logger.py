@@ -30,6 +30,10 @@ except Exception:
     FigureCanvas = None
     NavigationToolbar = None
 from matplotlib.lines import Line2D
+try:
+    import pyqtgraph as pg  # Optional realtime backend
+except Exception:
+    pg = None
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -175,6 +179,13 @@ class MainWindow(QtWidgets.QMainWindow):
         # Live plotting setup
         self._last_draw = 0.0
         self._init_live_plot()
+        # Overlay for batch collection
+        self._record_overlay = None
+        self._setup_record_overlay()
+        # Optional realtime backend
+        rt = getattr(self.ui, 'checkBox_rt_plot', None)
+        if rt is not None:
+            rt.stateChanged.connect(self._toggle_rt_plot)
         if getattr(self, 'name_builder', None) is not None:
             try:
                 self.name_builder.combo_format.currentIndexChanged.connect(self._on_format_changed)
@@ -579,6 +590,75 @@ class MainWindow(QtWidgets.QMainWindow):
             )
         self.canvas.draw_idle()
 
+    # --- Realtime backend toggle (pyqtgraph) --------------------------------
+    def _clear_plot_container(self) -> QtWidgets.QVBoxLayout | None:
+        container = getattr(self.ui, 'plot_container', None)
+        if container is None:
+            return None
+        layout = container.layout()
+        if layout is None:
+            layout = QtWidgets.QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(0)
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        return layout
+
+    def _toggle_rt_plot(self) -> None:
+        enabled = bool(self.ui.checkBox_rt_plot.isChecked())
+        if enabled and pg is not None:
+            layout = self._clear_plot_container()
+            self.pg_plot = pg.PlotWidget()
+            self.pg_plot.setBackground(self.palette().color(QtGui.QPalette.ColorRole.Base))
+            self.pg_curve = self.pg_plot.plot([], [], pen=None, symbol='o', symbolSize=2)
+            if layout is not None:
+                layout.addWidget(self.pg_plot)
+            self._pg_x = []
+            self._pg_y = []
+        else:
+            self._init_live_plot()
+
+    # --- Batch overlay -------------------------------------------------------
+    def _setup_record_overlay(self) -> None:
+        container = getattr(self.ui, 'plot_container', None)
+        if container is None:
+            return
+        ov = QtWidgets.QFrame(container)
+        ov.setStyleSheet("background: rgba(0,0,0,160);")
+        lay = QtWidgets.QVBoxLayout(ov)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addStretch(1)
+        msg = QtWidgets.QLabel("Collecting data…")
+        msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        msg.setStyleSheet("color: white; font-size: 16px; font-weight: 600;")
+        bar = QtWidgets.QProgressBar()
+        bar.setRange(0, 0)
+        bar.setTextVisible(False)
+        bar.setFixedWidth(220)
+        bar.setMaximumHeight(8)
+        lay.addWidget(msg, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(bar, alignment=QtCore.Qt.AlignmentFlag.AlignCenter)
+        lay.addStretch(1)
+        self._record_overlay = ov
+        self._position_record_overlay()
+        ov.hide()
+
+    def _position_record_overlay(self) -> None:
+        container = getattr(self.ui, 'plot_container', None)
+        ov = getattr(self, '_record_overlay', None)
+        if container is None or ov is None:
+            return
+        ov.setGeometry(container.rect())
+
+    def _show_record_overlay(self, show: bool) -> None:
+        ov = getattr(self, '_record_overlay', None)
+        if ov is not None:
+            self._position_record_overlay()
+            ov.setVisible(bool(show))
+
     def _send_emulator_mode(self) -> None:
         if self.serial is None or getattr(self, "name_builder", None) is None:
             return
@@ -753,6 +833,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._position_connect_overlay()
             except Exception:
                 pass
+        try:
+            self._position_record_overlay()
+        except Exception:
+            pass
 
     def _apply_connected_state(self) -> None:
         connected = bool(self.connected)
@@ -801,9 +885,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.pushButton_record.setText("Resume")
                 self.ui.pushButton_record.setToolTip("Resume logging")
                 self._finish_time = None
+                # Hide overlay while paused
+                try:
+                    self._show_record_overlay(False)
+                except Exception:
+                    pass
             else:
                 self.ui.pushButton_record.setText("Pause")
                 self.ui.pushButton_record.setToolTip("Pause logging")
+                # Show overlay again if realtime is disabled
+                try:
+                    rt = getattr(self.ui, 'checkBox_rt_plot', None)
+                    self._show_record_overlay(bool(rt is None or not rt.isChecked()))
+                except Exception:
+                    pass
             self.update_time_estimate()
             return
 
@@ -874,11 +969,25 @@ class MainWindow(QtWidgets.QMainWindow):
             f"0/{self.sample_count} samples"
         )
         self.update_time_estimate()
-        # Reset batch/means state for a clean run when in stress mode
+        # Reset batch state, and if overwriting the file (mode == 'w') also
+        # replace existing raw/mean for this (dir, load) in the graph.
         try:
             if self._current_format() == 'Stress':
                 self._batch_values = []
-                # Do not clear global means so multiple loads accumulate across runs
+                if mode == 'w':
+                    load = float(self.name_builder.s_load.value())
+                    d = str(self.name_builder.s_dir.currentData())
+                    key = (d, float(load))
+                    if 'stress' in getattr(self, '_rt_data', {}):
+                        self._rt_data['stress'][key] = []
+                    if key in getattr(self, '_rt_means', {}):
+                        self._rt_means.pop(key, None)
+        except Exception:
+            pass
+        # Show overlay if realtime is disabled
+        try:
+            rt = getattr(self.ui, 'checkBox_rt_plot', None)
+            self._show_record_overlay(bool(rt is None or not rt.isChecked()))
         except Exception:
             pass
         # Emulator streams continuously; no RUN command needed
@@ -898,6 +1007,10 @@ class MainWindow(QtWidgets.QMainWindow):
         cast(Any, self.ui).progressBar_logging.setToolTip("")
         self._finish_time = None
         self.update_time_estimate()
+        try:
+            self._show_record_overlay(False)
+        except Exception:
+            pass
 
     # --- Stress live helpers ------------------------------------------------
     def _apply_stress_title(self) -> None:
@@ -931,7 +1044,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for (dirc, ld), yy in buf.items():
             x_center = ld + (-0.5 if dirc=='a' else +0.5)
             xs = [x_center + random.uniform(-0.5, 0.5) for _ in yy]
-            self.ax.scatter(xs[-2000:], yy[-2000:], s=0.6, c=RAW_COLORS.get(dirc,'gray'))
+            # Plot all points collected for this batch
+            self.ax.scatter(xs, yy, s=0.6, c=RAW_COLORS.get(dirc,'gray'))
         # Means: line+scatter exactly at x=load, slightly darker colors
         if self._rt_means:
             for d in ('a','b'):
