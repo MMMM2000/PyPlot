@@ -136,7 +136,7 @@ class MainWindow(QtWidgets.QMainWindow):
         cast(Any, self.ui).pushButton_cancel.setEnabled(False)
         cast(Any, self.ui).progressBar_logging.setValue(0)
         cast(Any, self.ui).progressBar_logging.setToolTip("")
-        self.ui.checkBox_subdir.setChecked(False)
+        self.ui.checkBox_subdir.setChecked(True)
 
         os.makedirs(self.log_dir, exist_ok=True)
 
@@ -327,6 +327,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.log_file.write(self.port_response.lstrip(">"))
                 self.sample_idx += 1
                 cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
+                # Keep Cancel enabled while logging
+                try:
+                    self.ui.pushButton_cancel.setEnabled(True)
+                except Exception:
+                    pass
 
                 if self.sample_rate:
                     remaining_samples = self.sample_count - self.sample_idx
@@ -367,11 +372,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
             # Always accumulate batch values for stress, even when realtime is off
-            try:
-                if self.logging_on and not self.paused and self._current_format() == 'Stress' and not rt_enabled:
-                    parts0 = [p.strip() for p in self.port_response.strip().lstrip('>').split(';') if p.strip()]
-                    if len(parts0) >= 4:
+            if self.logging_on and not self.paused and self._current_format() == 'Stress' and not rt_enabled:
+                parts0 = [p.strip() for p in self.port_response.strip().lstrip('>').split(';') if p.strip()]
+                if len(parts0) >= 4:
+                    try:
                         yv0 = float(parts0[3].replace(',', '.'))
+                    except Exception:
+                        yv0 = None
+                    if yv0 is not None and yv0 > 0:
                         try:
                             load0 = float(self.name_builder.s_load.value())
                             d0 = str(self.name_builder.s_dir.currentData())
@@ -382,8 +390,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         arr0 = buf0.setdefault(key0, [])
                         arr0.append(yv0)
                         self._batch_values.append(yv0)
-            except Exception:
-                pass
 
             # Drain any additional complete lines to prevent driver buffer
             # buildup at high emulator rates. This mirrors the single-line
@@ -862,6 +868,13 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.serial.readyRead.disconnect(self.read_from_port)
                     except Exception:
                         pass
+
+            # Safety: if we are no longer logging, hide any leftover overlay
+            if not self.logging_on:
+                try:
+                    self._show_record_overlay(False)
+                except Exception:
+                    pass
             finally:
                 if self._serial_ctx is not None:
                     self._serial_ctx.__exit__(None, None, None)
