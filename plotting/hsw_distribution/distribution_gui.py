@@ -14,8 +14,10 @@ if __package__ is None or __package__ == "":
     # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.backends import wants_matplotlib, wants_origin
 else:
     from ..utils import apply_system_theme, select_files_or_folder
+    from ..backends import wants_matplotlib, wants_origin
 
 
 def ask_files() -> List[str]:
@@ -63,6 +65,7 @@ def ask_options() -> Dict[str, Any] | None:
     naming_layout.addWidget(tthh_rb)
     naming_layout.addWidget(t1t2_rb)
 
+    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
@@ -76,7 +79,12 @@ def ask_options() -> Dict[str, Any] | None:
     layout.addWidget(bin_group, 0, 1)
     layout.addWidget(core_group, 1, 1)
     layout.addWidget(naming_group, 1, 0)
-    layout.addWidget(run_btn, 2, 0, 1, 2)
+    out_box = QtWidgets.QGroupBox("Output")
+    out_l = QtWidgets.QHBoxLayout(out_box)
+    out_l.addWidget(QtWidgets.QLabel("Backend:"))
+    out_l.addWidget(backend_combo)
+    layout.addWidget(out_box, 2, 0, 1, 2)
+    layout.addWidget(run_btn, 3, 0, 1, 2)
     dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
@@ -94,6 +102,7 @@ def ask_options() -> Dict[str, Any] | None:
         "core_bins": bins_spin.value(),
         "core_min": min_spin.value(),
         "labels": ("TT", "HH") if tthh_rb.isChecked() else ("T1", "T2"),
+        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
     }
 
 
@@ -208,13 +217,14 @@ def main() -> None:
     total_plots = len(data) * num_per
     progress = ProgressDialog(total_plots) if total_plots else None
 
+    backend = cfg.get("backend", "matplotlib")
     for name, df in data.items():
         if progress and progress.cancelled:
             break
         mask = masks[name]
         raw = raw_data[name]
 
-        if cfg["raw"]:
+        if cfg["raw"] and wants_matplotlib(backend):
             plt.figure(figsize=(6, 3))
             plt.scatter(df.index + 1, df["TT"], s=2, label=f"{labels[0]} inlier")
             plt.scatter(df.index + 1, df["HH"], s=2, label=f"{labels[1]} inlier", color="C1")
@@ -229,7 +239,7 @@ def main() -> None:
                 progress.update()
         if progress and progress.cancelled:
             break
-        if cfg["hist"]:
+        if cfg["hist"] and wants_matplotlib(backend):
             for col, h in hist[name].items():
                 plt.figure()
                 plt.bar(h["centers"], h["counts"], width=h["dh"], edgecolor="k", alpha=0.6)
@@ -240,7 +250,7 @@ def main() -> None:
                     progress.update()
             if progress and progress.cancelled:
                 break
-        if cfg["ind_log"] and not (progress and progress.cancelled):
+        if cfg["ind_log"] and wants_matplotlib(backend) and not (progress and progress.cancelled):
             for col, h in hist[name].items():
                 valid = h["dp"] > 0
                 x = (1 - h["centers"][valid]) ** 1.5
@@ -254,7 +264,7 @@ def main() -> None:
                     progress.update()
             if progress and progress.cancelled:
                 break
-        if cfg["comb_log"] and not (progress and progress.cancelled):
+        if cfg["comb_log"] and wants_matplotlib(backend) and not (progress and progress.cancelled):
             plt.figure()
             for col, h in hist[name].items():
                 valid = h["dp"] > 0
@@ -264,6 +274,49 @@ def main() -> None:
             plt.legend(); plt.grid(ls="--", alpha=0.3)
             if progress:
                 progress.update()
+
+    # Optional Origin output
+    if wants_origin(backend):
+        try:
+            import originpro as op
+            try:
+                op.set_show()
+            except Exception:
+                pass
+            gp = op.new_graph(template='scatter')
+            gl0 = gp[0]
+            first_layer = True
+            # For each file, plot combined ln(dp/dh) curves (TT/HH) in its own layer
+            for name in sorted(hist.keys()):
+                gl = gl0 if first_layer else gp.add_layer()  # type: ignore[attr-defined]
+                first_layer = False
+                for col, color in ((cfg["labels"][0], '#1f77b4'), (cfg["labels"][1], '#ff7f0e')):
+                    h = hist[name][col]
+                    valid = h["dp"] > 0
+                    x = (1 - h["centers"][valid]) ** 1.5
+                    y = np.log(h["dp"][valid])
+                    w = op.new_sheet('w', lname=f'{name}_{col}')
+                    w.from_list(0, x.tolist())
+                    w.from_list(1, y.tolist())
+                    w.cols_axis('XY')
+                    p = gl.add_plot(w, coly=1, colx=0, type='y')
+                    try:
+                        p.color = color
+                        p.symbol_shape = 2
+                    except Exception:
+                        pass
+                try:
+                    gl.rescale()
+                except Exception:
+                    pass
+            try:
+                gp.activate()
+                op.lt_exec('page.antialias=1; layer -aa 1;')
+                op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Origin plot failed: {e}")
 
     if progress and not progress.cancelled:
         progress.destroy()

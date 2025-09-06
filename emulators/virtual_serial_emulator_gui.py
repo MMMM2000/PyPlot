@@ -338,10 +338,21 @@ class Main(QWidget):
         self.cmb_port = QComboBox()
         self.btn_refresh = QPushButton("Refresh Ports")
         self.btn_refresh.clicked.connect(self.refresh_ports)
+        self.chk_auto_refresh = QCheckBox("Auto refresh ports")
+        self.chk_auto_refresh.stateChanged.connect(self.on_auto_refresh_changed)
+        self.refresh_timer = QTimer(self)
+        self.refresh_timer.setInterval(2000)
+        self.refresh_timer.timeout.connect(self.refresh_ports)
         # Mode selection
         self.cmb_mode = QComboBox(); self.cmb_mode.addItems(["Serial Data Logger", "Current Annealing Logger"])
         self.cmb_mode.currentIndexChanged.connect(self.on_mode_changed)
-        self.spin_baud = QSpinBox(); self.spin_baud.setRange(110, 921600); self.spin_baud.setValue(921600)
+        self.btn_preset = QPushButton("Apply Preset")
+        self.btn_preset.clicked.connect(self.on_apply_preset)
+        # Baud selection like in data loggers
+        self.combo_baud = QComboBox(); self.combo_baud.addItems([
+            "921600", "460800", "115200", "57600", "19200", "9600"
+        ])
+        self.combo_baud.setCurrentText("921600")
         # Data rate only for Serial Data Logger
         self.spin_rate = QSpinBox(); self.spin_rate.setRange(1, 2000); self.spin_rate.setValue(1000)
         # Sample file only for Current Annealing
@@ -360,8 +371,9 @@ class Main(QWidget):
         eb.addWidget(QLabel("Port:"), row, 0)
         eb.addWidget(self.cmb_port,   row, 1)
         eb.addWidget(self.btn_refresh,row, 2); row += 1
+        eb.addWidget(self.chk_auto_refresh, row, 1); row += 1
         eb.addWidget(QLabel("Baud:"),row, 0)
-        eb.addWidget(self.spin_baud, row, 1); row += 1
+        eb.addWidget(self.combo_baud, row, 1); row += 1
         self.lbl_rate = QLabel("Rate Hz:")
         eb.addWidget(self.lbl_rate, row, 0)
         eb.addWidget(self.spin_rate, row, 1); row += 1
@@ -370,6 +382,15 @@ class Main(QWidget):
         eb.addWidget(self.edit_sample, row, 1)
         eb.addWidget(self.btn_sample, row, 2); row += 1
         eb.addWidget(self.chk_loop,  row, 0, 1, 3); row += 1
+        # Mode presets
+        self.btn_preset_pair0 = QPushButton("Emu on ./ttyV0 (logger on ./ttyV1)")
+        self.btn_preset_pair1 = QPushButton("Emu on ./ttyV1 (logger on ./ttyV0)")
+        self.btn_preset_pair0.clicked.connect(lambda: self.on_use_pair_port(str(TTY0), str(TTY1)))
+        self.btn_preset_pair1.clicked.connect(lambda: self.on_use_pair_port(str(TTY1), str(TTY0)))
+        eb.addWidget(QLabel("Pair preset:"), row, 0)
+        eb.addWidget(self.btn_preset_pair0, row, 1)
+        eb.addWidget(self.btn_preset_pair1, row, 2); row += 1
+        eb.addWidget(self.btn_preset, row, 0); row += 1
         eb.addWidget(self.btn_start, row, 0)
         eb.addWidget(self.btn_stop,  row, 1)
 
@@ -459,7 +480,10 @@ class Main(QWidget):
         if not port:
             log_append(self.log, "[ERR ] No port selected")
             return
-        baud = int(self.spin_baud.value())
+        try:
+            baud = int(self.combo_baud.currentText())
+        except Exception:
+            baud = 9600
         if self.cmb_mode.currentText().startswith("Serial"):
             rate = int(self.spin_rate.value())
             self.emu = DataLoggerEmuThread(port, baud, rate, self.log)
@@ -506,11 +530,56 @@ class Main(QWidget):
                 seen.add(it); uniq.append(it)
         self.cmb_port.clear()
         self.cmb_port.addItems(uniq)
+        self._update_pair_buttons_enabled()
+
+    def on_auto_refresh_changed(self, state):
+        if self.chk_auto_refresh.isChecked():
+            self.refresh_timer.start()
+        else:
+            self.refresh_timer.stop()
+
+    def on_apply_preset(self) -> None:
+        is_serial = self.cmb_mode.currentText().startswith("Serial")
+        # Set recommended baud and mode-specific fields
+        self.combo_baud.setCurrentText("921600" if is_serial else "9600")
+        if is_serial:
+            self.spin_rate.setValue(1000)
+        else:
+            self.edit_sample.setText(str(_ca_default_sample()))
+        # Select first available port, else enable loop://
+        if self.cmb_port.count() > 0:
+            self.cmb_port.setCurrentIndex(0)
+            self.chk_loop.setChecked(False)
+        else:
+            self.chk_loop.setChecked(True)
+
+    def _update_pair_buttons_enabled(self) -> None:
+        sysname = platform.system()
+        ok_platform = sysname in {"Darwin", "Linux"}
+        have0 = TTY0.exists()
+        have1 = TTY1.exists()
+        enabled0 = ok_platform and have0
+        enabled1 = ok_platform and have1
+        self.btn_preset_pair0.setEnabled(enabled0)
+        self.btn_preset_pair1.setEnabled(enabled1)
+
+    def on_use_pair_port(self, emu_port: str, logger_port: str) -> None:
+        if not Path(emu_port).exists():
+            log_append(self.log, f"[WARN] {emu_port} not found. Create the pair first.")
+            return
+        idx = self.cmb_port.findText(emu_port)
+        if idx >= 0:
+            self.cmb_port.setCurrentIndex(idx)
+        else:
+            self.cmb_port.insertItem(0, emu_port)
+            self.cmb_port.setCurrentIndex(0)
+        self.chk_loop.setChecked(False)
+        log_append(self.log, f"[INFO] Emulator will use {emu_port}. Point your logger to {logger_port}.")
 
     def on_mode_changed(self) -> None:
         is_serial = self.cmb_mode.currentText().startswith("Serial")
         # Recommended baud per mode
-        self.spin_baud.setValue(921600 if is_serial else 9600)
+        self.combo_baud.setCurrentText("921600" if is_serial else "9600")
         # Show/Hide controls per mode
         self.lbl_rate.setVisible(is_serial)
         self.spin_rate.setVisible(is_serial)

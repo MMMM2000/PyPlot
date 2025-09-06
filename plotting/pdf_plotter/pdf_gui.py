@@ -20,6 +20,7 @@ except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
 from ..utils import apply_system_theme, select_files_or_folder, save_figure  # type: ignore
+from ..backends import wants_matplotlib, wants_origin
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -198,10 +199,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Combined", "Separate"])
         self.mode_combo.currentIndexChanged.connect(self._maybe_auto_plot)
+        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+        self.backend_combo.currentIndexChanged.connect(self._maybe_auto_plot)
         self.zero_cb = QtWidgets.QCheckBox("First point at zero")
         self.zero_cb.setChecked(True)
         self.zero_cb.stateChanged.connect(self._maybe_auto_plot)
         form.addRow("Plot mode", self.mode_combo)
+        form.addRow("Backend", self.backend_combo)
         form.addRow("Zero first", self.zero_cb)
 
         # Styling
@@ -543,6 +547,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         y_label = f"{' / '.join(selected)} (arb. u.)"
         x_label = x_name
         mode = self.mode_combo.currentText()
+        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
         if mode == "Combined":
             lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
             for path, sets in lines_by_file.items():
@@ -555,26 +560,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 title = f"{y_label} vs {x_label} — {base_title}"
             else:
                 title = f"{y_label} vs {x_label} — {len(lines_by_file)} files"
-            win = PlotWindow(None, controller=self)
-            self._plot_to_window(win, lines, title, x_label, y_label)
-            win.show()
-            self.plot_wins.append(win)
-            self.plot_win = win
-            self._last_lines = win._last_lines
-            self._last_title = title
-            self._last_x_label = x_label
-            self._last_y_label = y_label
-            if self.save_cb.isChecked():
-                self._save_lines(self._last_lines, self._last_title, x_label, y_label)
-        else:  # Separate
-            for path, sets in lines_by_file.items():
+            if wants_matplotlib(backend):
                 win = PlotWindow(None, controller=self)
-                lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
-                base = os.path.splitext(os.path.basename(path))[0]
-                for y_name, xs, ys in sets:
-                    label = f"{base} {y_name}"
-                    lines.append((label, xs, ys))
-                title = f"{y_label} vs {x_label} — {base}"
                 self._plot_to_window(win, lines, title, x_label, y_label)
                 win.show()
                 self.plot_wins.append(win)
@@ -585,6 +572,36 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 self._last_y_label = y_label
                 if self.save_cb.isChecked():
                     self._save_lines(self._last_lines, self._last_title, x_label, y_label)
+            if wants_origin(backend):
+                try:
+                    self._plot_to_origin(lines, title, x_label, y_label)
+                except Exception as e:
+                    print(f"Origin plot failed: {e}")
+        else:  # Separate
+            for path, sets in lines_by_file.items():
+                lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
+                base = os.path.splitext(os.path.basename(path))[0]
+                for y_name, xs, ys in sets:
+                    label = f"{base} {y_name}"
+                    lines.append((label, xs, ys))
+                title = f"{y_label} vs {x_label} — {base}"
+                if wants_matplotlib(backend):
+                    win = PlotWindow(None, controller=self)
+                    self._plot_to_window(win, lines, title, x_label, y_label)
+                    win.show()
+                    self.plot_wins.append(win)
+                    self.plot_win = win
+                    self._last_lines = win._last_lines
+                    self._last_title = title
+                    self._last_x_label = x_label
+                    self._last_y_label = y_label
+                    if self.save_cb.isChecked():
+                        self._save_lines(self._last_lines, self._last_title, x_label, y_label)
+                if wants_origin(backend):
+                    try:
+                        self._plot_to_origin(lines, title, x_label, y_label)
+                    except Exception as e:
+                        print(f"Origin plot failed: {e}")
 
     def _plot_to_window(
         self,
@@ -615,6 +632,43 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         ax = fig.add_subplot(111)
         self._draw_on_axes(ax, lines, title, x_label, y_label)
         return fig
+
+    def _plot_to_origin(
+        self,
+        lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
+        title: str,
+        x_label: str,
+        y_label: str,
+    ) -> None:
+        import originpro as op  # lazy import
+        try:
+            op.set_show()
+        except Exception:
+            pass
+        gp = op.new_graph(template='scatter')
+        gl = gp[0]
+        for idx, (lbl, xs, ys) in enumerate(lines):
+            w = op.new_sheet('w', lname=f'data_{idx}')
+            w.from_list(0, np.asarray(xs, dtype=float).tolist())
+            w.from_list(1, np.asarray(ys, dtype=float).tolist())
+            w.cols_axis('XY')
+            p = gl.add_plot(w, coly=1, colx=0, type='y')
+            try:
+                p.symbol_shape = 2
+            except Exception:
+                pass
+            try:
+                p.lname = lbl
+            except Exception:
+                pass
+        try:
+            gp.activate()
+            esc_title = title.replace('"', "'")
+            op.lt_exec('page.antialias=1; layer -aa 1;')
+            op.lt_exec(f'title -s "{esc_title}";')
+            op.lt_exec(f'lab -xb "{x_label}"; lab -yl "{y_label}"; legend;')
+        except Exception:
+            pass
 
     def _save_lines(
         self,

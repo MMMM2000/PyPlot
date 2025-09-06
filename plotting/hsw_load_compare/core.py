@@ -134,71 +134,6 @@ def load_file(path: str):
 
 def main(files: List[str], cfg: Dict[str, Any]):
     backend = cfg.get("BACKEND", BACKEND)
-    if not wants_matplotlib(backend) and wants_origin(backend):
-        # Compute histograms as in Matplotlib path
-        records = []
-        for p in files:
-            md, raw, filtered, mask = load_file(p)
-            if md is None:
-                print(f"Skipping {p}")
-                continue
-            records.append((md, raw, filtered, mask))
-        if not records:
-            raise SystemExit("No valid ascending-load files selected.")
-        records.sort(key=lambda t: t[0]["load"])
-        hist_data: Dict[float, Dict[str, Dict[str, np.ndarray]]] = {}
-        for md, _raw, filt, _mask in records:
-            load = md["load"]
-            hist_data[load] = build_histograms(filt)
-        try:
-            import originpro as op
-            # Ensure Origin UI is shown
-            try:
-                op.set_show()
-            except Exception:
-                pass
-            book = op.new_book('w', lname="HSW Compare (Python)")
-            book.activate()
-            # One layer per load
-            gp = op.new_graph(template='scatter')
-            gl0 = gp[0]
-            first = True
-            for load, data in hist_data.items():
-                gl = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
-                first = False
-                for col, color in (("TT", "#1f77b4"), ("HH", "#ff7f0e")):
-                    h = data[col]
-                    valid = h["dp"] > 0
-                    x = (1 - h["centers"][valid]) ** 1.5
-                    y = np.log(h["dp"][valid])
-                    w = op.new_sheet('w', lname=f'{col}_{load:g}')
-                    w.from_list(0, x.tolist())
-                    w.from_list(1, y.tolist())
-                    w.cols_axis('XY')
-                    p = gl.add_plot(w, coly=1, colx=0, type='y')
-                    try:
-                        p.color = color
-                        p.symbol_shape = 2
-                    except Exception:
-                        pass
-                try:
-                    gl.rescale()
-                except Exception:
-                    pass
-            try:
-                gp.activate()
-                op.lt_exec('page.antialias=1;')
-                op.lt_exec('layer -aa 1;')
-                op.lt_exec('lab -xb "$\\Delta h^{3/2}$";')
-                op.lt_exec('lab -yl "ln(dp/dh)";')
-                op.lt_exec('legend;')
-            except Exception:
-                pass
-            if cfg.get("hist") or cfg.get("raw"):
-                print("Note: Origin output currently includes only the log-compare panels.")
-        except Exception as e:
-            print(f"Origin plot failed: {e}")
-        return
     cfg_show = cfg["show"]
     cfg_save = cfg["save"]
     out_dir = Path(cfg["out_dir"]).expanduser()
@@ -230,49 +165,51 @@ def main(files: List[str], cfg: Dict[str, Any]):
     nrows = len(loads)
     all_centers = np.concatenate([h["centers"] for hist in hist_data.values() for h in hist.values()])
     x_min, x_max = all_centers.min(), all_centers.max()
-    fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
-    fig_log.subplots_adjust(hspace=0)
-    plots: List[Tuple[Figure, str]] = [(fig_log, "log_compare.png")]
-    if nrows == 1:
-        ax_log = [ax_log]
-    log_x_vals = []
-    log_y_vals = []
-    for load in loads:
-        for col in ("TT", "HH"):
-            h = hist_data[load][col]
-            valid = h["dp"] > 0
-            log_x_vals.append((1 - h["centers"][valid])**1.5)
-            log_y_vals.append(np.log(h["dp"][valid]))
-    log_x_all = np.concatenate(log_x_vals)
-    log_y_all = np.concatenate(log_y_vals)
-    lx_min = -1e-5
-    lx_max = log_x_all.max()
-    ly_min, ly_max = log_y_all.min(), log_y_all.max()
-    lx_pad = (lx_max - lx_min) * 0.05
-    ly_pad = (ly_max - ly_min) * 0.05
-    lx_upper = lx_max + lx_pad
-    ly_lower = ly_min - ly_pad
-    ly_upper = ly_max + ly_pad
-    for ax, load in zip(ax_log, loads):
-        for col in ("TT", "HH"):
-            if cfg[col]:
+    plots: List[Tuple[Figure, str]] = []
+    if wants_matplotlib(backend):
+        fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
+        fig_log.subplots_adjust(hspace=0)
+        plots.append((fig_log, "log_compare.png"))
+        if nrows == 1:
+            ax_log = [ax_log]
+        log_x_vals = []
+        log_y_vals = []
+        for load in loads:
+            for col in ("TT", "HH"):
                 h = hist_data[load][col]
                 valid = h["dp"] > 0
-                ax.plot((1 - h["centers"][valid])**1.5,
-                        np.log(h["dp"][valid]), '-o', markersize=4, label=col)
-        ax.set_xlim(lx_min, lx_upper)
-        ax.set_ylim(ly_lower, ly_upper)
-        ax.grid(True, linestyle="--", alpha=0.3)
-        ax.text(0.02, 0.05, f"{load:g} g", transform=ax.transAxes, va="bottom")
-        if cfg["TT"] and cfg["HH"]:
-            ax.legend(fontsize="small")
-    ax_log[-1].set_xlabel(r"$\Delta h^{3/2}$")
-    for ax in ax_log[:-1]:
-        ax.tick_params(axis="x", bottom=False, labelbottom=False)
-    ax_log[0].set_title("Combined ln(dp/dh) vs reduced switching field")
-    fig_log.supylabel("ln(dp/dh)")
+                log_x_vals.append((1 - h["centers"][valid])**1.5)
+                log_y_vals.append(np.log(h["dp"][valid]))
+        log_x_all = np.concatenate(log_x_vals)
+        log_y_all = np.concatenate(log_y_vals)
+        lx_min = -1e-5
+        lx_max = log_x_all.max()
+        ly_min, ly_max = log_y_all.min(), log_y_all.max()
+        lx_pad = (lx_max - lx_min) * 0.05
+        ly_pad = (ly_max - ly_min) * 0.05
+        lx_upper = lx_max + lx_pad
+        ly_lower = ly_min - ly_pad
+        ly_upper = ly_max + ly_pad
+        for ax, load in zip(ax_log, loads):
+            for col in ("TT", "HH"):
+                if cfg[col]:
+                    h = hist_data[load][col]
+                    valid = h["dp"] > 0
+                    ax.plot((1 - h["centers"][valid])**1.5,
+                            np.log(h["dp"][valid]), '-o', markersize=4, label=col)
+            ax.set_xlim(lx_min, lx_upper)
+            ax.set_ylim(ly_lower, ly_upper)
+            ax.grid(True, linestyle="--", alpha=0.3)
+            ax.text(0.02, 0.05, f"{load:g} g", transform=ax.transAxes, va="bottom")
+            if cfg["TT"] and cfg["HH"]:
+                ax.legend(fontsize="small")
+        ax_log[-1].set_xlabel(r"$\Delta h^{3/2}$")
+        for ax in ax_log[:-1]:
+            ax.tick_params(axis="x", bottom=False, labelbottom=False)
+        ax_log[0].set_title("Combined ln(dp/dh) vs reduced switching field")
+        fig_log.supylabel("ln(dp/dh)")
 
-    if cfg["hist"]:
+    if cfg["hist"] and wants_matplotlib(backend):
         fig_h, ax_h = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
         fig_h.subplots_adjust(hspace=0)
         if nrows == 1:
@@ -299,7 +236,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
         fig_h.supylabel("Counts")
         plots.append((fig_h, "hist_compare"))
 
-    if cfg["raw"]:
+    if cfg["raw"] and wants_matplotlib(backend):
         fig_r, ax_r = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
         fig_r.subplots_adjust(hspace=0)
         if nrows == 1:
@@ -324,7 +261,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
         ax_r[0].set_title("Raw Hsw vs load (Histogram-Core filtered)")
         plots.append((fig_r, "raw_compare"))
 
-    if cfg_save:
+    if cfg_save and wants_matplotlib(backend):
         out_dir.mkdir(parents=True, exist_ok=True)
         save_figure(fig_log, out_dir / "log_compare", SAVE_FORMAT, PNG_DPI)
         if cfg["hist"]:
@@ -332,12 +269,13 @@ def main(files: List[str], cfg: Dict[str, Any]):
         if cfg["raw"]:
             save_figure(fig_r, out_dir / "raw_compare", SAVE_FORMAT, PNG_DPI)
 
-    if cfg_show:
-        plt.show()
-    else:
-        plt.close("all")
+    if wants_matplotlib(backend):
+        if cfg_show:
+            plt.show()
+        else:
+            plt.close("all")
 
-    if (not cfg_save) and plots and QtWidgets.QApplication.instance() is not None:
+    if wants_matplotlib(backend) and (not cfg_save) and plots and QtWidgets.QApplication.instance() is not None:
         reply = QtWidgets.QMessageBox.question(
             None,
             "Save Plots",
@@ -351,3 +289,49 @@ def main(files: List[str], cfg: Dict[str, Any]):
                 for fig, fname in plots:
                     base = os.path.join(out, fname)
                     save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
+
+    # Origin output (log-compare panels)
+    if wants_origin(backend):
+        try:
+            import originpro as op
+            try:
+                op.set_show()
+            except Exception:
+                pass
+            book = op.new_book('w', lname="HSW Compare (Python)")
+            book.activate()
+            gp = op.new_graph(template='scatter')
+            gl0 = gp[0]
+            first = True
+            for load in loads:
+                gl = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
+                first = False
+                for col, color in (("TT", "#1f77b4"), ("HH", "#ff7f0e")):
+                    if not cfg[col]:
+                        continue
+                    h = hist_data[load][col]
+                    valid = h["dp"] > 0
+                    x = (1 - h["centers"][valid]) ** 1.5
+                    y = np.log(h["dp"][valid])
+                    w = op.new_sheet('w', lname=f'{col}_{load:g}')
+                    w.from_list(0, x.tolist())
+                    w.from_list(1, y.tolist())
+                    w.cols_axis('XY')
+                    p = gl.add_plot(w, coly=1, colx=0, type='y')
+                    try:
+                        p.color = color
+                        p.symbol_shape = 2
+                    except Exception:
+                        pass
+                try:
+                    gl.rescale()
+                except Exception:
+                    pass
+            try:
+                gp.activate()
+                op.lt_exec('page.antialias=1; layer -aa 1;')
+                op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
+            except Exception:
+                pass
+        except Exception as e:
+            print(f"Origin plot failed: {e}")

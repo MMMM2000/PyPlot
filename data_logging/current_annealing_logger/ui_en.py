@@ -6,6 +6,11 @@ are preserved for compatibility with the existing logic.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+try:
+    # Reuse InfoLineEdit from data logger for inline info and validation
+    from data_logging.data_logger.file_name_builder import InfoLineEdit
+except Exception:
+    InfoLineEdit = QtWidgets.QLineEdit  # type: ignore[assignment]
 
 
 class Ui_MainWindow(object):
@@ -228,9 +233,24 @@ class Ui_MainWindow(object):
         name_grid.addWidget(QtWidgets.QLabel("Preset:"), 0, 0)
         name_grid.addWidget(self.comboBox_name_preset, 0, 1)
         # Fields for the "Current annealing" preset
-        self.lineEdit_composition = QtWidgets.QLineEdit("Ni51Fe26Ga21")
-        self.lineEdit_microwire = QtWidgets.QLineEdit("1_2")
-        self.lineEdit_sample = QtWidgets.QLineEdit("s1")
+        self.lineEdit_composition = InfoLineEdit("Chemical composition, e.g., Ni51Fe26Ga21")
+        try:
+            self.lineEdit_composition.set_validation(r"^[A-Za-z0-9]+$", "Use only letters and numbers")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.lineEdit_composition.setText("Ni51Fe26Ga21")
+        self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
+        try:
+            self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.lineEdit_microwire.setText("1_2")
+        self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
+        try:
+            self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.lineEdit_sample.setText("s1")
         name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
         name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
@@ -238,7 +258,7 @@ class Ui_MainWindow(object):
         name_grid.addWidget(QtWidgets.QLabel("Sample:"), 3, 0)
         name_grid.addWidget(self.lineEdit_sample, 3, 1)
         # Field for the "Custom" preset
-        self.lineEdit_custom_name = QtWidgets.QLineEdit("")
+        self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
         name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
@@ -373,4 +393,3 @@ class Ui_MainWindow(object):
         MainWindow.setStatusBar(self.statusBar)
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
-

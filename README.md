@@ -1,12 +1,12 @@
-# Python Plot
+# Microwire Data Plotting & Logging
 
 This repository contains simple tools for logging measurement data and plotting the resulting text files.
 
 ## Installation
 
-The steps below assume no prior Python knowledge. **Commands** shown in fixed-width
-font should be typed into a terminal exactly as written and confirmed with the
-``Enter`` key.
+The steps below assume no prior Python knowledge. On macOS use `python3`/`pip3` in all
+commands; on Windows and many Linux setups `python`/`pip` is sufficient. Commands shown
+in fixed-width font should be typed into a terminal exactly as written and confirmed with Enter.
 
 1. **Install Visual Studio Code**
    - Download from [https://code.visualstudio.com](https://code.visualstudio.com) and run the installer.
@@ -19,7 +19,7 @@ font should be typed into a terminal exactly as written and confirmed with the
    - **Windows**: during installation enable the *Add python.exe to PATH* option so
      ``python`` and ``pip`` work from a terminal.
    - **macOS**: either run the installer downloaded above or install with Homebrew.
-   - Check the installation by running ``python --version`` in a terminal.
+   - Check the installation by running `python --version` (Windows) or `python3 --version` (macOS).
 
 3. **Open the project**
    - Choose *File → Open Folder* in VS Code and select the repository directory
@@ -27,7 +27,8 @@ font should be typed into a terminal exactly as written and confirmed with the
    - Open a new terminal inside VS Code with *Terminal → New Terminal*.
 
 4. **Create and activate a virtual environment**
-   - Run ``python -m venv .venv`` to create a folder named ``.venv``.
+   - Windows: run `python -m venv .venv` to create a folder named `.venv`.
+   - macOS/Linux: run `python3 -m venv .venv`.
    - **Windows**:
      - Activation may fail with an "execution policy" error. In that case run
        ``Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`` in a
@@ -37,9 +38,11 @@ font should be typed into a terminal exactly as written and confirmed with the
    - After activation the terminal prompt usually shows ``(.venv)`` at the start.
 
 5. **Install dependencies**
-   - First upgrade ``pip`` (Python's package installer) with ``python -m pip install --upgrade pip``.
+   - First upgrade pip (Python's package installer):
+     - Windows: `python -m pip install --upgrade pip`
+     - macOS/Linux: `python3 -m pip install --upgrade pip`
    - Project dependencies and their pinned versions are defined in ``pyproject.toml``.
-   - Install the pinned set of packages with ``pip install -r requirements.txt``. Make
+   - Install the pinned set of packages with `pip install -r requirements.txt` (`pip3` on macOS). Make
      sure you are in the repository folder so ``requirements.txt`` is found.
    - The ``requirements.txt`` file is generated from ``pyproject.toml`` using ``pip-compile``
      from [pip-tools](https://github.com/jazzband/pip-tools). To update dependencies,
@@ -47,7 +50,8 @@ font should be typed into a terminal exactly as written and confirmed with the
    - Alternatively run ``pip install -e .`` to install the project in editable mode.
 
 6. **Start the launcher**
-   - Run ``python -m launcher`` to open the graphical tool window.
+   - Windows: `python -m launcher`
+   - macOS/Linux: `python3 -m launcher`
 
 Reactivate the virtual environment whenever you open a new terminal. Repeat the
 ``activate`` command from step 4 before running ``python`` or ``pip`` again.
@@ -78,7 +82,7 @@ pyinstaller launcher.spec
 This creates `dist/launcher.app`.  To distribute it as a disk image run:
 
 ```bash
-hdiutil create -volname PythonPlot -srcfolder dist/launcher.app dist/launcher.dmg
+hdiutil create -volname MicrowirePlot -srcfolder dist/launcher.app dist/launcher.dmg
 ```
 
 Both commands may be executed on a Mac to generate a self‑contained application
@@ -100,9 +104,11 @@ options in a persistent window. Run it with ``python -m experiments.data_plotter
 plotting tools (Stress Dependence, Temperature Sensitivity and others).
 Select an item and press **Run** to launch it:
 
-```bash
-python -m launcher
-```
+Windows: `python -m launcher`
+
+macOS/Linux: `python3 -m launcher`
+
+PDF Plotter now supports Origin output. In the PDF T1/T2 Plotter window, choose Backend = Matplotlib, Origin, or Both to render to your preferred target.
 
 ## COM port emulator (universal)
 
@@ -111,26 +117,41 @@ Use the single, universal emulator to test both loggers:
 - Launch from the launcher: Emulators → "Universal Serial Emulator".
 - Or run directly:
 
-```bash
-python -m emulators.virtual_serial_emulator_gui
-```
+Windows: `python -m emulators.virtual_serial_emulator_gui`
+
+macOS/Linux: `python3 -m emulators.virtual_serial_emulator_gui`
 
 Modes and defaults:
 - Serial Data Logger: baud 921600; Rate Hz configurable (default 1000).
 - Current Annealing Logger: baud 9600; replies to HMP4030 MEAS queries. Optionally pick a sample file (defaults to `sample_data/current_annealing/Ni51Fe26Ga21 1_2 s2 1000mA.txt`).
 
 Virtual port pairs:
-- macOS/Linux: click "Create Pair (socat)" to create `./ttyV0 <-> ./ttyV1`. Optional sudo symlinks to `/dev/cu.ttyV*` are supported.
-- Windows: use existing COM ports (driver required) or enable the `loop://` option for internal loopback.
+- macOS/Linux: click "Create Pair (socat)" to create `./ttyV0 <-> ./ttyV1`. Optional sudo symlinks to `/dev/cu.ttyV*` are supported. Use the emulator's new "Pair preset" buttons to place the emulator on one side and point your logger to the other.
+- Windows: use an installed virtual port pair (driver required; see below) or enable the `loop://` option for internal loopback.
+
+### Windows: set up virtual COM ports
+
+If you need a paired virtual COM port on Windows, the free HHD tool works well:
+
+1. Go to https://freevirtualserialports.com and download the installer.
+2. Install and launch the tool, then create a new pair (e.g., COM7 ↔ COM8).
+3. In the emulator, select one side of the pair (e.g., COM7). In the logger, connect to the other side (COM8).
+4. When finished, remove the pair in the HHD tool.
+
+Some antivirus software may prompt for driver installation; allow it so the ports function correctly.
+
+### macOS: create a virtual pair with socat
+
+1. Install socat via Homebrew: `brew install socat`.
+2. In the emulator, click "Create Pair (socat)" — this creates `./ttyV0` and `./ttyV1` inside the repository.
+3. Optionally click "Create /dev/cu.ttyV* symlinks (sudo)" to make `/dev/cu.ttyV0` and `/dev/cu.ttyV1`.
+4. Use the emulator's "Pair preset" buttons to pick which side the emulator uses; point your logger to the other.
+5. Click "Stop Pair" to stop socat when done.
 
 
 ## Backends: Matplotlib and Origin
 
-All plotting tools can render graphs with Matplotlib, Origin, or both:
-
-- In every plotting dialog, use the new "Backend" selector to choose `Matplotlib`, `Origin`, or `Both`.
-- Default is `Matplotlib` so behavior remains unchanged unless you switch it.
-- Advanced users can also set the per‑tool `BACKEND` in `plotting/default_config.json` or call the core APIs directly, e.g. `core.main(files, backend="origin")` or `backend="both"`.
+All plotting tools can render graphs with Matplotlib and/or Origin. Where applicable, the UI includes a "Backend" selector that offers Matplotlib, Origin, or Both. Default is Matplotlib so behavior remains unchanged unless you switch it. Advanced users can also set a per‑tool `BACKEND` in `plotting/default_config.json` or call the core APIs directly (e.g., `core.main(files, backend="origin")`).
 
 Notes on Origin output:
 - Requires Origin (desktop app) installed locally and the `originpro` Python package (`pip install originpro`).
@@ -269,7 +290,7 @@ The port list shows each device's full description to make selection easier.
 ## Requirements
 
 This project depends on `PyQt6`, `matplotlib`, `numpy` and `pandas`.
-Install the pinned dependencies with:
+Install the pinned dependencies with (use `pip3` on macOS):
 
 ```bash
 pip install -r requirements.txt
