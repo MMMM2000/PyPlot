@@ -340,19 +340,39 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.pushButton_record.setEnabled(True)
                     self.ui.pushButton_cancel.setEnabled(False)
                     self._finish_time = None
-                    # Update plot to include the new mean
+                    # Update plot to include the new mean and hide overlay
                     try:
                         if self._current_format() == 'Stress':
                             self._draw_stress_live()
+                        self._show_record_overlay(False)
                     except Exception:
                         pass
                     # Keep emulator streaming continuously; no STOP
-            # Feed live plot only while logging
-            if self.logging_on and not self.paused:
+            # Feed live plot only while logging and when realtime is enabled
+            rt_enabled = getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()
+            if self.logging_on and not self.paused and rt_enabled:
                 try:
                     self._ingest_live_sample(self.port_response)
                 except Exception:
                     pass
+            # Always accumulate batch values for stress, even when realtime is off
+            try:
+                if self.logging_on and not self.paused and self._current_format() == 'Stress' and not rt_enabled:
+                    parts0 = [p.strip() for p in self.port_response.strip().lstrip('>').split(';') if p.strip()]
+                    if len(parts0) >= 4:
+                        yv0 = float(parts0[3].replace(',', '.'))
+                        try:
+                            load0 = float(self.name_builder.s_load.value())
+                            d0 = str(self.name_builder.s_dir.currentData())
+                        except Exception:
+                            load0, d0 = 0.0, 'a'
+                        key0 = (d0, float(load0))
+                        buf0 = self._rt_data.setdefault('stress', {})
+                        arr0 = buf0.setdefault(key0, [])
+                        arr0.append(yv0)
+                        self._batch_values.append(yv0)
+            except Exception:
+                pass
 
             # Drain any additional complete lines to prevent driver buffer
             # buildup at high emulator rates. This mirrors the single-line
@@ -402,11 +422,29 @@ class MainWindow(QtWidgets.QMainWindow):
                                 self._draw_stress_live()
                         except Exception:
                             pass
-                if self.logging_on and not self.paused:
+                if self.logging_on and not self.paused and getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked():
                     try:
                         self._ingest_live_sample(self.port_response)
                     except Exception:
                         pass
+                # Always accumulate for stress batches even when realtime plot is off
+                try:
+                    if self.logging_on and not self.paused and self._current_format() == 'Stress':
+                        parts = [p.strip() for p in self.port_response.strip().lstrip('>').split(';') if p.strip()]
+                        if len(parts) >= 4:
+                            yv = float(parts[3].replace(',', '.'))
+                            try:
+                                load = float(self.name_builder.s_load.value())
+                                d = str(self.name_builder.s_dir.currentData())
+                            except Exception:
+                                load, d = 0.0, 'a'
+                            key = (d, float(load))
+                            buf = self._rt_data.setdefault('stress', {})
+                            arr = buf.setdefault(key, [])
+                            arr.append(yv)
+                            self._batch_values.append(yv)
+                except Exception:
+                    pass
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
@@ -629,8 +667,7 @@ class MainWindow(QtWidgets.QMainWindow):
             arr.append(y)
             # Append to batch for mean computation
             self._batch_values.append(y)
-            # Redraw stress plot with raw + means overlay
-            self._draw_stress_live()
+            # Do not redraw per sample; draw once at end of batch
         elif fmt == 'Temperature':
             if len(vals) < 4:
                 return
@@ -888,16 +925,29 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax.set_ylabel("T1+T2 (μs)", color=self._plot_fg)
         self._apply_stress_title()
         self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
-        colors = {'a': '#45A1D6', 'b': '#F09C67'}
+        RAW_COLORS = {'a': '#45A1D6', 'b': '#F09C67'}
+        MEAN_COLORS = {'a': '#00306E', 'b': '#965308'}
+        # Raw scatter jittered around load ± 0.5
         for (dirc, ld), yy in buf.items():
             x_center = ld + (-0.5 if dirc=='a' else +0.5)
             xs = [x_center + random.uniform(-0.5, 0.5) for _ in yy]
-            self.ax.scatter(xs[-2000:], yy[-2000:], s=0.6, c=colors.get(dirc,'gray'), label=f"{ld:g}{dirc}")
-        # Overlay means
+            self.ax.scatter(xs[-2000:], yy[-2000:], s=0.6, c=RAW_COLORS.get(dirc,'gray'))
+        # Means: line+scatter exactly at x=load, slightly darker colors
         if self._rt_means:
-            for (dirc, ld), m in sorted(self._rt_means.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-                x = ld + (-0.5 if dirc=='a' else +0.5)
-                self.ax.scatter([x], [m], s=40, marker='o', edgecolors='k', linewidths=0.6, c=colors.get(dirc,'gray'))
+            for d in ('a','b'):
+                pts = sorted([(ld, m) for (dirc, ld), m in self._rt_means.items() if dirc==d], key=lambda t: t[0])
+                if not pts:
+                    continue
+                xs_m = [ld for ld, _ in pts]
+                ys_m = [m for _, m in pts]
+                self.ax.plot(xs_m, ys_m, 'o-', color=MEAN_COLORS.get(d, 'gray'), markersize=8, linewidth=2)
+        # X ticks at loads
+        try:
+            loads = sorted({ld for (_d, ld) in buf.keys()})
+            if loads:
+                self.ax.set_xticks(loads)
+        except Exception:
+            pass
         # Delta if 2+ means for 'a'
         try:
             means_a = sorted([(ld, v) for (d, ld), v in self._rt_means.items() if d=='a'], key=lambda t: t[0])
@@ -906,8 +956,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ax.text(0.95, 0.05, f"Δ={delta:.2f} μs", transform=self.ax.transAxes, ha='right', va='bottom', fontsize=10, bbox=dict(facecolor='white', alpha=0.6))
         except Exception:
             pass
+        # Legend: raw ↑/↓ and mean ↑/↓
         try:
-            self.ax.legend(loc='best', markerscale=10, fontsize=8)
+            import matplotlib.lines as mlines
+            raw_up = mlines.Line2D([], [], color=RAW_COLORS['a'], marker='o', linestyle='None', markersize=6, label='raw \u2191')
+            raw_dn = mlines.Line2D([], [], color=RAW_COLORS['b'], marker='o', linestyle='None', markersize=6, label='raw \u2193')
+            mean_up = mlines.Line2D([], [], color=MEAN_COLORS['a'], marker='o', linestyle='-', linewidth=2, markersize=8, label='mean \u2191')
+            mean_dn = mlines.Line2D([], [], color=MEAN_COLORS['b'], marker='o', linestyle='-', linewidth=2, markersize=8, label='mean \u2193')
+            self.ax.legend(handles=[raw_up, raw_dn, mean_up, mean_dn], loc='best', fontsize=8)
         except Exception:
             pass
         self._draw_throttled()

@@ -94,7 +94,7 @@ class UiMainWindow(object):
 
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
-        self.lineEdit_log_dir.setMinimumWidth(360)
+        self.lineEdit_log_dir.setMinimumWidth(280)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -106,7 +106,7 @@ class UiMainWindow(object):
 
         log_layout.addWidget(QtWidgets.QLabel("File name:"), 1, 0)
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(360)
+        self.lineEdit_log_file.setMinimumWidth(280)
         self.lineEdit_log_file.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
