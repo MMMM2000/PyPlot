@@ -201,20 +201,24 @@ class MainWindow(QtWidgets.QMainWindow):
                     label += f" - {info.description()}"
             except Exception:
                 pass
-            self.ui.comboBox_port.addItem(label, userData=sysloc)
-            seen.add(sysloc)
+            # Store systemLocation when available; logger falls back to opening
+            # by basename if needed (serial_port handles both).
+            self.ui.comboBox_port.addItem(label, userData=(sysloc or name))
+            seen.add(sysloc or name)
         # 2) Extra virtual symlinks (macOS/Linux): /dev/cu.ttyV* and /dev/ttyV*
         try:
             import platform
             from glob import glob
             if platform.system() in {"Darwin", "Linux"}:
-                extras = sorted(set(glob("/dev/cu.ttyV*") + glob("/dev/ttyV*") + glob(str(Path.cwd() / "ttyV*"))))
+                extras = sorted(set(glob("/dev/cu.ttyV*") + glob("/dev/ttyV*") + glob(str(Path.cwd()/"ttyV*"))))
                 for path in extras:
-                    sysloc = os.path.abspath(path)
+                    rp = os.path.realpath(path)
+                    # Prefer the final /dev/* node name so QSerialPort can open it
+                    name = os.path.basename(rp) if rp.startswith('/dev/') else os.path.basename(path)
                     label = f"{os.path.basename(path)} - Virtual pair"
-                    if sysloc not in seen:
-                        self.ui.comboBox_port.addItem(label, userData=sysloc)
-                        seen.add(sysloc)
+                    if name not in seen:
+                        self.ui.comboBox_port.insertItem(0, label, userData=name)
+                        seen.add(name)
         except Exception:
             pass
         if self.ui.comboBox_port.count() > 0:
@@ -342,12 +346,67 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._draw_stress_live()
                     except Exception:
                         pass
+                    # Keep emulator streaming continuously; no STOP
             # Feed live plot only while logging
             if self.logging_on and not self.paused:
                 try:
                     self._ingest_live_sample(self.port_response)
                 except Exception:
                     pass
+
+            # Drain any additional complete lines to prevent driver buffer
+            # buildup at high emulator rates. This mirrors the single-line
+            # processing above for each extra line currently available.
+            while self.serial is not None and self.serial.canReadLine():
+                raw = self.serial.readLine()
+                raw_bytes = bytes(raw)            # type: ignore[arg-type]
+                self.port_response = raw_bytes.decode('ascii')
+
+                now = time.perf_counter()
+                if self.last_sample_time is not None:
+                    dt = now - self.last_sample_time
+                    if dt > 0:
+                        rate = 1.0 / dt
+                        self._rate_window.append(rate)
+                        self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                self.last_sample_time = now
+
+                if not self.paused and self.logging_on:
+                    assert self.log_file is not None
+                    self.log_file.write(self.port_response.lstrip(">"))
+                    self.sample_idx += 1
+                    cast(Any, self.ui).progressBar_logging.setValue(self.sample_idx)
+                    if self.sample_rate:
+                        remaining_samples = self.sample_count - self.sample_idx
+                        self._finish_time = now + remaining_samples / self.sample_rate
+                    if self.sample_idx >= self.sample_count:
+                        try:
+                            if self._current_format() == 'Stress' and self._batch_values:
+                                import numpy as _np
+                                m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
+                                try:
+                                    ld = float(self.name_builder.s_load.value())
+                                    d = str(self.name_builder.s_dir.currentData())
+                                except Exception:
+                                    ld, d = 0.0, 'a'
+                                self._rt_means[(d, float(ld))] = m
+                        except Exception:
+                            pass
+                        self.log_file.close()
+                        self.logging_on = False
+                        self.ui.pushButton_record.setEnabled(True)
+                        self.ui.pushButton_cancel.setEnabled(False)
+                        self._finish_time = None
+                        try:
+                            if self._current_format() == 'Stress':
+                                self._draw_stress_live()
+                        except Exception:
+                            pass
+                if self.logging_on and not self.paused:
+                    try:
+                        self._ingest_live_sample(self.port_response)
+                    except Exception:
+                        pass
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
@@ -459,7 +518,10 @@ class MainWindow(QtWidgets.QMainWindow):
             if mode == "Stress":
                 self.ax.set_xlabel("Applied load (g)", color=self._plot_fg)
                 self.ax.set_ylabel("T1+T2 (μs)", color=self._plot_fg)
-                self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
+                try:
+                    self._apply_stress_title()
+                except Exception:
+                    self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
             elif mode == "Temperature":
                 self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
                 self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
@@ -782,6 +844,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Do not clear global means so multiple loads accumulate across runs
         except Exception:
             pass
+        # Emulator streams continuously; no RUN command needed
 
     def cancel_logging(self):
         """Abort the current logging session."""

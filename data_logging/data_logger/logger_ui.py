@@ -88,15 +88,29 @@ class UiMainWindow(object):
         # --- Logging controls ------------------------------------------------
         self.groupBox_log = QtWidgets.QGroupBox("Logging")
         log_layout = QtWidgets.QGridLayout(self.groupBox_log)
+        log_layout.setColumnStretch(0, 0)
+        log_layout.setColumnStretch(1, 1)
+        log_layout.setColumnStretch(2, 0)
 
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
+        self.lineEdit_log_dir.setMinimumWidth(360)
+        self.lineEdit_log_dir.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         log_layout.addWidget(self.lineEdit_log_dir, 0, 1)
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
+        self.pushButton_browse_dir.setMaximumWidth(90)
         log_layout.addWidget(self.pushButton_browse_dir, 0, 2)
 
         log_layout.addWidget(QtWidgets.QLabel("File name:"), 1, 0)
         self.lineEdit_log_file = QtWidgets.QLineEdit()
+        self.lineEdit_log_file.setMinimumWidth(360)
+        self.lineEdit_log_file.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         log_layout.addWidget(self.lineEdit_log_file, 1, 1)
         self.label_extension = QtWidgets.QLabel(".txt")
         log_layout.addWidget(self.label_extension, 1, 2)
@@ -124,8 +138,13 @@ class UiMainWindow(object):
         log_layout.addWidget(self.pushButton_cancel, 4, 2)
         log_layout.addWidget(self.checkBox_subdir, 4, 3)
 
+        # Optional realtime plotting toggle
+        self.checkBox_rt_plot = QtWidgets.QCheckBox("Realtime plot (experimental)")
+        self.checkBox_rt_plot.setChecked(False)
+        log_layout.addWidget(self.checkBox_rt_plot, 5, 0, 1, 2)
+
         self.file_name_builder = FileNameBuilderWidget(self.groupBox_log, self.lineEdit_log_file)
-        log_layout.addWidget(self.file_name_builder, 5, 0, 1, 4)
+        log_layout.addWidget(self.file_name_builder, 6, 0, 1, 4)
 
         left_layout.addWidget(self.groupBox_log)
 

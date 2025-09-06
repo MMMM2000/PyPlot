@@ -483,20 +483,38 @@ class Main(QWidget):
         if platform.system() not in {"Darwin", "Linux"}:
             log_append(self.log, "[WARN] Symlinks are only relevant on macOS/Linux.")
             return
-        for idx, src in enumerate((TTY0, TTY1)):
-            dst = Path(f"/dev/cu.ttyV{idx}")
-            if not src.exists():
-                log_append(self.log, f"[WARN] {src} does not exist yet – create the pair first.")
-                continue
-            try:
-                if not dst.exists():
-                    subprocess.check_call(["sudo", "ln", "-s", str(src), str(dst)])
-                    log_append(self.log, f"[INFO] Created {dst} → {src}")
-                else:
+        # Run in a background thread to avoid freezing the GUI in case of auth prompt
+        def worker():
+            for idx, src in enumerate((TTY0, TTY1)):
+                dst = Path(f"/dev/cu.ttyV{idx}")
+                if not src.exists():
+                    log_append(self.log, f"[WARN] {src} does not exist yet – create the pair first.")
+                    continue
+                if dst.exists():
                     log_append(self.log, f"[INFO] Symlink already exists: {dst}")
-            except subprocess.CalledProcessError:
-                log_append(self.log, f"[WARN] Could not create {dst}. You can still select {src} directly in your app.")
-        self.refresh_ports()
+                    continue
+                try:
+                    if platform.system() == "Darwin":
+                        # Use AppleScript to prompt for admin privileges without blocking the main thread
+                        cmd = f'do shell script "ln -s {src} {dst}" with administrator privileges'
+                        r = subprocess.run(["osascript", "-e", cmd], capture_output=True, text=True)
+                        if r.returncode == 0:
+                            log_append(self.log, f"[INFO] Created {dst} → {src}")
+                        else:
+                            log_append(self.log, f"[WARN] Could not create {dst}: {r.stderr.strip()}")
+                    else:
+                        # Linux: prompt in terminal-less context is tricky; attempt direct ln, likely no sudo needed
+                        subprocess.run(["ln", "-s", str(src), str(dst)], check=False)
+                        if dst.exists():
+                            log_append(self.log, f"[INFO] Created {dst} → {src}")
+                        else:
+                            log_append(self.log, f"[WARN] Could not create {dst}. You can still select {src} directly.")
+                except Exception as e:
+                    log_append(self.log, f"[WARN] Symlink creation failed: {e}")
+            # Refresh list back on the GUI thread
+            self.refresh_ports()
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def on_kill_pair(self):
         if self.socat_proc is not None:

@@ -347,7 +347,12 @@ class MainWindow(QtWidgets.QMainWindow):
             if not port_name:
                 QtWidgets.QMessageBox.warning(self, "No port", "Please select a serial port")
                 return
-            self.ser_mcu.setPortName(port_name)
+            try:
+                import os as _os
+                name = _os.path.basename(port_name) if '/' in port_name else port_name
+            except Exception:
+                name = port_name
+            self.ser_mcu.setPortName(name)
             self.ser_mcu.setBaudRate(self.baudrate)
             self.ser_mcu.setFlowControl(QtSerialPort.QSerialPort.FlowControl.NoFlowControl)
             self.ser_mcu.setDataBits(QtSerialPort.QSerialPort.DataBits.Data8)
@@ -1266,20 +1271,21 @@ class MainWindow(QtWidgets.QMainWindow):
                         label += f" - {info.description()}"
                 except Exception:
                     pass
-                self.ui.comboBox_port.addItem(label, userData=sysloc)
-                seen.add(sysloc)
+                self.ui.comboBox_port.addItem(label, userData=(sysloc or name))
+                seen.add(sysloc or name)
             # 2) Extra virtual symlinks (macOS/Linux): /dev/cu.ttyV*
             try:
                 import platform
                 from glob import glob
                 if platform.system() in {"Darwin", "Linux"}:
-                    extras = sorted(set(glob("/dev/cu.ttyV*") + glob("/dev/ttyV*") + glob(str(Path.cwd() / "ttyV*"))))
+                    extras = sorted(set(glob("/dev/cu.ttyV*") + glob("/dev/ttyV*") + glob(str(Path.cwd()/"ttyV*"))))
                     for path in extras:
-                        sysloc = os.path.abspath(path)
+                        rp = os.path.realpath(path)
+                        name = os.path.basename(rp) if rp.startswith('/dev/') else os.path.basename(path)
                         label = f"{os.path.basename(path)} - Virtual pair"
-                        if sysloc not in seen:
-                            self.ui.comboBox_port.addItem(label, userData=sysloc)
-                            seen.add(sysloc)
+                        if name not in seen:
+                            self.ui.comboBox_port.insertItem(0, label, userData=name)
+                            seen.add(name)
             except Exception:
                 pass
             if self.ui.comboBox_port.count() > 0:
