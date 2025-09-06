@@ -16,20 +16,6 @@ from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
 from .serial_port import serial_connection
 
 from plotting.utils import apply_system_theme
-import random
-import numpy as np
-import matplotlib
-import matplotlib.pyplot as plt
-from matplotlib.figure import Figure
-try:
-    from matplotlib.backends.backend_qt5agg import (
-        FigureCanvasQTAgg as FigureCanvas,
-        NavigationToolbar2QT as NavigationToolbar,
-    )
-except Exception:
-    FigureCanvas = None
-    NavigationToolbar = None
-from matplotlib.lines import Line2D
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -146,18 +132,6 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.update_time_estimate()
 
-        # Live plotting setup
-        self._last_draw = 0.0
-        self._init_live_plot()
-        if getattr(self, 'name_builder', None) is not None:
-            try:
-                self.name_builder.combo_format.currentIndexChanged.connect(self._on_format_changed)
-                self.name_builder.s_load.valueChanged.connect(self._send_emulator_mode)
-                self.name_builder.s_dir.currentIndexChanged.connect(self._send_emulator_mode)
-                self.name_builder.t_temp.currentIndexChanged.connect(self._send_emulator_mode)
-            except Exception:
-                pass
-
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
         self.ui.comboBox_port.clear()
@@ -185,11 +159,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.groupBox_commands.setEnabled(True)
             self.ui.label_connection_indicator.setText("\u25cf Connected")
             self.ui.label_connection_indicator.setStyleSheet("color: green;")
-            # Inform emulator of selected format
-            try:
-                self._send_emulator_mode()
-            except Exception:
-                pass
         else:
             if self._serial_ctx is not None:
                 self._serial_ctx.__exit__(None, None, None)
@@ -264,11 +233,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.pushButton_record.setEnabled(True)
                     self.ui.pushButton_cancel.setEnabled(False)
                     self._finish_time = None
-            # Feed live plot
-            try:
-                self._ingest_live_sample(self.port_response)
-            except Exception:
-                pass
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
@@ -309,223 +273,6 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._last_time_secs = None
             label.setText("Time remaining: N/A")
-
-    # --- Live plotting helpers ---------------------------------------------
-    def _current_format(self) -> str:
-        if getattr(self, "name_builder", None) is None:
-            return "Custom"
-        return self.name_builder.combo_format.currentText()
-
-    def _init_live_plot(self) -> None:
-        container = getattr(self.ui, "plot_container", None)
-        if container is None or FigureCanvas is None:
-            return
-        layout = container.layout()
-        if layout is None:
-            layout = QtWidgets.QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(0)
-        while layout.count():
-            item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
-        try:
-            palette = self.palette()
-            win = palette.color(QtGui.QPalette.ColorRole.Window)
-            base = palette.color(QtGui.QPalette.ColorRole.Base)
-            text = palette.color(QtGui.QPalette.ColorRole.Text)
-            win_rgb = (win.redF(), win.greenF(), win.blueF())
-            base_rgb = (base.redF(), base.greenF(), base.blueF())
-            text_rgb = (text.redF(), text.greenF(), text.blueF())
-        except Exception:
-            win_rgb = (1, 1, 1)
-            base_rgb = (1, 1, 1)
-            text_rgb = (0, 0, 0)
-        self.fig = Figure(facecolor=win_rgb, constrained_layout=True)
-        self.canvas = FigureCanvas(self.fig)
-        self.toolbar = NavigationToolbar(self.canvas, container)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas, stretch=1)
-        self._plot_bg = base_rgb
-        self._plot_fg = text_rgb
-        self._reset_plot_for_mode(self._current_format())
-
-    def _reset_plot_for_mode(self, mode: str) -> None:
-        if not hasattr(self, "fig") or FigureCanvas is None:
-            return
-        self.fig.clear()
-        self._rt_data = {}
-        self._temp_cont_counter = 0
-        if mode == "Maxion":
-            self.ax_ch = [self.fig.add_subplot(311), self.fig.add_subplot(312), self.fig.add_subplot(313)]
-            for i, ax in enumerate(self.ax_ch, start=1):
-                ax.set_facecolor(self._plot_bg)
-                ax.set_title(f"Channel {i} T1+T2", color=self._plot_fg)
-                ax.set_xlabel("Sample index", color=self._plot_fg)
-                ax.set_ylabel("sum", color=self._plot_fg)
-                ax.tick_params(colors=self._plot_fg)
-                for spine in ax.spines.values():
-                    spine.set_color(self._plot_fg)
-        else:
-            self.ax = self.fig.add_subplot(111)
-            self.ax.set_facecolor(self._plot_bg)
-            if mode == "Stress":
-                self.ax.set_xlabel("Applied load (g)", color=self._plot_fg)
-                self.ax.set_ylabel("T1+T2 (μs)", color=self._plot_fg)
-                self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
-            elif mode == "Temperature":
-                self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
-                self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
-                self.ax.set_title("Temperature dependence (live)", color=self._plot_fg)
-            else:
-                self.ax.set_title("Live data", color=self._plot_fg)
-            self.ax.grid(True, color=(0.35, 0.35, 0.35, 0.5))
-            self.ax.tick_params(colors=self._plot_fg)
-            for spine in self.ax.spines.values():
-                spine.set_color(self._plot_fg)
-        self.canvas.draw_idle()
-
-    def _send_emulator_mode(self) -> None:
-        if self.serial is None or getattr(self, "name_builder", None) is None:
-            return
-        fmt = self._current_format()
-        cmd = None
-        if fmt == "Stress":
-            try:
-                load = float(self.name_builder.s_load.value())
-                d = self.name_builder.s_dir.currentData()
-            except Exception:
-                load, d = 2.5, 'a'
-            cmd = f"MODE STRESS LOAD={load} DIR={d}\n"
-        elif fmt == "Temperature":
-            try:
-                t = self.name_builder.t_temp.currentText()
-            except Exception:
-                t = "25C"
-            cmd = f"MODE TEMP T={t}\n"
-        elif fmt == "Maxion":
-            cmd = "MODE MAXION\n"
-        if cmd:
-            try:
-                self.serial.write(cmd.encode('ascii'))
-            except Exception:
-                pass
-
-    def _on_format_changed(self) -> None:
-        self._reset_plot_for_mode(self._current_format())
-        self._send_emulator_mode()
-
-    def _draw_throttled(self, min_interval: float = 0.05) -> None:
-        if not hasattr(self, "canvas"):
-            return
-        now = time.perf_counter()
-        if now - getattr(self, "_last_draw", 0.0) >= min_interval:
-            try:
-                self.canvas.draw_idle()
-            except Exception:
-                pass
-            self._last_draw = now
-
-    def _ingest_live_sample(self, line: str) -> None:
-        fmt = self._current_format()
-        parts = [p.strip() for p in line.strip().lstrip('>').split(';') if p.strip()]
-        if not parts:
-            return
-        try:
-            vals = [float(x.replace(',', '.')) for x in parts]
-        except ValueError:
-            return
-        if fmt == 'Maxion':
-            if len(vals) < 6 or not hasattr(self, 'ax_ch'):
-                return
-            sums = [vals[0] + vals[1], vals[2] + vals[3], vals[4] + vals[5]]
-            store = self._rt_data.setdefault('maxion', [[], [], []])
-            for i in range(3):
-                store[i].append(sums[i])
-                ax = self.ax_ch[i]
-                x = np.arange(len(store[i]))
-                ax.cla()
-                ax.set_facecolor(self._plot_bg)
-                ax.set_title(f"Channel {i+1} T1+T2", color=self._plot_fg)
-                ax.set_xlabel("Sample index", color=self._plot_fg)
-                ax.set_ylabel("sum", color=self._plot_fg)
-                ax.grid(True, color=(0.35,0.35,0.35,0.5))
-                for spine in ax.spines.values():
-                    spine.set_color(self._plot_fg)
-                ax.tick_params(colors=self._plot_fg)
-                ax.scatter(x, store[i], s=0.2)
-            self._draw_throttled()
-            return
-        if not hasattr(self, 'ax'):
-            return
-        if fmt == 'Stress':
-            if len(vals) < 4:
-                return
-            y = vals[3]
-            try:
-                load = float(self.name_builder.s_load.value())
-                d = str(self.name_builder.s_dir.currentData())
-            except Exception:
-                load, d = 0.0, 'a'
-            key = (d, float(load))
-            buf = self._rt_data.setdefault('stress', {})
-            arr = buf.setdefault(key, [])
-            arr.append(y)
-            self.ax.cla()
-            self.ax.set_facecolor(self._plot_bg)
-            self.ax.set_xlabel("Applied load (g)", color=self._plot_fg)
-            self.ax.set_ylabel("T1+T2 (μs)", color=self._plot_fg)
-            self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
-            self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
-            colors = {'a': '#45A1D6', 'b': '#F09C67'}
-            for (dirc, ld), yy in buf.items():
-                x_center = ld + (-0.5 if dirc=='a' else +0.5)
-                xs = [x_center + random.uniform(-0.5, 0.5) for _ in yy]
-                self.ax.scatter(xs[-1000:], yy[-1000:], s=0.2, c=colors.get(dirc,'gray'), label=f"{ld:g}{dirc}")
-            try:
-                self.ax.legend(loc='best', markerscale=10, fontsize=8)
-            except Exception:
-                pass
-            self._draw_throttled()
-        elif fmt == 'Temperature':
-            if len(vals) < 4:
-                return
-            y = vals[3]
-            sub = self._rt_data.setdefault('temp', {'cont': [], 25: [], 100: []})
-            try:
-                t_sel = self.name_builder.t_temp.currentText()
-            except Exception:
-                t_sel = '25C'
-            if t_sel == '25-100C':
-                step = 0.05
-                t = 25.0 + self._temp_cont_counter * step
-                if t > 100.0:
-                    self._temp_cont_counter = 0
-                    t = 25.0
-                self._temp_cont_counter += 1
-                sub['cont'].append((t, y))
-            else:
-                temp_val = 25 if '25' in t_sel else 100
-                sub[temp_val].append(y)
-            self.ax.cla()
-            self.ax.set_facecolor(self._plot_bg)
-            self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
-            self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
-            self.ax.set_title("Temperature dependence (live)", color=self._plot_fg)
-            self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
-            if sub['cont']:
-                tx, ty = zip(*sub['cont'])
-                self.ax.scatter(list(tx)[-5000:], list(ty)[-5000:], s=0.2, c='#6B6B6B', label='25-100C')
-            for tv, col in [(25,'#45A1D6'), (100,'#F09C67')]:
-                if sub[tv]:
-                    xs = [tv + random.uniform(-0.5, 0.5) for _ in sub[tv]]
-                    self.ax.scatter(xs[-2000:], sub[tv][-2000:], s=0.2, c=col, label=f"{tv}°C")
-            try:
-                self.ax.legend(loc='best', markerscale=10, fontsize=8)
-            except Exception:
-                pass
-            self._draw_throttled()
 
     def send_command(self):
         """Send the text from the command line edit down the serial port."""
@@ -651,7 +398,7 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
     apply_system_theme(app)
 
     window = MainWindow(log_dir)
-    window.showMaximized()
+    window.show()
 
     WINDOWS.append(window)
 

@@ -11,11 +11,11 @@ from .file_name_builder import FileNameBuilderWidget
 
 
 class UiMainWindow(object):
-    """Simple vertical layout."""
+    """Two-panel layout: settings left, live plot right."""
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("MainWindowModernA")
-        MainWindow.resize(720, 540)
+        MainWindow.resize(1000, 700)
 
         font = QtGui.QFont()
         font.setPointSize(10)
@@ -24,9 +24,26 @@ class UiMainWindow(object):
         self.centralWidget = QtWidgets.QWidget(MainWindow)
         MainWindow.setCentralWidget(self.centralWidget)
 
-        main_layout = QtWidgets.QVBoxLayout(self.centralWidget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        root = QtWidgets.QHBoxLayout(self.centralWidget)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        # Left side scrollable settings panel
+        left_panel = QtWidgets.QWidget(self.centralWidget)
+        left_panel.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+        left_layout = QtWidgets.QVBoxLayout(left_panel)
+        left_layout.setContentsMargins(8, 8, 8, 8)
+        left_layout.setSpacing(12)
+        left_scroll = QtWidgets.QScrollArea(self.centralWidget)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        left_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
+        left_scroll.setWidget(left_panel)
+        root.addWidget(left_scroll, stretch=0)
 
         # --- Serial settings -------------------------------------------------
         self.groupBox_serial = QtWidgets.QGroupBox("Serial")
@@ -49,7 +66,7 @@ class UiMainWindow(object):
         serial_layout.addWidget(self.comboBox_baud)
         self.pushButton_connect = QtWidgets.QPushButton("Connect")
         serial_layout.addWidget(self.pushButton_connect)
-        main_layout.addWidget(self.groupBox_serial)
+        left_layout.addWidget(self.groupBox_serial)
 
         # --- Command controls -----------------------------------------------
         self.groupBox_cmd = QtWidgets.QGroupBox("Commands")
@@ -63,7 +80,7 @@ class UiMainWindow(object):
         self.label_port_response = QtWidgets.QLabel("Port response")
         self.label_port_response.setWordWrap(True)
         cmd_layout.addWidget(self.label_port_response)
-        main_layout.addWidget(self.groupBox_cmd)
+        left_layout.addWidget(self.groupBox_cmd)
 
         # --- Logging controls ------------------------------------------------
         self.groupBox_log = QtWidgets.QGroupBox("Logging")
@@ -107,7 +124,17 @@ class UiMainWindow(object):
         self.file_name_builder = FileNameBuilderWidget(self.groupBox_log, self.lineEdit_log_file)
         log_layout.addWidget(self.file_name_builder, 5, 0, 1, 4)
 
-        main_layout.addWidget(self.groupBox_log)
+        left_layout.addWidget(self.groupBox_log)
+
+        # Right plot container -----------------------------------------------
+        self.plot_container = QtWidgets.QFrame(self.centralWidget)
+        self.plot_container.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        self.plot_container.setMinimumWidth(520)
+        self.plot_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        root.addWidget(self.plot_container, stretch=1)
 
         # --- Status bar ------------------------------------------------------
         self.statusbar = QtWidgets.QStatusBar(MainWindow)

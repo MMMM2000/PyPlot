@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
 from emulators import current_annealing_emulator
+from emulators import data_logger_emulator
 from plotting import common
 from plotting.hsw_distribution import distribution_gui
 from plotting.hsw_load_compare import load_compare_gui
@@ -40,6 +41,7 @@ LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
 
 EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
     "Current Annealing Emulator": current_annealing_emulator.main,
+    "Serial Data Emulator": data_logger_emulator.main,
 }
 
 
