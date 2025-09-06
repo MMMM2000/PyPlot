@@ -44,6 +44,8 @@ class Ui_MainWindow(object):
             QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
         )
         left_scroll.setWidget(left_panel)
+        # Expose scroll for overlays from logic
+        self.left_scroll = left_scroll
         root.addWidget(left_scroll, stretch=0)
 
         # Right plot container

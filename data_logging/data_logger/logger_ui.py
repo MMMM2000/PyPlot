@@ -43,6 +43,9 @@ class UiMainWindow(object):
         left_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         left_scroll.setSizeAdjustPolicy(QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents)
         left_scroll.setWidget(left_panel)
+        # Expose for runtime overlay handling
+        self.left_scroll = left_scroll
+        self.left_panel = left_panel
         root.addWidget(left_scroll, stretch=0)
 
         # --- Serial settings -------------------------------------------------

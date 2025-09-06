@@ -39,7 +39,29 @@ from matplotlib.lines import Line2D
 #    the LOG_DIR environment variable.
 # Use a logs folder in the user's home directory by default. This path works on
 # all platforms and can be overridden via the ``LOG_DIR`` environment variable.
-LOG_DIR = str(Path.home() / "python_plot_logs")
+def _default_download_dir() -> str:
+    # Cross-platform best-effort Downloads folder
+    home = Path.home()
+    candidates = [
+        Path(os.environ.get("USERPROFILE", "")) / "Downloads",
+        home / "Downloads",
+        home / "downloads",
+    ]
+    for p in candidates:
+        try:
+            if p and p.exists():
+                return str(p)
+        except Exception:
+            continue
+    # Fallback: create ~/Downloads
+    p = home / "Downloads"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return str(p)
+
+LOG_DIR = _default_download_dir()
 
 # 2) DEFAULT_PORT_COMMAND: command pre-filled in the command box when the GUI
 #    starts. Adjust to match the most common command for your logger.
@@ -145,6 +167,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.spinBox_log_sample_count.valueChanged.connect(self.update_time_estimate)
 
         self.update_time_estimate()
+        # Overlay to prompt connection; disable settings until connected
+        self._setup_connect_overlay()
+        self._apply_connected_state()
+
 
         # Live plotting setup
         self._last_draw = 0.0
@@ -190,6 +216,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._send_emulator_mode()
             except Exception:
                 pass
+            self._apply_connected_state()
         else:
             if self._serial_ctx is not None:
                 self._serial_ctx.__exit__(None, None, None)
@@ -200,6 +227,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.groupBox_commands.setEnabled(False)
             self.ui.label_connection_indicator.setText("\u25cf Disconnected")
             self.ui.label_connection_indicator.setStyleSheet("color: red;")
+            self._apply_connected_state()
 
     def update_port_name(self):
         """Keep self.port_name in sync with the combo box selection."""
@@ -488,6 +516,47 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._draw_throttled()
+
+    # --- Connect overlay and UI gating -------------------------------------
+    def _setup_connect_overlay(self) -> None:
+        scroll = getattr(self.ui, 'left_scroll', None)
+        if scroll is None or not hasattr(scroll, 'viewport'):
+            self._overlay = None
+            return
+        ov = QtWidgets.QFrame(scroll.viewport())
+        ov.setStyleSheet("background: rgba(0,0,0,100);")
+        layout = QtWidgets.QVBoxLayout(ov)
+        layout.setContentsMargins(0, 0, 0, 0)
+        msg = QtWidgets.QLabel("Connect COM port to enable settings")
+        msg.setStyleSheet("color: white; font-size: 14px;")
+        msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        layout.addWidget(msg)
+        layout.addStretch(1)
+        ov.setGeometry(scroll.viewport().rect())
+        ov.hide()
+        self._overlay = ov
+
+    def resizeEvent(self, ev: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(ev)
+        scroll = getattr(self.ui, 'left_scroll', None)
+        if getattr(self, '_overlay', None) is not None and scroll is not None:
+            try:
+                self._overlay.setGeometry(scroll.viewport().rect())
+            except Exception:
+                pass
+
+    def _apply_connected_state(self) -> None:
+        connected = bool(self.connected)
+        try:
+            self.ui.groupBox_log.setEnabled(connected)
+        except Exception:
+            pass
+        if getattr(self, '_overlay', None) is not None:
+            try:
+                self._overlay.setVisible(not connected)
+            except Exception:
+                pass
         elif fmt == 'Temperature':
             if len(vals) < 4:
                 return
@@ -661,5 +730,6 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
 
 if __name__ == "__main__":
     main()
+
 
 

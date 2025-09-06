@@ -42,7 +42,27 @@ plt.rcParams["figure.figsize"] = fig_size
 plt.rcParams["font.family"] = "Palatino Linotype"
 plt.rcParams["font.size"] = 14
 
-DEFAULT_LOG_DIR = str(Path.home() / "python_anneal_logs")
+def _default_download_dir() -> str:
+    home = Path.home()
+    candidates = [
+        Path(os.environ.get("USERPROFILE", "")) / "Downloads",
+        home / "Downloads",
+        home / "downloads",
+    ]
+    for p in candidates:
+        try:
+            if p and p.exists():
+                return str(p)
+        except Exception:
+            continue
+    p = home / "Downloads"
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    return str(p)
+
+DEFAULT_LOG_DIR = _default_download_dir()
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -215,6 +235,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.frame_nastavenia_procesu.setEnabled(False)
         self.ui.frame_command_and_response.setEnabled(False)
         self.ui.frame_modus_operandi.setEnabled(False)
+
+        # Connection overlay over the left panel until port is connected
+        self._setup_connect_overlay()
+        if hasattr(self, 'pripojene') and not self.pripojene:
+            self._show_connect_overlay(True)
         
         self.max_resistance = 0
         
@@ -333,6 +358,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.frame_zakladne_nastavenia_portu.setEnabled(False)
                     self.ui.frame_command_and_response.setEnabled(True)
                     self.handle_radioButton_raw_VCP_clicked()
+                    self._show_connect_overlay(False)
             else:
                     # print('Pripojenie portu zlyhalo')
                     pass
@@ -351,6 +377,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.frame_zakladne_nastavenia_portu.setEnabled(True)
             self.ui.frame_nastavenia_procesu.setEnabled(False)
             self.ui.frame_modus_operandi.setEnabled(False)
+            self._show_connect_overlay(True)
 
     def handle_spinBox_cislo_portu_valueChanged(self):
         self.cislo_portu = self.ui.spinBox_cislo_portu.value()
@@ -1209,6 +1236,42 @@ class MainWindow(QtWidgets.QMainWindow):
             # print("Sériový port zatvorený")
 
         event.accept()
+
+    # --- Overlay helpers
+    def _setup_connect_overlay(self) -> None:
+        scroll = getattr(self.ui, 'left_scroll', None)
+        if scroll is None:
+            self._overlay = None
+            return
+        ov = QtWidgets.QFrame(scroll.viewport())
+        ov.setStyleSheet("background: rgba(0,0,0,100);")
+        layout = QtWidgets.QVBoxLayout(ov)
+        layout.setContentsMargins(0, 0, 0, 0)
+        msg = QtWidgets.QLabel("Connect COM port to enable settings")
+        msg.setStyleSheet("color: white; font-size: 14px;")
+        msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch(1)
+        layout.addWidget(msg)
+        layout.addStretch(1)
+        ov.setGeometry(scroll.viewport().rect())
+        ov.hide()
+        self._overlay = ov
+
+    def _show_connect_overlay(self, show: bool) -> None:
+        if getattr(self, '_overlay', None) is not None:
+            try:
+                self._overlay.setVisible(bool(show))
+            except Exception:
+                pass
+
+    def resizeEvent(self, ev: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(ev)
+        scroll = getattr(self.ui, 'left_scroll', None)
+        if getattr(self, '_overlay', None) is not None and scroll is not None:
+            try:
+                self._overlay.setGeometry(scroll.viewport().rect())
+            except Exception:
+                pass
 
 
 WINDOWS: list[QtWidgets.QWidget] = []
