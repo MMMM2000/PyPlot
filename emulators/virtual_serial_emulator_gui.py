@@ -89,17 +89,54 @@ class BaseEmuThread(threading.Thread):
     def stop(self) -> None:
         self._stop.set()
 
+    def _maybe_prefer_cu(self, p: str) -> str:
+        """On macOS, prefer /dev/cu.* device when available.
+
+        If ``p`` is a local ./ttyV* symlink or a /dev/tty* path and a matching
+        /dev/cu.* exists (created by the GUI button), return the cu path.
+        Otherwise return ``p`` unchanged.
+        """
+        try:
+            import platform, os as _os
+            if platform.system() != 'Darwin':
+                return p
+            rp = _os.path.realpath(p)
+            # If user created cu.ttyV* symlinks, prefer those by base name
+            base = _os.path.basename(p)
+            cu_by_base = f"/dev/cu.{base}" if not base.startswith('cu.') else p
+            if _os.path.exists(cu_by_base):
+                return cu_by_base
+            # Otherwise keep the resolved path (often /dev/ttysNNN)
+            return rp
+        except Exception:
+            return p
+
     def open_serial(self, timeout: float = 0.1) -> bool:
         if serial is None:
             log_append(self.log, "[ERR ] pyserial not installed – run: pip install pyserial")
             return False
+        # First attempt (possibly normalized to /dev/cu.* on macOS)
+        primary = self._maybe_prefer_cu(self.port)
         try:
-            self.ser = serial.serial_for_url(self.port, baudrate=self.baud, timeout=timeout)  # type: ignore[union-attr]
+            self.ser = serial.serial_for_url(primary, baudrate=self.baud, timeout=timeout)  # type: ignore[union-attr]
+            if primary != self.port:
+                self.port = primary
             log_append(self.log, f"[INFO] Opened {self.port} @ {self.baud} baud")
             return True
         except Exception as e:
-            log_append(self.log, f"[ERR ] Could not open {self.port}: {e}")
-            return False
+            log_append(self.log, f"[WARN] Open failed on {primary}: {e}")
+        # Fallback: lower baudrates commonly supported by PTYs
+        for b in (115200, 9600):
+            try:
+                self.ser = serial.serial_for_url(primary, baudrate=b, timeout=timeout)  # type: ignore[union-attr]
+                self.baud = b
+                if primary != self.port:
+                    self.port = primary
+                log_append(self.log, f"[INFO] Opened {self.port} with fallback baud {b}")
+                return True
+            except Exception as e:
+                log_append(self.log, f"[WARN] Fallback {b} failed: {e}")
+        return False
 
     def close_serial(self) -> None:
         try:
@@ -385,8 +422,8 @@ class Main(QWidget):
         # Mode presets
         self.btn_preset_pair0 = QPushButton("Emu on ./ttyV0 (logger on ./ttyV1)")
         self.btn_preset_pair1 = QPushButton("Emu on ./ttyV1 (logger on ./ttyV0)")
-        self.btn_preset_pair0.clicked.connect(lambda: self.on_use_pair_port(str(TTY0), str(TTY1)))
-        self.btn_preset_pair1.clicked.connect(lambda: self.on_use_pair_port(str(TTY1), str(TTY0)))
+        self.btn_preset_pair0.clicked.connect(lambda: self.on_use_pair_port(self._best_pair_path(0), self._best_pair_path(1)))
+        self.btn_preset_pair1.clicked.connect(lambda: self.on_use_pair_port(self._best_pair_path(1), self._best_pair_path(0)))
         eb.addWidget(QLabel("Pair preset:"), row, 0)
         eb.addWidget(self.btn_preset_pair0, row, 1)
         eb.addWidget(self.btn_preset_pair1, row, 2); row += 1
@@ -556,8 +593,8 @@ class Main(QWidget):
     def _update_pair_buttons_enabled(self) -> None:
         sysname = platform.system()
         ok_platform = sysname in {"Darwin", "Linux"}
-        have0 = TTY0.exists()
-        have1 = TTY1.exists()
+        have0 = TTY0.exists() or Path("/dev/cu.ttyV0").exists()
+        have1 = TTY1.exists() or Path("/dev/cu.ttyV1").exists()
         enabled0 = ok_platform and have0
         enabled1 = ok_platform and have1
         self.btn_preset_pair0.setEnabled(enabled0)
@@ -575,6 +612,13 @@ class Main(QWidget):
             self.cmb_port.setCurrentIndex(0)
         self.chk_loop.setChecked(False)
         log_append(self.log, f"[INFO] Emulator will use {emu_port}. Point your logger to {logger_port}.")
+
+    def _best_pair_path(self, index: int) -> str:
+        # Prefer /dev/cu.ttyV* symlink if present; else local ./ttyV*
+        p = Path(f"/dev/cu.ttyV{index}")
+        if p.exists():
+            return str(p)
+        return str((TTY0 if index == 0 else TTY1))
 
     def on_mode_changed(self) -> None:
         is_serial = self.cmb_mode.currentText().startswith("Serial")
