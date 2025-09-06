@@ -395,6 +395,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 ax.tick_params(colors=self._plot_fg)
                 for spine in ax.spines.values():
                     spine.set_color(self._plot_fg)
+                # Visible placeholder
+                ax.text(
+                    0.5, 0.5, 'No data yet', transform=ax.transAxes,
+                    ha='center', va='center', fontsize=14, fontweight='bold',
+                    color=self._plot_fg,
+                    bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
+                )
         else:
             self.ax = self.fig.add_subplot(111)
             self.ax.set_facecolor(self._plot_bg)
@@ -412,6 +419,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax.tick_params(colors=self._plot_fg)
             for spine in self.ax.spines.values():
                 spine.set_color(self._plot_fg)
+            # Visible placeholder
+            self.ax.text(
+                0.5, 0.5, 'No data yet', transform=self.ax.transAxes,
+                ha='center', va='center', fontsize=14, fontweight='bold',
+                color=self._plot_fg,
+                bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
+            )
         self.canvas.draw_idle()
 
     def _send_emulator_mode(self) -> None:
@@ -516,6 +530,45 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             self._draw_throttled()
+        elif fmt == 'Temperature':
+            if len(vals) < 4:
+                return
+            y = vals[3]
+            sub = self._rt_data.setdefault('temp', {'cont': [], 25: [], 100: []})
+            try:
+                t_sel = self.name_builder.t_temp.currentText()
+            except Exception:
+                t_sel = '25C'
+            if t_sel == '25-100C':
+                step = 0.05
+                t = 25.0 + self._temp_cont_counter * step
+                if t > 100.0:
+                    self._temp_cont_counter = 0
+                    t = 25.0
+                self._temp_cont_counter += 1
+                sub['cont'].append((t, y))
+            else:
+                temp_val = 25 if '25' in t_sel else 100
+                sub[temp_val].append(y)
+            self.ax.cla()
+            self.ax.set_facecolor(self._plot_bg)
+            self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
+            self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
+            self.ax.set_title("Temperature dependence (live)", color=self._plot_fg)
+            self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
+            if sub['cont']:
+                tx, ty = zip(*sub['cont'])
+                self.ax.scatter(list(tx)[-5000:], list(ty)[-5000:], s=0.2, c='#6B6B6B', label='25-100C')
+            for tv, col in [(25,'#45A1D6'), (100,'#F09C67')]:
+                if sub[tv]:
+                    xs = [tv + random.uniform(-0.5, 0.5) for _ in sub[tv]]
+                    self.ax.scatter(xs[-2000:], sub[tv][-2000:], s=0.2, c=col, label=f"{tv}°C")
+            try:
+                self.ax.legend(loc='best', markerscale=10, fontsize=8)
+            except Exception:
+                pass
+            self._draw_throttled()
+        return
 
     # --- Connect overlay and UI gating -------------------------------------
     def _setup_connect_overlay(self) -> None:
@@ -524,36 +577,56 @@ class MainWindow(QtWidgets.QMainWindow):
             self._overlay = None
             return
         ov = QtWidgets.QFrame(scroll.viewport())
-        ov.setStyleSheet("background: rgba(0,0,0,100);")
+        ov.setStyleSheet("background: rgba(0,0,0,160);")
         layout = QtWidgets.QVBoxLayout(ov)
         layout.setContentsMargins(0, 0, 0, 0)
         msg = QtWidgets.QLabel("Connect COM port to enable settings")
-        msg.setStyleSheet("color: white; font-size: 14px;")
+        msg.setStyleSheet("color: white; font-size: 18px; font-weight: 700;")
         msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
         layout.addWidget(msg)
         layout.addStretch(1)
-        ov.setGeometry(scroll.viewport().rect())
-        ov.hide()
         self._overlay = ov
+        self._position_connect_overlay()
+        ov.hide()
+
+    def _position_connect_overlay(self) -> None:
+        scroll = getattr(self.ui, 'left_scroll', None)
+        ov = getattr(self, '_overlay', None)
+        if scroll is None or ov is None:
+            return
+        try:
+            serial = getattr(self.ui, 'groupBox_serial', None)
+            if serial is not None:
+                pt = serial.mapTo(scroll.viewport(), QtCore.QPoint(0, serial.height()))
+                y = pt.y() + 8
+            else:
+                y = 0
+            vp = scroll.viewport().rect()
+            ov.setGeometry(0, max(0, y), vp.width(), max(0, vp.height()-max(0, y)))
+        except Exception:
+            ov.setGeometry(scroll.viewport().rect())
 
     def resizeEvent(self, ev: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(ev)
         scroll = getattr(self.ui, 'left_scroll', None)
         if getattr(self, '_overlay', None) is not None and scroll is not None:
             try:
-                self._overlay.setGeometry(scroll.viewport().rect())
+                self._position_connect_overlay()
             except Exception:
                 pass
 
     def _apply_connected_state(self) -> None:
         connected = bool(self.connected)
-        try:
-            self.ui.groupBox_log.setEnabled(connected)
-        except Exception:
-            pass
+        # Enable/disable settings groups except the serial group
+        for gb in ('groupBox_log', 'groupBox_cmd'):
+            try:
+                getattr(self.ui, gb).setEnabled(connected)
+            except Exception:
+                pass
         if getattr(self, '_overlay', None) is not None:
             try:
+                self._position_connect_overlay()
                 self._overlay.setVisible(not connected)
             except Exception:
                 pass

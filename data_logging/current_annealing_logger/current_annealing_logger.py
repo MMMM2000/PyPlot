@@ -304,11 +304,19 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             self.init_graph_window()
             if getattr(self, 'ax1', None) is not None:
-                self.ax1.text(0.5, 0.5, 'No data yet', transform=self.ax1.transAxes,
-                              ha='center', va='center', alpha=0.5)
+                self.ax1.text(
+                    0.5, 0.5, 'No data yet', transform=self.ax1.transAxes,
+                    ha='center', va='center', fontsize=14, fontweight='bold',
+                    color=self.palette().color(QtGui.QPalette.ColorRole.Text),
+                    bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
+                )
             if getattr(self, 'ax2', None) is not None:
-                self.ax2.text(0.5, 0.5, 'No data yet', transform=self.ax2.transAxes,
-                              ha='center', va='center', alpha=0.5)
+                self.ax2.text(
+                    0.5, 0.5, 'No data yet', transform=self.ax2.transAxes,
+                    ha='center', va='center', fontsize=14, fontweight='bold',
+                    color=self.palette().color(QtGui.QPalette.ColorRole.Text),
+                    bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
+                )
             if getattr(self, 'canvas', None) is not None:
                 self.canvas.draw()
         except Exception:
@@ -1244,18 +1252,36 @@ class MainWindow(QtWidgets.QMainWindow):
             self._overlay = None
             return
         ov = QtWidgets.QFrame(scroll.viewport())
-        ov.setStyleSheet("background: rgba(0,0,0,100);")
+        # Stronger blur/dim overlay
+        ov.setStyleSheet("background: rgba(0,0,0,160);")
         layout = QtWidgets.QVBoxLayout(ov)
         layout.setContentsMargins(0, 0, 0, 0)
         msg = QtWidgets.QLabel("Connect COM port to enable settings")
-        msg.setStyleSheet("color: white; font-size: 14px;")
+        msg.setStyleSheet("color: white; font-size: 18px; font-weight: 700;")
         msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addStretch(1)
         layout.addWidget(msg)
         layout.addStretch(1)
-        ov.setGeometry(scroll.viewport().rect())
-        ov.hide()
         self._overlay = ov
+        self._position_connect_overlay()
+        ov.hide()
+
+    def _position_connect_overlay(self) -> None:
+        scroll = getattr(self.ui, 'left_scroll', None)
+        ov = getattr(self, '_overlay', None)
+        if scroll is None or ov is None:
+            return
+        try:
+            serial_frame = getattr(self.ui, 'frame_zakladne_nastavenia_portu', None)
+            if serial_frame is not None:
+                pt = serial_frame.mapTo(scroll.viewport(), QtCore.QPoint(0, serial_frame.height()))
+                y = pt.y() + 8
+            else:
+                y = 0
+            vp = scroll.viewport().rect()
+            ov.setGeometry(0, max(0, y), vp.width(), max(0, vp.height()-max(0, y)))
+        except Exception:
+            ov.setGeometry(scroll.viewport().rect())
 
     def _show_connect_overlay(self, show: bool) -> None:
         if getattr(self, '_overlay', None) is not None:
@@ -1269,7 +1295,7 @@ class MainWindow(QtWidgets.QMainWindow):
         scroll = getattr(self.ui, 'left_scroll', None)
         if getattr(self, '_overlay', None) is not None and scroll is not None:
             try:
-                self._overlay.setGeometry(scroll.viewport().rect())
+                self._position_connect_overlay()
             except Exception:
                 pass
 
