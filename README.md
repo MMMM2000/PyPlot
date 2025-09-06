@@ -104,22 +104,24 @@ Select an item and press **Run** to launch it:
 python -m launcher
 ```
 
-## COM port emulators
+## COM port emulator (universal)
 
-A virtual **Current Annealing Emulator** can replay recorded data over a
-paired serial port. The emulator feeds values from
-`sample_data/Ni51Fe26Ga21 1_2 s2 1000mA.txt` and returns a zero current
-after the final sample to mimic a burned-through microwire. Launch it
-from the new *Emulators* tab in the master launcher or run it directly
-with:
+Use the single, universal emulator to test both loggers:
+
+- Launch from the launcher: Emulators → "Universal Serial Emulator".
+- Or run directly:
 
 ```bash
-python -m emulators.current_annealing_emulator
+python -m emulators.virtual_serial_emulator_gui
 ```
 
-Set up a linked pair of COM ports (e.g. with ``socat`` on Linux or
-``com0com`` on Windows) and point the logger at one end while the
-emulator serves the other.
+Modes and defaults:
+- Serial Data Logger: baud 921600; Rate Hz configurable (default 1000).
+- Current Annealing Logger: baud 9600; replies to HMP4030 MEAS queries. Optionally pick a sample file (defaults to `sample_data/current_annealing/Ni51Fe26Ga21 1_2 s2 1000mA.txt`).
+
+Virtual port pairs:
+- macOS/Linux: click "Create Pair (socat)" to create `./ttyV0 <-> ./ttyV1`. Optional sudo symlinks to `/dev/cu.ttyV*` are supported.
+- Windows: use existing COM ports (driver required) or enable the `loop://` option for internal loopback.
 
 
 ## Backends: Matplotlib and Origin

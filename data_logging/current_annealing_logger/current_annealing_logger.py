@@ -377,10 +377,17 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 self.send_safe_end_commands()
             # print('Odpájam port')
+            # Proactively disconnect signal-slot before closing the port
+            try:
+                self.ser_mcu.readyRead.disconnect(self.handle_ser_mcu_readyRead)
+            except Exception:
+                pass
             self.ser_mcu.close()
             self.pripojene = False
             self.ui.pushButton_pripojPort.setText('Pripojiť sa k portu')
             self.ui.pushButton_pripojPort.setText('Connect to port')
+            # Dim the left panel again until connected
+            self._show_connect_overlay(True)
             self.ui.frame_command_and_response.setEnabled(False)
             self.ui.frame_zakladne_nastavenia_portu.setEnabled(True)
             self.ui.frame_nastavenia_procesu.setEnabled(False)

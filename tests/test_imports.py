@@ -8,4 +8,4 @@ def test_packages_importable():
     assert importlib.import_module('plotting.temperature_dependence')
     assert importlib.import_module('plotting.stress_sensitivity')
     assert importlib.import_module('emulators')
-    assert importlib.import_module('emulators.current_annealing_emulator')
+    assert importlib.import_module('emulators.virtual_serial_emulator_gui')

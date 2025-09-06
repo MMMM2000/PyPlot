@@ -218,6 +218,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
             self._apply_connected_state()
         else:
+            # Proactively disconnect the signal before closing the port
+            try:
+                if self.serial is not None:
+                    self.serial.readyRead.disconnect(self.read_from_port)
+            except Exception:
+                pass
             if self._serial_ctx is not None:
                 self._serial_ctx.__exit__(None, None, None)
                 self._serial_ctx = None
@@ -630,44 +636,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._overlay.setVisible(not connected)
             except Exception:
                 pass
-        elif fmt == 'Temperature':
-            if len(vals) < 4:
-                return
-            y = vals[3]
-            sub = self._rt_data.setdefault('temp', {'cont': [], 25: [], 100: []})
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        """Ensure the serial port is cleanly closed when the window closes."""
+        try:
             try:
-                t_sel = self.name_builder.t_temp.currentText()
-            except Exception:
-                t_sel = '25C'
-            if t_sel == '25-100C':
-                step = 0.05
-                t = 25.0 + self._temp_cont_counter * step
-                if t > 100.0:
-                    self._temp_cont_counter = 0
-                    t = 25.0
-                self._temp_cont_counter += 1
-                sub['cont'].append((t, y))
-            else:
-                temp_val = 25 if '25' in t_sel else 100
-                sub[temp_val].append(y)
-            self.ax.cla()
-            self.ax.set_facecolor(self._plot_bg)
-            self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
-            self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
-            self.ax.set_title("Temperature dependence (live)", color=self._plot_fg)
-            self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
-            if sub['cont']:
-                tx, ty = zip(*sub['cont'])
-                self.ax.scatter(list(tx)[-5000:], list(ty)[-5000:], s=0.2, c='#6B6B6B', label='25-100C')
-            for tv, col in [(25,'#45A1D6'), (100,'#F09C67')]:
-                if sub[tv]:
-                    xs = [tv + random.uniform(-0.5, 0.5) for _ in sub[tv]]
-                    self.ax.scatter(xs[-2000:], sub[tv][-2000:], s=0.2, c=col, label=f"{tv}°C")
-            try:
-                self.ax.legend(loc='best', markerscale=10, fontsize=8)
-            except Exception:
-                pass
-            self._draw_throttled()
+                if self.serial is not None:
+                    try:
+                        self.serial.readyRead.disconnect(self.read_from_port)
+                    except Exception:
+                        pass
+            finally:
+                if self._serial_ctx is not None:
+                    self._serial_ctx.__exit__(None, None, None)
+                    self._serial_ctx = None
+                self.serial = None
+                self.connected = False
+        finally:
+            event.accept()
 
     def send_command(self):
         """Send the text from the command line edit down the serial port."""
@@ -803,6 +789,5 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
 
 if __name__ == "__main__":
     main()
-
 
 
