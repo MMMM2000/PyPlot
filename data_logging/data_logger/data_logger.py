@@ -183,6 +183,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.name_builder.t_temp.currentIndexChanged.connect(self._send_emulator_mode)
             except Exception:
                 pass
+        # Buffers for stress means
+        self._batch_values = []
+        self._rt_means = {}
 
     def populate_ports(self):
         """Scan available serial ports and populate the combo box."""
@@ -315,16 +318,36 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._finish_time = now + remaining_samples / self.sample_rate
 
                 if self.sample_idx >= self.sample_count:
+                    # finalize this batch
+                    try:
+                        if self._current_format() == 'Stress' and self._batch_values:
+                            import numpy as _np
+                            m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
+                            try:
+                                ld = float(self.name_builder.s_load.value())
+                                d = str(self.name_builder.s_dir.currentData())
+                            except Exception:
+                                ld, d = 0.0, 'a'
+                            self._rt_means[(d, float(ld))] = m
+                    except Exception:
+                        pass
                     self.log_file.close()
                     self.logging_on = False
                     self.ui.pushButton_record.setEnabled(True)
                     self.ui.pushButton_cancel.setEnabled(False)
                     self._finish_time = None
-            # Feed live plot
-            try:
-                self._ingest_live_sample(self.port_response)
-            except Exception:
-                pass
+                    # Update plot to include the new mean
+                    try:
+                        if self._current_format() == 'Stress':
+                            self._draw_stress_live()
+                    except Exception:
+                        pass
+            # Feed live plot only while logging
+            if self.logging_on and not self.paused:
+                try:
+                    self._ingest_live_sample(self.port_response)
+                except Exception:
+                    pass
 
     def update_response_label(self):
         """Refresh the on-screen label with the latest port_response."""
@@ -542,22 +565,10 @@ class MainWindow(QtWidgets.QMainWindow):
             buf = self._rt_data.setdefault('stress', {})
             arr = buf.setdefault(key, [])
             arr.append(y)
-            self.ax.cla()
-            self.ax.set_facecolor(self._plot_bg)
-            self.ax.set_xlabel("Applied load (g)", color=self._plot_fg)
-            self.ax.set_ylabel("T1+T2 (μs)", color=self._plot_fg)
-            self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
-            self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
-            colors = {'a': '#45A1D6', 'b': '#F09C67'}
-            for (dirc, ld), yy in buf.items():
-                x_center = ld + (-0.5 if dirc=='a' else +0.5)
-                xs = [x_center + random.uniform(-0.5, 0.5) for _ in yy]
-                self.ax.scatter(xs[-1000:], yy[-1000:], s=0.2, c=colors.get(dirc,'gray'), label=f"{ld:g}{dirc}")
-            try:
-                self.ax.legend(loc='best', markerscale=10, fontsize=8)
-            except Exception:
-                pass
-            self._draw_throttled()
+            # Append to batch for mean computation
+            self._batch_values.append(y)
+            # Redraw stress plot with raw + means overlay
+            self._draw_stress_live()
         elif fmt == 'Temperature':
             if len(vals) < 4:
                 return
@@ -764,6 +775,13 @@ class MainWindow(QtWidgets.QMainWindow):
             f"0/{self.sample_count} samples"
         )
         self.update_time_estimate()
+        # Reset batch/means state for a clean run when in stress mode
+        try:
+            if self._current_format() == 'Stress':
+                self._batch_values = []
+                # Do not clear global means so multiple loads accumulate across runs
+        except Exception:
+            pass
 
     def cancel_logging(self):
         """Abort the current logging session."""
@@ -780,6 +798,56 @@ class MainWindow(QtWidgets.QMainWindow):
         cast(Any, self.ui).progressBar_logging.setToolTip("")
         self._finish_time = None
         self.update_time_estimate()
+
+    # --- Stress live helpers ------------------------------------------------
+    def _apply_stress_title(self) -> None:
+        if not hasattr(self, 'ax'):
+            return
+        try:
+            comp = self.name_builder.s_comp.text().strip()
+            title = self.name_builder.s_sample.text().strip()
+            number = self.name_builder.s_number.text().strip()
+            end = str(self.name_builder.s_end.currentData())
+            anneal = self.name_builder.s_anneal.text().strip()
+            samp = f"{number}{end}"
+            label = "T1+T2 (μs)"
+            self.ax.set_title(f"{comp} {title} {samp} {anneal} — {label}", color=self._plot_fg)
+        except Exception:
+            self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
+
+    def _draw_stress_live(self) -> None:
+        if not hasattr(self, 'ax'):
+            return
+        buf = self._rt_data.get('stress', {})
+        self.ax.cla()
+        self.ax.set_facecolor(self._plot_bg)
+        self.ax.set_xlabel("Applied load (g)", color=self._plot_fg)
+        self.ax.set_ylabel("T1+T2 (μs)", color=self._plot_fg)
+        self._apply_stress_title()
+        self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
+        colors = {'a': '#45A1D6', 'b': '#F09C67'}
+        for (dirc, ld), yy in buf.items():
+            x_center = ld + (-0.5 if dirc=='a' else +0.5)
+            xs = [x_center + random.uniform(-0.5, 0.5) for _ in yy]
+            self.ax.scatter(xs[-2000:], yy[-2000:], s=0.6, c=colors.get(dirc,'gray'), label=f"{ld:g}{dirc}")
+        # Overlay means
+        if self._rt_means:
+            for (dirc, ld), m in sorted(self._rt_means.items(), key=lambda kv: (kv[0][0], kv[0][1])):
+                x = ld + (-0.5 if dirc=='a' else +0.5)
+                self.ax.scatter([x], [m], s=40, marker='o', edgecolors='k', linewidths=0.6, c=colors.get(dirc,'gray'))
+        # Delta if 2+ means for 'a'
+        try:
+            means_a = sorted([(ld, v) for (d, ld), v in self._rt_means.items() if d=='a'], key=lambda t: t[0])
+            if len(means_a) >= 2:
+                delta = means_a[-1][1] - means_a[0][1]
+                self.ax.text(0.95, 0.05, f"Δ={delta:.2f} μs", transform=self.ax.transAxes, ha='right', va='bottom', fontsize=10, bbox=dict(facecolor='white', alpha=0.6))
+        except Exception:
+            pass
+        try:
+            self.ax.legend(loc='best', markerscale=10, fontsize=8)
+        except Exception:
+            pass
+        self._draw_throttled()
 
 def main(log_dir: str | None = None) -> QtWidgets.QWidget:
     """Launch the data logger window and return the created widget.
