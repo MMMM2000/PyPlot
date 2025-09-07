@@ -17,6 +17,7 @@ from .serial_port import serial_connection
 
 from plotting.utils import apply_system_theme
 import random
+import pandas as pd
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
@@ -99,6 +100,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.pushButton_browse_dir.clicked.connect(self.choose_log_dir)
+        # Open directory button
+        if hasattr(self.ui, 'pushButton_open_dir'):
+            self.ui.pushButton_open_dir.clicked.connect(self.open_log_dir)
 
         # runtime state
         self.port_response = ""
@@ -182,16 +186,31 @@ class MainWindow(QtWidgets.QMainWindow):
         # Overlay for batch collection
         self._record_overlay = None
         self._setup_record_overlay()
-        # Optional realtime backend
+        # Optional realtime backend (use PyQtGraph for realtime when enabled)
         rt = getattr(self.ui, 'checkBox_rt_plot', None)
         if rt is not None:
             rt.stateChanged.connect(self._toggle_rt_plot)
+        fps_box = getattr(self.ui, 'spinBox_rt_fps', None)
+        if fps_box is not None:
+            fps_box.valueChanged.connect(self._update_rt_fps)
+        gl_cb = getattr(self.ui, 'checkBox_rt_gl', None)
+        if gl_cb is not None:
+            gl_cb.toggled.connect(self._apply_pg_opengl)
+        # Defaults for realtime plotting
+        self._pg_min_interval = 1.0 / float(getattr(self.ui, 'spinBox_rt_fps', None).value() if getattr(self.ui, 'spinBox_rt_fps', None) is not None else 30)
+        self._pg_last_draw = 0.0
+        self._pg_timer: QtCore.QTimer | None = None
         if getattr(self, 'name_builder', None) is not None:
             try:
                 self.name_builder.combo_format.currentIndexChanged.connect(self._on_format_changed)
                 self.name_builder.s_load.valueChanged.connect(self._send_emulator_mode)
                 self.name_builder.s_dir.currentIndexChanged.connect(self._send_emulator_mode)
                 self.name_builder.t_temp.currentIndexChanged.connect(self._send_emulator_mode)
+                # Clear graph on identity change
+                self.name_builder.s_comp.textChanged.connect(self._clear_on_identity_change)
+                self.name_builder.s_sample.textChanged.connect(self._clear_on_identity_change)
+                self.name_builder.s_number.textChanged.connect(self._clear_on_identity_change)
+                self.name_builder.s_end.currentIndexChanged.connect(self._clear_on_identity_change)
             except Exception:
                 pass
         # Buffers for stress means
@@ -295,6 +314,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.root_log_dir = new_dir
             self.ui.lineEdit_log_dir.setText(new_dir)
 
+    def open_log_dir(self) -> None:
+        """Open the current log directory in the system file manager."""
+        try:
+            path = self.ui.lineEdit_log_dir.text().strip() or self.log_dir
+            if not path:
+                return
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+        except Exception:
+            pass
+
     def read_from_port(self):
         """
         Read a line from the serial port whenever data arrives.
@@ -337,34 +366,49 @@ class MainWindow(QtWidgets.QMainWindow):
                     remaining_samples = self.sample_count - self.sample_idx
                     self._finish_time = now + remaining_samples / self.sample_rate
 
-                if self.sample_idx >= self.sample_count:
-                    # finalize this batch
-                    try:
-                        if self._current_format() == 'Stress' and self._batch_values:
-                            import numpy as _np
-                            m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
-                            try:
-                                ld = float(self.name_builder.s_load.value())
-                                d = str(self.name_builder.s_dir.currentData())
-                            except Exception:
-                                ld, d = 0.0, 'a'
-                            self._rt_means[(d, float(ld))] = m
-                    except Exception:
-                        pass
-                    self.log_file.close()
-                    self.logging_on = False
-                    self.ui.pushButton_record.setEnabled(True)
-                    self.ui.pushButton_cancel.setEnabled(False)
-                    self._finish_time = None
-                    # Update plot to include the new mean and hide overlay
-                    try:
-                        if self._current_format() == 'Stress':
-                            self._draw_stress_live()
-                        self._show_record_overlay(False)
-                    except Exception:
-                        pass
+                    if self.sample_idx >= self.sample_count:
+                        # finalize this batch
+                        try:
+                            fmt_now = self._current_format()
+                            if fmt_now == 'Stress' and self._batch_values:
+                                import numpy as _np
+                                m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
+                                try:
+                                    ld = float(self.name_builder.s_load.value())
+                                    d = str(self.name_builder.s_dir.currentData())
+                                except Exception:
+                                    ld, d = 0.0, 'a'
+                                self._rt_means[(d, float(ld))] = m
+                        except Exception:
+                            pass
+                        self.log_file.close()
+                        self.logging_on = False
+                        self.ui.pushButton_record.setEnabled(True)
+                        # Reset record button text/state
+                        try:
+                            self.ui.pushButton_record.setText("Record")
+                            self.ui.pushButton_record.setToolTip("Start logging")
+                        except Exception:
+                            pass
+                        self.ui.pushButton_cancel.setEnabled(False)
+                        self._finish_time = None
+                        # Update plot to include the new mean and hide overlay
+                        try:
+                            # Ensure Matplotlib canvas for final rendering (switch from PG if active)
+                            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
+                                self._stop_pg_timer()
+                                self._init_live_plot()
+                            if fmt_now == 'Stress':
+                                self._draw_stress_live()
+                            elif fmt_now == 'Temperature':
+                                self._draw_temp_final()
+                            elif fmt_now == 'Maxion':
+                                self._draw_maxion_final()
+                            self._show_record_overlay(False)
+                        except Exception:
+                            pass
                     # Keep emulator streaming continuously; no STOP
-            # Feed live plot only while logging and when realtime is enabled
+            # Feed live plot while logging only when realtime is enabled
             rt_enabled = getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()
             if self.logging_on and not self.paused and rt_enabled:
                 try:
@@ -432,14 +476,30 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.log_file.close()
                         self.logging_on = False
                         self.ui.pushButton_record.setEnabled(True)
+                        # Reset record button text/state
+                        try:
+                            self.ui.pushButton_record.setText("Record")
+                            self.ui.pushButton_record.setToolTip("Start logging")
+                        except Exception:
+                            pass
                         self.ui.pushButton_cancel.setEnabled(False)
                         self._finish_time = None
                         try:
-                            if self._current_format() == 'Stress':
+                            fmt_now2 = self._current_format()
+                            # Ensure Matplotlib canvas for final rendering (switch from PG if active)
+                            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
+                                self._stop_pg_timer()
+                                self._init_live_plot()
+                            if fmt_now2 == 'Stress':
                                 self._draw_stress_live()
+                            elif fmt_now2 == 'Temperature':
+                                self._draw_temp_final()
+                            elif fmt_now2 == 'Maxion':
+                                self._draw_maxion_final()
+                            self._show_record_overlay(False)
                         except Exception:
                             pass
-                if self.logging_on and not self.paused and getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked():
+                if self.logging_on and not self.paused and (getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()):
                     try:
                         self._ingest_live_sample(self.port_response)
                     except Exception:
@@ -475,6 +535,10 @@ class MainWindow(QtWidgets.QMainWindow):
         if self.paused:
             self._last_time_secs = None
             label.setText("Time remaining: Paused")
+            try:
+                self.ui.label_input_rate.setText("Input: Paused")
+            except Exception:
+                pass
             return
         if self.sample_rate:
             remaining = self.ui.spinBox_log_sample_count.value()
@@ -499,9 +563,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             else:
                 label.setText(f"Time remaining: {secs}s")
+            try:
+                self.ui.label_input_rate.setText(f"Input: {self.sample_rate:.0f} Hz")
+            except Exception:
+                pass
         else:
             self._last_time_secs = None
             label.setText("Time remaining: N/A")
+            try:
+                self.ui.label_input_rate.setText("Input: N/A")
+            except Exception:
+                pass
 
     # --- Live plotting helpers ---------------------------------------------
     def _current_format(self) -> str:
@@ -579,8 +651,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ax.set_title("Stress dependence (live)", color=self._plot_fg)
             elif mode == "Temperature":
                 self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
-                self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
-                self.ax.set_title("Temperature dependence (live)", color=self._plot_fg)
+                self.ax.set_ylabel("T1+T2 (µs)", color=self._plot_fg)
+                try:
+                    self._apply_temp_title()
+                except Exception:
+                    self.ax.set_title("Temperature dependence", color=self._plot_fg)
             else:
                 self.ax.set_title("Live data", color=self._plot_fg)
             self.ax.grid(True, color=(0.35, 0.35, 0.35, 0.5))
@@ -595,6 +670,36 @@ class MainWindow(QtWidgets.QMainWindow):
                 bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
             )
         self.canvas.draw_idle()
+
+    def _current_identity(self) -> tuple[str, str, str, str, str]:
+        comp = getattr(self.name_builder.s_comp, 'text', lambda: "")().strip()
+        sample = getattr(self.name_builder.s_sample, 'text', lambda: "")().strip()
+        number = getattr(self.name_builder.s_number, 'text', lambda: "")().strip()
+        end = str(getattr(self.name_builder.s_end, 'currentData', lambda: "")())
+        anneal = getattr(self.name_builder.s_anneal, 'text', lambda: "")().strip()
+        return (comp, sample, number, end, anneal)
+
+    def _clear_on_identity_change(self) -> None:
+        try:
+            self._rt_data = {}
+            self._rt_means = {}
+            if hasattr(self, 'ax'):
+                self._reset_plot_for_mode(self._current_format())
+        except Exception:
+            pass
+
+    # --- Title helpers ------------------------------------------------------
+    def _apply_temp_title(self) -> None:
+        if not hasattr(self, 'ax'):
+            return
+        try:
+            comp = self.name_builder.t_comp.text().strip()
+            sample = self.name_builder.t_sample.text().strip()
+            anneal = self.name_builder.t_anneal.text().strip()
+            label = "T1+T2 (µs)"
+            self.ax.set_title(f"{comp} {sample} {anneal} — {label}", color=self._plot_fg)
+        except Exception:
+            self.ax.set_title("Temperature dependence", color=self._plot_fg)
 
     # --- Realtime backend toggle (pyqtgraph) --------------------------------
     def _clear_plot_container(self) -> QtWidgets.QVBoxLayout | None:
@@ -616,16 +721,124 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_rt_plot(self) -> None:
         enabled = bool(self.ui.checkBox_rt_plot.isChecked())
         if enabled and pg is not None:
+            # Global perf options
+            try:
+                self._apply_pg_opengl()
+                pg.setConfigOptions(antialias=False)
+            except Exception:
+                pass
+            # Build PyQtGraph widgets depending on mode
+            mode = self._current_format()
             layout = self._clear_plot_container()
-            self.pg_plot = pg.PlotWidget()
-            self.pg_plot.setBackground(self.palette().color(QtGui.QPalette.ColorRole.Base))
-            self.pg_curve = self.pg_plot.plot([], [], pen=None, symbol='o', symbolSize=2)
-            if layout is not None:
+            if layout is None:
+                return
+            self._pg_last_draw = 0.0
+            # _pg_min_interval already tied to FPS spinbox
+            if mode == 'Maxion':
+                self.pg_plots = [pg.PlotWidget(), pg.PlotWidget(), pg.PlotWidget()]
+                for i, w in enumerate(self.pg_plots, start=1):
+                    w.setBackground(self.palette().color(QtGui.QPalette.ColorRole.Base))
+                    w.showGrid(x=True, y=True, alpha=0.3)
+                    w.setLabel('bottom', 'N')
+                    w.setLabel('left', 'T1+T2 (arb units)')
+                    w.setTitle(f'Channel {i} T1+T2')
+                    layout.addWidget(w)
+                # Use ScatterPlotItem for efficient appends
+                self.pg_scatters = [pg.ScatterPlotItem(size=1, pen=None, brush=pg.mkBrush(140,140,140)) for _ in range(3)]
+                for sc, w in zip(self.pg_scatters, self.pg_plots):
+                    w.addItem(sc)
+                self.pg_counts = [0, 0, 0]
+                self.pg_queues = [[], [], []]  # list of (x,y) per channel waiting to be added
+            elif mode == 'Temperature':
+                self.pg_plot = pg.PlotWidget()
+                self.pg_plot.setBackground(self.palette().color(QtGui.QPalette.ColorRole.Base))
+                self.pg_plot.showGrid(x=True, y=True, alpha=0.3)
+                self.pg_plot.setLabel('bottom', 'N')
+                self.pg_plot.setLabel('left', 'T1+T2 (µs)')
+                self.pg_plot.setTitle('Temperature dependence (live)')
                 layout.addWidget(self.pg_plot)
-            self._pg_x = []
-            self._pg_y = []
+                self.pg_scatter = pg.ScatterPlotItem(size=1, pen=None, brush=pg.mkBrush(140,140,140))
+                self.pg_plot.addItem(self.pg_scatter)
+                self.pg_temp_count = 0
+                self.pg_temp_queue: list[tuple[float, float]] = []
+            else:
+                # Keep Matplotlib for Stress
+                self._init_live_plot()
+            # Start/update PG timer
+            self._start_pg_timer()
+            # Re-assert emulator mode for safety on backend rebuild
+            self._send_emulator_mode()
         else:
+            # Switch back to Matplotlib
             self._init_live_plot()
+            self._stop_pg_timer()
+
+    def _update_rt_fps(self) -> None:
+        try:
+            fps = float(self.ui.spinBox_rt_fps.value())
+            self._pg_min_interval = max(0.001, 1.0 / max(1.0, fps))
+            # Update QTimer interval if running
+            if self._pg_timer is not None:
+                self._pg_timer.setInterval(int(1000 * self._pg_min_interval))
+        except Exception:
+            self._pg_min_interval = 1.0 / 30.0
+
+    def _start_pg_timer(self) -> None:
+        if pg is None:
+            return
+        if self._pg_timer is None:
+            self._pg_timer = QtCore.QTimer(self)
+            self._pg_timer.timeout.connect(self._pg_update_plots)
+        self._pg_timer.setInterval(int(1000 * self._pg_min_interval))
+        self._pg_timer.start()
+
+    def _stop_pg_timer(self) -> None:
+        t = getattr(self, '_pg_timer', None)
+        if t is not None:
+            try:
+                t.stop()
+            except Exception:
+                pass
+
+    def _apply_pg_opengl(self) -> None:
+        if pg is None:
+            return
+        try:
+            use_gl = bool(self.ui.checkBox_rt_gl.isChecked()) if getattr(self.ui, 'checkBox_rt_gl', None) is not None else True
+            pg.setConfigOptions(useOpenGL=use_gl)
+        except Exception:
+            pass
+
+    def _pg_update_plots(self) -> None:
+        # Called by QTimer at selected FPS
+        mode = self._current_format()
+        if pg is None:
+            return
+        now = time.perf_counter()
+        if now - getattr(self, '_pg_last_draw', 0.0) < getattr(self, '_pg_min_interval', 0.03):
+            return
+        if mode == 'Maxion' and hasattr(self, 'pg_plots') and hasattr(self, 'pg_scatters'):
+            for i in range(3):
+                q = self.pg_queues[i]
+                if q:
+                    # Convert queued tuples to spots and add
+                    spots = [{'pos': (x, y)} for (x, y) in q]
+                    self.pg_scatters[i].addPoints(spots)
+                    self.pg_queues[i].clear()
+                try:
+                    self.pg_plots[i].setXRange(1, max(2, int(self.sample_count)), padding=0)
+                except Exception:
+                    pass
+        elif mode == 'Temperature' and hasattr(self, 'pg_plot') and hasattr(self, 'pg_scatter'):
+            if self.pg_temp_queue:
+                spots = [{'pos': (x, y)} for (x, y) in self.pg_temp_queue]
+                self.pg_scatter.addPoints(spots)
+                self.pg_temp_queue.clear()
+            try:
+                self.pg_plot.setXRange(1, max(2, int(self.sample_count)), padding=0)
+            except Exception:
+                pass
+        self._pg_last_draw = now
 
     # --- Batch overlay -------------------------------------------------------
     def _setup_record_overlay(self) -> None:
@@ -637,7 +850,7 @@ class MainWindow(QtWidgets.QMainWindow):
         lay = QtWidgets.QVBoxLayout(ov)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.addStretch(1)
-        msg = QtWidgets.QLabel("Collecting data…")
+        msg = QtWidgets.QLabel("Loading data…")
         msg.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         msg.setStyleSheet("color: white; font-size: 16px; font-weight: 600;")
         bar = QtWidgets.QProgressBar()
@@ -688,11 +901,27 @@ class MainWindow(QtWidgets.QMainWindow):
         if cmd:
             try:
                 self.serial.write(cmd.encode('ascii'))
+                # Clear buffers to drop stale lines from previous mode
+                try:
+                    self.serial.clear()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+            # Send the mode command a couple more times shortly after to ensure
+            # the emulator thread sees it between data bursts and clear again.
+            try:
+                QtCore.QTimer.singleShot(50, lambda: (self.serial and self.serial.write(cmd.encode('ascii')), self.serial and self.serial.clear()))
+                QtCore.QTimer.singleShot(120, lambda: (self.serial and self.serial.write(cmd.encode('ascii')), self.serial and self.serial.clear()))
             except Exception:
                 pass
 
     def _on_format_changed(self) -> None:
-        self._reset_plot_for_mode(self._current_format())
+        # Rebuild the plotting surface for the new mode
+        if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
+            self._toggle_rt_plot()
+        else:
+            self._reset_plot_for_mode(self._current_format())
         self._send_emulator_mode()
 
     def _draw_throttled(self, min_interval: float = 0.05) -> None:
@@ -716,25 +945,36 @@ class MainWindow(QtWidgets.QMainWindow):
         except ValueError:
             return
         if fmt == 'Maxion':
-            if len(vals) < 6 or not hasattr(self, 'ax_ch'):
+            if len(vals) < 6:
                 return
             sums = [vals[0] + vals[1], vals[2] + vals[3], vals[4] + vals[5]]
-            store = self._rt_data.setdefault('maxion', [[], [], []])
-            for i in range(3):
-                store[i].append(sums[i])
-                ax = self.ax_ch[i]
-                x = np.arange(len(store[i]))
-                ax.cla()
-                ax.set_facecolor(self._plot_bg)
-                ax.set_title(f"Channel {i+1} T1+T2", color=self._plot_fg)
-                ax.set_xlabel("Sample index", color=self._plot_fg)
-                ax.set_ylabel("sum", color=self._plot_fg)
-                ax.grid(True, color=(0.35,0.35,0.35,0.5))
-                for spine in ax.spines.values():
-                    spine.set_color(self._plot_fg)
-                ax.tick_params(colors=self._plot_fg)
-                ax.scatter(x, store[i], s=0.2)
-            self._draw_throttled()
+            # PyQtGraph realtime if active
+            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None and hasattr(self, 'pg_plots') and hasattr(self, 'pg_scatters'):
+                for i in range(3):
+                    self.pg_counts[i] += 1
+                    self.pg_queues[i].append((self.pg_counts[i], sums[i]))
+            else:
+                # Matplotlib fallback at ~1 Hz
+                store = self._rt_data.setdefault('maxion', [[], [], []])
+                for i in range(3):
+                    store[i].append(sums[i])
+                    ax = self.ax_ch[i]
+                    x = np.arange(1, len(store[i]) + 1)
+                    ax.cla()
+                    ax.set_facecolor(self._plot_bg)
+                    ax.set_title(f"Channel {i+1} T1+T2", color=self._plot_fg)
+                    ax.set_xlabel("N", color=self._plot_fg)
+                    ax.set_ylabel("T1+T2 (arb units)", color=self._plot_fg)
+                    ax.grid(True, color=(0.35,0.35,0.35,0.5))
+                    for spine in ax.spines.values():
+                        spine.set_color(self._plot_fg)
+                    ax.tick_params(colors=self._plot_fg)
+                    try:
+                        ax.set_xlim(1, max(2, int(self.sample_count)))
+                    except Exception:
+                        pass
+                    ax.scatter(x, store[i], s=0.2)
+                self._draw_throttled(min_interval=1.0)
             return
         if not hasattr(self, 'ax'):
             return
@@ -758,49 +998,39 @@ class MainWindow(QtWidgets.QMainWindow):
             if len(vals) < 4:
                 return
             y = vals[3]
-            sub = self._rt_data.setdefault('temp', {'cont': [], 25: [], 100: []})
-            try:
-                t_sel = self.name_builder.t_temp.currentText()
-            except Exception:
-                t_sel = '25C'
-            if t_sel == '25-100C':
-                step = 0.05
-                t = 25.0 + self._temp_cont_counter * step
-                if t > 100.0:
-                    self._temp_cont_counter = 0
-                    t = 25.0
-                self._temp_cont_counter += 1
-                sub['cont'].append((t, y))
+            # PyQtGraph realtime if active
+            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None and hasattr(self, 'pg_plot') and hasattr(self, 'pg_scatter'):
+                self.pg_temp_count += 1
+                self.pg_temp_queue.append((self.pg_temp_count, y))
             else:
-                temp_val = 25 if '25' in t_sel else 100
-                sub[temp_val].append(y)
-            self.ax.cla()
-            self.ax.set_facecolor(self._plot_bg)
-            self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
-            self.ax.set_ylabel("T1+T2 (A·s)", color=self._plot_fg)
-            self.ax.set_title("Temperature dependence (live)", color=self._plot_fg)
-            self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
-            if sub['cont']:
-                tx, ty = zip(*sub['cont'])
-                self.ax.scatter(list(tx)[-5000:], list(ty)[-5000:], s=0.2, c='#6B6B6B', label='25-100C')
-            for tv, col in [(25,'#45A1D6'), (100,'#F09C67')]:
-                if sub[tv]:
-                    xs = [tv + random.uniform(-0.5, 0.5) for _ in sub[tv]]
-                    self.ax.scatter(xs[-2000:], sub[tv][-2000:], s=0.2, c=col, label=f"{tv}°C")
-            try:
-                self.ax.legend(loc='best', markerscale=10, fontsize=8)
-            except Exception:
-                pass
-            self._draw_throttled()
+                # Matplotlib fallback at ~1 Hz
+                series = self._rt_data.setdefault('temp_series', [])
+                series.append(y)
+                x = np.arange(1, len(series) + 1)
+                self.ax.cla()
+                self.ax.set_facecolor(self._plot_bg)
+                self.ax.set_xlabel("N", color=self._plot_fg)
+                self.ax.set_ylabel("T1+T2 (µs)", color=self._plot_fg)
+                try:
+                    self._apply_temp_title()
+                except Exception:
+                    self.ax.set_title("Temperature dependence", color=self._plot_fg)
+                self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
+                try:
+                    self.ax.set_xlim(1, max(2, int(self.sample_count)))
+                except Exception:
+                    pass
+                self.ax.scatter(x, series, s=0.2, c='#6B6B6B')
+                self._draw_throttled(min_interval=1.0)
         return
 
     # --- Connect overlay and UI gating -------------------------------------
     def _setup_connect_overlay(self) -> None:
-        scroll = getattr(self.ui, 'left_scroll', None)
-        if scroll is None or not hasattr(scroll, 'viewport'):
+        container = getattr(self.ui, 'left_panel', None)
+        if container is None:
             self._overlay = None
             return
-        ov = QtWidgets.QFrame(scroll.viewport())
+        ov = QtWidgets.QFrame(container)
         ov.setStyleSheet("background: rgba(0,0,0,160);")
         layout = QtWidgets.QVBoxLayout(ov)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -815,26 +1045,26 @@ class MainWindow(QtWidgets.QMainWindow):
         ov.hide()
 
     def _position_connect_overlay(self) -> None:
-        scroll = getattr(self.ui, 'left_scroll', None)
+        container = getattr(self.ui, 'left_panel', None)
         ov = getattr(self, '_overlay', None)
-        if scroll is None or ov is None:
+        if container is None or ov is None:
             return
         try:
             serial = getattr(self.ui, 'groupBox_serial', None)
             if serial is not None:
-                pt = serial.mapTo(scroll.viewport(), QtCore.QPoint(0, serial.height()))
+                pt = serial.mapTo(container, QtCore.QPoint(0, serial.height()))
                 y = pt.y() + 8
             else:
                 y = 0
-            vp = scroll.viewport().rect()
-            ov.setGeometry(0, max(0, y), vp.width(), max(0, vp.height()-max(0, y)))
+            rc = container.rect()
+            ov.setGeometry(0, max(0, y), rc.width(), max(0, rc.height()-max(0, y)))
         except Exception:
-            ov.setGeometry(scroll.viewport().rect())
+            ov.setGeometry(container.rect())
 
     def resizeEvent(self, ev: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(ev)
-        scroll = getattr(self.ui, 'left_scroll', None)
-        if getattr(self, '_overlay', None) is not None and scroll is not None:
+        container = getattr(self.ui, 'left_panel', None)
+        if getattr(self, '_overlay', None) is not None and container is not None:
             try:
                 self._position_connect_overlay()
             except Exception:
@@ -862,26 +1092,30 @@ class MainWindow(QtWidgets.QMainWindow):
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         """Ensure the serial port is cleanly closed when the window closes."""
         try:
-            try:
-                if self.serial is not None:
-                    try:
-                        self.serial.readyRead.disconnect(self.read_from_port)
-                    except Exception:
-                        pass
-
-            # Safety: if we are no longer logging, hide any leftover overlay
-            if not self.logging_on:
+            # Best‑effort disconnect of signal
+            if self.serial is not None:
                 try:
-                    self._show_record_overlay(False)
+                    self.serial.readyRead.disconnect(self.read_from_port)
                 except Exception:
                     pass
-            finally:
+            # Hide overlay, if shown
+            try:
+                self._show_record_overlay(False)
+            except Exception:
+                pass
+        finally:
+            try:
                 if self._serial_ctx is not None:
                     self._serial_ctx.__exit__(None, None, None)
                     self._serial_ctx = None
-                self.serial = None
-                self.connected = False
-        finally:
+            except Exception:
+                pass
+            self.serial = None
+            self.connected = False
+            try:
+                self._stop_pg_timer()
+            except Exception:
+                pass
             event.accept()
 
     def send_command(self):
@@ -889,6 +1123,121 @@ class MainWindow(QtWidgets.QMainWindow):
         cmd = self.ui.lineEdit_port_command.text() + "\n"
         if self.serial is not None:
             self.serial.write(cmd.encode('ascii'))
+
+    # --- Final renderers for completed batches ------------------------------
+    def _draw_temp_final(self) -> None:
+        """Render the finished temperature log to look like the plotting script."""
+        try:
+            from plotting.temperature_dependence import core as T
+            from plotting.common import maybe_handle_outliers
+        except Exception:
+            return
+        fn = self.ui.lineEdit_log_file.text().strip()
+        if not fn:
+            return
+        path = os.path.join(self.log_dir, f"{fn}.txt")
+        try:
+            data = T.load_data([path])
+            data = maybe_handle_outliers(data)
+        except Exception:
+            return
+        var = 'sum'
+        # Prepare theme
+        self.fig.clear()
+        self.ax = self.fig.add_subplot(111)
+        self.ax.set_facecolor(self._plot_bg)
+        # Raw continuous
+        if T.PLOT_MODE in ("raw", "both"):
+            sub = data[data["continuous"]]
+            if not sub.empty:
+                self.ax.scatter(
+                    sub["temp"], sub[var], c=T.OVERALL_COLOR, s=T.MARKER_SIZE, marker=T.MARKER, label="raw 25-100C",
+                )
+            # Discrete temps
+            disc = data[~data["continuous"]]
+            for temp in sorted(disc["temp"].dropna().unique()):
+                s = disc[disc["temp"] == temp]
+                if s.empty:
+                    continue
+                jitter = np.random.uniform(-T.JITTER_SPAN, T.JITTER_SPAN, len(s))
+                color = T.RAW_COLORS.get(int(temp), next(iter(T.RAW_COLORS.values())))
+                self.ax.scatter(
+                    s["temp"].astype(float) + jitter,
+                    s[var],
+                    c=color, s=T.MARKER_SIZE, marker=T.MARKER, label=f"raw {int(temp)}°C",
+                )
+        # Processed line for continuous
+        if T.PLOT_MODE in ("processed", "both"):
+            sub = data[data["continuous"]].sort_values("temp")
+            if not sub.empty:
+                med = sub[var].rolling(T.MED_WINDOW, center=True, min_periods=1).median()
+                proc = med.rolling(T.MA_WINDOW, center=True, min_periods=1).mean()
+                self.ax.plot(sub["temp"], proc, color=T.PROC_COLOR, linewidth=T.PROC_LW, label=f"med{T.MED_WINDOW}+mwa{T.MA_WINDOW}")
+        # Labels and style
+        try:
+            comp = str(data["composition"].iat[0])
+            sample = str(data["sample"].iat[0])
+            anneal = str(data["anneal"].iat[0])
+            title = f"{comp} {sample} {anneal} — {T.LABELS[var]}"
+        except Exception:
+            title = "Temperature dependence"
+        self.ax.set_xlabel("Temperature (°C)", color=self._plot_fg)
+        self.ax.set_ylabel(T.LABELS.get(var, "T1+T2 (µs)"), color=self._plot_fg)
+        self.ax.set_title(title, color=self._plot_fg)
+        self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
+        self.ax.tick_params(colors=self._plot_fg)
+        for spine in self.ax.spines.values():
+            spine.set_color(self._plot_fg)
+        try:
+            self.ax.legend(loc='best', fontsize=8)
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+    def _draw_maxion_final(self) -> None:
+        """Render the finished Maxion log to match the maxion plotting script."""
+        try:
+            from plotting.maxion_continuous import core as M
+            from plotting.common import maybe_handle_outliers_series
+        except Exception:
+            return
+        fn = self.ui.lineEdit_log_file.text().strip()
+        if not fn:
+            return
+        path = os.path.join(self.log_dir, f"{fn}.txt")
+        try:
+            df = M.load_file(path)
+        except Exception:
+            return
+        try:
+            head, coils = M.parse_name(Path(path).stem)
+        except Exception:
+            head, coils = None, None
+        self.fig.clear()
+        self.ax_ch = [self.fig.add_subplot(311), self.fig.add_subplot(312), self.fig.add_subplot(313)]
+        for i, ax in enumerate(self.ax_ch, start=1):
+            ax.set_facecolor(self._plot_bg)
+            # Build series
+            y = (df[f"ch{i}_t1"].astype(float) + df[f"ch{i}_t2"].astype(float))
+            try:
+                y = maybe_handle_outliers_series(y, f"{Path(path).name}_CH{i}")
+            except Exception:
+                pass
+            x = np.arange(1, len(y) + 1)
+            # Raw only (no legend), per your requirement
+            ax.scatter(x, y.to_numpy(), s=M.MARKER_SIZE)
+            ax.set_xlabel("Sample index", color=self._plot_fg)
+            ax.set_ylabel("T1+T2 (arb units)", color=self._plot_fg)
+            if head is None or coils is None:
+                title = f"CH{i} T1+T2"
+            else:
+                title = f"Head {head} — {coils} coils — CH{i} T1+T2"
+            ax.set_title(title, color=self._plot_fg)
+            ax.grid(True)
+            ax.tick_params(colors=self._plot_fg)
+            for spine in ax.spines.values():
+                spine.set_color(self._plot_fg)
+        self.canvas.draw_idle()
 
     def start_logging(self):
         """Open the selected log file, begin logging, or toggle pause."""

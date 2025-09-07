@@ -114,6 +114,28 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
         hints.colorSchemeChanged.connect(update_scheme)
 
 
+def apply_theme(app: QtWidgets.QApplication, mode: str = "system") -> None:
+    """Apply a specific theme: 'system', 'light', or 'dark'.
+
+    This mirrors apply_system_theme but allows forcing a color scheme.
+    """
+    m = (mode or "system").lower()
+    if m == "system":
+        apply_system_theme(app)
+        return
+    scheme = QtCore.Qt.ColorScheme.Dark if m == "dark" else QtCore.Qt.ColorScheme.Light
+
+    if sys.platform.startswith("win"):
+        style = "windowsvista" if scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
+        app.setStyle(style)
+    elif sys.platform == "darwin":
+        if "macos" in QtWidgets.QStyleFactory.keys():
+            app.setStyle("macos")
+    else:
+        app.setStyle("Fusion")
+    _apply_color_scheme(app, scheme)
+
+
 def apply_dark_theme(app: QtWidgets.QApplication) -> None:
     """Backward compatible wrapper around :func:`apply_system_theme`."""
     apply_system_theme(app)

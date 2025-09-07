@@ -19,7 +19,7 @@ from plotting.stress_dependence import stress_gui
 from plotting.stress_sensitivity import sens_gui
 from plotting.temperature_dependence import temp_dep_gui
 from plotting.temperature_sensitivity import temp_gui
-from plotting.utils import apply_system_theme
+from plotting.utils import apply_system_theme, apply_theme
 
 
 PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
@@ -94,11 +94,28 @@ class MasterLauncher(QtWidgets.QDialog):
         emu_layout = QtWidgets.QVBoxLayout(self.emu_tab)
         emu_layout.addWidget(self.emu_list)
 
+        # Theme selector
+        theme_row = QtWidgets.QHBoxLayout()
+        theme_row.addStretch(1)
+        theme_row.addWidget(QtWidgets.QLabel("Theme:"))
+        self.theme_combo = QtWidgets.QComboBox(); self.theme_combo.addItems(["System", "Light", "Dark"])
+        self.theme_combo.setCurrentIndex(0)
+        self.theme_combo.currentIndexChanged.connect(self.on_theme_changed)
+        theme_row.addWidget(self.theme_combo)
+
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
 
         self.main_layout.addWidget(self.tabs)
+        self.main_layout.addLayout(theme_row)
         self.main_layout.addWidget(self.run_button)
+
+    def on_theme_changed(self) -> None:
+        app_instance = QtWidgets.QApplication.instance()
+        assert isinstance(app_instance, QtWidgets.QApplication)
+        idx = self.theme_combo.currentIndex()
+        mode = ["system", "light", "dark"][idx]
+        apply_theme(app_instance, mode)
 
     def run_selected(self) -> None:
         if self.tabs.currentWidget() is self.log_tab:

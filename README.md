@@ -165,15 +165,28 @@ Notes on Origin output:
 ## Data logger
 
 The data logger window allows recording measurements and saving them to text
-files. A built-in name builder assembles structured file names from individual
+files. A built‑in name builder assembles structured file names from individual
 fields such as composition, sample number or load. For stress files the
 annealing field accepts descriptions like *ascast*, *300C* or *74mA*. When using
-the temperature template the measurement temperature can be selected from
-**25C**, **25-100C** (a continuous run) or **100C**. To keep file names compatible
-with the plotting scripts, input fields reject spaces and hyphens; the sample
-number is the sole exception and must contain exactly one hyphen (e.g.
-``s2-2``). Alternatively you can type any custom file name directly into the log
-file box.
+the Temperature template the measurement temperature can be selected from
+**25C**, **25-100C** (a continuous run) or **100C**. File names are designed to
+remain compatible with the plotting scripts, so inputs reject spaces and hyphens;
+the sample number is the sole exception and must contain exactly one hyphen
+(e.g. ``s2-2``). Alternatively you can type any custom file name directly into
+the log file box.
+
+Realtime plotting:
+- Toggle “Realtime plot” to visualize incoming data while logging. Temperature
+  and Maxion use PyQtGraph for smooth live updates, Stress keeps Matplotlib for
+  batch means and raw points.
+- Choose an “FPS” value (1–120) to control how often the live graph refreshes.
+  Logging always writes every sample immediately; the FPS only limits UI redraws.
+- “OpenGL accel” enables PyQtGraph’s OpenGL backend to improve performance on
+  most systems. If you observe driver issues, uncheck it.
+- When realtime is OFF, an on-plot overlay shows “Collecting data…” while a
+  batch is being recorded. On completion, the logger renders the figure to match
+  the respective plotting script (Temperature Dependence or Maxion). Maxion
+  final plots show raw data only without a legend, as requested.
 
 
 ## Plotting stress dependence data
