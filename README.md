@@ -6,8 +6,9 @@ This repository contains simple tools for logging measurement data and plotting 
 
 - Automatically ramps the current back to zero after the hold phase when reverse is enabled.
 - "Stop annealing process" immediately turns off the power supply.
-- Interface tweaks: non-overlapping **Browse** button, smaller current/time inputs and a wider **Hold current now!** button.
-- Graph titles show compositions with subscripted numbers and use `n/m` microwire notation.
+- Interface tweaks: non-overlapping **Browse** button, smaller current/time inputs, a left-aligned **Hold current now!** button with no overlap, and a quick **Open** directory link.
+- Graph titles show compositions with subscripted numbers, use `n/m` microwire notation, and render in a larger font.
+- File name presets remember your last values and offer a **Reset** option (also in the serial data logger).
 
 ## Installation
 

@@ -64,6 +64,14 @@ def _default_download_dir() -> str:
 
 DEFAULT_LOG_DIR = _default_download_dir()
 
+DEFAULT_PRESET = {
+    "preset": 0,
+    "composition": "Ni51Fe26Ga21",
+    "microwire": "1_2",
+    "sample": "s1",
+    "custom_name": "",
+}
+
 
 class MainWindow(QtWidgets.QMainWindow):
 
@@ -90,6 +98,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'lineEdit_log_file'):
             if not self.ui.lineEdit_log_file.text().strip():
                 self.ui.lineEdit_log_file.setText("anneal_log")
+        self.settings = QtCore.QSettings("microwire", "current_annealing")
+        self.restore_name_preset()
         self.odpoved_portu = ''
         self.prikaz_portu = ''
         self.pripojene = False
@@ -188,6 +198,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
         if hasattr(self.ui, 'pushButton_browse_dir'):
             self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
+        if hasattr(self.ui, 'pushButton_open_dir'):
+            self.ui.pushButton_open_dir.clicked.connect(self.open_log_dir)
         if hasattr(self.ui, 'lineEdit_log_dir'):
             self.ui.lineEdit_log_dir.textChanged.connect(self.sync_full_log_path)
         if hasattr(self.ui, 'lineEdit_log_file'):
@@ -198,6 +210,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample','lineEdit_custom_name'):
             if hasattr(self.ui, name):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
+        if hasattr(self.ui, 'pushButton_reset_preset'):
+            self.ui.pushButton_reset_preset.clicked.connect(self.reset_name_preset)
         if hasattr(self.ui, 'checkBox_reverse'):
             self.ui.checkBox_reverse.toggled.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'spinBox_loops'):
@@ -613,6 +627,53 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.lineEdit_custom_name.setVisible(True)
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.setText(base)
+        self.store_name_preset()
+
+    def store_name_preset(self):
+        s = self.settings
+        s.setValue("preset", self.ui.comboBox_name_preset.currentIndex())
+        s.setValue("composition", self.ui.lineEdit_composition.text())
+        s.setValue("microwire", self.ui.lineEdit_microwire.text())
+        s.setValue("sample", self.ui.lineEdit_sample.text())
+        s.setValue("custom_name", self.ui.lineEdit_custom_name.text())
+
+    def restore_name_preset(self):
+        try:
+            self.ui.comboBox_name_preset.blockSignals(True)
+            self.ui.lineEdit_composition.blockSignals(True)
+            self.ui.lineEdit_microwire.blockSignals(True)
+            self.ui.lineEdit_sample.blockSignals(True)
+            self.ui.lineEdit_custom_name.blockSignals(True)
+        except Exception:
+            pass
+        s = self.settings
+        self.ui.comboBox_name_preset.setCurrentIndex(int(s.value("preset", DEFAULT_PRESET["preset"])))
+        self.ui.lineEdit_composition.setText(s.value("composition", DEFAULT_PRESET["composition"]))
+        self.ui.lineEdit_microwire.setText(s.value("microwire", DEFAULT_PRESET["microwire"]))
+        self.ui.lineEdit_sample.setText(s.value("sample", DEFAULT_PRESET["sample"]))
+        self.ui.lineEdit_custom_name.setText(s.value("custom_name", DEFAULT_PRESET["custom_name"]))
+        try:
+            self.ui.comboBox_name_preset.blockSignals(False)
+            self.ui.lineEdit_composition.blockSignals(False)
+            self.ui.lineEdit_microwire.blockSignals(False)
+            self.ui.lineEdit_sample.blockSignals(False)
+            self.ui.lineEdit_custom_name.blockSignals(False)
+        except Exception:
+            pass
+
+    def reset_name_preset(self):
+        self.settings.clear()
+        self.restore_name_preset()
+        self.update_file_name_from_preset()
+
+    def open_log_dir(self) -> None:
+        try:
+            path = self.ui.lineEdit_log_dir.text().strip()
+            if not path:
+                return
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(path))
+        except Exception:
+            pass
 
     def handle_step_changed(self):
         try:
@@ -1064,7 +1125,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             # Style to match palette
             try:
-                self.title_label.setStyleSheet("font-weight: 600; margin: 2px 0 2px 0;")
+                self.title_label.setStyleSheet(
+                    "font-weight: 600; font-size: 18px; margin: 2px 0 2px 0;"
+                )
                 self.title_label.setForegroundRole(QtGui.QPalette.ColorRole.Text)
             except Exception:
                 pass

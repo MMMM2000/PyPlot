@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 
 
 class InfoLineEdit(QtWidgets.QLineEdit):
@@ -55,6 +55,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
     def __init__(self, parent: QtWidgets.QWidget, target: QtWidgets.QLineEdit) -> None:
         super().__init__(parent)
         self.target = target
+        self.settings = QtCore.QSettings("microwire", "data_logger")
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -173,6 +174,12 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         # Placeholder for custom format
         self.stacked.addWidget(QtWidgets.QWidget())
 
+        btn_layout = QtWidgets.QHBoxLayout()
+        btn_layout.addStretch(1)
+        self.reset_btn = QtWidgets.QPushButton("Reset")
+        btn_layout.addWidget(self.reset_btn)
+        layout.addLayout(btn_layout)
+
         # connections ---------------------------------------------------
         self.combo_format.currentIndexChanged.connect(self.on_format_change)
         for w in [
@@ -198,8 +205,9 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
                 w.currentIndexChanged.connect(self.update_name)
             elif isinstance(w, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
                 w.valueChanged.connect(self.update_name)
-
-        self.on_format_change(0)
+        self.reset_btn.clicked.connect(self.reset_defaults)
+        self.load_settings()
+        self.on_format_change(self.combo_format.currentIndex())
 
     def on_format_change(self, idx: int) -> None:
         self.stacked.setCurrentIndex(idx)
@@ -235,6 +243,75 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         else:
             return
         self.target.setText(name)
+        self.save_settings()
+
+    # settings ---------------------------------------------------------
+    def save_settings(self) -> None:
+        s = self.settings
+        s.setValue("format", self.combo_format.currentIndex())
+        s.setValue("s_comp", self.s_comp.text())
+        s.setValue("s_sample", self.s_sample.text())
+        s.setValue("s_number", self.s_number.text())
+        s.setValue("s_end", self.s_end.currentIndex())
+        s.setValue("s_anneal", self.s_anneal.text())
+        s.setValue("s_load", self.s_load.value())
+        s.setValue("s_dir", self.s_dir.currentIndex())
+        s.setValue("t_comp", self.t_comp.text())
+        s.setValue("t_sample", self.t_sample.text())
+        s.setValue("t_number", self.t_number.text())
+        s.setValue("t_anneal", self.t_anneal.text())
+        s.setValue("t_temp", self.t_temp.currentIndex())
+        s.setValue("m_head", self.m_head.value())
+        s.setValue("m_desc", self.m_desc.text())
+        s.setValue("m_coils", self.m_coils.currentIndex())
+        s.setValue("custom_text", self.target.text())
+
+    def load_settings(self) -> None:
+        s = self.settings
+        widgets: list[QtWidgets.QWidget] = [
+            self.combo_format,
+            self.s_comp,
+            self.s_sample,
+            self.s_number,
+            self.s_end,
+            self.s_anneal,
+            self.s_load,
+            self.s_dir,
+            self.t_comp,
+            self.t_sample,
+            self.t_number,
+            self.t_anneal,
+            self.t_temp,
+            self.m_head,
+            self.m_desc,
+            self.m_coils,
+        ]
+        for w in widgets:
+            w.blockSignals(True)
+        self.combo_format.setCurrentIndex(int(s.value("format", 0)))
+        self.s_comp.setText(s.value("s_comp", "FeSiBP"))
+        self.s_sample.setText(s.value("s_sample", "156_2"))
+        self.s_number.setText(s.value("s_number", "s2-1"))
+        self.s_end.setCurrentIndex(int(s.value("s_end", 0)))
+        self.s_anneal.setText(s.value("s_anneal", "74mA"))
+        self.s_load.setValue(float(s.value("s_load", 2.5)))
+        self.s_dir.setCurrentIndex(int(s.value("s_dir", 0)))
+        self.t_comp.setText(s.value("t_comp", "FeSiBP"))
+        self.t_sample.setText(s.value("t_sample", "156_2"))
+        self.t_number.setText(s.value("t_number", "s2-1"))
+        self.t_anneal.setText(s.value("t_anneal", "74mA"))
+        self.t_temp.setCurrentIndex(int(s.value("t_temp", 0)))
+        self.m_head.setValue(int(s.value("m_head", 1)))
+        self.m_desc.setText(s.value("m_desc", ""))
+        self.m_coils.setCurrentIndex(int(s.value("m_coils", 0)))
+        self.target.setText(s.value("custom_text", ""))
+        for w in widgets:
+            w.blockSignals(False)
+
+    def reset_defaults(self) -> None:
+        self.settings.clear()
+        self.load_settings()
+        self.update_name()
 
 
 __all__ = ["FileNameBuilderWidget", "InfoLineEdit"]

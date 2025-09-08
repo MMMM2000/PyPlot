@@ -156,7 +156,7 @@ class Ui_MainWindow(object):
         # Make the main text fields expand and keep the browse button narrow
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 0)
+        grid.setColumnStretch(2, 1)
 
         # Log file location (separate directory and file name)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
@@ -167,8 +167,11 @@ class Ui_MainWindow(object):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
+        self.pushButton_open_dir = QtWidgets.QPushButton("Open")
+        self.pushButton_open_dir.setFixedWidth(70)
         dir_layout.addWidget(self.lineEdit_log_dir)
         dir_layout.addWidget(self.pushButton_browse_dir)
+        dir_layout.addWidget(self.pushButton_open_dir)
         grid.addWidget(self.label_log_dir, 0, 0)
         grid.addLayout(dir_layout, 0, 1, 1, 2)
 
@@ -218,9 +221,9 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setMinimumWidth(200)
+        self.pushButton_start_stop_drzania_prudu.setFixedWidth(150)
         hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
-        hold_and_step.addSpacing(8)
+        hold_and_step.addSpacing(6)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
@@ -283,6 +286,25 @@ class Ui_MainWindow(object):
         # Hidden by default; shown only when "Custom" preset is selected
         self.label_custom_name.hide()
         self.lineEdit_custom_name.hide()
+        name_grid.addItem(
+            QtWidgets.QSpacerItem(
+                0,
+                0,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Minimum,
+            ),
+            5,
+            0,
+        )
+        self.pushButton_reset_preset = QtWidgets.QPushButton("Reset")
+        name_grid.addWidget(
+            self.pushButton_reset_preset,
+            5,
+            1,
+            1,
+            1,
+            QtCore.Qt.AlignmentFlag.AlignRight,
+        )
         grid.addWidget(gb_name, 4, 0, 1, 3)
 
         # Reverse sweep and loops controls
