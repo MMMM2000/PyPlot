@@ -91,7 +91,8 @@ class UiMainWindow(object):
         cmd_layout = QtWidgets.QVBoxLayout(self.groupBox_cmd)
         cmd_row = QtWidgets.QHBoxLayout()
         self.lineEdit_port_command = QtWidgets.QLineEdit()
-        cmd_row.addWidget(self.lineEdit_port_command)
+        self.lineEdit_port_command.setMinimumWidth(240)
+        cmd_row.addWidget(self.lineEdit_port_command, stretch=1)
         self.pushButton_send_command = QtWidgets.QPushButton("Send")
         cmd_row.addWidget(self.pushButton_send_command)
         cmd_layout.addLayout(cmd_row)
@@ -111,7 +112,7 @@ class UiMainWindow(object):
 
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
-        self.lineEdit_log_dir.setMinimumWidth(120)
+        self.lineEdit_log_dir.setMinimumWidth(200)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -128,7 +129,7 @@ class UiMainWindow(object):
 
         log_layout.addWidget(QtWidgets.QLabel("File name:"), 1, 0)
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(120)
+        self.lineEdit_log_file.setMinimumWidth(200)
         self.lineEdit_log_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         log_layout.addWidget(self.lineEdit_log_file, 1, 1)
         self.label_extension = QtWidgets.QLabel(".txt")
@@ -166,16 +167,17 @@ class UiMainWindow(object):
         # Optional realtime plotting toggle + FPS control
         self.checkBox_rt_plot = QtWidgets.QCheckBox("Realtime plot (experimental)")
         self.checkBox_rt_plot.setChecked(False)
-        log_layout.addWidget(self.checkBox_rt_plot, 5, 0, 1, 2)
+        log_layout.addWidget(self.checkBox_rt_plot, 5, 0)
         self.label_rt_fps = QtWidgets.QLabel("FPS:")
         self.spinBox_rt_fps = QtWidgets.QSpinBox()
-        self.spinBox_rt_fps.setRange(1, 120)
+        self.spinBox_rt_fps.setRange(1, 60)
         self.spinBox_rt_fps.setValue(30)
-        log_layout.addWidget(self.label_rt_fps, 5, 2)
-        log_layout.addWidget(self.spinBox_rt_fps, 5, 3)
+        self.spinBox_rt_fps.setMaximumWidth(60)
+        log_layout.addWidget(self.label_rt_fps, 5, 1)
+        log_layout.addWidget(self.spinBox_rt_fps, 5, 2)
         self.checkBox_rt_gl = QtWidgets.QCheckBox("OpenGL accel")
         self.checkBox_rt_gl.setChecked(True)
-        log_layout.addWidget(self.checkBox_rt_gl, 5, 4)
+        log_layout.addWidget(self.checkBox_rt_gl, 5, 3)
 
         self.file_name_builder = FileNameBuilderWidget(self.groupBox_log, self.lineEdit_log_file)
         log_layout.addWidget(self.file_name_builder, 6, 0, 1, 4)

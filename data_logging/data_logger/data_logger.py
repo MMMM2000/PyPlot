@@ -337,12 +337,15 @@ class MainWindow(QtWidgets.QMainWindow):
             # PyQt6 returns a QByteArray; at runtime bytes(raw) works fine.
             raw_bytes = bytes(raw)            # type: ignore[arg-type]
             self.port_response = raw_bytes.decode('ascii')
+            extra_lines: list[bytes] = []
+            while self.serial.canReadLine():
+                extra_lines.append(bytes(self.serial.readLine()))  # type: ignore[arg-type]
 
             now = time.perf_counter()
             if self.last_sample_time is not None:
                 dt = now - self.last_sample_time
                 if dt > 0:
-                    rate = 1.0 / dt
+                    rate = (1 + len(extra_lines)) / dt
                     self._rate_window.append(rate)
                     self.sample_rate = sum(self._rate_window) / len(self._rate_window)
             self.last_sample_time = now
@@ -366,48 +369,48 @@ class MainWindow(QtWidgets.QMainWindow):
                     remaining_samples = self.sample_count - self.sample_idx
                     self._finish_time = now + remaining_samples / self.sample_rate
 
-                    if self.sample_idx >= self.sample_count:
-                        # finalize this batch
-                        try:
-                            fmt_now = self._current_format()
-                            if fmt_now == 'Stress' and self._batch_values:
-                                import numpy as _np
-                                m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
-                                try:
-                                    ld = float(self.name_builder.s_load.value())
-                                    d = str(self.name_builder.s_dir.currentData())
-                                except Exception:
-                                    ld, d = 0.0, 'a'
-                                self._rt_means[(d, float(ld))] = m
-                        except Exception:
-                            pass
-                        self.log_file.close()
-                        self.logging_on = False
-                        self.ui.pushButton_record.setEnabled(True)
-                        # Reset record button text/state
-                        try:
-                            self.ui.pushButton_record.setText("Record")
-                            self.ui.pushButton_record.setToolTip("Start logging")
-                        except Exception:
-                            pass
-                        self.ui.pushButton_cancel.setEnabled(False)
-                        self._finish_time = None
-                        # Update plot to include the new mean and hide overlay
-                        try:
-                            # Ensure Matplotlib canvas for final rendering (switch from PG if active)
-                            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
-                                self._stop_pg_timer()
-                                self._init_live_plot()
-                            if fmt_now == 'Stress':
-                                self._draw_stress_live()
-                            elif fmt_now == 'Temperature':
-                                self._draw_temp_final()
-                            elif fmt_now == 'Maxion':
-                                self._draw_maxion_final()
-                            self._show_record_overlay(False)
-                        except Exception:
-                            pass
-                    # Keep emulator streaming continuously; no STOP
+                if self.sample_idx >= self.sample_count:
+                    # finalize this batch
+                    try:
+                        fmt_now = self._current_format()
+                        if fmt_now == 'Stress' and self._batch_values:
+                            import numpy as _np
+                            m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
+                            try:
+                                ld = float(self.name_builder.s_load.value())
+                                d = str(self.name_builder.s_dir.currentData())
+                            except Exception:
+                                ld, d = 0.0, 'a'
+                            self._rt_means[(d, float(ld))] = m
+                    except Exception:
+                        pass
+                    self.log_file.close()
+                    self.logging_on = False
+                    self.ui.pushButton_record.setEnabled(True)
+                    # Reset record button text/state
+                    try:
+                        self.ui.pushButton_record.setText("Record")
+                        self.ui.pushButton_record.setToolTip("Start logging")
+                    except Exception:
+                        pass
+                    self.ui.pushButton_cancel.setEnabled(False)
+                    self._finish_time = None
+                    # Update plot to include the new mean and hide overlay
+                    try:
+                        # Ensure Matplotlib canvas for final rendering (switch from PG if active)
+                        if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
+                            self._stop_pg_timer()
+                            self._init_live_plot()
+                        if fmt_now == 'Stress':
+                            self._draw_stress_live()
+                        elif fmt_now == 'Temperature':
+                            self._draw_temp_final()
+                        elif fmt_now == 'Maxion':
+                            self._draw_maxion_final()
+                        self._show_record_overlay(False)
+                    except Exception:
+                        pass
+                # Keep emulator streaming continuously; no STOP
             # Feed live plot while logging only when realtime is enabled
             rt_enabled = getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()
             if self.logging_on and not self.paused and rt_enabled:
@@ -435,23 +438,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         arr0.append(yv0)
                         self._batch_values.append(yv0)
 
-            # Drain any additional complete lines to prevent driver buffer
-            # buildup at high emulator rates. This mirrors the single-line
-            # processing above for each extra line currently available.
-            while self.serial is not None and self.serial.canReadLine():
-                raw = self.serial.readLine()
-                raw_bytes = bytes(raw)            # type: ignore[arg-type]
+            # Process any additional lines captured above without re-sampling the rate
+            for raw_bytes in extra_lines:
                 self.port_response = raw_bytes.decode('ascii')
-
-                now = time.perf_counter()
-                if self.last_sample_time is not None:
-                    dt = now - self.last_sample_time
-                    if dt > 0:
-                        rate = 1.0 / dt
-                        self._rate_window.append(rate)
-                        self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                self.last_sample_time = now
-
                 if not self.paused and self.logging_on:
                     assert self.log_file is not None
                     self.log_file.write(self.port_response.lstrip(">"))
@@ -499,14 +488,14 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._show_record_overlay(False)
                         except Exception:
                             pass
-                if self.logging_on and not self.paused and (getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()):
+                if self.logging_on and not self.paused and rt_enabled:
                     try:
                         self._ingest_live_sample(self.port_response)
                     except Exception:
                         pass
                 # Always accumulate for stress batches even when realtime plot is off
                 try:
-                    if self.logging_on and not self.paused and self._current_format() == 'Stress':
+                    if self.logging_on and not self.paused and self._current_format() == 'Stress' and not rt_enabled:
                         parts = [p.strip() for p in self.port_response.strip().lstrip('>').split(';') if p.strip()]
                         if len(parts) >= 4:
                             yv = float(parts[3].replace(',', '.'))
@@ -775,7 +764,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _update_rt_fps(self) -> None:
         try:
-            fps = float(self.ui.spinBox_rt_fps.value())
+            fps = min(60.0, float(self.ui.spinBox_rt_fps.value()))
             self._pg_min_interval = max(0.001, 1.0 / max(1.0, fps))
             # Update QTimer interval if running
             if self._pg_timer is not None:
@@ -889,32 +878,35 @@ class MainWindow(QtWidgets.QMainWindow):
                 d = self.name_builder.s_dir.currentData()
             except Exception:
                 load, d = 2.5, 'a'
-            cmd = f"MODE STRESS LOAD={load} DIR={d}\n"
+            cmd = f"MODE STRESS LOAD={load} DIR={d}\r\n"
         elif fmt == "Temperature":
             try:
                 t = self.name_builder.t_temp.currentText()
             except Exception:
                 t = "25C"
-            cmd = f"MODE TEMP T={t}\n"
+            cmd = f"MODE TEMP T={t}\r\n"
         elif fmt == "Maxion":
-            cmd = "MODE MAXION\n"
+            cmd = "MODE MAXION\r\n"
         if cmd:
             try:
-                self.serial.write(cmd.encode('ascii'))
+                cmd_b = cmd.encode('ascii')
+                self.serial.write(cmd_b)
                 # Clear buffers to drop stale lines from previous mode
                 try:
                     self.serial.clear()
                 except Exception:
                     pass
             except Exception:
-                pass
+                cmd_b = None
             # Send the mode command a couple more times shortly after to ensure
             # the emulator thread sees it between data bursts and clear again.
-            try:
-                QtCore.QTimer.singleShot(50, lambda: (self.serial and self.serial.write(cmd.encode('ascii')), self.serial and self.serial.clear()))
-                QtCore.QTimer.singleShot(120, lambda: (self.serial and self.serial.write(cmd.encode('ascii')), self.serial and self.serial.clear()))
-            except Exception:
-                pass
+            if cmd_b is not None:
+                try:
+                    QtCore.QTimer.singleShot(50, lambda: (self.serial and self.serial.write(cmd_b), self.serial and self.serial.clear()))
+                    QtCore.QTimer.singleShot(150, lambda: (self.serial and self.serial.write(cmd_b), self.serial and self.serial.clear()))
+                    QtCore.QTimer.singleShot(300, lambda: (self.serial and self.serial.write(cmd_b), self.serial and self.serial.clear()))
+                except Exception:
+                    pass
 
     def _on_format_changed(self) -> None:
         # Rebuild the plotting surface for the new mode
