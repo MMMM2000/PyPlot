@@ -75,19 +75,19 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(4)
         self.s_comp = InfoLineEdit("Chemical composition of the sample, e.g., FeSiBP or FeSiB")
-        self.s_comp.setMinimumWidth(200)
+        self.s_comp.setMinimumWidth(240)
         self.s_comp.setText("FeSiBP")
         self.s_comp.set_validation(r"^[A-Za-z0-9]+$", "Use only letters and numbers")
         form.addRow("Composition:", self.s_comp)
 
         self.s_sample = InfoLineEdit("Microwire identifier, e.g., 156_2")
-        self.s_sample.setMinimumWidth(200)
+        self.s_sample.setMinimumWidth(240)
         self.s_sample.setText("156_2")
         self.s_sample.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")
         form.addRow("Microwire:", self.s_sample)
 
         self.s_number = InfoLineEdit("Sample number, e.g., s2-1")
-        self.s_number.setMinimumWidth(150)
+        self.s_number.setMinimumWidth(200)
         self.s_number.setText("s2-1")
         self.s_number.set_validation(
             r"^[A-Za-z0-9]+-[A-Za-z0-9]+$",
@@ -101,7 +101,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.s_anneal = InfoLineEdit(
             "Annealing description, e.g., ascast, 300C, 74mA"
         )
-        self.s_anneal.setMinimumWidth(200)
+        self.s_anneal.setMinimumWidth(240)
         self.s_anneal.setText("74mA")
         form.addRow("Annealing:", self.s_anneal)
         self.s_load = QtWidgets.QDoubleSpinBox()
@@ -123,19 +123,19 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         tform.setHorizontalSpacing(8)
         tform.setVerticalSpacing(4)
         self.t_comp = InfoLineEdit("Chemical composition of the sample, e.g., FeSiBP or FeSiB")
-        self.t_comp.setMinimumWidth(200)
+        self.t_comp.setMinimumWidth(240)
         self.t_comp.setText("FeSiBP")
         self.t_comp.set_validation(r"^[A-Za-z0-9]+$", "Use only letters and numbers")
         tform.addRow("Composition:", self.t_comp)
 
         self.t_sample = InfoLineEdit("Microwire identifier, e.g., 156_2")
-        self.t_sample.setMinimumWidth(200)
+        self.t_sample.setMinimumWidth(240)
         self.t_sample.setText("156_2")
         self.t_sample.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")
         tform.addRow("Microwire:", self.t_sample)
 
         self.t_number = InfoLineEdit("Sample number, e.g., s2-1")
-        self.t_number.setMinimumWidth(150)
+        self.t_number.setMinimumWidth(200)
         self.t_number.setText("s2-1")
         self.t_number.set_validation(
             r"^[A-Za-z0-9]+-[A-Za-z0-9]+$",
@@ -144,7 +144,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         tform.addRow("Sample number:", self.t_number)
 
         self.t_anneal = InfoLineEdit("Annealing description, e.g., 74mA")
-        self.t_anneal.setMinimumWidth(200)
+        self.t_anneal.setMinimumWidth(240)
         self.t_anneal.setText("74mA")
         tform.addRow("Annealing:", self.t_anneal)
 
@@ -164,7 +164,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.m_head.setRange(1, 6)
         mform.addRow("Head:", self.m_head)
         self.m_desc = InfoLineEdit("Description of the experiment")
-        self.m_desc.setMinimumWidth(200)
+        self.m_desc.setMinimumWidth(240)
         mform.addRow("Description:", self.m_desc)
         self.m_coils = QtWidgets.QComboBox()
         self.m_coils.addItems(["2", "3"])

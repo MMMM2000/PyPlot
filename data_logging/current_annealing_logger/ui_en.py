@@ -153,26 +153,29 @@ class Ui_MainWindow(object):
         gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_nastavenia_procesu)
         self.groupBox_nastavenia_procesu = gb_proc
         grid = QtWidgets.QGridLayout(gb_proc)
-        # Make the main text fields expand and keep the browse button narrow
+        # Make the main text fields expand and keep the buttons narrow
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 0)
-        grid.setColumnStretch(3, 0)
+        grid.setColumnStretch(2, 1)
 
         # Log file location (separate directory and file name)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
+        self.lineEdit_log_dir.setMinimumWidth(360)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.pushButton_open_dir = QtWidgets.QPushButton("Open")
-        self.pushButton_open_dir.setFixedWidth(70)
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
+        dir_btns = QtWidgets.QHBoxLayout()
+        dir_btns.setContentsMargins(0, 0, 0, 0)
+        dir_btns.setSpacing(4)
+        dir_btns.addWidget(self.pushButton_open_dir)
+        dir_btns.addWidget(self.pushButton_browse_dir)
         grid.addWidget(self.label_log_dir, 0, 0)
         grid.addWidget(self.lineEdit_log_dir, 0, 1)
-        grid.addWidget(self.pushButton_open_dir, 0, 2)
-        grid.addWidget(self.pushButton_browse_dir, 0, 3)
+        grid.addLayout(dir_btns, 0, 2)
 
         self.label_log_file = QtWidgets.QLabel("File name:")
         self.lineEdit_log_file = QtWidgets.QLineEdit()
@@ -183,8 +186,8 @@ class Ui_MainWindow(object):
         )
         self.label_extension = QtWidgets.QLabel(".txt")
         grid.addWidget(self.label_log_file, 1, 0)
-        grid.addWidget(self.lineEdit_log_file, 1, 1, 1, 2)
-        grid.addWidget(self.label_extension, 1, 3)
+        grid.addWidget(self.lineEdit_log_file, 1, 1)
+        grid.addWidget(self.label_extension, 1, 2)
 
         # Legacy single-path widgets kept (hidden) for compatibility with code
         self.label_logfile = QtWidgets.QLabel("Log file:")
@@ -200,7 +203,6 @@ class Ui_MainWindow(object):
         self.spinBox_hodnota_staly_prud = QtWidgets.QSpinBox()
         self.spinBox_hodnota_staly_prud.setRange(1, 10_000)
         self.spinBox_hodnota_staly_prud.setValue(10)
-        self.spinBox_hodnota_staly_prud.setMaximumWidth(80)
         # Move one row down to avoid overlap with File name
         grid.addWidget(self.label_hodnota_staly_prud, 2, 0)
         grid.addWidget(self.spinBox_hodnota_staly_prud, 2, 1)
@@ -211,7 +213,6 @@ class Ui_MainWindow(object):
         self.spinBox_doba_staly_prud.setRange(1, 36000)
         # Default hold time 1 second
         self.spinBox_doba_staly_prud.setValue(1)
-        self.spinBox_doba_staly_prud.setMaximumWidth(80)
         # Shift down by one row
         grid.addWidget(self.label_logfile_doba_staleho_prudu, 3, 0)
         grid.addWidget(self.spinBox_doba_staly_prud, 3, 1)
@@ -220,9 +221,8 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setFixedWidth(200)
         hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
-        hold_and_step.addSpacing(6)
+        hold_and_step.addStretch(1)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
@@ -230,7 +230,6 @@ class Ui_MainWindow(object):
         self.spinBox_step_mA.setMaximumWidth(90)
         hold_and_step.addWidget(self.label_step)
         hold_and_step.addWidget(self.spinBox_step_mA)
-        hold_and_step.addStretch(1)
         grid.addLayout(hold_and_step, 2, 2)
 
         self.label_logfile_uplynulo = QtWidgets.QLabel("Elapsed:")
@@ -259,21 +258,21 @@ class Ui_MainWindow(object):
         except Exception:
             pass
         self.lineEdit_composition.setText("Ni51Fe26Ga21")
-        self.lineEdit_composition.setMinimumWidth(200)
+        self.lineEdit_composition.setMinimumWidth(260)
         self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
         try:
             self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_microwire.setText("1_2")
-        self.lineEdit_microwire.setMinimumWidth(200)
+        self.lineEdit_microwire.setMinimumWidth(260)
         self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
         try:
             self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_sample.setText("s1")
-        self.lineEdit_sample.setMinimumWidth(200)
+        self.lineEdit_sample.setMinimumWidth(260)
         name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
         name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
@@ -282,7 +281,7 @@ class Ui_MainWindow(object):
         name_grid.addWidget(self.lineEdit_sample, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
-        self.lineEdit_custom_name.setMinimumWidth(200)
+        self.lineEdit_custom_name.setMinimumWidth(260)
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
         name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
