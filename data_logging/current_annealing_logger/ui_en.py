@@ -203,6 +203,7 @@ class Ui_MainWindow(object):
         self.spinBox_hodnota_staly_prud = QtWidgets.QSpinBox()
         self.spinBox_hodnota_staly_prud.setRange(1, 10_000)
         self.spinBox_hodnota_staly_prud.setValue(10)
+        self.spinBox_hodnota_staly_prud.setMaximumWidth(80)
         # Move one row down to avoid overlap with File name
         grid.addWidget(self.label_hodnota_staly_prud, 2, 0)
         grid.addWidget(self.spinBox_hodnota_staly_prud, 2, 1)
@@ -213,6 +214,7 @@ class Ui_MainWindow(object):
         self.spinBox_doba_staly_prud.setRange(1, 36000)
         # Default hold time 1 second
         self.spinBox_doba_staly_prud.setValue(1)
+        self.spinBox_doba_staly_prud.setMaximumWidth(80)
         # Shift down by one row
         grid.addWidget(self.label_logfile_doba_staleho_prudu, 3, 0)
         grid.addWidget(self.spinBox_doba_staly_prud, 3, 1)
@@ -221,13 +223,18 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
+        self.pushButton_start_stop_drzania_prudu.setMinimumWidth(200)
+        self.pushButton_start_stop_drzania_prudu.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
         hold_and_step.addStretch(1)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
         self.spinBox_step_mA.setValue(1)
-        self.spinBox_step_mA.setMaximumWidth(90)
+        self.spinBox_step_mA.setMaximumWidth(80)
         hold_and_step.addWidget(self.label_step)
         hold_and_step.addWidget(self.spinBox_step_mA)
         grid.addLayout(hold_and_step, 2, 2)
@@ -258,21 +265,21 @@ class Ui_MainWindow(object):
         except Exception:
             pass
         self.lineEdit_composition.setText("Ni51Fe26Ga21")
-        self.lineEdit_composition.setMinimumWidth(260)
+        self.lineEdit_composition.setMinimumWidth(360)
         self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
         try:
             self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_microwire.setText("1_2")
-        self.lineEdit_microwire.setMinimumWidth(260)
+        self.lineEdit_microwire.setMinimumWidth(360)
         self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
         try:
             self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_sample.setText("s1")
-        self.lineEdit_sample.setMinimumWidth(260)
+        self.lineEdit_sample.setMinimumWidth(360)
         name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
         name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
@@ -281,7 +288,7 @@ class Ui_MainWindow(object):
         name_grid.addWidget(self.lineEdit_sample, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
-        self.lineEdit_custom_name.setMinimumWidth(260)
+        self.lineEdit_custom_name.setMinimumWidth(360)
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
         name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)

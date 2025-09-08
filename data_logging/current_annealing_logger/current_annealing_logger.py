@@ -756,7 +756,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.command_number = 0
             self.vzorka_N = 0
             # print("Proces bezi")
-            self.ui.pushButton_spusti_proces.setText("Stop process")
+            self.ui.pushButton_spusti_proces.setText("Stop annealing process")
             if(self.modus_operandi == 0):
                 # print("Spusteny raw VCP mod")
                 pass
@@ -835,28 +835,38 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 pass
         else:
-            self.proces_on = False
+            self.stop_annealing()
+
+    def stop_annealing(self):
+        """Abort the annealing run and power down the supply safely."""
+        self.proces_on = False
+        self.wait = False  # break any pending delays
+        try:
             self.timer_command.stop()
             self.timer_prud.stop()
-            self.prud_timer_on = False
-            if(self.f_out):
-                self.f_out.close()
-                self.f_out = None
-            if(self.modus_operandi == 1):
-                self.ui.pushButton_start_stop_drzania_prudu.setText("Držať prúd teraz!")
-            # Immediately ramp the supply to zero before running the shutdown sequence
-            try:
-                self.prikaz_portu = "CURR 0.000\n"
+        except Exception:
+            pass
+        self.prud_timer_on = False
+        if self.f_out:
+            self.f_out.close()
+            self.f_out = None
+        if self.modus_operandi == 1:
+            self.ui.pushButton_start_stop_drzania_prudu.setText("Držať prúd teraz!")
+        # Immediately ramp the supply to zero before running the shutdown sequence
+        try:
+            for cmd in ("INST:NSEL 3\n", "CURR 0.000\n", "OUTP OFF\n"):
+                self.prikaz_portu = cmd
                 self.send_serial_command()
-                self.prikaz_portu = "OUTP OFF\n"
-                self.send_serial_command()
-            except Exception:
-                pass
+                self.simple_delay(100)
+        except Exception:
+            pass
+        try:
             self.send_safe_end_commands()
-            # print("Proces zastaveny")
-            self.ui.pushButton_spusti_proces.setText("Start annealing process")
-            self.ui.groupBox_nastavenia_procesu.setEnabled(True)
-            self.ui.frame_modus_operandi.setEnabled(True)
+        except Exception:
+            pass
+        self.ui.pushButton_spusti_proces.setText("Start annealing process")
+        self.ui.groupBox_nastavenia_procesu.setEnabled(True)
+        self.ui.frame_modus_operandi.setEnabled(True)
         
     def handle_send_new_command(self):
         
@@ -1070,7 +1080,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "No response from power supply. Is it turned on? Aborting the process.",
         )
         if self.proces_on:
-            self.handle_pushButton_spusti_proces_clicked()
+            self.stop_annealing()
 
     def handle_lineEdit_log_subor_text_changed(self):
         # Sync f_name from separate directory + file name controls
