@@ -108,28 +108,23 @@ class UiMainWindow(object):
         log_layout.setColumnStretch(1, 1)
         log_layout.setColumnStretch(2, 0)
         log_layout.setColumnStretch(3, 0)
-        log_layout.setColumnStretch(4, 0)
 
         log_layout.addWidget(QtWidgets.QLabel("Directory:"), 0, 0)
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
-        self.lineEdit_log_dir.setMinimumWidth(200)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         log_layout.addWidget(self.lineEdit_log_dir, 0, 1)
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
-        self.pushButton_browse_dir.setMinimumWidth(70)
-        self.pushButton_browse_dir.setMaximumWidth(80)
+        self.pushButton_browse_dir.setFixedWidth(80)
         log_layout.addWidget(self.pushButton_browse_dir, 0, 2)
         self.pushButton_open_dir = QtWidgets.QPushButton("Open")
-        self.pushButton_open_dir.setMinimumWidth(60)
-        self.pushButton_open_dir.setMaximumWidth(70)
+        self.pushButton_open_dir.setFixedWidth(70)
         log_layout.addWidget(self.pushButton_open_dir, 0, 3)
 
         log_layout.addWidget(QtWidgets.QLabel("File name:"), 1, 0)
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(200)
         self.lineEdit_log_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         log_layout.addWidget(self.lineEdit_log_file, 1, 1)
         self.label_extension = QtWidgets.QLabel(".txt")

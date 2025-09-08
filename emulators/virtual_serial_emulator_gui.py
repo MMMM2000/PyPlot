@@ -536,6 +536,13 @@ class Main(QWidget):
             baud = int(self.combo_baud.currentText())
         except Exception:
             baud = 9600
+        if serial is not None:
+            try:
+                test = serial.serial_for_url(port, baudrate=baud, timeout=0)
+                test.close()
+            except Exception as e:
+                log_append(self.log, f"[ERR ] Cannot open {port}: {e}")
+                return
         if self.cmb_mode.currentText().startswith("Serial"):
             rate = int(self.spin_rate.value())
             self.emu = DataLoggerEmuThread(port, baud, rate, self.log)

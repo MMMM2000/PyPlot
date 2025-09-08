@@ -866,6 +866,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if ov is not None:
             self._position_record_overlay()
             ov.setVisible(bool(show))
+            if show:
+                try:
+                    QtWidgets.QApplication.processEvents()
+                except Exception:
+                    pass
 
     def _send_emulator_mode(self) -> None:
         if self.serial is None or getattr(self, "name_builder", None) is None:
@@ -891,20 +896,36 @@ class MainWindow(QtWidgets.QMainWindow):
             try:
                 cmd_b = cmd.encode('ascii')
                 self.serial.write(cmd_b)
-                # Clear buffers to drop stale lines from previous mode
                 try:
-                    self.serial.clear()
+                    self.serial.flush()
+                except Exception:
+                    pass
+                try:
+                    self.serial.clear(QtSerialPort.QSerialPort.Direction.Input)
                 except Exception:
                     pass
             except Exception:
                 cmd_b = None
-            # Send the mode command a couple more times shortly after to ensure
-            # the emulator thread sees it between data bursts and clear again.
             if cmd_b is not None:
+                def _resend() -> None:
+                    if self.serial is None:
+                        return
+                    try:
+                        self.serial.write(cmd_b)
+                        try:
+                            self.serial.flush()
+                        except Exception:
+                            pass
+                        try:
+                            self.serial.clear(QtSerialPort.QSerialPort.Direction.Input)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                 try:
-                    QtCore.QTimer.singleShot(50, lambda: (self.serial and self.serial.write(cmd_b), self.serial and self.serial.clear()))
-                    QtCore.QTimer.singleShot(150, lambda: (self.serial and self.serial.write(cmd_b), self.serial and self.serial.clear()))
-                    QtCore.QTimer.singleShot(300, lambda: (self.serial and self.serial.write(cmd_b), self.serial and self.serial.clear()))
+                    QtCore.QTimer.singleShot(50, _resend)
+                    QtCore.QTimer.singleShot(150, _resend)
+                    QtCore.QTimer.singleShot(300, _resend)
                 except Exception:
                     pass
 
