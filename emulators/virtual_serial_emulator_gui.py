@@ -195,9 +195,8 @@ class DataLoggerEmuThread(BaseEmuThread):
         if not self.open_serial(timeout=0):
             return
         delay = 1.0 / max(self.rate_hz, 1)
-        last_send = time.perf_counter()
+        next_send = time.perf_counter()
         while not self._stop.is_set():
-            # Handle commands
             try:
                 raw = self.ser.readline() if self.ser else b""
             except Exception:
@@ -223,6 +222,7 @@ class DataLoggerEmuThread(BaseEmuThread):
                     if m:
                         self.rate_hz = max(1, int(m.group(1)))
                         delay = 1.0 / self.rate_hz
+                        next_send = time.perf_counter() + delay
                         try:
                             if self.ser is not None:
                                 self.ser.write(f"{self.rate_hz}\n".encode())
@@ -257,9 +257,8 @@ class DataLoggerEmuThread(BaseEmuThread):
                         except Exception as e:
                             log_append(self.log, f"[WARN] MODE change failed: {e}")
 
-            # Periodic streaming
             now = time.perf_counter()
-            if self.streaming and self.lines and (now - last_send) >= delay:
+            if self.streaming and self.lines and now >= next_send:
                 line = self.lines[self.idx % len(self.lines)] + "\n"
                 self.idx += 1
                 try:
@@ -267,8 +266,9 @@ class DataLoggerEmuThread(BaseEmuThread):
                         self.ser.write(line.encode())
                 except Exception as e:
                     log_append(self.log, f"[ERR ] write failed: {e}")
-                last_send = now
-            time.sleep(0.0005)
+                next_send += delay
+            sleep_for = max(0.0005, next_send - time.perf_counter())
+            time.sleep(min(0.001, sleep_for))
         self.close_serial()
 
 
