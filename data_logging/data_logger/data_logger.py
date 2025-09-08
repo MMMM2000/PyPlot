@@ -174,6 +174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if refresh_btn is not None:
             refresh_btn.clicked.connect(self.populate_ports)
         self.ui.spinBox_log_sample_count.valueChanged.connect(self.update_time_estimate)
+        self.ui.spinBox_log_sample_count.valueChanged.connect(self._sync_window_max)
 
         self.update_time_estimate()
         # Overlay to prompt connection; disable settings until connected
@@ -203,7 +204,9 @@ class MainWindow(QtWidgets.QMainWindow):
         win_box = getattr(self.ui, 'spinBox_rt_window', None)
         if win_box is not None:
             win_box.valueChanged.connect(self._update_rt_window)
+            win_box.setSingleStep(500)
             self._rt_window = int(win_box.value())
+            self._sync_window_max()
         else:
             self._rt_window = 2000
         # Defaults for realtime plotting
@@ -785,6 +788,19 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self._pg_min_interval = 1.0 / 30.0
 
+    def _sync_window_max(self) -> None:
+        """Keep realtime window cap in sync with recording sample count."""
+        try:
+            max_samples = int(self.ui.spinBox_log_sample_count.value())
+            win_box = getattr(self.ui, 'spinBox_rt_window', None)
+            if win_box is not None:
+                win_box.setMaximum(max_samples)
+                if win_box.value() > max_samples:
+                    win_box.setValue(max_samples)
+        except Exception:
+            pass
+        self._update_rt_window()
+
     def _update_rt_window(self) -> None:
         try:
             self._rt_window = max(1, int(self.ui.spinBox_rt_window.value()))
@@ -838,13 +854,14 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def _prewarm_rt_backend(self) -> None:
-        """Instantiate and discard a dummy PlotWidget to avoid initial restart."""
+        """Instantiate a hidden PlotWidget so first toggle doesn't restart."""
         if pg is None:
             return
         try:
-            dummy = pg.PlotWidget()
-            dummy.hide()
-            dummy.deleteLater()
+            self._rt_dummy = pg.PlotWidget()
+            self._rt_dummy.show()
+            QtWidgets.QApplication.processEvents()
+            self._rt_dummy.hide()
         except Exception:
             pass
 
