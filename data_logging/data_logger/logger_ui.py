@@ -34,13 +34,14 @@ class UiMainWindow(object):
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Preferred,
         )
-        # Fix settings width to one third of the available screen width
+        # Settings pane width: match Current Annealing Logger feel
+        # Use ~40% of screen with sensible bounds for consistency across devices
         try:
             screen = QtGui.QGuiApplication.primaryScreen()
             avail = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1440, 900)
-            fixed_settings_w = max(260, int(avail.width() / 3))
+            fixed_settings_w = min(640, max(520, int(avail.width() * 0.40)))
         except Exception:
-            fixed_settings_w = 480
+            fixed_settings_w = 560
         left_panel.setMinimumWidth(fixed_settings_w)
         left_panel.setMaximumWidth(fixed_settings_w)
         left_layout = QtWidgets.QVBoxLayout(left_panel)
@@ -116,32 +117,28 @@ class UiMainWindow(object):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         log_layout.addWidget(self.lineEdit_log_dir, 0, 1)
-        spacer_dir = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum)
-        log_layout.addItem(spacer_dir, 0, 2)
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
         self.pushButton_browse_dir.setMinimumWidth(70)
         self.pushButton_browse_dir.setMaximumWidth(80)
-        log_layout.addWidget(self.pushButton_browse_dir, 0, 3)
+        log_layout.addWidget(self.pushButton_browse_dir, 0, 2)
         self.pushButton_open_dir = QtWidgets.QPushButton("Open")
         self.pushButton_open_dir.setMinimumWidth(60)
         self.pushButton_open_dir.setMaximumWidth(70)
-        log_layout.addWidget(self.pushButton_open_dir, 0, 4)
+        log_layout.addWidget(self.pushButton_open_dir, 0, 3)
 
         log_layout.addWidget(QtWidgets.QLabel("File name:"), 1, 0)
         self.lineEdit_log_file = QtWidgets.QLineEdit()
         self.lineEdit_log_file.setMinimumWidth(120)
         self.lineEdit_log_file.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
         log_layout.addWidget(self.lineEdit_log_file, 1, 1)
-        spacer_ext = QtWidgets.QSpacerItem(40, 20, QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Minimum)
-        log_layout.addItem(spacer_ext, 1, 2)
         self.label_extension = QtWidgets.QLabel(".txt")
         self.label_extension.setFixedWidth(36)
         self.label_extension.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        log_layout.addWidget(self.label_extension, 1, 3)
+        log_layout.addWidget(self.label_extension, 1, 2)
         self.pushButton_build_name = QtWidgets.QPushButton("Build name")
         self.pushButton_build_name.hide()
         # keep out of the way
-        log_layout.addWidget(self.pushButton_build_name, 1, 4)
+        log_layout.addWidget(self.pushButton_build_name, 1, 3)
 
         self.pushButton_record = QtWidgets.QPushButton("Record")
         self.spinBox_log_sample_count = QtWidgets.QSpinBox()

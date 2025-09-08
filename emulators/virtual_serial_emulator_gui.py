@@ -523,7 +523,12 @@ class Main(QWidget):
         self.cmb_port.setEnabled(not self.chk_loop.isChecked())
 
     def on_start(self):
-        port = "loop://" if self.chk_loop.isChecked() else self.cmb_port.currentText().strip()
+        # Prefer stored device path (userData). Fallback to visible text.
+        if self.chk_loop.isChecked():
+            port = "loop://"
+        else:
+            data = self.cmb_port.currentData()
+            port = str(data) if data else self.cmb_port.currentText().split(" - ")[0].strip()
         if not port:
             log_append(self.log, "[ERR ] No port selected")
             return
@@ -560,23 +565,48 @@ class Main(QWidget):
 
     # -------- ports listing ---------
     def refresh_ports(self):
-        # Include local ./ttyV* if they exist, plus common macOS /dev/cu.* and Windows COMx
-        items = []
-        if TTY0.exists(): items.append(str(TTY0))
-        if TTY1.exists(): items.append(str(TTY1))
-        sysname = platform.system()
-        if sysname in {"Darwin", "Linux"}:
-            from glob import glob
-            items += sorted(glob("/dev/cu.*")) + sorted(glob("/dev/tty.*"))
-        else:  # Windows – show COM1..COM256 (exists check is tricky; let pyserial validate)
-            items += [f"COM{i}" for i in range(1, 257)]
-        # Deduplicate while preserving order
-        seen = set(); uniq = []
-        for it in items:
-            if it not in seen:
-                seen.add(it); uniq.append(it)
+        """Populate the port list with only actually available ports.
+
+        - Windows: use pyserial list_ports for COMx with friendly descriptions.
+        - macOS/Linux: include common /dev/cu.* and /dev/tty.* plus local ./ttyV*.
+        """
         self.cmb_port.clear()
-        self.cmb_port.addItems(uniq)
+        sysname = platform.system()
+
+        # Always offer local virtual pair paths if present
+        local_syms: list[tuple[str, str]] = []
+        if TTY0.exists():
+            local_syms.append((str(TTY0), str(TTY0)))
+        if TTY1.exists():
+            local_syms.append((str(TTY1), str(TTY1)))
+
+        if sysname == "Windows":
+            # Use pyserial enumeration to show only real COM ports with names
+            try:
+                from serial.tools import list_ports  # type: ignore
+                ports = list(list_ports.comports())
+            except Exception:
+                ports = []
+            for p in ports:
+                try:
+                    dev = getattr(p, 'device', '') or getattr(p, 'name', '')
+                    desc = getattr(p, 'description', '') or 'Serial Port'
+                    if dev:
+                        label = f"{dev} - {desc}" if desc else dev
+                        self.cmb_port.addItem(label, userData=dev)
+                except Exception:
+                    continue
+        else:
+            # macOS/Linux: prefer real devices in /dev; still show local symlinks
+            from glob import glob
+            paths = sorted(set(glob("/dev/cu.*") + glob("/dev/tty.*")))
+            for dev in paths:
+                self.cmb_port.addItem(dev, userData=dev)
+
+        # Prepend local virtual pair entries (if any) for quick access
+        for label, dev in reversed(local_syms):
+            self.cmb_port.insertItem(0, label, userData=dev)
+
         self._update_pair_buttons_enabled()
 
     def on_auto_refresh_changed(self, state):
@@ -623,7 +653,7 @@ class Main(QWidget):
         if idx >= 0:
             self.cmb_port.setCurrentIndex(idx)
         else:
-            self.cmb_port.insertItem(0, emu_port)
+            self.cmb_port.insertItem(0, emu_port, userData=emu_port)
             self.cmb_port.setCurrentIndex(0)
         self.chk_loop.setChecked(False)
         log_append(self.log, f"[INFO] Emulator will use {emu_port}. Point your logger to {logger_port}.")
