@@ -167,11 +167,7 @@ def _stress_path(load_g: float, direction: str) -> _Path:
 def _temp_path(temp_sel: str) -> _Path:
     base = ROOT_DIR / "sample_data" / "temperature_dependence"
     temp_sel = temp_sel.strip()
-    if temp_sel == "25-100C":
-        suffix = "overall"
-    else:
-        suffix = temp_sel
-    return base / f"Fe77Mo4B18Cu1 4_3 77mA {suffix}.txt"
+    return base / f"Fe77Mo4B18Cu1 4_3 77mA {temp_sel}.txt"
 
 
 def _maxion_path() -> _Path:

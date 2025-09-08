@@ -197,6 +197,9 @@ class MainWindow(QtWidgets.QMainWindow):
         gl_cb = getattr(self.ui, 'checkBox_rt_gl', None)
         if gl_cb is not None:
             gl_cb.toggled.connect(self._apply_pg_opengl)
+            self._apply_pg_opengl()
+        # Pre-create a PlotWidget to avoid first-use stalls or restarts
+        self._prewarm_rt_backend()
         win_box = getattr(self.ui, 'spinBox_rt_window', None)
         if win_box is not None:
             win_box.valueChanged.connect(self._update_rt_window)
@@ -831,6 +834,17 @@ class MainWindow(QtWidgets.QMainWindow):
         try:
             use_gl = bool(self.ui.checkBox_rt_gl.isChecked()) if getattr(self.ui, 'checkBox_rt_gl', None) is not None else True
             pg.setConfigOptions(useOpenGL=use_gl)
+        except Exception:
+            pass
+
+    def _prewarm_rt_backend(self) -> None:
+        """Instantiate and discard a dummy PlotWidget to avoid initial restart."""
+        if pg is None:
+            return
+        try:
+            dummy = pg.PlotWidget()
+            dummy.hide()
+            dummy.deleteLater()
         except Exception:
             pass
 
