@@ -131,8 +131,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.logging_on = False
         self.paused = False  # when True, data is read but not written
         self.sample_rate: float | None = None
-        self._rate_window: deque[float] = deque(maxlen=1000)
-        self.last_sample_time: float | None = None
+        self._rate_window: deque[float] = deque(maxlen=10)
+        self._rate_start = time.perf_counter()
+        self._rate_samples = 0
         self._last_time_secs: int | None = None
         self._finish_time: float | None = None
 
@@ -173,6 +174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if refresh_btn is not None:
             refresh_btn.clicked.connect(self.populate_ports)
         self.ui.spinBox_log_sample_count.valueChanged.connect(self.update_time_estimate)
+        self.ui.spinBox_log_sample_count.valueChanged.connect(self._sync_window_max)
 
         self.update_time_estimate()
         # Overlay to prompt connection; disable settings until connected
@@ -196,8 +198,20 @@ class MainWindow(QtWidgets.QMainWindow):
         gl_cb = getattr(self.ui, 'checkBox_rt_gl', None)
         if gl_cb is not None:
             gl_cb.toggled.connect(self._apply_pg_opengl)
+            self._apply_pg_opengl()
+        # Pre-create a PlotWidget to avoid first-use stalls or restarts
+        self._prewarm_rt_backend()
+        win_box = getattr(self.ui, 'spinBox_rt_window', None)
+        if win_box is not None:
+            win_box.valueChanged.connect(self._update_rt_window)
+            win_box.setSingleStep(500)
+            self._rt_window = int(win_box.value())
+            self._sync_window_max()
+        else:
+            self._rt_window = 2000
         # Defaults for realtime plotting
-        self._pg_min_interval = 1.0 / float(getattr(self.ui, 'spinBox_rt_fps', None).value() if getattr(self.ui, 'spinBox_rt_fps', None) is not None else 30)
+        fps_initial = getattr(self.ui, 'spinBox_rt_fps', None)
+        self._pg_min_interval = 1.0 / float(fps_initial.value() if fps_initial is not None else 30)
         self._pg_last_draw = 0.0
         self._pg_timer: QtCore.QTimer | None = None
         if getattr(self, 'name_builder', None) is not None:
@@ -270,6 +284,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.groupBox_commands.setEnabled(True)
             self.ui.label_connection_indicator.setText("\u25cf Connected")
             self.ui.label_connection_indicator.setStyleSheet("color: green;")
+            # Reset rate tracking on fresh connection
+            self.sample_rate = None
+            self._rate_window.clear()
+            self._rate_samples = 0
+            self._rate_start = time.perf_counter()
             # Inform emulator of selected format
             try:
                 self._send_emulator_mode()
@@ -292,6 +311,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.groupBox_commands.setEnabled(False)
             self.ui.label_connection_indicator.setText("\u25cf Disconnected")
             self.ui.label_connection_indicator.setStyleSheet("color: red;")
+            self.sample_rate = None
             self._apply_connected_state()
 
     def update_port_name(self):
@@ -337,15 +357,19 @@ class MainWindow(QtWidgets.QMainWindow):
             # PyQt6 returns a QByteArray; at runtime bytes(raw) works fine.
             raw_bytes = bytes(raw)            # type: ignore[arg-type]
             self.port_response = raw_bytes.decode('ascii')
+            extra_lines: list[bytes] = []
+            while self.serial.canReadLine():
+                extra_lines.append(bytes(self.serial.readLine()))  # type: ignore[arg-type]
 
             now = time.perf_counter()
-            if self.last_sample_time is not None:
-                dt = now - self.last_sample_time
-                if dt > 0:
-                    rate = 1.0 / dt
-                    self._rate_window.append(rate)
-                    self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-            self.last_sample_time = now
+            n_lines = 1 + len(extra_lines)
+            self._rate_samples += n_lines
+            if now - self._rate_start >= 1.0:
+                inst = self._rate_samples / (now - self._rate_start)
+                self._rate_window.append(inst)
+                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                self._rate_samples = 0
+                self._rate_start = now
 
             if self.paused:
                 return
@@ -366,48 +390,48 @@ class MainWindow(QtWidgets.QMainWindow):
                     remaining_samples = self.sample_count - self.sample_idx
                     self._finish_time = now + remaining_samples / self.sample_rate
 
-                    if self.sample_idx >= self.sample_count:
-                        # finalize this batch
-                        try:
-                            fmt_now = self._current_format()
-                            if fmt_now == 'Stress' and self._batch_values:
-                                import numpy as _np
-                                m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
-                                try:
-                                    ld = float(self.name_builder.s_load.value())
-                                    d = str(self.name_builder.s_dir.currentData())
-                                except Exception:
-                                    ld, d = 0.0, 'a'
-                                self._rt_means[(d, float(ld))] = m
-                        except Exception:
-                            pass
-                        self.log_file.close()
-                        self.logging_on = False
-                        self.ui.pushButton_record.setEnabled(True)
-                        # Reset record button text/state
-                        try:
-                            self.ui.pushButton_record.setText("Record")
-                            self.ui.pushButton_record.setToolTip("Start logging")
-                        except Exception:
-                            pass
-                        self.ui.pushButton_cancel.setEnabled(False)
-                        self._finish_time = None
-                        # Update plot to include the new mean and hide overlay
-                        try:
-                            # Ensure Matplotlib canvas for final rendering (switch from PG if active)
-                            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
-                                self._stop_pg_timer()
-                                self._init_live_plot()
-                            if fmt_now == 'Stress':
-                                self._draw_stress_live()
-                            elif fmt_now == 'Temperature':
-                                self._draw_temp_final()
-                            elif fmt_now == 'Maxion':
-                                self._draw_maxion_final()
-                            self._show_record_overlay(False)
-                        except Exception:
-                            pass
-                    # Keep emulator streaming continuously; no STOP
+                if self.sample_idx >= self.sample_count:
+                    # finalize this batch
+                    try:
+                        fmt_now = self._current_format()
+                        if fmt_now == 'Stress' and self._batch_values:
+                            import numpy as _np
+                            m = float(_np.mean(_np.asarray(self._batch_values, dtype=float)))
+                            try:
+                                ld = float(self.name_builder.s_load.value())
+                                d = str(self.name_builder.s_dir.currentData())
+                            except Exception:
+                                ld, d = 0.0, 'a'
+                            self._rt_means[(d, float(ld))] = m
+                    except Exception:
+                        pass
+                    self.log_file.close()
+                    self.logging_on = False
+                    self.ui.pushButton_record.setEnabled(True)
+                    # Reset record button text/state
+                    try:
+                        self.ui.pushButton_record.setText("Record")
+                        self.ui.pushButton_record.setToolTip("Start logging")
+                    except Exception:
+                        pass
+                    self.ui.pushButton_cancel.setEnabled(False)
+                    self._finish_time = None
+                    # Update plot to include the new mean and hide overlay
+                    try:
+                        # Ensure Matplotlib canvas for final rendering (switch from PG if active)
+                        if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None:
+                            self._stop_pg_timer()
+                            self._init_live_plot()
+                        if fmt_now == 'Stress':
+                            self._draw_stress_live()
+                        elif fmt_now == 'Temperature':
+                            self._draw_temp_final()
+                        elif fmt_now == 'Maxion':
+                            self._draw_maxion_final()
+                        self._show_record_overlay(False)
+                    except Exception:
+                        pass
+                # Keep emulator streaming continuously; no STOP
             # Feed live plot while logging only when realtime is enabled
             rt_enabled = getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()
             if self.logging_on and not self.paused and rt_enabled:
@@ -435,23 +459,9 @@ class MainWindow(QtWidgets.QMainWindow):
                         arr0.append(yv0)
                         self._batch_values.append(yv0)
 
-            # Drain any additional complete lines to prevent driver buffer
-            # buildup at high emulator rates. This mirrors the single-line
-            # processing above for each extra line currently available.
-            while self.serial is not None and self.serial.canReadLine():
-                raw = self.serial.readLine()
-                raw_bytes = bytes(raw)            # type: ignore[arg-type]
+            # Process any additional lines captured above without re-sampling the rate
+            for raw_bytes in extra_lines:
                 self.port_response = raw_bytes.decode('ascii')
-
-                now = time.perf_counter()
-                if self.last_sample_time is not None:
-                    dt = now - self.last_sample_time
-                    if dt > 0:
-                        rate = 1.0 / dt
-                        self._rate_window.append(rate)
-                        self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                self.last_sample_time = now
-
                 if not self.paused and self.logging_on:
                     assert self.log_file is not None
                     self.log_file.write(self.port_response.lstrip(">"))
@@ -499,14 +509,14 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._show_record_overlay(False)
                         except Exception:
                             pass
-                if self.logging_on and not self.paused and (getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked()):
+                if self.logging_on and not self.paused and rt_enabled:
                     try:
                         self._ingest_live_sample(self.port_response)
                     except Exception:
                         pass
                 # Always accumulate for stress batches even when realtime plot is off
                 try:
-                    if self.logging_on and not self.paused and self._current_format() == 'Stress':
+                    if self.logging_on and not self.paused and self._current_format() == 'Stress' and not rt_enabled:
                         parts = [p.strip() for p in self.port_response.strip().lstrip('>').split(';') if p.strip()]
                         if len(parts) >= 4:
                             yv = float(parts[3].replace(',', '.'))
@@ -721,19 +731,16 @@ class MainWindow(QtWidgets.QMainWindow):
     def _toggle_rt_plot(self) -> None:
         enabled = bool(self.ui.checkBox_rt_plot.isChecked())
         if enabled and pg is not None:
-            # Global perf options
             try:
                 self._apply_pg_opengl()
                 pg.setConfigOptions(antialias=False)
             except Exception:
                 pass
-            # Build PyQtGraph widgets depending on mode
             mode = self._current_format()
             layout = self._clear_plot_container()
             if layout is None:
                 return
             self._pg_last_draw = 0.0
-            # _pg_min_interval already tied to FPS spinbox
             if mode == 'Maxion':
                 self.pg_plots = [pg.PlotWidget(), pg.PlotWidget(), pg.PlotWidget()]
                 for i, w in enumerate(self.pg_plots, start=1):
@@ -743,12 +750,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     w.setLabel('left', 'T1+T2 (arb units)')
                     w.setTitle(f'Channel {i} T1+T2')
                     layout.addWidget(w)
-                # Use ScatterPlotItem for efficient appends
                 self.pg_scatters = [pg.ScatterPlotItem(size=1, pen=None, brush=pg.mkBrush(140,140,140)) for _ in range(3)]
                 for sc, w in zip(self.pg_scatters, self.pg_plots):
                     w.addItem(sc)
-                self.pg_counts = [0, 0, 0]
-                self.pg_queues = [[], [], []]  # list of (x,y) per channel waiting to be added
+                from collections import deque as _dq
+                self.pg_data = [_dq(maxlen=self._rt_window) for _ in range(3)]
+                self._start_pg_timer()
             elif mode == 'Temperature':
                 self.pg_plot = pg.PlotWidget()
                 self.pg_plot.setBackground(self.palette().color(QtGui.QPalette.ColorRole.Base))
@@ -759,29 +766,66 @@ class MainWindow(QtWidgets.QMainWindow):
                 layout.addWidget(self.pg_plot)
                 self.pg_scatter = pg.ScatterPlotItem(size=1, pen=None, brush=pg.mkBrush(140,140,140))
                 self.pg_plot.addItem(self.pg_scatter)
+                from collections import deque as _dq
+                self.pg_temp_data = _dq(maxlen=self._rt_window)
                 self.pg_temp_count = 0
-                self.pg_temp_queue: list[tuple[float, float]] = []
+                self._start_pg_timer()
             else:
-                # Keep Matplotlib for Stress
                 self._init_live_plot()
-            # Start/update PG timer
-            self._start_pg_timer()
-            # Re-assert emulator mode for safety on backend rebuild
+                self._stop_pg_timer()
             self._send_emulator_mode()
         else:
-            # Switch back to Matplotlib
             self._init_live_plot()
             self._stop_pg_timer()
 
     def _update_rt_fps(self) -> None:
         try:
-            fps = float(self.ui.spinBox_rt_fps.value())
+            fps = min(60.0, float(self.ui.spinBox_rt_fps.value()))
             self._pg_min_interval = max(0.001, 1.0 / max(1.0, fps))
             # Update QTimer interval if running
             if self._pg_timer is not None:
                 self._pg_timer.setInterval(int(1000 * self._pg_min_interval))
         except Exception:
             self._pg_min_interval = 1.0 / 30.0
+
+    def _sync_window_max(self) -> None:
+        """Keep realtime window cap in sync with recording sample count."""
+        try:
+            max_samples = int(self.ui.spinBox_log_sample_count.value())
+            win_box = getattr(self.ui, 'spinBox_rt_window', None)
+            if win_box is not None:
+                win_box.setMaximum(max_samples)
+                if win_box.value() > max_samples:
+                    win_box.setValue(max_samples)
+        except Exception:
+            pass
+        self._update_rt_window()
+
+    def _update_rt_window(self) -> None:
+        try:
+            self._rt_window = max(1, int(self.ui.spinBox_rt_window.value()))
+        except Exception:
+            self._rt_window = max(1, self._rt_window)
+        try:
+            from collections import deque as _dq
+            if hasattr(self, 'pg_data'):
+                self.pg_data = [_dq(list(d)[-self._rt_window:], maxlen=self._rt_window) for d in self.pg_data]
+            if hasattr(self, 'pg_temp_data'):
+                self.pg_temp_data = _dq(list(self.pg_temp_data)[-self._rt_window:], maxlen=self._rt_window)
+            if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked():
+                mode = self._current_format()
+                if pg is not None and mode == 'Maxion' and hasattr(self, 'pg_plots'):
+                    for p in self.pg_plots:
+                        p.setXRange(1, max(2, self._rt_window), padding=0)
+                elif pg is not None and mode == 'Temperature' and hasattr(self, 'pg_plot'):
+                    self.pg_plot.setXRange(1, max(2, self._rt_window), padding=0)
+                elif hasattr(self, 'ax'):
+                    cur = getattr(self, 'sample_idx', 0)
+                    self.ax.set_xlim(max(1, cur - self._rt_window + 1), max(self._rt_window, cur))
+                    if hasattr(self, 'canvas'):
+                        self.canvas.draw_idle()
+        except Exception:
+            pass
 
     def _start_pg_timer(self) -> None:
         if pg is None:
@@ -809,6 +853,18 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _prewarm_rt_backend(self) -> None:
+        """Instantiate a hidden PlotWidget so first toggle doesn't restart."""
+        if pg is None:
+            return
+        try:
+            self._rt_dummy = pg.PlotWidget()
+            self._rt_dummy.show()
+            QtWidgets.QApplication.processEvents()
+            self._rt_dummy.hide()
+        except Exception:
+            pass
+
     def _pg_update_plots(self) -> None:
         # Called by QTimer at selected FPS
         mode = self._current_format()
@@ -819,23 +875,23 @@ class MainWindow(QtWidgets.QMainWindow):
             return
         if mode == 'Maxion' and hasattr(self, 'pg_plots') and hasattr(self, 'pg_scatters'):
             for i in range(3):
-                q = self.pg_queues[i]
-                if q:
-                    # Convert queued tuples to spots and add
-                    spots = [{'pos': (x, y)} for (x, y) in q]
-                    self.pg_scatters[i].addPoints(spots)
-                    self.pg_queues[i].clear()
+                data = list(self.pg_data[i])
+                if data:
+                    xs = list(range(1, len(data) + 1))
+                    ys = [v for v in data]
+                    self.pg_scatters[i].setData(xs, ys)
                 try:
-                    self.pg_plots[i].setXRange(1, max(2, int(self.sample_count)), padding=0)
+                    self.pg_plots[i].setXRange(1, max(2, self._rt_window), padding=0)
                 except Exception:
                     pass
         elif mode == 'Temperature' and hasattr(self, 'pg_plot') and hasattr(self, 'pg_scatter'):
-            if self.pg_temp_queue:
-                spots = [{'pos': (x, y)} for (x, y) in self.pg_temp_queue]
-                self.pg_scatter.addPoints(spots)
-                self.pg_temp_queue.clear()
+            data = list(self.pg_temp_data)
+            if data:
+                xs = list(range(1, len(data) + 1))
+                ys = [v for v in data]
+                self.pg_scatter.setData(xs, ys)
             try:
-                self.pg_plot.setXRange(1, max(2, int(self.sample_count)), padding=0)
+                self.pg_plot.setXRange(1, max(2, self._rt_window), padding=0)
             except Exception:
                 pass
         self._pg_last_draw = now
@@ -877,6 +933,11 @@ class MainWindow(QtWidgets.QMainWindow):
         if ov is not None:
             self._position_record_overlay()
             ov.setVisible(bool(show))
+            if show:
+                try:
+                    QtWidgets.QApplication.processEvents()
+                except Exception:
+                    pass
 
     def _send_emulator_mode(self) -> None:
         if self.serial is None or getattr(self, "name_builder", None) is None:
@@ -889,32 +950,51 @@ class MainWindow(QtWidgets.QMainWindow):
                 d = self.name_builder.s_dir.currentData()
             except Exception:
                 load, d = 2.5, 'a'
-            cmd = f"MODE STRESS LOAD={load} DIR={d}\n"
+            cmd = f"MODE STRESS LOAD={load} DIR={d}\r\n"
         elif fmt == "Temperature":
             try:
                 t = self.name_builder.t_temp.currentText()
             except Exception:
                 t = "25C"
-            cmd = f"MODE TEMP T={t}\n"
+            cmd = f"MODE TEMP T={t}\r\n"
         elif fmt == "Maxion":
-            cmd = "MODE MAXION\n"
+            cmd = "MODE MAXION\r\n"
         if cmd:
             try:
-                self.serial.write(cmd.encode('ascii'))
-                # Clear buffers to drop stale lines from previous mode
+                cmd_b = cmd.encode('ascii')
+                self.serial.write(cmd_b)
                 try:
-                    self.serial.clear()
+                    self.serial.flush()
+                except Exception:
+                    pass
+                try:
+                    self.serial.clear(QtSerialPort.QSerialPort.Direction.Input)
                 except Exception:
                     pass
             except Exception:
-                pass
-            # Send the mode command a couple more times shortly after to ensure
-            # the emulator thread sees it between data bursts and clear again.
-            try:
-                QtCore.QTimer.singleShot(50, lambda: (self.serial and self.serial.write(cmd.encode('ascii')), self.serial and self.serial.clear()))
-                QtCore.QTimer.singleShot(120, lambda: (self.serial and self.serial.write(cmd.encode('ascii')), self.serial and self.serial.clear()))
-            except Exception:
-                pass
+                cmd_b = None
+            if cmd_b is not None:
+                def _resend() -> None:
+                    if self.serial is None:
+                        return
+                    try:
+                        self.serial.write(cmd_b)
+                        try:
+                            self.serial.flush()
+                        except Exception:
+                            pass
+                        try:
+                            self.serial.clear(QtSerialPort.QSerialPort.Direction.Input)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+                try:
+                    QtCore.QTimer.singleShot(50, _resend)
+                    QtCore.QTimer.singleShot(150, _resend)
+                    QtCore.QTimer.singleShot(300, _resend)
+                except Exception:
+                    pass
 
     def _on_format_changed(self) -> None:
         # Rebuild the plotting surface for the new mode
@@ -951,15 +1031,14 @@ class MainWindow(QtWidgets.QMainWindow):
             # PyQtGraph realtime if active
             if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None and hasattr(self, 'pg_plots') and hasattr(self, 'pg_scatters'):
                 for i in range(3):
-                    self.pg_counts[i] += 1
-                    self.pg_queues[i].append((self.pg_counts[i], sums[i]))
+                    self.pg_data[i].append(sums[i])
             else:
-                # Matplotlib fallback at ~1 Hz
                 store = self._rt_data.setdefault('maxion', [[], [], []])
                 for i in range(3):
                     store[i].append(sums[i])
+                    if len(store[i]) > self._rt_window:
+                        del store[i][0:len(store[i]) - self._rt_window]
                     ax = self.ax_ch[i]
-                    x = np.arange(1, len(store[i]) + 1)
                     ax.cla()
                     ax.set_facecolor(self._plot_bg)
                     ax.set_title(f"Channel {i+1} T1+T2", color=self._plot_fg)
@@ -970,9 +1049,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         spine.set_color(self._plot_fg)
                     ax.tick_params(colors=self._plot_fg)
                     try:
-                        ax.set_xlim(1, max(2, int(self.sample_count)))
+                        ax.set_xlim(1, max(2, self._rt_window))
                     except Exception:
                         pass
+                    x = np.arange(1, len(store[i]) + 1)
                     ax.scatter(x, store[i], s=0.2)
                 self._draw_throttled(min_interval=1.0)
             return
@@ -1001,12 +1081,12 @@ class MainWindow(QtWidgets.QMainWindow):
             # PyQtGraph realtime if active
             if getattr(self.ui, 'checkBox_rt_plot', None) is not None and self.ui.checkBox_rt_plot.isChecked() and pg is not None and hasattr(self, 'pg_plot') and hasattr(self, 'pg_scatter'):
                 self.pg_temp_count += 1
-                self.pg_temp_queue.append((self.pg_temp_count, y))
+                self.pg_temp_data.append(y)
             else:
-                # Matplotlib fallback at ~1 Hz
                 series = self._rt_data.setdefault('temp_series', [])
                 series.append(y)
-                x = np.arange(1, len(series) + 1)
+                if len(series) > self._rt_window:
+                    del series[0:len(series) - self._rt_window]
                 self.ax.cla()
                 self.ax.set_facecolor(self._plot_bg)
                 self.ax.set_xlabel("N", color=self._plot_fg)
@@ -1017,9 +1097,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ax.set_title("Temperature dependence", color=self._plot_fg)
                 self.ax.grid(True, color=(0.35,0.35,0.35,0.5))
                 try:
-                    self.ax.set_xlim(1, max(2, int(self.sample_count)))
+                    self.ax.set_xlim(1, max(2, self._rt_window))
                 except Exception:
                     pass
+                x = np.arange(1, len(series) + 1)
                 self.ax.scatter(x, series, s=0.2, c='#6B6B6B')
                 self._draw_throttled(min_interval=1.0)
         return
