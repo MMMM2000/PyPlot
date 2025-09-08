@@ -157,6 +157,7 @@ class Ui_MainWindow(object):
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
         grid.setColumnStretch(2, 1)
+        grid.setColumnMinimumWidth(2, 260)
 
         # Log file location (separate directory and file name)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
@@ -221,7 +222,7 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setFixedWidth(150)
+        self.pushButton_start_stop_drzania_prudu.setFixedWidth(160)
         hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
         hold_and_step.addSpacing(6)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
@@ -260,18 +261,21 @@ class Ui_MainWindow(object):
         except Exception:
             pass
         self.lineEdit_composition.setText("Ni51Fe26Ga21")
+        self.lineEdit_composition.setMinimumWidth(200)
         self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
         try:
             self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_microwire.setText("1_2")
+        self.lineEdit_microwire.setMinimumWidth(200)
         self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
         try:
             self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_sample.setText("s1")
+        self.lineEdit_sample.setMinimumWidth(200)
         name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
         name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
@@ -280,6 +284,7 @@ class Ui_MainWindow(object):
         name_grid.addWidget(self.lineEdit_sample, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
+        self.lineEdit_custom_name.setMinimumWidth(200)
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
         name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
