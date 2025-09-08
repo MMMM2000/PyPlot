@@ -844,6 +844,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.f_out = None
             if(self.modus_operandi == 1):
                 self.ui.pushButton_start_stop_drzania_prudu.setText("Držať prúd teraz!")
+            # Immediately ramp the supply to zero before running the shutdown sequence
+            try:
+                self.prikaz_portu = "CURR 0.000\n"
+                self.send_serial_command()
+                self.prikaz_portu = "OUTP OFF\n"
+                self.send_serial_command()
+            except Exception:
+                pass
             self.send_safe_end_commands()
             # print("Proces zastaveny")
             self.ui.pushButton_spusti_proces.setText("Start annealing process")
@@ -975,7 +983,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
                       
             #zholdujeme prud ako keby tlacidlom
-            if (self.current_current_set > (self.hodnota_staly_prud/1000.0)) and (self.current_increment > 0):
+            if (self.current_current_set >= (self.hodnota_staly_prud/1000.0)) and (self.current_increment > 0):
                 if(self.prud_timer_on == False):
                     self.current_increment = 0.000
                     self.ciara_color="g"

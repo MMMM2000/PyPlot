@@ -156,25 +156,23 @@ class Ui_MainWindow(object):
         # Make the main text fields expand and keep the browse button narrow
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
-        grid.setColumnMinimumWidth(2, 260)
+        grid.setColumnStretch(2, 0)
+        grid.setColumnStretch(3, 0)
 
         # Log file location (separate directory and file name)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
-        dir_layout = QtWidgets.QHBoxLayout()
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
         self.pushButton_open_dir = QtWidgets.QPushButton("Open")
         self.pushButton_open_dir.setFixedWidth(70)
-        dir_layout.addWidget(self.lineEdit_log_dir)
-        dir_layout.addWidget(self.pushButton_browse_dir)
-        dir_layout.addWidget(self.pushButton_open_dir)
+        self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
         grid.addWidget(self.label_log_dir, 0, 0)
-        grid.addLayout(dir_layout, 0, 1, 1, 2)
+        grid.addWidget(self.lineEdit_log_dir, 0, 1)
+        grid.addWidget(self.pushButton_open_dir, 0, 2)
+        grid.addWidget(self.pushButton_browse_dir, 0, 3)
 
         self.label_log_file = QtWidgets.QLabel("File name:")
         self.lineEdit_log_file = QtWidgets.QLineEdit()
@@ -185,8 +183,8 @@ class Ui_MainWindow(object):
         )
         self.label_extension = QtWidgets.QLabel(".txt")
         grid.addWidget(self.label_log_file, 1, 0)
-        grid.addWidget(self.lineEdit_log_file, 1, 1)
-        grid.addWidget(self.label_extension, 1, 2)
+        grid.addWidget(self.lineEdit_log_file, 1, 1, 1, 2)
+        grid.addWidget(self.label_extension, 1, 3)
 
         # Legacy single-path widgets kept (hidden) for compatibility with code
         self.label_logfile = QtWidgets.QLabel("Log file:")
@@ -202,7 +200,7 @@ class Ui_MainWindow(object):
         self.spinBox_hodnota_staly_prud = QtWidgets.QSpinBox()
         self.spinBox_hodnota_staly_prud.setRange(1, 10_000)
         self.spinBox_hodnota_staly_prud.setValue(10)
-        self.spinBox_hodnota_staly_prud.setMaximumWidth(100)
+        self.spinBox_hodnota_staly_prud.setMaximumWidth(80)
         # Move one row down to avoid overlap with File name
         grid.addWidget(self.label_hodnota_staly_prud, 2, 0)
         grid.addWidget(self.spinBox_hodnota_staly_prud, 2, 1)
@@ -213,7 +211,7 @@ class Ui_MainWindow(object):
         self.spinBox_doba_staly_prud.setRange(1, 36000)
         # Default hold time 1 second
         self.spinBox_doba_staly_prud.setValue(1)
-        self.spinBox_doba_staly_prud.setMaximumWidth(100)
+        self.spinBox_doba_staly_prud.setMaximumWidth(80)
         # Shift down by one row
         grid.addWidget(self.label_logfile_doba_staleho_prudu, 3, 0)
         grid.addWidget(self.spinBox_doba_staly_prud, 3, 1)
@@ -222,7 +220,7 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setFixedWidth(160)
+        self.pushButton_start_stop_drzania_prudu.setFixedWidth(200)
         hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
         hold_and_step.addSpacing(6)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
