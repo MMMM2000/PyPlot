@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
-from plotting.utils import apply_system_theme
+from plotting.utils import apply_system_theme, format_annealing_title
 
 import numpy as np
 import matplotlib
@@ -914,7 +914,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
                       
             #zholdujeme prud ako keby tlacidlom
-            if(self.current_current_set > (self.hodnota_staly_prud/1000.0)):
+            if (self.current_current_set > (self.hodnota_staly_prud/1000.0)) and (self.current_increment > 0):
                 if(self.prud_timer_on == False):
                     self.current_increment = 0.000
                     self.ciara_color="g"
@@ -1054,17 +1054,10 @@ class MainWindow(QtWidgets.QMainWindow):
 
             self.fig = Figure(facecolor=win_rgb, constrained_layout=True)
             self.canvas = FigureCanvas(self.fig) if FigureCanvas is not None else None
-            if NavigationToolbar is not None and self.canvas is not None:
-                self.toolbar = NavigationToolbar(self.canvas, container)
-                layout.addWidget(self.toolbar)
-            if self.canvas is not None:
-                layout.addWidget(self.canvas, stretch=1)
-
             try:
-                import os as _os
-                _title = _os.path.basename(self.f_name)
+                _title = format_annealing_title(Path(self.f_name).stem)
             except Exception:
-                _title = self.f_name
+                _title = format_annealing_title(self.f_name)
             # Place the title above the graph area using a Qt label instead of
             # drawing inside the figure. This keeps it clearly outside axes.
             self.title_label = QtWidgets.QLabel(_title)
@@ -1076,6 +1069,11 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
             layout.addWidget(self.title_label)
+            if NavigationToolbar is not None and self.canvas is not None:
+                self.toolbar = NavigationToolbar(self.canvas, container)
+                layout.addWidget(self.toolbar)
+            if self.canvas is not None:
+                layout.addWidget(self.canvas, stretch=1)
 
             self.ax1 = self.fig.add_subplot(211)
             self.ax1.set_facecolor(base_rgb)

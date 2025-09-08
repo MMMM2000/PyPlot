@@ -5,6 +5,21 @@ from pathlib import Path
 from matplotlib.figure import Figure
 
 
+_SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+def format_annealing_title(base: str) -> str:
+    """Return ``base`` with composition digits subscripted and microwire
+    identifiers using a slash instead of an underscore."""
+
+    parts = base.split()
+    if parts:
+        parts[0] = parts[0].translate(_SUBSCRIPT_MAP)
+    if len(parts) > 1:
+        parts[1] = parts[1].replace("_", "/")
+    return " ".join(parts)
+
+
 def save_figure(fig: Figure, base_path: str | Path, fmt: str = "png", dpi: int = 1000) -> None:
     """Save ``fig`` to ``base_path`` with format ``fmt``.
 

@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..utils import save_figure
+from ..utils import save_figure, format_annealing_title
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -80,7 +80,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     outs: List[Tuple[Figure, str]] = []
     for path in files:
         df = load_file(path)
-        title = Path(path).stem
+        title = format_annealing_title(Path(path).stem)
         if wants_matplotlib(backend):
             fig, fname = plot_one(df, title)
             outs.append((fig, fname))

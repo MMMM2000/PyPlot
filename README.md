@@ -2,6 +2,13 @@
 
 This repository contains simple tools for logging measurement data and plotting the resulting text files.
 
+### Current Annealing Logger
+
+- Automatically ramps the current back to zero after the hold phase when reverse is enabled.
+- "Stop annealing process" immediately turns off the power supply.
+- Interface tweaks: non-overlapping **Browse** button, smaller current/time inputs and a wider **Hold current now!** button.
+- Graph titles show compositions with subscripted numbers and use `n/m` microwire notation.
+
 ## Installation
 
 The steps below assume no prior Python knowledge. On macOS use `python3`/`pip3` in all
