@@ -869,7 +869,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.frame_modus_operandi.setEnabled(True)
         
     def handle_send_new_command(self):
-        
+        if not self.proces_on:
+            return
+
         #manual zihanie
         if self.modus_operandi == 1:
             # print("Prikaz manualneho zihania cislo ", self.command_number)
@@ -881,6 +883,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_serial_command()
             # wait boundedly, allow stopping
             if not self.wait_for_sample(3000):
+                if not self.proces_on:
+                    return
                 self.warn_no_response_and_abort()
                 return
                 
@@ -891,6 +895,8 @@ class MainWindow(QtWidgets.QMainWindow):
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
             if not self.wait_for_sample(3000):
+                if not self.proces_on:
+                    return
                 self.warn_no_response_and_abort()
                 return
                 
@@ -926,12 +932,14 @@ class MainWindow(QtWidgets.QMainWindow):
             
             #iteracia prudu
             self.current_current_set += self.current_increment
-            
+
             #vypnutie ako pri tlacidle
             if(self.current_current_set < 0.001):
                 self.handle_pushButton_spusti_proces_clicked()
-            
-            self.prikaz_portu = self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
+
+            if not self.proces_on:
+                return
+            self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
            
             
@@ -947,6 +955,8 @@ class MainWindow(QtWidgets.QMainWindow):
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
             if not self.wait_for_sample(3000):
+                if not self.proces_on:
+                    return
                 self.warn_no_response_and_abort()
                 return
                 
@@ -957,6 +967,8 @@ class MainWindow(QtWidgets.QMainWindow):
             #self.prikaz_portu = "*RRAWO\n"
             self.send_serial_command()
             if not self.wait_for_sample(3000):
+                if not self.proces_on:
+                    return
                 self.warn_no_response_and_abort()
                 return
                 
@@ -1005,7 +1017,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             #iteracia prudu
             self.current_current_set += self.current_increment
-            
+
             # end of hold: either reverse (if enabled) or stop
             if(self.prud_timer_on and (self.sekundy >= self.doba_staly_prud)):
                 self.timer_prud.stop()
@@ -1015,8 +1027,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ciara_color = "b"
                 else:
                     self.handle_pushButton_spusti_proces_clicked()
-            
-            self.prikaz_portu = self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
+
+            if not self.proces_on:
+                return
+            self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
             # completed descending to zero? manage loops
             if getattr(self, 'reverse_enabled', False) and (self.current_current_set < self.current_step_A):
