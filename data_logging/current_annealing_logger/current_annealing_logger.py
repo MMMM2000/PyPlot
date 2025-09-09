@@ -100,6 +100,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.lineEdit_log_file.setText("anneal_log")
         self.settings = QtCore.QSettings("microwire", "current_annealing")
         self.restore_name_preset()
+        self.init_live_values()
         self.odpoved_portu = ''
         self.prikaz_portu = ''
         self.pripojene = False
@@ -149,6 +150,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_voltage = 0
         self.current_resistance = 0
         self.open_threshold = 30
+        self.max_voltage = 30.0
+        self._max_voltage_dialog = False
         self.direction_ascending = True
         self.sample_ready = False
         self.force_stop_at_zero = False
@@ -515,7 +518,12 @@ class MainWindow(QtWidgets.QMainWindow):
                         if hasattr(self.ui, 'progressBar_process') and self.total_steps:
                             self.ui.progressBar_process.setMaximum(self.total_steps)
                             self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
-                
+                if (
+                    self.current_increment > 0
+                    and self.current_voltage >= self.max_voltage
+                    and not self._max_voltage_dialog
+                ):
+                    self.handle_max_voltage()
                 self.sample_ready = True
                 #print("tutaj lala")
             self.zamok.unlock()
@@ -755,6 +763,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if(self.proces_on == False):
             self.proces_on = True
             self.sekundy = 0
+            self._max_voltage_dialog = False
             self.ui.frame_modus_operandi.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -781,6 +790,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
+                self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
@@ -803,6 +813,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
+                self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
@@ -906,6 +917,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
         self.ui.frame_modus_operandi.setEnabled(True)
+        self.ui.label_set_current.display("0")
+        self._max_voltage_dialog = False
         
     def handle_send_new_command(self):
         if not self.proces_on:
@@ -967,10 +980,11 @@ class MainWindow(QtWidgets.QMainWindow):
             
             self.prev_value_x = self.curr_value_x
             self.prev_value_y = self.curr_value_y
-            
-            
+
+
             #iteracia prudu
             self.current_current_set += self.current_increment
+            self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
 
             #vypnutie ako pri tlacidle
             if(self.current_current_set < 0.001):
@@ -1056,6 +1070,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             #iteracia prudu
             self.current_current_set += self.current_increment
+            self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
 
             # end of hold: either reverse (if enabled) or stop
             if(self.prud_timer_on and (self.sekundy >= self.doba_staly_prud)):
@@ -1147,6 +1162,49 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.f_name = self.ui.lineEdit_log_subor.text()
         # print("Zaznam subor:", self.f_name)
+
+    def init_live_values(self) -> None:
+        box = getattr(self.ui, 'groupBox_aktualne_hodnoty', None)
+        if box is None:
+            return
+        for child in box.findChildren(QtWidgets.QWidget):
+            child.deleteLater()
+        layout = QtWidgets.QFormLayout(box)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.label_live_current = QtWidgets.QLabel("0")
+        self.label_live_set = QtWidgets.QLabel("0")
+        self.label_live_resistance = QtWidgets.QLabel("0")
+        for lbl in (self.label_live_current, self.label_live_set, self.label_live_resistance):
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addRow("Current (mA)", self.label_live_current)
+        layout.addRow("Set current (mA)", self.label_live_set)
+        layout.addRow("Resistance (Ω)", self.label_live_resistance)
+        # Alias old names for compatibility
+        self.ui.lcdNumber_aktualny_prud_mA = self.label_live_current
+        self.ui.lcdNumber_aktualny_odpor = self.label_live_resistance
+        self.ui.label_set_current = self.label_live_set
+        self.ui.lcdNumber_aktualny_prud_mA.display = self.label_live_current.setText
+        self.ui.lcdNumber_aktualny_odpor.display = self.label_live_resistance.setText
+        self.ui.label_set_current.display = self.label_live_set.setText
+
+    def handle_max_voltage(self) -> None:
+        self._max_voltage_dialog = True
+        self.current_increment = 0
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Voltage limit reached")
+        msg.setText("Power supply reached 30 V. What do you want to do?")
+        hold_btn = msg.addButton("Hold current", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        reverse_btn = msg.addButton("Reverse to zero", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        stop_btn = msg.addButton("Stop measurement", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is reverse_btn:
+            self.current_increment = -abs(self.current_step_A)
+            self.direction_ascending = False
+        elif clicked is stop_btn:
+            self.handle_pushButton_spusti_proces_clicked()
+        else:
+            pass
     
     def init_graph_window(self):
         """

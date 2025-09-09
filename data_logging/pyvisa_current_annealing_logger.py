@@ -77,8 +77,12 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.interval_spin.setSuffix(" ms")
 
         # readouts
-        self.voltage_label = QtWidgets.QLabel("V: --")
-        self.current_label = QtWidgets.QLabel("I: --")
+        self.voltage_value = QtWidgets.QLabel("--")
+        self.current_value = QtWidgets.QLabel("--")
+        self.set_value = QtWidgets.QLabel("--")
+        for lbl in (self.voltage_value, self.current_value, self.set_value):
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            lbl.setMinimumWidth(60)
         self.output_view = QtWidgets.QPlainTextEdit(readOnly=True)
 
         # live plots using matplotlib (Resistance vs current and sample count)
@@ -96,6 +100,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.res_data: list[float] = []
         self.n_data: list[int] = []
         self.sample_idx = 0
+        self.update_plot_colors()
 
         # ------------------------------------------------------------------ layout
         top = QtWidgets.QHBoxLayout()
@@ -122,9 +127,11 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         proc_row.addWidget(self.stop_button)
         proc_row.addWidget(self.reverse_button)
 
-        values_row = QtWidgets.QHBoxLayout()
-        values_row.addWidget(self.voltage_label)
-        values_row.addWidget(self.current_label)
+        values_box = QtWidgets.QWidget()
+        values_layout = QtWidgets.QFormLayout(values_box)
+        values_layout.addRow("Voltage [V]", self.voltage_value)
+        values_layout.addRow("Current [mA]", self.current_value)
+        values_layout.addRow("Set current [mA]", self.set_value)
 
         left = QtWidgets.QVBoxLayout()
         left.addLayout(top)
@@ -132,7 +139,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         left.addWidget(self.log_button)
         left.addLayout(config_row)
         left.addLayout(proc_row)
-        left.addLayout(values_row)
+        left.addWidget(values_box)
         left.addWidget(self.output_view)
 
         layout = QtWidgets.QHBoxLayout(self)
@@ -157,6 +164,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         # state
         self.current_set = 0.0
         self.ramping_up = True
+        self.max_voltage = 30.0
+        self._max_voltage_dialog = False
 
         self.refresh_resources()
 
@@ -179,6 +188,28 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.resource_combo.clear()
         for r in resources:
             self.resource_combo.addItem(r)
+
+    def update_plot_colors(self) -> None:
+        app = QtWidgets.QApplication.instance()
+        if app is None:
+            return
+        palette = app.palette()
+        scheme = app.styleHints().colorScheme()
+        win = palette.color(QtGui.QPalette.ColorRole.Window)
+        base = palette.color(QtGui.QPalette.ColorRole.Base)
+        text = palette.color(QtGui.QPalette.ColorRole.Text)
+        win_rgb = (win.redF(), win.greenF(), win.blueF())
+        base_rgb = (base.redF(), base.greenF(), base.blueF())
+        text_rgb = (text.redF(), text.greenF(), text.blueF())
+        self.fig.set_facecolor(win_rgb)
+        for ax in (self.ax_ri, self.ax_rn):
+            ax.set_facecolor(base_rgb)
+            ax.tick_params(colors=text_rgb)
+            ax.xaxis.label.set_color(text_rgb)
+            ax.yaxis.label.set_color(text_rgb)
+            for spine in ax.spines.values():
+                spine.set_color(text_rgb)
+            ax.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
 
     # -------------------------------------------------------------------- slots
     def disconnect(self) -> None:
@@ -288,8 +319,9 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
                 self.log("Failed to write to log file")
                 self.handle_log()
         self.log(f"V={voltage:.3f} I={current:.3f} R={resistance:.3f}")
-        self.voltage_label.setText(f"V: {voltage:.3f}")
-        self.current_label.setText(f"I: {current:.3f}")
+        self.voltage_value.setText(f"{voltage:.3f}")
+        self.current_value.setText(f"{current*1000:.3f}")
+        self.set_value.setText(f"{self.current_set*1000:.3f}")
         self.curr_mA.append(current * 1000.0)
         self.res_data.append(resistance)
         self.sample_idx += 1
@@ -303,19 +335,47 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.ax_ri.relim(); self.ax_ri.autoscale_view()
         self.ax_rn.relim(); self.ax_rn.autoscale_view()
         self.canvas.draw_idle()
+        if (
+            self.ramping_up
+            and self.process_timer.isActive()
+            and voltage >= self.max_voltage
+            and not self._max_voltage_dialog
+        ):
+            self.handle_voltage_limit()
 
     # ----------------------------------------------------------- annealing logic
+    def handle_voltage_limit(self) -> None:
+        self._max_voltage_dialog = True
+        self.process_timer.stop()
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Voltage limit reached")
+        msg.setText("Power supply reached 30 V. What do you want to do?")
+        hold_btn = msg.addButton("Hold current", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        reverse_btn = msg.addButton("Reverse to zero", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        stop_btn = msg.addButton("Stop measurement", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is reverse_btn:
+            self.ramping_up = False
+            self.process_timer.start(self.interval_spin.value())
+        elif clicked is stop_btn:
+            self.stop_process()
+        else:
+            pass
+
     def start_process(self) -> None:
         if self.inst is None:
             QtWidgets.QMessageBox.warning(self, "Not connected", "Connect to an instrument first")
             return
         self.current_set = 0.0
         self.ramping_up = True
+        self._max_voltage_dialog = False
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.reverse_button.setEnabled(True)
         self.curr_mA.clear(); self.res_data.clear(); self.n_data.clear()
         self.sample_idx = 0
+        self.set_value.setText("0.000")
         self.process_timer.start(self.interval_spin.value())
 
     def stop_process(self) -> None:
@@ -328,12 +388,17 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.start_button.setEnabled(self.inst is not None)
         self.stop_button.setEnabled(False)
         self.reverse_button.setEnabled(False)
+        self.set_value.setText("0.000")
+        self._max_voltage_dialog = False
         self.current_set = 0.0
         self.ramping_up = True
 
     def reverse_now(self) -> None:
-        if self.process_timer.isActive():
-            self.ramping_up = False
+        if self.inst is None:
+            return
+        self.ramping_up = False
+        if not self.process_timer.isActive():
+            self.process_timer.start(self.interval_spin.value())
 
     def process_step(self) -> None:
         if self.inst is None:
@@ -355,6 +420,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
                 return
         try:
             self.inst.write(f"CURR {max(self.current_set, 0):.4f}")
+            self.set_value.setText(f"{self.current_set*1000:.3f}")
         except Exception as exc:
             self.log(f"Write failed: {exc}")
             self.stop_process()
