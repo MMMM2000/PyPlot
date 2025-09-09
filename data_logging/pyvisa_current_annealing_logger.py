@@ -20,7 +20,10 @@ from pathlib import Path
 
 from PyQt6 import QtCore, QtWidgets
 import pyvisa
-import pyqtgraph as pg
+from matplotlib.backends.backend_qtagg import (
+    FigureCanvasQTAgg as FigureCanvas,
+)
+from matplotlib.figure import Figure
 
 from plotting.utils import apply_system_theme
 
@@ -78,12 +81,16 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.current_label = QtWidgets.QLabel("I: --")
         self.output_view = QtWidgets.QPlainTextEdit(readOnly=True)
 
-        # live plots
-        self.graph = pg.GraphicsLayoutWidget()
-        self.plot_v = self.graph.addPlot(title="Voltage")
-        self.plot_i = self.graph.addPlot(title="Current", row=1, col=0)
-        self.curve_v = self.plot_v.plot(pen="y")
-        self.curve_i = self.plot_i.plot(pen="c")
+        # live plots using matplotlib
+        self.fig = Figure()
+        self.canvas = FigureCanvas(self.fig)
+        self.ax_v = self.fig.add_subplot(211)
+        self.ax_i = self.fig.add_subplot(212, sharex=self.ax_v)
+        (self.line_v,) = self.ax_v.plot([], [], "y")
+        (self.line_i,) = self.ax_i.plot([], [], "c")
+        self.ax_v.set_ylabel("Voltage [V]")
+        self.ax_i.set_ylabel("Current [A]")
+        self.ax_i.set_xlabel("Time [s]")
         self.time_data: list[float] = []
         self.volt_data: list[float] = []
         self.curr_data: list[float] = []
@@ -118,15 +125,18 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         values_row.addWidget(self.voltage_label)
         values_row.addWidget(self.current_label)
 
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.addLayout(top)
-        layout.addLayout(path_row)
-        layout.addWidget(self.log_button)
-        layout.addLayout(config_row)
-        layout.addLayout(proc_row)
-        layout.addLayout(values_row)
-        layout.addWidget(self.graph)
-        layout.addWidget(self.output_view)
+        left = QtWidgets.QVBoxLayout()
+        left.addLayout(top)
+        left.addLayout(path_row)
+        left.addWidget(self.log_button)
+        left.addLayout(config_row)
+        left.addLayout(proc_row)
+        left.addLayout(values_row)
+        left.addWidget(self.output_view)
+
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.addLayout(left)
+        layout.addWidget(self.canvas, stretch=1)
 
         # ---------------------------------------------------------------- connections
         self.refresh_button.clicked.connect(self.refresh_resources)
@@ -280,8 +290,11 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             self.time_data = self.time_data[-1000:]
             self.volt_data = self.volt_data[-1000:]
             self.curr_data = self.curr_data[-1000:]
-        self.curve_v.setData(self.time_data, self.volt_data)
-        self.curve_i.setData(self.time_data, self.curr_data)
+        self.line_v.set_data(self.time_data, self.volt_data)
+        self.line_i.set_data(self.time_data, self.curr_data)
+        self.ax_v.relim(); self.ax_v.autoscale_view()
+        self.ax_i.relim(); self.ax_i.autoscale_view()
+        self.canvas.draw_idle()
 
     # ----------------------------------------------------------- annealing logic
     def start_process(self) -> None:
@@ -346,7 +359,7 @@ def main() -> QtWidgets.QWidget:  # pragma: no cover - manual use
         app = QtWidgets.QApplication(sys.argv)
     apply_system_theme(app)
     win = PyVISAAnnealingLogger()
-    win.show()
+    win.showMaximized()
     return win
 
 
