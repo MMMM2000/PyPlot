@@ -184,7 +184,7 @@ class Ui_MainWindow(object):
         self.groupBox_zakladne_nastavenia_portu.setTitle(_translate("MainWindow", "Základné nastavenia portu"))
         self.label_cislo_portu.setText(_translate("MainWindow", "COM?:"))
         self.label_baudrate.setText(_translate("MainWindow", "BAUD?:"))
-        self.comboBox_baudrate.setCurrentText(_translate("MainWindow", "9600"))
+        self.comboBox_baudrate.setCurrentText(_translate("MainWindow", "115200"))
         self.comboBox_baudrate.setItemText(0, _translate("MainWindow", "921600"))
         self.comboBox_baudrate.setItemText(1, _translate("MainWindow", "460800"))
         self.comboBox_baudrate.setItemText(2, _translate("MainWindow", "115200"))

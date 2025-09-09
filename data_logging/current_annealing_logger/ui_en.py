@@ -104,7 +104,7 @@ class Ui_MainWindow(object):
             "19200",
             "9600",
         ])
-        self.comboBox_baudrate.setCurrentText("9600")
+        self.comboBox_baudrate.setCurrentText("115200")
         gb_layout.addWidget(self.comboBox_baudrate)
 
         gb_layout.addStretch(1)

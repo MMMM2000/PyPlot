@@ -14,6 +14,8 @@ dependencies = [
     "tqdm==4.67.1",
     "pyinstaller==6.15.0",
     "pyserial==3.5",
+    "pyvisa==1.15.0",
+    "pyvisa-py==0.8.1",
 ]
 requires-python = ">=3.8"
 

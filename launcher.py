@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from typing import Callable, Dict
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtWidgets, QtGui
 
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
@@ -184,6 +184,26 @@ class MasterLauncher(QtWidgets.QDialog):
                 w.activateWindow()
             except RuntimeError:
                 pass
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        open_windows = [w for w in list(self._open_windows) if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
+        if open_windows:
+            reply = QtWidgets.QMessageBox.question(
+                self,
+                "Close Launcher",
+                f"Closing the launcher will also close {len(open_windows)} open window(s). Continue?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            for w in list(open_windows):
+                try:
+                    w.close()
+                except Exception:
+                    pass
+        event.accept()
 
 
 def main() -> None:

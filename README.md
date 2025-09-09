@@ -12,7 +12,7 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ### PyVISA Current Annealing Logger
 
-A minimal logger that communicates with instruments over the VISA protocol using the `pyvisa` library. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
+A PyVISA-based version of the current annealing logger that mirrors the serial implementation. It communicates with instruments using the `pyvisa` and `pyvisa-py` libraries. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
 
 ## Installation
 
