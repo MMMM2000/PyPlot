@@ -18,7 +18,7 @@ import sys
 import time
 from pathlib import Path
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtWidgets, QtGui
 import pyvisa
 from matplotlib.backends.backend_qtagg import (
     FigureCanvasQTAgg as FigureCanvas,
@@ -81,20 +81,21 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.current_label = QtWidgets.QLabel("I: --")
         self.output_view = QtWidgets.QPlainTextEdit(readOnly=True)
 
-        # live plots using matplotlib
+        # live plots using matplotlib (Resistance vs current and sample count)
         self.fig = Figure()
         self.canvas = FigureCanvas(self.fig)
-        self.ax_v = self.fig.add_subplot(211)
-        self.ax_i = self.fig.add_subplot(212, sharex=self.ax_v)
-        (self.line_v,) = self.ax_v.plot([], [], "y")
-        (self.line_i,) = self.ax_i.plot([], [], "c")
-        self.ax_v.set_ylabel("Voltage [V]")
-        self.ax_i.set_ylabel("Current [A]")
-        self.ax_i.set_xlabel("Time [s]")
-        self.time_data: list[float] = []
-        self.volt_data: list[float] = []
-        self.curr_data: list[float] = []
-        self.t0 = time.time()
+        self.ax_ri = self.fig.add_subplot(211)
+        self.ax_rn = self.fig.add_subplot(212)
+        (self.line_ri,) = self.ax_ri.plot([], [], "y")
+        (self.line_rn,) = self.ax_rn.plot([], [], "c")
+        self.ax_ri.set_xlabel("Current [mA]")
+        self.ax_ri.set_ylabel("Resistance [Ohm]")
+        self.ax_rn.set_xlabel("N [-]")
+        self.ax_rn.set_ylabel("Resistance [Ohm]")
+        self.curr_mA: list[float] = []
+        self.res_data: list[float] = []
+        self.n_data: list[int] = []
+        self.sample_idx = 0
 
         # ------------------------------------------------------------------ layout
         top = QtWidgets.QHBoxLayout()
@@ -180,27 +181,32 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             self.resource_combo.addItem(r)
 
     # -------------------------------------------------------------------- slots
-    def handle_connect(self) -> None:
+    def disconnect(self) -> None:
+        """Close the instrument and reset UI state."""
+        if self.process_timer.isActive():
+            self.stop_process()
+        if self.poll_timer.isActive():
+            self.handle_log()
+        elif self.logfile is not None:
+            try:
+                self.logfile.close()
+            except Exception:
+                pass
+            self.logfile = None
+            self.log_button.setText("Start Log")
         if self.inst is not None:
-            if self.process_timer.isActive():
-                self.stop_process()
-            if self.poll_timer.isActive():
-                self.poll_timer.stop()
-            if self.logfile is not None:
-                try:
-                    self.logfile.close()
-                except Exception:
-                    pass
-                self.logfile = None
-                self.log_button.setText("Start Log")
             try:
                 self.inst.close()
             except Exception:
                 pass
             self.inst = None
-            self.connect_button.setText("Connect")
-            self.log_button.setEnabled(False)
-            self.start_button.setEnabled(False)
+        self.connect_button.setText("Connect")
+        self.log_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+
+    def handle_connect(self) -> None:
+        if self.inst is not None:
+            self.disconnect()
             return
 
         resource = self.resource_combo.currentText().strip()
@@ -209,6 +215,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             return
         try:
             self.inst = self.rm.open_resource(resource)
+            self.inst.timeout = 1000  # shorten blocking operations
             if resource.upper().startswith("ASRL"):
                 try:
                     self.inst.baud_rate = 115200
@@ -256,8 +263,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             return
         self.log(f"Logging to {fname}")
         self.log_button.setText("Stop Log")
-        self.time_data.clear(); self.volt_data.clear(); self.curr_data.clear()
-        self.t0 = time.time()
+        self.curr_mA.clear(); self.res_data.clear(); self.n_data.clear()
+        self.sample_idx = 0
         self.poll_timer.start(1000)
 
     def poll_once(self) -> None:
@@ -271,29 +278,30 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             self.stop_process()
             self.handle_log()
             return
+        resistance = voltage / current if abs(current) > 1e-9 else float("inf")
         if self.logfile is not None:
-            line = f"{time.time():.3f}      {voltage}       {current}\n"
+            line = f"{time.time():.3f}      {voltage}       {current}       {resistance}\n"
             try:
                 self.logfile.write(line)
                 self.logfile.flush()
             except Exception:  # pragma: no cover - disk issues
                 self.log("Failed to write to log file")
                 self.handle_log()
-        self.log(f"V={voltage:.3f} I={current:.3f}")
+        self.log(f"V={voltage:.3f} I={current:.3f} R={resistance:.3f}")
         self.voltage_label.setText(f"V: {voltage:.3f}")
         self.current_label.setText(f"I: {current:.3f}")
-        now = time.time() - self.t0
-        self.time_data.append(now)
-        self.volt_data.append(voltage)
-        self.curr_data.append(current)
-        if len(self.time_data) > 1000:
-            self.time_data = self.time_data[-1000:]
-            self.volt_data = self.volt_data[-1000:]
-            self.curr_data = self.curr_data[-1000:]
-        self.line_v.set_data(self.time_data, self.volt_data)
-        self.line_i.set_data(self.time_data, self.curr_data)
-        self.ax_v.relim(); self.ax_v.autoscale_view()
-        self.ax_i.relim(); self.ax_i.autoscale_view()
+        self.curr_mA.append(current * 1000.0)
+        self.res_data.append(resistance)
+        self.sample_idx += 1
+        self.n_data.append(self.sample_idx)
+        if len(self.res_data) > 1000:
+            self.curr_mA = self.curr_mA[-1000:]
+            self.res_data = self.res_data[-1000:]
+            self.n_data = self.n_data[-1000:]
+        self.line_ri.set_data(self.curr_mA, self.res_data)
+        self.line_rn.set_data(self.n_data, self.res_data)
+        self.ax_ri.relim(); self.ax_ri.autoscale_view()
+        self.ax_rn.relim(); self.ax_rn.autoscale_view()
         self.canvas.draw_idle()
 
     # ----------------------------------------------------------- annealing logic
@@ -306,8 +314,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.reverse_button.setEnabled(True)
-        self.t0 = time.time()
-        self.time_data.clear(); self.volt_data.clear(); self.curr_data.clear()
+        self.curr_mA.clear(); self.res_data.clear(); self.n_data.clear()
+        self.sample_idx = 0
         self.process_timer.start(self.interval_spin.value())
 
     def stop_process(self) -> None:
@@ -350,6 +358,11 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         except Exception as exc:
             self.log(f"Write failed: {exc}")
             self.stop_process()
+
+    # -------------------------------------------------------------------- Qt
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI
+        self.disconnect()
+        super().closeEvent(event)
 
 
 # ---------------------------------------------------------------------------

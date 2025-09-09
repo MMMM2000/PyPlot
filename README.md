@@ -13,9 +13,11 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ### PyVISA Current Annealing Logger
 
-A PyVISA-based version of the current annealing logger that mirrors the serial implementation. It communicates with instruments using the `pyvisa` and `pyvisa-py` libraries and now supports the full annealing workflow: configurable current ramps, automatic reversal to zero, an emergency **Reverse current now** button and a responsive **Stop annealing** control. The window opens maximized and displays live voltage and current Matplotlib graphs on the right so issues are easy to spot at a glance. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
+A PyVISA-based version of the current annealing logger that mirrors the serial implementation. It communicates with instruments using the `pyvisa` and `pyvisa-py` libraries and now supports the full annealing workflow: configurable current ramps, automatic reversal to zero, an emergency **Reverse current now** button and a responsive **Stop annealing** control. The window opens maximized and displays Matplotlib plots of resistance vs current (mA) and resistance vs sample number. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
 
-To test without hardware use the included serial emulator. Create a pair and point the logger at an `ASRL` resource such as `ASRL/path/to/ttyV1::INSTR`.
+To test without hardware use the included serial emulator. Run `python emulators/virtual_serial_emulator_gui.py`, create a pair and point the logger at an `ASRL` resource such as `ASRL/path/to/ttyV1::INSTR`.
+
+To use real hardware, connect a SCPI-capable power supply (e.g. the HMP4030) via USB, RS-232 or LAN and enter its VISA address (`ASRL3::INSTR`, `TCPIP0::192.168.0.5::inst0::INSTR`, …). The logger defaults to 115200 baud for serial links.
 
 For broader VISA resource discovery the logger depends on `psutil` and `zeroconf` in addition to the core PyVISA stack.
 
