@@ -55,6 +55,8 @@ pyqtgraph==0.13.7
     # via python-plot (pyproject.toml)
 pyserial==3.5
     # via python-plot (pyproject.toml)
+pyvisa==1.14.1
+    # via python-plot (pyproject.toml)
 python-dateutil==2.9.0.post0
     # via
     #   matplotlib

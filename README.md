@@ -10,6 +10,10 @@ This repository contains simple tools for logging measurement data and plotting 
 - Graph titles show compositions with subscripted numbers, use `n/m` microwire notation, and render in a larger font.
 - File name presets remember your last values and offer a **Reset** option (also in the serial data logger).
 
+### PyVISA Current Annealing Logger
+
+A minimal logger that communicates with instruments over the VISA protocol using the `pyvisa` library. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
+
 ## Installation
 
 The steps below assume no prior Python knowledge. On macOS use `python3`/`pip3` in all

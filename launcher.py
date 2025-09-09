@@ -7,6 +7,7 @@ from PyQt6 import QtWidgets
 
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
+from data_logging import pyvisa_current_annealing_logger
 from emulators import virtual_serial_emulator_gui
 from plotting import common
 from plotting.hsw_distribution import distribution_gui
@@ -38,6 +39,7 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
     "Serial Data Logger": data_logger.main,
     "Current Annealing Logger": current_annealing_logger.main,
+    "PyVISA Current Annealing Logger": pyvisa_current_annealing_logger.main,
 }
 
 EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
