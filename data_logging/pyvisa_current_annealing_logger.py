@@ -20,6 +20,7 @@ from pathlib import Path
 
 from PyQt6 import QtCore, QtWidgets
 import pyvisa
+import pyqtgraph as pg
 
 from plotting.utils import apply_system_theme
 
@@ -38,6 +39,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         # ------------------------------------------------------------------ widgets
         # connection
         self.resource_combo = QtWidgets.QComboBox()
+        self.resource_combo.setEditable(True)
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.connect_button = QtWidgets.QPushButton("Connect")
 
@@ -76,6 +78,17 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.current_label = QtWidgets.QLabel("I: --")
         self.output_view = QtWidgets.QPlainTextEdit(readOnly=True)
 
+        # live plots
+        self.graph = pg.GraphicsLayoutWidget()
+        self.plot_v = self.graph.addPlot(title="Voltage")
+        self.plot_i = self.graph.addPlot(title="Current", row=1, col=0)
+        self.curve_v = self.plot_v.plot(pen="y")
+        self.curve_i = self.plot_i.plot(pen="c")
+        self.time_data: list[float] = []
+        self.volt_data: list[float] = []
+        self.curr_data: list[float] = []
+        self.t0 = time.time()
+
         # ------------------------------------------------------------------ layout
         top = QtWidgets.QHBoxLayout()
         top.addWidget(self.resource_combo)
@@ -112,6 +125,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         layout.addLayout(config_row)
         layout.addLayout(proc_row)
         layout.addLayout(values_row)
+        layout.addWidget(self.graph)
         layout.addWidget(self.output_view)
 
         # ---------------------------------------------------------------- connections
@@ -145,6 +159,12 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         except Exception as exc:  # pragma: no cover - hardware dependent
             self.log(f"Resource query failed: {exc}")
             resources = []
+        for local in ("ttyV0", "ttyV1"):
+            path = Path(local)
+            if path.exists():
+                res = f"ASRL{path.resolve()}::INSTR"
+                if res not in resources:
+                    resources.append(res)
         self.resource_combo.clear()
         for r in resources:
             self.resource_combo.addItem(r)
@@ -152,10 +172,17 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
     # -------------------------------------------------------------------- slots
     def handle_connect(self) -> None:
         if self.inst is not None:
-            if self.poll_timer.isActive():
-                self.handle_log()
             if self.process_timer.isActive():
                 self.stop_process()
+            if self.poll_timer.isActive():
+                self.poll_timer.stop()
+            if self.logfile is not None:
+                try:
+                    self.logfile.close()
+                except Exception:
+                    pass
+                self.logfile = None
+                self.log_button.setText("Start Log")
             try:
                 self.inst.close()
             except Exception:
@@ -172,6 +199,11 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             return
         try:
             self.inst = self.rm.open_resource(resource)
+            if resource.upper().startswith("ASRL"):
+                try:
+                    self.inst.baud_rate = 115200
+                except Exception:
+                    pass
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
             self.inst = None
@@ -214,6 +246,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             return
         self.log(f"Logging to {fname}")
         self.log_button.setText("Stop Log")
+        self.time_data.clear(); self.volt_data.clear(); self.curr_data.clear()
+        self.t0 = time.time()
         self.poll_timer.start(1000)
 
     def poll_once(self) -> None:
@@ -238,6 +272,16 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.log(f"V={voltage:.3f} I={current:.3f}")
         self.voltage_label.setText(f"V: {voltage:.3f}")
         self.current_label.setText(f"I: {current:.3f}")
+        now = time.time() - self.t0
+        self.time_data.append(now)
+        self.volt_data.append(voltage)
+        self.curr_data.append(current)
+        if len(self.time_data) > 1000:
+            self.time_data = self.time_data[-1000:]
+            self.volt_data = self.volt_data[-1000:]
+            self.curr_data = self.curr_data[-1000:]
+        self.curve_v.setData(self.time_data, self.volt_data)
+        self.curve_i.setData(self.time_data, self.curr_data)
 
     # ----------------------------------------------------------- annealing logic
     def start_process(self) -> None:
@@ -249,6 +293,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.reverse_button.setEnabled(True)
+        self.t0 = time.time()
+        self.time_data.clear(); self.volt_data.clear(); self.curr_data.clear()
         self.process_timer.start(self.interval_spin.value())
 
     def stop_process(self) -> None:

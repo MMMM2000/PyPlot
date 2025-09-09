@@ -13,7 +13,9 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ### PyVISA Current Annealing Logger
 
-A PyVISA-based version of the current annealing logger that mirrors the serial implementation. It communicates with instruments using the `pyvisa` and `pyvisa-py` libraries and now supports the full annealing workflow: configurable current ramps, automatic reversal to zero, an emergency **Reverse current now** button and a responsive **Stop annealing** control. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
+A PyVISA-based version of the current annealing logger that mirrors the serial implementation. It communicates with instruments using the `pyvisa` and `pyvisa-py` libraries and now supports the full annealing workflow: configurable current ramps, automatic reversal to zero, an emergency **Reverse current now** button and a responsive **Stop annealing** control. Live voltage and current graphs mirror the serial logger and make it easy to spot issues at a glance. Launch it from the master launcher under **PyVISA Current Annealing Logger**.
+
+To test without hardware use the included serial emulator. Create a pair and point the logger at an `ASRL` resource such as `ASRL/path/to/ttyV1::INSTR`.
 
 For broader VISA resource discovery the logger depends on `psutil` and `zeroconf` in addition to the core PyVISA stack.
 
