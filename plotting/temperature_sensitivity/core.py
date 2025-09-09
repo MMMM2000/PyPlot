@@ -633,18 +633,6 @@ def main(files: List[str], backend: str = BACKEND):
             plt.show()
         else:
             plt.close('all')
-        if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
-            reply = non_modal_question(
-                "Save Plots",
-                "Save generated plots?",
-            )
-            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-                out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
-                if out:
-                    os.makedirs(out, exist_ok=True)
-                    for fig, fname in plots:
-                        base = os.path.join(out, Path(fname).stem)
-                        save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
     else:
         plt.close('all')
 

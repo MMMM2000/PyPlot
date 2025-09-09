@@ -115,6 +115,12 @@ to create a standalone `dist/launcher` for the current platform.
 Prototype user interfaces and plotting experiments live in the `experiments`
 directory and are independent from the main tools.
 
+### Data Plotter
+
+`experiments/data_plotter.py` provides a small GUI wrapper around the plotting
+modules.  Configure module settings, manage the list of input files, and run the
+plotter without the window closing or prompting to save figures afterwards.
+
 ## 7. Testing
 
 Run the test suite after installing the requirements:

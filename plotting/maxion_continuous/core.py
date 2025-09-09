@@ -180,19 +180,4 @@ def main(files: List[str], backend: str = BACKEND):
     else:
         plt.close('all')
 
-    if (not SAVE_PLOTS) and plots and QtWidgets.QApplication.instance() is not None:
-        reply = QtWidgets.QMessageBox.question(
-            None,
-            "Save Plots",
-            "Save generated plots?",
-            QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-        )
-        if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-            out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
-            if out:
-                os.makedirs(out, exist_ok=True)
-                for fig, fname in plots:
-                    base = os.path.join(out, Path(fname).stem)
-                    save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
-
     print('Done.')
