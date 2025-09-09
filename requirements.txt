@@ -53,6 +53,8 @@ pyqt6-sip==13.10.2
     # via pyqt6
 pyqtgraph==0.13.7
     # via python-plot (pyproject.toml)
+psutil==7.0.0
+    # via python-plot (pyproject.toml)
 pyserial==3.5
     # via python-plot (pyproject.toml)
 pyvisa==1.15.0
@@ -71,6 +73,8 @@ tqdm==4.67.1
     # via python-plot (pyproject.toml)
 tzdata==2025.2
     # via pandas
+zeroconf==0.147.2
+    # via python-plot (pyproject.toml)
 
 # The following packages are considered to be unsafe in a requirements file:
 # setuptools

@@ -16,6 +16,8 @@ dependencies = [
     "pyserial==3.5",
     "pyvisa==1.15.0",
     "pyvisa-py==0.8.1",
+    "psutil==7.0.0",
+    "zeroconf==0.147.2",
 ]
 requires-python = ">=3.8"
 
