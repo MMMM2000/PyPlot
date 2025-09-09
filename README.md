@@ -4,22 +4,90 @@ Tools for measuring and visualising data from microwire experiments.  The
 repository provides loggers for serial devices and VISA instruments, a generic
 data logger and a small launcher that groups all utilities.
 
-## 1. Requirements
+## 1. Installation
 
-* Python 3.10 or newer
-* All Python dependencies are listed in `requirements.txt`.
-  Install them in a virtual environment:
+All commands assume a terminal opened in the repository root.
+
+### 1.1 Windows
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+python -m venv .venv
+.\.venv\Scripts\Activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+pip install -U pyvisa-py    # optional: update VISA backend
+```
+
+### 1.2 macOS / Linux
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate    # Windows: .venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
 pip install -r requirements.txt
+pip install -U pyvisa-py    # optional: update VISA backend
+```
+
+### 1.3 Additional tools
+
+The project occasionally uses the Codex CLI for development helpers:
+
+```bash
+npm install -g @openai/codex
 ```
 
 The requirements include `pyvisa`, `pyvisa-py`, `psutil` and `zeroconf` so VISA
 resources can be discovered without vendor drivers.
 
-## 2. Virtual COM‑port emulator
+## 2. Master launcher
+
+Run the launcher to access all utilities in a single window:
+
+```bash
+python -m launcher
+```
+
+Closing the launcher warns about other open windows and will close them.
+
+## 3. Loggers
+
+### 3.1 Serial Current Annealing Logger
+
+Connects to an HMP4030 power supply via a serial port.  Features include:
+
+* configurable current ramp with optional automatic reversal
+* **Reverse current now** button for an immediate ramp down
+* default **Reverse to zero after max** behaviour
+* automatic halt at **30 V** with a dialog to hold, reverse or stop
+* live display of measured current, set current and resistance
+* plots of resistance vs. current and sample number that follow the system theme
+
+Launch from the master launcher or run
+
+```bash
+python -m data_logging.current_annealing_logger.current_annealing_logger
+```
+
+### 3.2 PyVISA Current Annealing Logger
+
+Uses PyVISA to communicate with SCPI instruments over USB, RS‑232 or TCP/IP.  It
+mirrors the serial logger’s workflow and adds the same voltage‑limit safety
+dialog and live values panel.  Select a VISA resource (e.g.
+`ASRL/ttyV1::INSTR`) and start logging.
+
+Launch from the master launcher or run
+
+```bash
+python -m data_logging.pyvisa_current_annealing_logger
+```
+
+### 3.3 Generic Data Logger
+
+Records arbitrary measurements to structured text files with a built‑in file
+name builder.  Real‑time plots update while logging and match the system theme.
+
+## 4. Virtual COM‑port emulator
 
 To test the loggers without hardware start the emulator:
 
@@ -31,45 +99,6 @@ Use **Create Pair (socat)** on Linux/macOS to create `ttyV0` ↔ `ttyV1`.  On
 Windows supply a pre‑installed virtual pair or enable the `loop://` option for a
 software loopback.  Point the emulator at one side of the pair and the logger at
 the other.  All annealing tools default to **115200 baud**.
-
-## 3. Master launcher
-
-Run `python -m launcher` to open a window that lists all available tools.  The
-launcher warns if other windows are still open and will close them when the
-launcher exits.
-
-## 4. Loggers
-
-### 4.1 Serial Current Annealing Logger
-
-Connects to an HMP4030 power supply via a serial port.  Features include:
-
-* configurable current ramp with optional automatic reversal
-* **Reverse current now** button for an immediate ramp down
-* default **Reverse to zero after max** behaviour
-* automatic halt when the supply reaches **30 V** – a dialog offers to hold the
-  current, reverse to zero or stop the measurement
-* live display of measured current, set current and resistance
-* plots of resistance vs. current and sample number with backgrounds that follow
-  the system light or dark theme
-
-Launch from the master launcher or run
-
-```bash
-python -m data_logging.current_annealing_logger.current_annealing_logger
-```
-
-### 4.2 PyVISA Current Annealing Logger
-
-Uses PyVISA to communicate with SCPI instruments over USB, RS‑232 or TCP/IP.  It
-mirrors the serial logger’s workflow and adds the same voltage‑limit safety
-dialog and live values panel.  Select a VISA resource (e.g.
-`ASRL/ttyV1::INSTR`) and start logging.
-
-### 4.3 Generic Data Logger
-
-Records arbitrary measurements to structured text files with a built‑in file
-name builder.  Real‑time plots update while logging and match the system theme.
 
 ## 5. Building executables
 
@@ -85,4 +114,12 @@ to create a standalone `dist/launcher` for the current platform.
 
 Prototype user interfaces and plotting experiments live in the `experiments`
 directory and are independent from the main tools.
+
+## 7. Testing
+
+Run the test suite after installing the requirements:
+
+```bash
+pytest -q
+```
 
