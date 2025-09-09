@@ -319,6 +319,7 @@ class Ui_MainWindow(object):
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
         self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
+        self.checkBox_reverse.setChecked(True)
         self.spinBox_loops = QtWidgets.QSpinBox()
         self.spinBox_loops.setRange(1, 100000)
         self.spinBox_loops.setValue(1)
@@ -379,12 +380,18 @@ class Ui_MainWindow(object):
         hr_layout.addStretch(1)
         grid.addLayout(hr_layout, 9, 0, 1, 3)
 
-        # Start/Stop process button
+        # Start/Stop and reverse buttons
+        buttons = QtWidgets.QHBoxLayout()
         self.pushButton_spusti_proces = QtWidgets.QPushButton("Start annealing process")
         bfont = QtGui.QFont()
         bfont.setPointSize(12)
         self.pushButton_spusti_proces.setFont(bfont)
-        grid.addWidget(self.pushButton_spusti_proces, 10, 0, 1, 3)
+        self.pushButton_reverse_now = QtWidgets.QPushButton("Reverse current now")
+        self.pushButton_reverse_now.setFont(bfont)
+        self.pushButton_reverse_now.setEnabled(False)
+        buttons.addWidget(self.pushButton_spusti_proces)
+        buttons.addWidget(self.pushButton_reverse_now)
+        grid.addLayout(buttons, 10, 0, 1, 3)
 
         frame_layout_proc = QtWidgets.QVBoxLayout(self.frame_nastavenia_procesu)
         frame_layout_proc.setContentsMargins(0, 0, 0, 0)

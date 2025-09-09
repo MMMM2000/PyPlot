@@ -151,6 +151,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.open_threshold = 30
         self.direction_ascending = True
         self.sample_ready = False
+        self.force_stop_at_zero = False
         # Debug + progress/time tracking
         self.DEBUG = False
         self.sample_rate: float | None = None
@@ -191,6 +192,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Also hook legacy browse button to new unified handler
         if hasattr(self.ui, 'pushButton_select_filename'):
             self.ui.pushButton_select_filename.clicked.connect(self.handle_browse_full_file)
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            self.ui.pushButton_reverse_now.clicked.connect(self.handle_pushButton_reverse_now_clicked)
+            self.ui.pushButton_reverse_now.setEnabled(False)
         # New UI pieces: port dropdown and separate log directory/name
         if hasattr(self.ui, 'comboBox_port'):
             self.ui.comboBox_port.currentIndexChanged.connect(self.handle_comboBox_port_changed)
@@ -752,7 +756,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.proces_on = True
             self.sekundy = 0
             self.ui.frame_modus_operandi.setEnabled(False)
-            self.ui.groupBox_nastavenia_procesu.setEnabled(False)
+            self._set_process_controls_enabled(False)
+            if hasattr(self.ui, 'pushButton_reverse_now'):
+                self.ui.pushButton_reverse_now.setEnabled(True)
+            self.force_stop_at_zero = False
             self.command_number = 0
             self.vzorka_N = 0
             # print("Proces bezi")
@@ -836,11 +843,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         else:
             self.stop_annealing()
+    def handle_pushButton_reverse_now_clicked(self):
+        """Immediately ramp current down toward zero."""
+        if not self.proces_on:
+            return
+        try:
+            self.timer_prud.stop()
+        except Exception:
+            pass
+        self.prud_timer_on = False
+        self.current_increment = -abs(self.current_step_A)
+        self.ciara_color = "b"
+        self.force_stop_at_zero = True
+
+    def _set_process_controls_enabled(self, enabled: bool) -> None:
+        if not hasattr(self.ui, 'groupBox_nastavenia_procesu'):
+            return
+        keep = {self.ui.pushButton_spusti_proces}
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            keep.add(self.ui.pushButton_reverse_now)
+        if hasattr(self.ui, 'progressBar_process'):
+            keep.add(self.ui.progressBar_process)
+        if hasattr(self.ui, 'label_time_remaining'):
+            keep.add(self.ui.label_time_remaining)
+        if hasattr(self.ui, 'groupBox_aktualne_hodnoty'):
+            keep.add(self.ui.groupBox_aktualne_hodnoty)
+        for child in self.ui.groupBox_nastavenia_procesu.findChildren(QtWidgets.QWidget):
+            if child in keep:
+                continue
+            child.setEnabled(enabled)
 
     def stop_annealing(self):
         """Abort the annealing run and power down the supply safely."""
         self.proces_on = False
         self.wait = False  # break any pending delays
+        self.force_stop_at_zero = False
         try:
             self.timer_command.stop()
             self.timer_prud.stop()
@@ -865,7 +902,9 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.ui.pushButton_spusti_proces.setText("Start annealing process")
-        self.ui.groupBox_nastavenia_procesu.setEnabled(True)
+        self._set_process_controls_enabled(True)
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            self.ui.pushButton_reverse_now.setEnabled(False)
         self.ui.frame_modus_operandi.setEnabled(True)
         
     def handle_send_new_command(self):
@@ -1032,18 +1071,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
-            # completed descending to zero? manage loops
-            if getattr(self, 'reverse_enabled', False) and (self.current_current_set < self.current_step_A):
-                self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
-                if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
-                    # prepare next loop
-                    self.current_increment = self.current_step_A
-                    self.current_current_set = 0.001
-                    self.ciara_color = "r"
-                    self.direction_ascending = True
-                    self.sekundy = 0
-                else:
+            # completed descending to zero? manage loops or stop
+            if (self.current_increment < 0) and (self.current_current_set < self.current_step_A):
+                if getattr(self, 'force_stop_at_zero', False) or not getattr(self, 'reverse_enabled', False):
                     self.handle_pushButton_spusti_proces_clicked()
+                else:
+                    self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
+                    if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
+                        # prepare next loop
+                        self.current_increment = self.current_step_A
+                        self.current_current_set = 0.001
+                        self.ciara_color = "r"
+                        self.direction_ascending = True
+                        self.sekundy = 0
+                    else:
+                        self.handle_pushButton_spusti_proces_clicked()
 
         else:
             pass
@@ -1064,6 +1106,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_init_commands(self):
         # print("teraz posielam univerzalnu zostavu prikazov pri spusteni")
         for i in range(0, len(self.commands_init)):
+            if not self.proces_on:
+                break
             self.prikaz_portu = self.commands_init[i]
             self.send_serial_command()
             self.simple_delay(1000)

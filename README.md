@@ -4,7 +4,8 @@ This repository contains simple tools for logging measurement data and plotting 
 
 ### Current Annealing Logger
 
-- "Reverse to zero after max" now reliably ramps the current back to zero after the hold phase.
+- "Reverse to zero after max" is now enabled by default and reliably ramps the current back to zero after the hold phase.
+- Added a **Reverse current now** button to immediately ramp the current down without waiting for the maximum.
 - "Stop annealing process" now reliably cuts power even during ongoing commands.
 - Interface tweaks: **Open**/**Browse** directory buttons, narrower **Max current**/**Hold time** inputs, a wider left-aligned **Hold current now!** button, and extra-wide file-name preset fields.
 - Graph titles show compositions with subscripted numbers, use `n/m` microwire notation, and render in a larger font.
