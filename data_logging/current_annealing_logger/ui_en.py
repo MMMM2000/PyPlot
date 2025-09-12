@@ -118,43 +118,25 @@ class Ui_MainWindow(object):
         frame_layout_serial.addWidget(gb_serial)
 
         # ------------------------------------------------------------------
-        # Modus operandi (collapsible)
+        # Mode of operation (simple combo box)
         # ------------------------------------------------------------------
         self.frame_modus_operandi = QtWidgets.QFrame(self.centralWidget)
         self.frame_modus_operandi.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         main_layout.addWidget(self.frame_modus_operandi)
 
-        frame_layout_mode = QtWidgets.QVBoxLayout(self.frame_modus_operandi)
+        frame_layout_mode = QtWidgets.QHBoxLayout(self.frame_modus_operandi)
         frame_layout_mode.setContentsMargins(0, 0, 0, 0)
-
-        header_mode = QtWidgets.QToolButton()
-        header_mode.setText("Mode of operation")
-        header_mode.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        header_mode.setArrowType(QtCore.Qt.ArrowType.RightArrow)
-        header_mode.setCheckable(True)
-        header_mode.setChecked(False)
-        frame_layout_mode.addWidget(header_mode)
-
-        self._mode_container = QtWidgets.QWidget()
-        self.groupBox_modus_operandi = self._mode_container
-        mode_layout = QtWidgets.QHBoxLayout(self._mode_container)
-        mode_layout.setContentsMargins(8, 4, 8, 8)
-        self.radioButton_raw_VCP = QtWidgets.QRadioButton("Raw VCP")
-        self.radioButton_manualne_zihanie = QtWidgets.QRadioButton("Manual annealing")
-        self.radioButton_automatizovane_zihanie = QtWidgets.QRadioButton("Automatic annealing")
-        self.radioButton_automatizovane_zihanie.setChecked(True)
-        mode_layout.addWidget(self.radioButton_raw_VCP)
-        mode_layout.addWidget(self.radioButton_manualne_zihanie)
-        mode_layout.addWidget(self.radioButton_automatizovane_zihanie)
-        mode_layout.addStretch(1)
-        frame_layout_mode.addWidget(self._mode_container)
-        self._mode_container.setVisible(False)
-
-        def _toggle_mode(checked: bool) -> None:
-            self._mode_container.setVisible(checked)
-            header_mode.setArrowType(QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
-
-        header_mode.toggled.connect(_toggle_mode)
+        self.label_mode = QtWidgets.QLabel("Mode of operation:")
+        frame_layout_mode.addWidget(self.label_mode)
+        self.comboBox_mode = QtWidgets.QComboBox()
+        self.comboBox_mode.addItems([
+            "Raw VCP",
+            "Manual annealing",
+            "Automatic annealing",
+        ])
+        self.comboBox_mode.setCurrentIndex(2)
+        frame_layout_mode.addWidget(self.comboBox_mode)
+        frame_layout_mode.addStretch(1)
 
         # ------------------------------------------------------------------
         # Process settings (frame_nastavenia_procesu)
@@ -237,7 +219,7 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setMaximumWidth(170)
+        self.pushButton_start_stop_drzania_prudu.setMaximumWidth(220)
         self.pushButton_start_stop_drzania_prudu.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Fixed,

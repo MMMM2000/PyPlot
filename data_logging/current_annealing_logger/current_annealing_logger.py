@@ -187,9 +187,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.handle_comboBox_baudrate_currentIndexChanged)
         self.ui.pushButton_posli_prikaz_portu.clicked.connect(self.handle_pushButton_posli_prikaz_portu_clicked)
         
-        self.ui.radioButton_raw_VCP.clicked.connect(self.handle_radioButton_raw_VCP_clicked)
-        self.ui.radioButton_manualne_zihanie.clicked.connect(self.handle_radioButton_manualne_zihanie_clicked)
-        self.ui.radioButton_automatizovane_zihanie.clicked.connect(self.handle_radioButton_automatizovane_zihanie_clicked)
+        if hasattr(self.ui, 'comboBox_mode'):
+            self.ui.comboBox_mode.currentIndexChanged.connect(self.handle_mode_changed)
         
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.handle_spinBox_hodnota_staly_prud_valueChanged)
         self.ui.spinBox_doba_staly_prud.valueChanged.connect(self.handle_spinBox_doba_staly_prud_valueChanged)
@@ -249,12 +248,8 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         # Apply initial mode selection
         try:
-            if self.ui.radioButton_automatizovane_zihanie.isChecked():
-                self.handle_radioButton_automatizovane_zihanie_clicked()
-            elif self.ui.radioButton_manualne_zihanie.isChecked():
-                self.handle_radioButton_manualne_zihanie_clicked()
-            else:
-                self.handle_radioButton_raw_VCP_clicked()
+            if hasattr(self.ui, 'comboBox_mode'):
+                self.handle_mode_changed(self.ui.comboBox_mode.currentIndex())
         except Exception:
             pass
         
@@ -421,10 +416,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.frame_command_and_response.setEnabled(True)
                     # Respect the selected mode rather than forcing raw VCP
                     try:
-                        if self.ui.radioButton_automatizovane_zihanie.isChecked():
-                            self.handle_radioButton_automatizovane_zihanie_clicked()
-                        elif self.ui.radioButton_manualne_zihanie.isChecked():
-                            self.handle_radioButton_manualne_zihanie_clicked()
+                        if hasattr(self.ui, 'comboBox_mode'):
+                            self.handle_mode_changed(self.ui.comboBox_mode.currentIndex())
                         else:
                             self.handle_radioButton_raw_VCP_clicked()
                     except Exception:
@@ -487,6 +480,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if(self.napatie == True):
                     try:
                         self.current_voltage = float(self.odpoved_portu.strip())
+                        if hasattr(self.ui, 'label_live_voltage'):
+                            self.ui.label_live_voltage.display(f"{self.current_voltage:.2f}")
                     except ValueError:
                         # Ignore non-numeric responses (e.g., from config commands)
                         self.zamok.unlock()
@@ -732,28 +727,30 @@ class MainWindow(QtWidgets.QMainWindow):
         # print('Poslaný príkaz: ' + self.prikaz_portu)
         
     def handle_radioButton_raw_VCP_clicked(self):
-        self.ui.radioButton_raw_VCP.setChecked(True)
         self.modus_operandi = 0
         self.ui.frame_nastavenia_procesu.setEnabled(False)
-        # print("ModOp: raw VCP ", self.modus_operandi)
-        
+
     def handle_radioButton_manualne_zihanie_clicked(self):
-        self.ui.radioButton_manualne_zihanie.setChecked(True)
         self.modus_operandi = 1
         self.ui.frame_nastavenia_procesu.setEnabled(True)
         self.ui.spinBox_hodnota_staly_prud.setEnabled(False)
         self.ui.spinBox_doba_staly_prud.setEnabled(False)
         self.ui.pushButton_start_stop_drzania_prudu.setEnabled(True)
-        # print("ModOp: manualne zihanie ", self.modus_operandi)
-        
+
     def handle_radioButton_automatizovane_zihanie_clicked(self):
-        self.ui.radioButton_automatizovane_zihanie.setChecked(True)
         self.modus_operandi = 2
         self.ui.frame_nastavenia_procesu.setEnabled(True)
         self.ui.spinBox_hodnota_staly_prud.setEnabled(True)
         self.ui.spinBox_doba_staly_prud.setEnabled(True)
         self.ui.pushButton_start_stop_drzania_prudu.setEnabled(False)
-        # print("ModOp: automatizovane zihanie ", self.modus_operandi)
+
+    def handle_mode_changed(self, index: int) -> None:
+        if index == 0:
+            self.handle_radioButton_raw_VCP_clicked()
+        elif index == 1:
+            self.handle_radioButton_manualne_zihanie_clicked()
+        else:
+            self.handle_radioButton_automatizovane_zihanie_clicked()
         
     def handle_spinBox_hodnota_staly_prud_valueChanged(self):
         self.hodnota_staly_prud = self.ui.spinBox_hodnota_staly_prud.value()
@@ -827,6 +824,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
+                self.ui.lcdNumber_aktualny_prud_mA.display("0")
+                if hasattr(self.ui, 'label_live_voltage'):
+                    self.ui.label_live_voltage.display("0")
                 self.ui.lcdNumber_uplynute_sekundy.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percento_from_hold.setText("0")
@@ -854,6 +854,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
+                self.ui.lcdNumber_aktualny_prud_mA.display("0")
+                if hasattr(self.ui, 'label_live_voltage'):
+                    self.ui.label_live_voltage.display("0")
                 # reverse + loop configuration
                 self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
                 self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
@@ -995,7 +998,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curr_value_x = self.current_current_read*1000
             self.curr_value_y = self.current_resistance
             self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
-            self.ui.lcdNumber_aktualny_odpor.display("{:.1f}".format(self.curr_value_y))
+            if hasattr(self.ui, 'label_live_voltage'):
+                self.ui.label_live_voltage.display("{:.2f}".format(self.current_voltage))
 
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
             if self.first_sample:
@@ -1071,7 +1075,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curr_value_x = self.current_current_read*1000
             self.curr_value_y = self.current_resistance
             self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
-            self.ui.lcdNumber_aktualny_odpor.display("{:.1f}".format(self.curr_value_y))
+            if hasattr(self.ui, 'label_live_voltage'):
+                self.ui.label_live_voltage.display("{:.2f}".format(self.current_voltage))
 
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
             if self.first_sample:
@@ -1222,19 +1227,19 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
         self.label_live_current = QtWidgets.QLabel("0")
         self.label_live_set = QtWidgets.QLabel("0")
-        self.label_live_resistance = QtWidgets.QLabel("0")
-        for lbl in (self.label_live_current, self.label_live_set, self.label_live_resistance):
+        self.label_live_voltage = QtWidgets.QLabel("0")
+        for lbl in (self.label_live_current, self.label_live_set, self.label_live_voltage):
             lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        layout.addRow("Current (mA)", self.label_live_current)
         layout.addRow("Set current (mA)", self.label_live_set)
-        layout.addRow("Resistance (Ω)", self.label_live_resistance)
+        layout.addRow("Current (mA)", self.label_live_current)
+        layout.addRow("Voltage (V)", self.label_live_voltage)
         # Alias old names for compatibility
         self.ui.lcdNumber_aktualny_prud_mA = self.label_live_current
-        self.ui.lcdNumber_aktualny_odpor = self.label_live_resistance
         self.ui.label_set_current = self.label_live_set
+        self.ui.label_live_voltage = self.label_live_voltage
         self.ui.lcdNumber_aktualny_prud_mA.display = self.label_live_current.setText
-        self.ui.lcdNumber_aktualny_odpor.display = self.label_live_resistance.setText
         self.ui.label_set_current.display = self.label_live_set.setText
+        self.ui.label_live_voltage.display = self.label_live_voltage.setText
 
     def handle_max_voltage(self) -> None:
         self._max_voltage_dialog = True
@@ -1304,7 +1309,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 _title = format_annealing_title(Path(self.f_name).stem)
             except Exception:
                 _title = format_annealing_title(self.f_name)
-            self.fig.suptitle(_title)
+            self.fig.suptitle(_title, color=text_rgb)
             if NavigationToolbar is not None and self.canvas is not None:
                 self.toolbar = NavigationToolbar(self.canvas, container)
                 layout.addWidget(self.toolbar)
