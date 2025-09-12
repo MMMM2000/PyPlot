@@ -7,6 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from ..backends import wants_matplotlib, wants_origin
 from ..config import load_config
+from ..utils import show_plots
 
 _CFG = load_config().get("hysteresis_loops", {})
 MODE = _CFG.get("MODE", "Combined")
@@ -180,7 +181,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, 
     if mode.lower() == "stacked":
         fig = _stacked(loaded)
         if show:
-            plt.show()
+            show_plots()
         return fig
 
     if mode.lower() == "combined":
@@ -199,7 +200,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, 
         ax.legend(title="Anneal", loc="best")
         fig.tight_layout()
         if show:
-            plt.show()
+            show_plots()
         return fig
 
     # Separate
@@ -215,7 +216,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, 
         fig.tight_layout()
         figs.append(fig)
     if show:
-        plt.show()
+        show_plots()
     return figs
 
 

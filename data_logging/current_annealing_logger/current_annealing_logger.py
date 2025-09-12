@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
-from plotting.utils import apply_system_theme, format_annealing_title
+from plotting.utils import apply_system_theme, format_annealing_title, show_plots
 
 import numpy as np
 import matplotlib
@@ -1364,7 +1364,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
             self.ax2.add_line(self.line2)
             plt.ion()
-            plt.show()
+            show_plots()
         
         
     def handle_pushButton_select_filename_clicked(self):

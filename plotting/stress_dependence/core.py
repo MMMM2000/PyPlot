@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Tuple, cast
 from PyQt6 import QtWidgets
 
 from ..config import load_config
-from ..utils import save_figure
+from ..utils import save_figure, show_plots
 from ..backends import wants_matplotlib, wants_origin
 
 import numpy as np
@@ -525,7 +525,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
 
     if wants_matplotlib(backend):
         if do_show:
-            plt.show()
+            show_plots()
         else:
             plt.close('all')
     else:

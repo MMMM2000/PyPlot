@@ -93,7 +93,9 @@
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
     "IMPROVE_READABILITY": false,
-    "TEXT_SIZE": 18,
+    "SHOW_LEGEND": true,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
     "TITLE_SIZE": 22
   }
 }

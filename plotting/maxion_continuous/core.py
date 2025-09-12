@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Tuple, Any
 
 from PyQt6 import QtWidgets
 
@@ -10,7 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
-from ..utils import save_figure, origin_session
+from ..utils import save_figure, origin_session, show_plots
 from ..backends import wants_matplotlib, wants_origin
 from ..config import load_config
 
@@ -26,7 +26,9 @@ MA_WINDOW = _CFG.get("MA_WINDOW", 20)
 SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = _CFG.get("PNG_DPI", 1200)
 IMPROVE_READABILITY = _CFG.get("IMPROVE_READABILITY", False)
-TEXT_SIZE = _CFG.get("TEXT_SIZE", 18)
+SHOW_LEGEND = _CFG.get("SHOW_LEGEND", True)
+TICK_SIZE = _CFG.get("TICK_SIZE", 18)
+AXIS_LABEL_SIZE = _CFG.get("AXIS_LABEL_SIZE", 18)
 TITLE_SIZE = _CFG.get("TITLE_SIZE", 22)
 BACKEND = _CFG.get("BACKEND", "matplotlib")
 
@@ -84,12 +86,11 @@ def load_data(files: List[str]) -> pd.DataFrame:
 def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, str]:
     rc = (
         {
-            "font.size": TEXT_SIZE,
             "axes.titlesize": TITLE_SIZE,
-            "axes.labelsize": TEXT_SIZE,
-            "legend.fontsize": TEXT_SIZE,
-            "xtick.labelsize": TEXT_SIZE,
-            "ytick.labelsize": TEXT_SIZE,
+            "axes.labelsize": AXIS_LABEL_SIZE,
+            "legend.fontsize": AXIS_LABEL_SIZE,
+            "xtick.labelsize": TICK_SIZE,
+            "ytick.labelsize": TICK_SIZE,
         }
         if IMPROVE_READABILITY
         else {}
@@ -97,17 +98,30 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
     with plt.rc_context(rc):
         fig, ax = plt.subplots(figsize=(9, 4))
         x = np.arange(len(y)) / 1e4
+        artists: list[Any] = []
+        labels: list[str] = []
         if PLOT_MODE in ("raw", "both"):
-            ax.scatter(x, y.to_numpy() / 1e3, s=MARKER_SIZE, label="raw")
+            sc = ax.scatter(x, y.to_numpy() / 1e3, s=MARKER_SIZE, label="raw")
+            artists.append(sc); labels.append("raw")
         if PLOT_MODE in ("processed", "both"):
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
             proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-            ax.scatter(x, proc.to_numpy() / 1e3, s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
+            sc = ax.scatter(x, proc.to_numpy() / 1e3, s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
+            artists.append(sc); labels.append(f"med{MED_WINDOW}+mwa{MA_WINDOW}")
         ax.set_xlabel("Sample index (×10⁴)")
-        ax.set_ylabel("T1+T2 (arb units, ×10³)")
+        ax.set_ylabel("T1+T2 (arb. u., ×10³)")
         ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
         ax.grid(True)
-        ax.legend()
+        if SHOW_LEGEND and artists:
+            leg = ax.legend(artists, labels, handlelength=0, handletextpad=0)
+            for handle, text in zip(leg.legend_handles, leg.get_texts()):
+                color = (
+                    handle.get_facecolor()[0]
+                    if hasattr(handle, "get_facecolor")
+                    else handle.get_color()
+                )
+                text.set_color(color)
+                handle.set_visible(False)
         fig.tight_layout()
     fname = f"head{head}_{coils}coils_CH{ch}_sum"
     if SAVE_PLOTS:
@@ -150,10 +164,11 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
             op.lt_exec('page.antialias=1;')
             op.lt_exec('layer -aa 1;')
             op.lt_exec('lab -xb "Sample index (x10^4)";')
-            op.lt_exec('lab -yl "T1+T2 (arb units, x10^3)";')
+            op.lt_exec('lab -yl "T1+T2 (arb. u., x10^3)";')
             esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
             op.lt_exec(f'title -s "{esc}";')
-            op.lt_exec('legend;')
+            if SHOW_LEGEND:
+                op.lt_exec('legend -o; legend.textcolor=1;')
         except Exception:
             pass
 
@@ -189,7 +204,7 @@ def main(files: List[str], backend: str = BACKEND):
         print('Cancelled.')
         return
     if SHOW_PLOTS:
-        plt.show()
+        show_plots()
     else:
         plt.close('all')
 

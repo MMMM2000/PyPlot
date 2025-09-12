@@ -18,7 +18,7 @@ from matplotlib.typing import ColorType
 
 from ..config import load_config
 from .. import common
-from ..utils import save_figure
+from ..utils import save_figure, show_plots
 from ..backends import wants_matplotlib, wants_origin
 
 # Load default configuration
@@ -635,7 +635,7 @@ def main(files: List[str], backend: str = BACKEND):
 
     if wants_matplotlib(backend):
         if do_show:
-            plt.show()
+            show_plots()
         else:
             plt.close('all')
     else:

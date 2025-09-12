@@ -12,7 +12,7 @@ from matplotlib.figure import Figure
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
-from ..utils import save_figure, origin_session
+from ..utils import save_figure, origin_session, show_plots
 from ..backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("temperature_dependence", {})
@@ -287,7 +287,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         print("Cancelled.")
         return
     if wants_matplotlib(backend) and SHOW_PLOTS:
-        plt.show()
+        show_plots()
     else:
         plt.close("all")
 

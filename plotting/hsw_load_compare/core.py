@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from ..utils import save_figure, origin_session
+from ..utils import save_figure, origin_session, show_plots
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -271,7 +271,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
 
     if wants_matplotlib(backend):
         if cfg_show:
-            plt.show()
+            show_plots()
         else:
             plt.close("all")
 

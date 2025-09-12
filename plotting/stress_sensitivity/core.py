@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
-from ..utils import save_figure
+from ..utils import save_figure, show_plots
 from ..backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("stress_sensitivity", {})
@@ -574,7 +574,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
 
     if wants_matplotlib(backend):
         if do_show:
-            plt.show()
+            show_plots()
         else:
             plt.close('all')
     else:

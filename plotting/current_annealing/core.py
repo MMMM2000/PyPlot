@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..utils import save_figure, format_annealing_title
+from ..utils import save_figure, format_annealing_title, show_plots
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -99,7 +99,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
 
     if wants_matplotlib(backend):
         if SHOW_PLOTS:
-            plt.show()
+            show_plots()
         else:
             plt.close('all')
         if SAVE_PLOTS and outs:

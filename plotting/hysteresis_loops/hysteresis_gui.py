@@ -8,9 +8,9 @@ from PyQt6 import QtWidgets
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import apply_system_theme, create_file_widget
+    from plotting.utils import apply_system_theme, create_file_widget, show_plots
 else:
-    from ..utils import apply_system_theme, create_file_widget
+    from ..utils import apply_system_theme, create_file_widget, show_plots
 
 def _load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path, usecols=(0,1))
@@ -71,7 +71,7 @@ def plot_stacked(paths: List[str]) -> None:
     axes[-1].set_xlabel('H (A/m)')
     fig.suptitle(base_title)
     fig.tight_layout()
-    plt.show()
+    show_plots()
 
 def plot_separate(paths: List[str]) -> None:
     for p in paths:
@@ -84,7 +84,7 @@ def plot_separate(paths: List[str]) -> None:
         ax.set_xlabel('H (A/m)')
         ax.set_ylabel('F (Wb)')
         fig.tight_layout()
-    plt.show()
+    show_plots()
 
 def plot_combined(paths: List[str]) -> None:
     fig, ax = plt.subplots()
@@ -101,7 +101,7 @@ def plot_combined(paths: List[str]) -> None:
     ax.set_ylabel('F (Wb)')
     ax.legend(title='Anneal', loc='best')
     fig.tight_layout()
-    plt.show()
+    show_plots()
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:

@@ -13,10 +13,10 @@ if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
     # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.utils import apply_system_theme, select_files_or_folder, show_plots
     from plotting.backends import wants_matplotlib, wants_origin
 else:
-    from ..utils import apply_system_theme, select_files_or_folder
+    from ..utils import apply_system_theme, select_files_or_folder, show_plots
     from ..backends import wants_matplotlib, wants_origin
 
 
@@ -328,7 +328,7 @@ def main() -> None:
         print("Cancelled.")
         return
 
-    plt.show()
+    show_plots()
 
 
 if __name__ == "__main__":

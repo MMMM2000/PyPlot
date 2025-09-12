@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 from matplotlib.figure import Figure
 from contextlib import contextmanager
+import matplotlib.pyplot as plt
 
 
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -51,6 +52,16 @@ def save_figure(fig: Figure, base_path: str | Path, fmt: str = "png", dpi: int =
         fig.savefig(path, dpi=dpi, format=fmt)
     else:
         fig.savefig(path, format=fmt)
+
+
+def show_plots() -> None:
+    """Display Matplotlib figures without starting a new Qt event loop."""
+
+    if QtWidgets.QApplication.instance() is not None:
+        plt.show(block=False)
+        QtWidgets.QApplication.processEvents()
+    else:
+        plt.show()
 
 
 def _dark_palette(accent: QtGui.QColor) -> QtGui.QPalette:
