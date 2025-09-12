@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from PyQt6 import QtWidgets
+from PyQt6 import QtWidgets, QtCore
 
 import pathlib
 
@@ -19,6 +19,8 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Maxion Continuous Settings")
         layout = QtWidgets.QGridLayout(self)
+
+        self.settings = QtCore.QSettings("microwire", "maxion_continuous")
 
         self.files, file_widget = create_file_widget(self)
         layout.addWidget(file_widget, 0, 0, 1, 2)
@@ -73,12 +75,38 @@ class SettingsDialog(QtWidgets.QDialog):
 
         style_group = QtWidgets.QGroupBox("Scatter")
         style_layout = QtWidgets.QGridLayout(style_group)
-        self.marker_spin = QtWidgets.QDoubleSpinBox(); self.marker_spin.setRange(0.1, 99.9); self.marker_spin.setSingleStep(0.1); self.marker_spin.setValue(float(orig.MARKER_SIZE))
+        self.marker_spin = QtWidgets.QDoubleSpinBox()
+        self.marker_spin.setRange(0.1, 99.9)
+        self.marker_spin.setSingleStep(0.1)
+        self.marker_spin.setValue(float(orig.MARKER_SIZE))
         style_layout.addWidget(QtWidgets.QLabel("Marker size:"), 0, 0)
         style_layout.addWidget(self.marker_spin, 0, 1)
+
+        # Readability (collapsible)
+        header = QtWidgets.QToolButton()
+        header.setText("Readability")
+        header.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        header.setArrowType(QtCore.Qt.ArrowType.RightArrow)
+        header.setCheckable(True)
+        header.setChecked(False)
+
+        self._read_container = QtWidgets.QWidget()
+        read_layout = QtWidgets.QGridLayout(self._read_container)
         self.readable_cb = QtWidgets.QCheckBox("Improve readability")
-        self.readable_cb.setChecked(orig.IMPROVE_READABILITY)
-        style_layout.addWidget(self.readable_cb, 1, 0, 1, 2)
+        self.readable_cb.setChecked(
+            bool(self.settings.value("readable", orig.IMPROVE_READABILITY, type=bool))
+        )
+        self.text_size_spin = QtWidgets.QSpinBox()
+        self.text_size_spin.setRange(6, 72)
+        self.text_size_spin.setValue(int(self.settings.value("text_size", orig.TEXT_SIZE, type=int)))
+        self.title_size_spin = QtWidgets.QSpinBox()
+        self.title_size_spin.setRange(6, 96)
+        self.title_size_spin.setValue(int(self.settings.value("title_size", orig.TITLE_SIZE, type=int)))
+        read_layout.addWidget(self.readable_cb, 0, 0, 1, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Text size:"), 1, 0)
+        read_layout.addWidget(self.text_size_spin, 1, 1)
+        read_layout.addWidget(QtWidgets.QLabel("Title size:"), 2, 0)
+        read_layout.addWidget(self.title_size_spin, 2, 1)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -87,7 +115,24 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(mode_group, 1, 1)
         layout.addWidget(proc_group, 2, 0)
         layout.addWidget(style_group, 2, 1)
-        layout.addWidget(self.run_btn, 3, 0, 1, 2)
+        layout.addWidget(header, 3, 0, 1, 2)
+        layout.addWidget(self._read_container, 4, 0, 1, 2)
+        layout.addWidget(self.run_btn, 5, 0, 1, 2)
+
+        self._read_container.setVisible(False)
+
+        def _toggle_section(checked: bool) -> None:
+            self._read_container.setVisible(checked)
+            header.setArrowType(QtCore.Qt.ArrowType.DownArrow if checked else QtCore.Qt.ArrowType.RightArrow)
+
+        header.toggled.connect(_toggle_section)
+
+        def _toggle_readable(checked: bool) -> None:
+            self.text_size_spin.setEnabled(checked)
+            self.title_size_spin.setEnabled(checked)
+
+        _toggle_readable(self.readable_cb.isChecked())
+        self.readable_cb.toggled.connect(_toggle_readable)
 
     def run(self) -> None:
         if not self.files:
@@ -103,6 +148,11 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         orig.IMPROVE_READABILITY = self.readable_cb.isChecked()
+        orig.TEXT_SIZE = int(self.text_size_spin.value())
+        orig.TITLE_SIZE = int(self.title_size_spin.value())
+        self.settings.setValue("readable", orig.IMPROVE_READABILITY)
+        self.settings.setValue("text_size", orig.TEXT_SIZE)
+        self.settings.setValue("title_size", orig.TITLE_SIZE)
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
         orig.main(self.files, backend=backend)
 

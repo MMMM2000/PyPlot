@@ -56,8 +56,9 @@ offers buttons to add or remove entries, so datasets can be refined without
 restarting the tool.  Export options include a choice of PNG, PDF, or SVG
 format with a configurable DPI (PNG defaults to 1200 dpi).  The current
 annealing plotter also omits the initial 0 mA data point so figures start with
-the first real sample, and the Maxion plotter offers an **Improve readability**
-checkbox that enlarges all text for reports.
+the first real sample.  The Maxion plotter features a collapsible
+**Readability** section that can enlarge plot text and titles and applies
+×10³/×10⁴ axis scaling to reduce zero clutter.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 

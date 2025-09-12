@@ -91,6 +91,9 @@
     "MA_WINDOW": 20,
     "BACKEND": "matplotlib",
     "SAVE_FORMAT": "png",
-    "PNG_DPI": 1200
+    "PNG_DPI": 1200,
+    "IMPROVE_READABILITY": false,
+    "TEXT_SIZE": 18,
+    "TITLE_SIZE": 22
   }
 }

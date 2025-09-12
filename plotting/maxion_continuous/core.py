@@ -12,18 +12,23 @@ from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
 from ..utils import save_figure, origin_session
 from ..backends import wants_matplotlib, wants_origin
+from ..config import load_config
 
-OUTPUT_DIR = os.getcwd()
-SHOW_PLOTS = True
-SAVE_PLOTS = False
-PLOT_MODE = "both"  # 'raw', 'processed', 'both'
-MARKER_SIZE = 0.1
-MED_WINDOW = 5
-MA_WINDOW = 20
-SAVE_FORMAT = "png"
-PNG_DPI = 1200
-IMPROVE_READABILITY = False
-BACKEND = "matplotlib"
+_CFG = load_config().get("maxion_continuous", {})
+
+OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
+SHOW_PLOTS = _CFG.get("SHOW_PLOTS", True)
+SAVE_PLOTS = _CFG.get("SAVE_PLOTS", False)
+PLOT_MODE = _CFG.get("PLOT_MODE", "both")  # 'raw', 'processed', 'both'
+MARKER_SIZE = _CFG.get("MARKER_SIZE", 0.1)
+MED_WINDOW = _CFG.get("MED_WINDOW", 5)
+MA_WINDOW = _CFG.get("MA_WINDOW", 20)
+SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
+PNG_DPI = _CFG.get("PNG_DPI", 1200)
+IMPROVE_READABILITY = _CFG.get("IMPROVE_READABILITY", False)
+TEXT_SIZE = _CFG.get("TEXT_SIZE", 18)
+TITLE_SIZE = _CFG.get("TITLE_SIZE", 22)
+BACKEND = _CFG.get("BACKEND", "matplotlib")
 
 
 class ProgressDialog:
@@ -77,23 +82,29 @@ def load_data(files: List[str]) -> pd.DataFrame:
 
 
 def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, str]:
-    rc = {
-        'font.size': 14,
-        'axes.titlesize': 16,
-        'axes.labelsize': 14,
-        'legend.fontsize': 12,
-    } if IMPROVE_READABILITY else {}
+    rc = (
+        {
+            "font.size": TEXT_SIZE,
+            "axes.titlesize": TITLE_SIZE,
+            "axes.labelsize": TEXT_SIZE,
+            "legend.fontsize": TEXT_SIZE,
+            "xtick.labelsize": TEXT_SIZE,
+            "ytick.labelsize": TEXT_SIZE,
+        }
+        if IMPROVE_READABILITY
+        else {}
+    )
     with plt.rc_context(rc):
         fig, ax = plt.subplots(figsize=(9, 4))
-        x = np.arange(len(y))
+        x = np.arange(len(y)) / 1e4
         if PLOT_MODE in ("raw", "both"):
-            ax.scatter(x, y.to_numpy(), s=MARKER_SIZE, label="raw")
+            ax.scatter(x, y.to_numpy() / 1e3, s=MARKER_SIZE, label="raw")
         if PLOT_MODE in ("processed", "both"):
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
             proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-            ax.scatter(x, proc.to_numpy(), s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
-        ax.set_xlabel("Sample index")
-        ax.set_ylabel("T1+T2 (arb units)")
+            ax.scatter(x, proc.to_numpy() / 1e3, s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
+        ax.set_xlabel("Sample index (×10⁴)")
+        ax.set_ylabel("T1+T2 (arb units, ×10³)")
         ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
         ax.grid(True)
         ax.legend()
@@ -107,7 +118,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
     with origin_session() as op:
-        x = np.arange(len(y))
+        x = (np.arange(len(y)) / 1e4).tolist()
         book = op.new_book('w', lname="Maxion (Python)")
         book.activate()
         gp = op.new_graph(template='scatter')
@@ -115,8 +126,8 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
 
         # Raw
         w_raw = op.new_sheet('w', lname='raw')
-        w_raw.from_list(0, x.tolist())
-        w_raw.from_list(1, y.to_numpy().tolist())
+        w_raw.from_list(0, x)
+        w_raw.from_list(1, (y.to_numpy() / 1e3).tolist())
         w_raw.cols_axis('XY')
         gl.add_plot(w_raw, coly=1, colx=0, type='s')
 
@@ -125,8 +136,8 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
             proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
             w_proc = op.new_sheet('w', lname='proc')
-            w_proc.from_list(0, x.tolist())
-            w_proc.from_list(1, proc.to_numpy().tolist())
+            w_proc.from_list(0, x)
+            w_proc.from_list(1, (proc.to_numpy() / 1e3).tolist())
             w_proc.cols_axis('XY')
             p = gl.add_plot(w_proc, coly=1, colx=0, type='y')
             try:
@@ -138,8 +149,8 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
             gp.activate()
             op.lt_exec('page.antialias=1;')
             op.lt_exec('layer -aa 1;')
-            op.lt_exec('lab -xb "Sample index";')
-            op.lt_exec('lab -yl "T1+T2 (arb units)";')
+            op.lt_exec('lab -xb "Sample index (x10^4)";')
+            op.lt_exec('lab -yl "T1+T2 (arb units, x10^3)";')
             esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
             op.lt_exec(f'title -s "{esc}";')
             op.lt_exec('legend;')
