@@ -75,19 +75,19 @@ class SettingsDialog(QtWidgets.QDialog):
         if not self.files:
             QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
             return
-          cfg = {
-              "TT": self.tt_cb.isChecked(),
-              "HH": self.hh_cb.isChecked(),
-              "raw": self.raw_cb.isChecked(),
-              "hist": self.hist_cb.isChecked(),
-              "share_y": self.share_cb.isChecked(),
-              "show": self.show_cb.isChecked(),
-              "save": self.save_cb.isChecked(),
-              "out_dir": self.out_dir_edit.text(),
-              "BACKEND": ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()],
-          }
-          orig.SAVE_FORMAT = self.fmt_combo.currentText()
-          orig.PNG_DPI = int(self.dpi_spin.value())
+        cfg = {
+            "TT": self.tt_cb.isChecked(),
+            "HH": self.hh_cb.isChecked(),
+            "raw": self.raw_cb.isChecked(),
+            "hist": self.hist_cb.isChecked(),
+            "share_y": self.share_cb.isChecked(),
+            "show": self.show_cb.isChecked(),
+            "save": self.save_cb.isChecked(),
+            "out_dir": self.out_dir_edit.text(),
+            "BACKEND": ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()],
+        }
+        orig.SAVE_FORMAT = self.fmt_combo.currentText()
+        orig.PNG_DPI = int(self.dpi_spin.value())
         orig.SAME_HIST_Y = cfg["share_y"]
         orig.SHOW_PLOTS = cfg["show"]
         orig.SAVE_PLOTS = cfg["save"]
