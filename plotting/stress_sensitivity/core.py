@@ -531,6 +531,11 @@ def plot_samples_origin(
     except Exception:
         pass
 
+    try:
+        op.exit()
+    except Exception:
+        pass
+
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     data = load_data(files)

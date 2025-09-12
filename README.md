@@ -54,6 +54,8 @@ Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 offers buttons to add or remove entries, so datasets can be refined without
 restarting the tool.
+Origin sessions are closed automatically after plots are generated so the
+Origin application can be closed independently from the Python tools.
 
 ## 3. Loggers
 
@@ -80,6 +82,8 @@ Uses PyVISA to communicate with SCPI instruments over USB, RS‑232 or TCP/IP.  
 mirrors the serial logger’s workflow and adds the same voltage‑limit safety
 dialog and live values panel.  Select a VISA resource (e.g.
 `ASRL/ttyV1::INSTR`) and start logging.
+The ramp-down path is plotted in a contrasting colour to distinguish it from the
+current ramp-up.
 
 Launch from the master launcher or run
 

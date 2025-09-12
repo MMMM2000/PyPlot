@@ -10,7 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
-from ..utils import save_figure
+from ..utils import save_figure, origin_session
 from ..backends import wants_matplotlib, wants_origin
 
 OUTPUT_DIR = os.getcwd()
@@ -98,51 +98,45 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
-    import originpro as op  # lazy import
-    # Ensure Origin UI is shown
-    try:
-        op.set_show()
-    except Exception:
-        pass
+    with origin_session() as op:
+        x = np.arange(len(y))
+        book = op.new_book('w', lname="Maxion (Python)")
+        book.activate()
+        gp = op.new_graph(template='scatter')
+        gl = gp[0]
 
-    x = np.arange(len(y))
-    book = op.new_book('w', lname="Maxion (Python)")
-    book.activate()
-    gp = op.new_graph(template='scatter')
-    gl = gp[0]
+        # Raw
+        w_raw = op.new_sheet('w', lname='raw')
+        w_raw.from_list(0, x.tolist())
+        w_raw.from_list(1, y.to_numpy().tolist())
+        w_raw.cols_axis('XY')
+        gl.add_plot(w_raw, coly=1, colx=0, type='s')
 
-    # Raw
-    w_raw = op.new_sheet('w', lname='raw')
-    w_raw.from_list(0, x.tolist())
-    w_raw.from_list(1, y.to_numpy().tolist())
-    w_raw.cols_axis('XY')
-    gl.add_plot(w_raw, coly=1, colx=0, type='s')
+        # Processed
+        if PLOT_MODE in ("processed", "both"):
+            med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
+            proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+            w_proc = op.new_sheet('w', lname='proc')
+            w_proc.from_list(0, x.tolist())
+            w_proc.from_list(1, proc.to_numpy().tolist())
+            w_proc.cols_axis('XY')
+            p = gl.add_plot(w_proc, coly=1, colx=0, type='y')
+            try:
+                p.line_width = 1
+            except Exception:
+                pass
 
-    # Processed
-    if PLOT_MODE in ("processed", "both"):
-        med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
-        proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-        w_proc = op.new_sheet('w', lname='proc')
-        w_proc.from_list(0, x.tolist())
-        w_proc.from_list(1, proc.to_numpy().tolist())
-        w_proc.cols_axis('XY')
-        p = gl.add_plot(w_proc, coly=1, colx=0, type='y')
         try:
-            p.line_width = 1
+            gp.activate()
+            op.lt_exec('page.antialias=1;')
+            op.lt_exec('layer -aa 1;')
+            op.lt_exec('lab -xb "Sample index";')
+            op.lt_exec('lab -yl "T1+T2 (arb units)";')
+            esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
+            op.lt_exec(f'title -s "{esc}";')
+            op.lt_exec('legend;')
         except Exception:
             pass
-
-    try:
-        gp.activate()
-        op.lt_exec('page.antialias=1;')
-        op.lt_exec('layer -aa 1;')
-        op.lt_exec('lab -xb "Sample index";')
-        op.lt_exec('lab -yl "T1+T2 (arb units)";')
-        esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
-        op.lt_exec(f'title -s "{esc}";')
-        op.lt_exec('legend;')
-    except Exception:
-        pass
 
 
 def main(files: List[str], backend: str = BACKEND):

@@ -315,6 +315,10 @@ def main() -> None:
                 op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
             except Exception:
                 pass
+            try:
+                op.exit()
+            except Exception:
+                pass
         except Exception as e:
             print(f"Origin plot failed: {e}")
 

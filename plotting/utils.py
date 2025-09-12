@@ -3,9 +3,28 @@ import os
 import sys
 from pathlib import Path
 from matplotlib.figure import Figure
+from contextlib import contextmanager
 
 
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
+
+
+@contextmanager
+def origin_session():
+    """Return an Origin session that is closed on exit."""
+
+    import originpro as op  # lazy import
+    try:
+        op.set_show()
+    except Exception:
+        pass
+    try:
+        yield op
+    finally:
+        try:
+            op.exit()
+        except Exception:
+            pass
 
 
 def format_annealing_title(base: str) -> str:

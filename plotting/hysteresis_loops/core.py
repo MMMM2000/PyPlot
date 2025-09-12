@@ -80,6 +80,11 @@ def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) 
     except Exception:
         pass
 
+    try:
+        op.exit()
+    except Exception:
+        pass
+
     book = op.new_book('w', lname="Hysteresis (Python)")
     book.activate()
     gp = op.new_graph(template='line')
@@ -139,6 +144,11 @@ def _origin_plot_separate(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) 
             op.lt_exec('lab -yl "F (Wb)";')
         except Exception:
             pass
+
+    try:
+        op.exit()
+    except Exception:
+        pass
 
 
 def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, backend: str = BACKEND):

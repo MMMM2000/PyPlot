@@ -116,7 +116,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
 class ProgressDialog:
     def __init__(self, total: int):
-        self.dialog = QtWidgets.QProgressDialog("Saving plots...", "Cancel", 0, total)
+        self.dialog = QtWidgets.QProgressDialog("Generating plots...", "Cancel", 0, total)
         self.dialog.setWindowTitle("Processing")
         self.dialog.canceled.connect(self.cancel)
         self.dialog.setAutoClose(False)

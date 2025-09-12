@@ -360,6 +360,11 @@ def _origin_build_graph(
     except Exception:
         pass
 
+    try:
+        op.exit()
+    except Exception:
+        pass
+
     # Defer legend tweaking until after plots are added.
 
 

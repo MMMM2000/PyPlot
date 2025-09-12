@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from ..utils import save_figure
+from ..utils import save_figure, origin_session
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -278,45 +278,41 @@ def main(files: List[str], cfg: Dict[str, Any]):
     # Origin output (log-compare panels)
     if wants_origin(backend):
         try:
-            import originpro as op
-            try:
-                op.set_show()
-            except Exception:
-                pass
-            book = op.new_book('w', lname="HSW Compare (Python)")
-            book.activate()
-            gp = op.new_graph(template='scatter')
-            gl0 = gp[0]
-            first = True
-            for load in loads:
-                gl = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
-                first = False
-                for col, color in (("TT", "#1f77b4"), ("HH", "#ff7f0e")):
-                    if not cfg[col]:
-                        continue
-                    h = hist_data[load][col]
-                    valid = h["dp"] > 0
-                    x = (1 - h["centers"][valid]) ** 1.5
-                    y = np.log(h["dp"][valid])
-                    w = op.new_sheet('w', lname=f'{col}_{load:g}')
-                    w.from_list(0, x.tolist())
-                    w.from_list(1, y.tolist())
-                    w.cols_axis('XY')
-                    p = gl.add_plot(w, coly=1, colx=0, type='y')
+            with origin_session() as op:
+                book = op.new_book('w', lname="HSW Compare (Python)")
+                book.activate()
+                gp = op.new_graph(template='scatter')
+                gl0 = gp[0]
+                first = True
+                for load in loads:
+                    gl = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
+                    first = False
+                    for col, color in (("TT", "#1f77b4"), ("HH", "#ff7f0e")):
+                        if not cfg[col]:
+                            continue
+                        h = hist_data[load][col]
+                        valid = h["dp"] > 0
+                        x = (1 - h["centers"][valid]) ** 1.5
+                        y = np.log(h["dp"][valid])
+                        w = op.new_sheet('w', lname=f'{col}_{load:g}')
+                        w.from_list(0, x.tolist())
+                        w.from_list(1, y.tolist())
+                        w.cols_axis('XY')
+                        p = gl.add_plot(w, coly=1, colx=0, type='y')
+                        try:
+                            p.color = color
+                            p.symbol_shape = 2
+                        except Exception:
+                            pass
                     try:
-                        p.color = color
-                        p.symbol_shape = 2
+                        gl.rescale()
                     except Exception:
                         pass
                 try:
-                    gl.rescale()
+                    gp.activate()
+                    op.lt_exec('page.antialias=1; layer -aa 1;')
+                    op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
                 except Exception:
                     pass
-            try:
-                gp.activate()
-                op.lt_exec('page.antialias=1; layer -aa 1;')
-                op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
-            except Exception:
-                pass
         except Exception as e:
             print(f"Origin plot failed: {e}")

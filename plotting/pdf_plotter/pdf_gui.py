@@ -669,6 +669,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             op.lt_exec(f'lab -xb "{x_label}"; lab -yl "{y_label}"; legend;')
         except Exception:
             pass
+        try:
+            op.exit()
+        except Exception:
+            pass
 
     def _save_lines(
         self,

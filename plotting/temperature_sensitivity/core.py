@@ -567,6 +567,11 @@ def plot_variable_origin(
     except Exception:
         pass
 
+    try:
+        op.exit()
+    except Exception:
+        pass
+
 
 from ..common import maybe_handle_outliers
 

@@ -90,15 +90,20 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.canvas = FigureCanvas(self.fig)
         self.ax_ri = self.fig.add_subplot(211)
         self.ax_rn = self.fig.add_subplot(212)
-        (self.line_ri,) = self.ax_ri.plot([], [], "y")
-        (self.line_rn,) = self.ax_rn.plot([], [], "c")
+        (self.line_ri_up,) = self.ax_ri.plot([], [], color="tab:orange")
+        (self.line_ri_down,) = self.ax_ri.plot([], [], color="tab:blue")
+        (self.line_rn_up,) = self.ax_rn.plot([], [], color="tab:orange")
+        (self.line_rn_down,) = self.ax_rn.plot([], [], color="tab:blue")
         self.ax_ri.set_xlabel("Current [mA]")
         self.ax_ri.set_ylabel("Resistance [Ohm]")
         self.ax_rn.set_xlabel("N [-]")
         self.ax_rn.set_ylabel("Resistance [Ohm]")
-        self.curr_mA: list[float] = []
-        self.res_data: list[float] = []
-        self.n_data: list[int] = []
+        self.curr_mA_up: list[float] = []
+        self.res_up: list[float] = []
+        self.curr_mA_down: list[float] = []
+        self.res_down: list[float] = []
+        self.n_up: list[int] = []
+        self.n_down: list[int] = []
         self.sample_idx = 0
         self.update_plot_colors()
 
@@ -294,7 +299,9 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             return
         self.log(f"Logging to {fname}")
         self.log_button.setText("Stop Log")
-        self.curr_mA.clear(); self.res_data.clear(); self.n_data.clear()
+        self.curr_mA_up.clear(); self.res_up.clear()
+        self.curr_mA_down.clear(); self.res_down.clear()
+        self.n_up.clear(); self.n_down.clear()
         self.sample_idx = 0
         self.poll_timer.start(1000)
 
@@ -322,16 +329,27 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.voltage_value.setText(f"{voltage:.3f}")
         self.current_value.setText(f"{current*1000:.3f}")
         self.set_value.setText(f"{self.current_set*1000:.3f}")
-        self.curr_mA.append(current * 1000.0)
-        self.res_data.append(resistance)
         self.sample_idx += 1
-        self.n_data.append(self.sample_idx)
-        if len(self.res_data) > 1000:
-            self.curr_mA = self.curr_mA[-1000:]
-            self.res_data = self.res_data[-1000:]
-            self.n_data = self.n_data[-1000:]
-        self.line_ri.set_data(self.curr_mA, self.res_data)
-        self.line_rn.set_data(self.n_data, self.res_data)
+        if self.ramping_up:
+            self.curr_mA_up.append(current * 1000.0)
+            self.res_up.append(resistance)
+            self.n_up.append(self.sample_idx)
+            if len(self.res_up) > 1000:
+                self.curr_mA_up = self.curr_mA_up[-1000:]
+                self.res_up = self.res_up[-1000:]
+                self.n_up = self.n_up[-1000:]
+        else:
+            self.curr_mA_down.append(current * 1000.0)
+            self.res_down.append(resistance)
+            self.n_down.append(self.sample_idx)
+            if len(self.res_down) > 1000:
+                self.curr_mA_down = self.curr_mA_down[-1000:]
+                self.res_down = self.res_down[-1000:]
+                self.n_down = self.n_down[-1000:]
+        self.line_ri_up.set_data(self.curr_mA_up, self.res_up)
+        self.line_ri_down.set_data(self.curr_mA_down, self.res_down)
+        self.line_rn_up.set_data(self.n_up, self.res_up)
+        self.line_rn_down.set_data(self.n_down, self.res_down)
         self.ax_ri.relim(); self.ax_ri.autoscale_view()
         self.ax_rn.relim(); self.ax_rn.autoscale_view()
         self.canvas.draw_idle()
@@ -373,7 +391,9 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.reverse_button.setEnabled(True)
-        self.curr_mA.clear(); self.res_data.clear(); self.n_data.clear()
+        self.curr_mA_up.clear(); self.res_up.clear()
+        self.curr_mA_down.clear(); self.res_down.clear()
+        self.n_up.clear(); self.n_down.clear()
         self.sample_idx = 0
         self.set_value.setText("0.000")
         self.process_timer.start(self.interval_spin.value())
