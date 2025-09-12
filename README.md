@@ -68,6 +68,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * default **Reverse to zero after max** behaviour
 * automatic halt at **30 V** with a dialog to hold, reverse or stop
 * live display of measured current, set current and resistance
+* streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
 
 Launch from the master launcher or run

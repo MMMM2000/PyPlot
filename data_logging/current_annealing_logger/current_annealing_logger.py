@@ -802,6 +802,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ciara_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
+                # Immediately request the first sample instead of waiting
+                # for the one‑second timer interval to elapse.  This avoids
+                # an unnecessary pause after the user presses *Start*.
+                self.handle_send_new_command()
                 self.timer_command.start(1000)
                 # print("Spusteny mod manualneho zihania")
                 
@@ -847,6 +851,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ciara_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
+                # Kick off the first acquisition immediately so the
+                # measurement starts without a one‑second delay.
+                self.handle_send_new_command()
                 self.timer_command.start(1000)
                 # print("Spusteny mod automatizovaneho zihania")
                 
@@ -1120,12 +1127,16 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def send_init_commands(self):
         # print("teraz posielam univerzalnu zostavu prikazov pri spusteni")
-        for i in range(0, len(self.commands_init)):
+        for cmd in self.commands_init:
             if not self.proces_on:
                 break
-            self.prikaz_portu = self.commands_init[i]
+            self.prikaz_portu = cmd
             self.send_serial_command()
-            self.simple_delay(1000)
+            # The original implementation paused for a full second between
+            # initialisation commands, which caused a noticeable start-up
+            # delay.  A brief 200 ms gap gives the supply time to process
+            # each command while keeping the UI responsive.
+            self.simple_delay(200)
             
     def simple_delay(self, delay_ms):
         self.wait = True
