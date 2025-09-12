@@ -640,5 +640,3 @@ def main(files: List[str], backend: str = BACKEND):
             plt.close('all')
     else:
         plt.close('all')
-
-    print(f'Done: processed {total} plots.')

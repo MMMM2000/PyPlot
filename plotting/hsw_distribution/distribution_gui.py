@@ -85,7 +85,6 @@ def ask_options() -> Dict[str, Any] | None:
     out_l.addWidget(backend_combo)
     layout.addWidget(out_box, 2, 0, 1, 2)
     layout.addWidget(run_btn, 3, 0, 1, 2)
-    dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         return None

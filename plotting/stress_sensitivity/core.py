@@ -580,8 +580,6 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     else:
         plt.close('all')
 
-    print(f'Done: processed {total} plots.')
-
 
 class ProgressDialog:
     """CLI progress bar used when no GUI is provided."""
