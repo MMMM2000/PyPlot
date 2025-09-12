@@ -6,16 +6,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PyQt6 import QtWidgets
 
-# Try to import theme helper if available
-try:
-    from ..utils import apply_system_theme  # when run in package
-except Exception:
-    try:
-        sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-        from plotting.utils import apply_system_theme  # when run directly
-    except Exception:
-        def apply_system_theme(app):  # no-op fallback
-            return
+if __package__ is None or __package__ == "":
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
+    from plotting.utils import apply_system_theme, create_file_widget
+else:
+    from ..utils import apply_system_theme, create_file_widget
 
 def _load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path, usecols=(0,1))
@@ -108,34 +103,50 @@ def plot_combined(paths: List[str]) -> None:
     fig.tight_layout()
     plt.show()
 
-def _select_dat_files(start_dir: str | None=None) -> list[str]:
-    dlg = QtWidgets.QFileDialog()
-    dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFiles)
-    dlg.setNameFilters(['Data files (*.dat *.txt)', 'All files (*.*)'])
-    if start_dir:
-        dlg.setDirectory(start_dir)
-    if dlg.exec():
-        return [str(p) for p in dlg.selectedFiles()]
-    return []
+class SettingsDialog(QtWidgets.QDialog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Hysteresis Loops")
+        layout = QtWidgets.QGridLayout(self)
+
+        self.files, file_widget = create_file_widget(self, ext=".dat")
+        layout.addWidget(file_widget, 0, 0, 1, 2)
+
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["Stacked", "Combined", "Separate"])
+
+        self.run_btn = QtWidgets.QPushButton("Plot")
+        self.run_btn.clicked.connect(self.run)
+
+        layout.addWidget(QtWidgets.QLabel("Mode:"), 1, 0)
+        layout.addWidget(self.mode_combo, 1, 1)
+        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+
+    def run(self) -> None:
+        if not self.files:
+            QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
+            return
+        mode = self.mode_combo.currentText()
+        if mode == 'Stacked':
+            plot_stacked(self.files)
+        elif mode == 'Combined':
+            plot_combined(self.files)
+        else:
+            plot_separate(self.files)
+
 
 def main() -> None:
-    app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
-    files = _select_dat_files()
-    if not files:
-        sys.exit(0)
-    # Ask mode
-    combo = QtWidgets.QInputDialog()
-    modes = ['Stacked', 'Combined', 'Separate']
-    ok, mode = QtWidgets.QInputDialog.getItem(None, 'Plot mode', 'Mode:', modes, 0, False)
-    if not ok:
-        sys.exit(0)
-    if mode == 'Stacked':
-        plot_stacked(files)
-    elif mode == 'Combined':
-        plot_combined(files)
-    else:
-        plot_separate(files)
+    app = QtWidgets.QApplication.instance()
+    owns = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        apply_system_theme(app)
+        owns = True
+    dlg = SettingsDialog()
+    dlg.show()
+    if owns:
+        app.exec()
 
-if __name__ == '__main__':  # pragma: no cover
+
+if __name__ == '__main__':
     main()

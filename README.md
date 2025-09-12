@@ -50,6 +50,11 @@ python -m launcher
 
 Closing the launcher warns about other open windows and will close them.
 
+Plotting scripts opened from the **Plotting** tab keep their settings dialogs
+open after generating figures.  Each dialog lists the selected input files and
+offers buttons to add or remove entries, so datasets can be refined without
+restarting the tool.
+
 ## 3. Loggers
 
 ### 3.1 Serial Current Annealing Logger

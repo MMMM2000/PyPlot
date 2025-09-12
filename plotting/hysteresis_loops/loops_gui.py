@@ -1,84 +1,67 @@
 from __future__ import annotations
 
-import os
 import sys
-import pathlib
-from typing import List
-
 from PyQt6 import QtWidgets
+
+import pathlib
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import apply_system_theme
     from plotting.hysteresis_loops import core
+    from plotting.utils import apply_system_theme, create_file_widget
 else:
-    from ..utils import apply_system_theme
     from . import core
+    from ..utils import apply_system_theme, create_file_widget
 
 
-def select_dat_files(parent: QtWidgets.QWidget | None = None) -> List[str]:
-    """Return a list of ``.dat`` files chosen by the user."""
-    box = QtWidgets.QMessageBox(parent)
-    box.setWindowTitle("Select Input")
-    box.setText("Choose input files or a folder with data")
-    files_btn = box.addButton("Files", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-    folder_btn = box.addButton("Folder", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-    box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
-    box.exec()
+class SettingsDialog(QtWidgets.QDialog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Hysteresis Loop Settings")
+        layout = QtWidgets.QGridLayout(self)
 
-    clicked = box.clickedButton()
-    paths: List[str] = []
-    if clicked == files_btn:
-        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            parent,
-            "Select measurement files",
-            "",
-            "Data files (*.dat);;All files (*)",
-        )
-    elif clicked == folder_btn:
-        directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder")
-        if directory:
-            for root, _dirs, files in os.walk(directory):
-                for name in files:
-                    if name.lower().endswith(".dat"):
-                        paths.append(os.path.join(root, name))
-            paths.sort()
-    return list(paths)
+        self.files, file_widget = create_file_widget(self, ext=".dat")
+        layout.addWidget(file_widget, 0, 0, 1, 2)
 
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["Combined", "Separate", "Stacked"])
+        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
 
-def ask_files() -> List[str]:
-    paths = select_dat_files()
-    if not paths:
-        sys.exit("No files selected.")
-    return paths
+        mode_group = QtWidgets.QGroupBox("Options")
+        mode_layout = QtWidgets.QGridLayout(mode_group)
+        mode_layout.addWidget(QtWidgets.QLabel("Plot mode:"), 0, 0)
+        mode_layout.addWidget(self.mode_combo, 0, 1)
+        mode_layout.addWidget(QtWidgets.QLabel("Backend:"), 1, 0)
+        mode_layout.addWidget(self.backend_combo, 1, 1)
 
+        self.run_btn = QtWidgets.QPushButton("Plot")
+        self.run_btn.clicked.connect(self.run)
 
-def ask_mode() -> tuple[str, str]:
-    dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Hysteresis Loop Settings")
-    layout = QtWidgets.QVBoxLayout(dialog)
-    combo = QtWidgets.QComboBox()
-    combo.addItems(["Combined", "Separate", "Stacked"])
-    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-    layout.addWidget(QtWidgets.QLabel("Plot mode:"))
-    layout.addWidget(combo)
-    layout.addWidget(QtWidgets.QLabel("Backend:"))
-    layout.addWidget(backend_combo)
-    run_btn = QtWidgets.QPushButton("Plot")
-    run_btn.clicked.connect(dialog.accept)
-    layout.addWidget(run_btn)
-    if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-        sys.exit(0)
-    return combo.currentText(), ["matplotlib", "origin", "both"][backend_combo.currentIndex()]
+        layout.addWidget(mode_group, 1, 0, 1, 2)
+        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+
+    def run(self) -> None:
+        if not self.files:
+            QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
+            return
+        mode = self.mode_combo.currentText()
+        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        core.plot_loops(self.files, mode=mode, show=True, backend=backend)
 
 
 def main() -> None:
-    files = ask_files()
-    mode, backend = ask_mode()
-    core.plot_loops(files, mode=mode, show=True, backend=backend)
+    app = QtWidgets.QApplication.instance()
+    owns = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        apply_system_theme(app)
+        owns = True
+    dlg = SettingsDialog()
+    dlg.show()
+    if owns:
+        app.exec()
 
 
-if __name__ == "__main__":  # pragma: no cover
-    app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
+if __name__ == "__main__":
     main()
+

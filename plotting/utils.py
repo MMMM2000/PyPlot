@@ -191,3 +191,45 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = "
                         paths.append(os.path.join(root, name))
             paths.sort()
     return list(paths)
+
+
+def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[list[str], QtWidgets.QWidget]:
+    """Return a widget managing a list of input files and the backing list."""
+
+    files: list[str] = []
+    file_list = QtWidgets.QListWidget()
+    file_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+
+    def add_files() -> None:
+        new = select_files_or_folder(parent, ext)
+        for f in new:
+            if f not in files:
+                files.append(f)
+        file_list.clear()
+        file_list.addItems(files)
+
+    def remove_selected() -> None:
+        for item in file_list.selectedItems():
+            files.remove(item.text())
+            file_list.takeItem(file_list.row(item))
+
+    def open_item(item: QtWidgets.QListWidgetItem) -> None:
+        QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
+
+    file_list.itemDoubleClicked.connect(open_item)
+
+    add_btn = QtWidgets.QPushButton("Add Files/Folders")
+    add_btn.clicked.connect(add_files)
+    remove_btn = QtWidgets.QPushButton("Remove Selected")
+    remove_btn.clicked.connect(remove_selected)
+
+    container = QtWidgets.QWidget()
+    layout = QtWidgets.QHBoxLayout(container)
+    layout.addWidget(file_list, 1)
+    btn_layout = QtWidgets.QVBoxLayout()
+    btn_layout.addWidget(add_btn)
+    btn_layout.addWidget(remove_btn)
+    btn_layout.addStretch()
+    layout.addLayout(btn_layout)
+
+    return files, container
