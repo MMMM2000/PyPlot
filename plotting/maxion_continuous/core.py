@@ -30,6 +30,9 @@ SHOW_LEGEND = _CFG.get("SHOW_LEGEND", True)
 TICK_SIZE = _CFG.get("TICK_SIZE", 18)
 AXIS_LABEL_SIZE = _CFG.get("AXIS_LABEL_SIZE", 18)
 TITLE_SIZE = _CFG.get("TITLE_SIZE", 22)
+SHOW_TICK_LABELS = _CFG.get("SHOW_TICK_LABELS", True)
+SHOW_AXIS_LABELS = _CFG.get("SHOW_AXIS_LABELS", True)
+SHOW_TITLE = _CFG.get("SHOW_TITLE", True)
 BACKEND = _CFG.get("BACKEND", "matplotlib")
 
 
@@ -108,9 +111,25 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
             proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
             sc = ax.scatter(x, proc.to_numpy() / 1e3, s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
             artists.append(sc); labels.append(f"med{MED_WINDOW}+mwa{MA_WINDOW}")
-        ax.set_xlabel("Sample index (×10⁴)")
-        ax.set_ylabel("T1+T2 (arb. u., ×10³)")
-        ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
+        if IMPROVE_READABILITY:
+            if SHOW_AXIS_LABELS:
+                ax.set_xlabel("Sample index (×10⁴)")
+                ax.set_ylabel("T1+T2 (arb. u., ×10³)")
+            else:
+                ax.set_xlabel("")
+                ax.set_ylabel("")
+            if SHOW_TICK_LABELS:
+                pass
+            else:
+                ax.tick_params(labelbottom=False, labelleft=False)
+            if SHOW_TITLE:
+                ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
+            else:
+                ax.set_title("")
+        else:
+            ax.set_xlabel("Sample index (×10⁴)")
+            ax.set_ylabel("T1+T2 (arb. u., ×10³)")
+            ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
         ax.grid(True)
         if SHOW_LEGEND and artists:
             leg = ax.legend(artists, labels, handlelength=0, handletextpad=0)

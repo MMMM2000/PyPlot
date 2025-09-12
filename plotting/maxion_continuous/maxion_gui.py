@@ -105,24 +105,39 @@ class SettingsDialog(QtWidgets.QDialog):
         self.tick_size_spin.setValue(
             int(self.settings.value("tick_size", orig.TICK_SIZE, type=int))
         )
+        self.tick_show_cb = QtWidgets.QCheckBox("Show")
+        self.tick_show_cb.setChecked(
+            bool(self.settings.value("show_ticks", orig.SHOW_TICK_LABELS, type=bool))
+        )
         self.axis_size_spin = QtWidgets.QSpinBox()
         self.axis_size_spin.setRange(6, 72)
         self.axis_size_spin.setValue(
             int(self.settings.value("axis_size", orig.AXIS_LABEL_SIZE, type=int))
+        )
+        self.axis_show_cb = QtWidgets.QCheckBox("Show")
+        self.axis_show_cb.setChecked(
+            bool(self.settings.value("show_axis", orig.SHOW_AXIS_LABELS, type=bool))
         )
         self.title_size_spin = QtWidgets.QSpinBox()
         self.title_size_spin.setRange(6, 96)
         self.title_size_spin.setValue(
             int(self.settings.value("title_size", orig.TITLE_SIZE, type=int))
         )
-        read_layout.addWidget(self.readable_cb, 0, 0, 1, 2)
-        read_layout.addWidget(self.legend_cb, 1, 0, 1, 2)
+        self.title_show_cb = QtWidgets.QCheckBox("Show")
+        self.title_show_cb.setChecked(
+            bool(self.settings.value("show_title", orig.SHOW_TITLE, type=bool))
+        )
+        read_layout.addWidget(self.readable_cb, 0, 0, 1, 3)
+        read_layout.addWidget(self.legend_cb, 1, 0, 1, 3)
         read_layout.addWidget(QtWidgets.QLabel("Tick label size:"), 2, 0)
         read_layout.addWidget(self.tick_size_spin, 2, 1)
+        read_layout.addWidget(self.tick_show_cb, 2, 2)
         read_layout.addWidget(QtWidgets.QLabel("Axis label size:"), 3, 0)
         read_layout.addWidget(self.axis_size_spin, 3, 1)
+        read_layout.addWidget(self.axis_show_cb, 3, 2)
         read_layout.addWidget(QtWidgets.QLabel("Title size:"), 4, 0)
         read_layout.addWidget(self.title_size_spin, 4, 1)
+        read_layout.addWidget(self.title_show_cb, 4, 2)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -143,11 +158,27 @@ class SettingsDialog(QtWidgets.QDialog):
 
         header.toggled.connect(_toggle_section)
 
+        def _toggle_tick(checked: bool) -> None:
+            self.tick_size_spin.setEnabled(checked and self.readable_cb.isChecked())
+
+        def _toggle_axis(checked: bool) -> None:
+            self.axis_size_spin.setEnabled(checked and self.readable_cb.isChecked())
+
+        def _toggle_title(checked: bool) -> None:
+            self.title_size_spin.setEnabled(checked and self.readable_cb.isChecked())
+
+        self.tick_show_cb.toggled.connect(_toggle_tick)
+        self.axis_show_cb.toggled.connect(_toggle_axis)
+        self.title_show_cb.toggled.connect(_toggle_title)
+
         def _toggle_readable(checked: bool) -> None:
             self.legend_cb.setEnabled(checked)
-            self.tick_size_spin.setEnabled(checked)
-            self.axis_size_spin.setEnabled(checked)
-            self.title_size_spin.setEnabled(checked)
+            self.tick_show_cb.setEnabled(checked)
+            self.axis_show_cb.setEnabled(checked)
+            self.title_show_cb.setEnabled(checked)
+            _toggle_tick(self.tick_show_cb.isChecked())
+            _toggle_axis(self.axis_show_cb.isChecked())
+            _toggle_title(self.title_show_cb.isChecked())
 
         _toggle_readable(self.readable_cb.isChecked())
         self.readable_cb.toggled.connect(_toggle_readable)
@@ -167,11 +198,17 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.PNG_DPI = int(self.dpi_spin.value())
         orig.IMPROVE_READABILITY = self.readable_cb.isChecked()
         orig.SHOW_LEGEND = self.legend_cb.isChecked()
+        orig.SHOW_TICK_LABELS = self.tick_show_cb.isChecked()
+        orig.SHOW_AXIS_LABELS = self.axis_show_cb.isChecked()
+        orig.SHOW_TITLE = self.title_show_cb.isChecked()
         orig.TICK_SIZE = int(self.tick_size_spin.value())
         orig.AXIS_LABEL_SIZE = int(self.axis_size_spin.value())
         orig.TITLE_SIZE = int(self.title_size_spin.value())
         self.settings.setValue("readable", orig.IMPROVE_READABILITY)
         self.settings.setValue("show_legend", orig.SHOW_LEGEND)
+        self.settings.setValue("show_ticks", orig.SHOW_TICK_LABELS)
+        self.settings.setValue("show_axis", orig.SHOW_AXIS_LABELS)
+        self.settings.setValue("show_title", orig.SHOW_TITLE)
         self.settings.setValue("tick_size", orig.TICK_SIZE)
         self.settings.setValue("axis_size", orig.AXIS_LABEL_SIZE)
         self.settings.setValue("title_size", orig.TITLE_SIZE)
