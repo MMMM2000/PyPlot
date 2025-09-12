@@ -105,6 +105,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.n_up: list[int] = []
         self.n_down: list[int] = []
         self.sample_idx = 0
+        self.first_sample = True
         self.update_plot_colors()
 
         # ------------------------------------------------------------------ layout
@@ -303,6 +304,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.curr_mA_down.clear(); self.res_down.clear()
         self.n_up.clear(); self.n_down.clear()
         self.sample_idx = 0
+        self.first_sample = True
         self.poll_timer.start(1000)
 
     def poll_once(self) -> None:
@@ -317,6 +319,12 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             self.handle_log()
             return
         resistance = voltage / current if abs(current) > 1e-9 else float("inf")
+        if self.first_sample:
+            self.first_sample = False
+            self.voltage_value.setText(f"{voltage:.3f}")
+            self.current_value.setText(f"{current*1000:.3f}")
+            self.set_value.setText(f"{self.current_set*1000:.3f}")
+            return
         if self.logfile is not None:
             line = f"{time.time():.3f}      {voltage}       {current}       {resistance}\n"
             try:
@@ -395,6 +403,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.curr_mA_down.clear(); self.res_down.clear()
         self.n_up.clear(); self.n_down.clear()
         self.sample_idx = 0
+        self.first_sample = True
         self.set_value.setText("0.000")
         self.process_timer.start(self.interval_spin.value())
 

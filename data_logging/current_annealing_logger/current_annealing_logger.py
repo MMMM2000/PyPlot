@@ -293,10 +293,11 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         #premenne na kreslenie grafu z dat
-        self.prev_value_x = 0
+        self.prev_value_x = None
         self.curr_value_x = 0
-        self.prev_value_y = 0
+        self.prev_value_y = None
         self.curr_value_y = 0
+        self.first_sample = True
         
         self.fig = None
         self.ax1 = None
@@ -488,36 +489,37 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.zamok.unlock()
                         return
                     #na tomto mieste zapiseme data do suboru
-                    if(not self.f_out):
-                        try:
-                            from os import makedirs
-                            from os.path import dirname
-                            makedirs(dirname(self.f_name), exist_ok=True)
-                        except Exception:
-                            pass
-                        self.f_out = open(self.f_name, "a")
-                    if(self.f_out):
-                        self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
-                        self.f_out.write(self.line)
-                        self.f_out.close()
-                        self.f_out = None
+                    if not self.first_sample:
+                        if(not self.f_out):
+                            try:
+                                from os import makedirs
+                                from os.path import dirname
+                                makedirs(dirname(self.f_name), exist_ok=True)
+                            except Exception:
+                                pass
+                            self.f_out = open(self.f_name, "a")
+                        if(self.f_out):
+                            self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
+                            self.f_out.write(self.line)
+                            self.f_out.close()
+                            self.f_out = None
 
-                        # progress and rate tracking on each sample
-                        now = time.perf_counter()
-                        if self.last_sample_time is not None:
-                            dt = now - self.last_sample_time
-                            if dt > 0:
-                                rate = 1.0 / dt
-                                self._rate_window.append(rate)
-                                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                                if self.total_steps:
-                                    remaining = max(0, self.total_steps - self.step_idx)
-                                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
-                        self.last_sample_time = now
-                        self.step_idx += 1
-                        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
-                            self.ui.progressBar_process.setMaximum(self.total_steps)
-                            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+                            # progress and rate tracking on each sample
+                            now = time.perf_counter()
+                            if self.last_sample_time is not None:
+                                dt = now - self.last_sample_time
+                                if dt > 0:
+                                    rate = 1.0 / dt
+                                    self._rate_window.append(rate)
+                                    self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                                    if self.total_steps:
+                                        remaining = max(0, self.total_steps - self.step_idx)
+                                        self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
+                            self.last_sample_time = now
+                            self.step_idx += 1
+                            if hasattr(self.ui, 'progressBar_process') and self.total_steps:
+                                self.ui.progressBar_process.setMaximum(self.total_steps)
+                                self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
                 if (
                     self.current_increment > 0
                     and self.current_voltage >= self.max_voltage
@@ -771,6 +773,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.force_stop_at_zero = False
             self.command_number = 0
             self.vzorka_N = 0
+            self.prev_value_x = None
+            self.prev_value_y = None
+            self.first_sample = True
             # print("Proces bezi")
             self.ui.pushButton_spusti_proces.setText("Stop annealing process")
             if(self.modus_operandi == 0):
@@ -963,30 +968,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curr_value_y = self.current_resistance
             self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
             self.ui.lcdNumber_aktualny_odpor.display("{:.1f}".format(self.curr_value_y))
-           
-            
+
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
-            self.vzorka_N +=1
-            
-            if(self.vzorka_N > 1):
-                #pridame novu vzroku do grafu
-                self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax1.add_line(self.line1)
-            
-                self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax2.add_line(self.line2)
-            
-                # Voliteľné: dynamické prispôsobenie rozsahov
-                self.ax1.relim()
-                self.ax1.autoscale_view()
-                self.ax2.relim()
-                self.ax2.autoscale_view()
-            
-                self.fig.canvas.draw()
-                self.fig.canvas.flush_events()
-            
-            self.prev_value_x = self.curr_value_x
-            self.prev_value_y = self.curr_value_y
+            if self.first_sample:
+                self.first_sample = False
+                self.prev_value_x = None
+                self.prev_value_y = None
+            else:
+                self.vzorka_N +=1
+                if self.prev_value_x is not None:
+                    #pridame novu vzroku do grafu
+                    self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax1.add_line(self.line1)
+
+                    self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax2.add_line(self.line2)
+
+                    # Voliteľné: dynamické prispôsobenie rozsahov
+                    self.ax1.relim()
+                    self.ax1.autoscale_view()
+                    self.ax2.relim()
+                    self.ax2.autoscale_view()
+
+                    self.fig.canvas.draw()
+                    self.fig.canvas.flush_events()
+
+                self.prev_value_x = self.curr_value_x
+                self.prev_value_y = self.curr_value_y
 
 
             #iteracia prudu
@@ -1036,31 +1044,33 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curr_value_y = self.current_resistance
             self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
             self.ui.lcdNumber_aktualny_odpor.display("{:.1f}".format(self.curr_value_y))
-           
-            
+
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
-            self.vzorka_N +=1
-            
-                       
-            if(self.vzorka_N > 1):
-                #pridame novu vzroku do grafu
-                self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax1.add_line(self.line1)
-            
-                self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax2.add_line(self.line2)
-            
-                # Voliteľné: dynamické prispôsobenie rozsahov
-                self.ax1.relim()
-                self.ax1.autoscale_view()
-                self.ax2.relim()
-                self.ax2.autoscale_view()
-            
-                self.fig.canvas.draw()
-                self.fig.canvas.flush_events()
-            
-            self.prev_value_x = self.curr_value_x
-            self.prev_value_y = self.curr_value_y
+            if self.first_sample:
+                self.first_sample = False
+                self.prev_value_x = None
+                self.prev_value_y = None
+            else:
+                self.vzorka_N +=1
+                if self.prev_value_x is not None:
+                    #pridame novu vzroku do grafu
+                    self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax1.add_line(self.line1)
+
+                    self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax2.add_line(self.line2)
+
+                    # Voliteľné: dynamické prispôsobenie rozsahov
+                    self.ax1.relim()
+                    self.ax1.autoscale_view()
+                    self.ax2.relim()
+                    self.ax2.autoscale_view()
+
+                    self.fig.canvas.draw()
+                    self.fig.canvas.flush_events()
+
+                self.prev_value_x = self.curr_value_x
+                self.prev_value_y = self.curr_value_y
             
             
                       
@@ -1211,6 +1221,8 @@ class MainWindow(QtWidgets.QMainWindow):
         clicked = msg.clickedButton()
         if clicked is reverse_btn:
             self.current_increment = -abs(self.current_step_A)
+            self.ciara_color = "b"
+            self.force_stop_at_zero = True
             self.direction_ascending = False
         elif clicked is stop_btn:
             self.handle_pushButton_spusti_proces_clicked()

@@ -70,6 +70,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * live display of measured current, set current and resistance
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
+* ignores the initial zero sample when logging and plotting
 
 Launch from the master launcher or run
 
@@ -84,7 +85,8 @@ mirrors the serial logger’s workflow and adds the same voltage‑limit safety
 dialog and live values panel.  Select a VISA resource (e.g.
 `ASRL/ttyV1::INSTR`) and start logging.
 The ramp-down path is plotted in a contrasting colour to distinguish it from the
-current ramp-up.
+current ramp-up, and the first zero sample is ignored just like in the serial
+logger.
 
 Launch from the master launcher or run
 
