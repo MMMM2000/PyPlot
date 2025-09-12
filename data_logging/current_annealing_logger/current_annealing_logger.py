@@ -1218,11 +1218,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # print("Zaznam subor:", self.f_name)
 
     def init_live_values(self) -> None:
-        box = getattr(self.ui, 'groupBox_aktualne_hodnoty', None)
+        box = getattr(self.ui, "groupBox_aktualne_hodnoty", None)
         if box is None:
             return
         for child in box.findChildren(QtWidgets.QWidget):
             child.deleteLater()
+        old_layout = box.layout()
+        if old_layout is not None:
+            QtWidgets.QWidget().setLayout(old_layout)
         layout = QtWidgets.QFormLayout(box)
         layout.setContentsMargins(6, 6, 6, 6)
         self.label_live_current = QtWidgets.QLabel("0")
