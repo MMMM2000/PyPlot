@@ -31,8 +31,10 @@ def load_file(path: str) -> pd.DataFrame:
         raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3]
     df.columns = ["I_A", "V_V", "R_Ohm"]
-    df["I_mA"] = df["I_A"].astype(float) * 1e3
+    df["I_A"] = df["I_A"].astype(float)
+    df["I_mA"] = df["I_A"] * 1e3
     df["R_Ohm"] = df["R_Ohm"].astype(float)
+    df = df[df["I_mA"] != 0].reset_index(drop=True)
     return df[["I_mA", "R_Ohm"]]
 
 

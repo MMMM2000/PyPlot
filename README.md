@@ -53,7 +53,8 @@ Closing the launcher warns about other open windows and will close them.
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 offers buttons to add or remove entries, so datasets can be refined without
-restarting the tool.
+restarting the tool.  The current annealing plotter also omits the initial
+0 mA data point so figures start with the first real sample.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 
