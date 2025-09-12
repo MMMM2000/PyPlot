@@ -39,7 +39,7 @@ def format_annealing_title(base: str) -> str:
     return " ".join(parts)
 
 
-def save_figure(fig: Figure, base_path: str | Path, fmt: str = "png", dpi: int = 1000) -> None:
+def save_figure(fig: Figure, base_path: str | Path, fmt: str = "png", dpi: int = 1200) -> None:
     """Save ``fig`` to ``base_path`` with format ``fmt``.
 
     ``base_path`` should omit the file extension. ``dpi`` is only applied when

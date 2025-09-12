@@ -42,9 +42,15 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.save_cb, 1, 0)
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-        out_layout.addWidget(self.out_dir_edit, 4, 0)
-        out_layout.addWidget(browse_btn, 4, 1)
+        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
+        out_layout.addWidget(self.fmt_combo, 3, 1)
+        out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
+        out_layout.addWidget(self.dpi_spin, 4, 1)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 5, 0)
+        out_layout.addWidget(self.out_dir_edit, 6, 0)
+        out_layout.addWidget(browse_btn, 6, 1)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -59,6 +65,8 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SHOW_PLOTS = self.show_cb.isChecked()
         orig.SAVE_PLOTS = self.save_cb.isChecked()
         orig.OUTPUT_DIR = self.out_dir_edit.text()
+        orig.SAVE_FORMAT = self.fmt_combo.currentText()
+        orig.PNG_DPI = int(self.dpi_spin.value())
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
         orig.main(self.files, backend=backend)
 

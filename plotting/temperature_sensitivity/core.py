@@ -43,7 +43,7 @@ JITTER_SPAN = 0.25
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
-PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
+PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 BASELINE_MODE = _CFG.get("BASELINE_MODE", "none")
 if BASELINE_MODE not in {"none", "zero_25", "both"}:
     # backwards compatibility for old ZERO_25_BASELINE flag

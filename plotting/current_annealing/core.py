@@ -17,7 +17,7 @@ OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
 SAVE_PLOTS = False
 SAVE_FORMAT = "png"
-PNG_DPI = 1000
+PNG_DPI = 1200
 BACKEND = "matplotlib"
 
 

@@ -20,7 +20,7 @@ SHOW_PLOTS = True
 SAVE_PLOTS = False
 SAME_HIST_Y = True
 SAVE_FORMAT = "png"
-PNG_DPI = 1000
+PNG_DPI = 1200
 BACKEND = "matplotlib"
 
 FNAME_RE = re.compile(

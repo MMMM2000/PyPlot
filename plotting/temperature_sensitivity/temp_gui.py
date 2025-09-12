@@ -58,9 +58,15 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.baseline_combo, 2, 1)
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 3, 0)
         out_layout.addWidget(self.backend_combo, 3, 1)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 4, 0)
-        out_layout.addWidget(self.out_dir_edit, 5, 0)
-        out_layout.addWidget(browse_btn, 5, 1)
+        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        out_layout.addWidget(QtWidgets.QLabel("Format:"), 4, 0)
+        out_layout.addWidget(self.fmt_combo, 4, 1)
+        out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 5, 0)
+        out_layout.addWidget(self.dpi_spin, 5, 1)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
+        out_layout.addWidget(self.out_dir_edit, 7, 0)
+        out_layout.addWidget(browse_btn, 7, 1)
 
         cont_group = QtWidgets.QGroupBox("Continuous data")
         cont_layout = QtWidgets.QGridLayout(cont_group)
@@ -101,6 +107,8 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.INCLUDE_CONTINUOUS = self.cont_cb.isChecked()
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())
+        orig.SAVE_FORMAT = self.fmt_combo.currentText()
+        orig.PNG_DPI = int(self.dpi_spin.value())
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
         orig.main(self.files, backend=backend)
 

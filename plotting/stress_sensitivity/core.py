@@ -36,7 +36,7 @@ MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
-PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
+PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 

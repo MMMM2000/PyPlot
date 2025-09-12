@@ -298,7 +298,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         fmt_box = self._hbox(self.format_combo)
         self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 3000)
-        self.dpi_spin.setValue(1000)
+        self.dpi_spin.setValue(1200)
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm

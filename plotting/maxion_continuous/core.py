@@ -21,7 +21,8 @@ MARKER_SIZE = 0.1
 MED_WINDOW = 5
 MA_WINDOW = 20
 SAVE_FORMAT = "png"
-PNG_DPI = 1000
+PNG_DPI = 1200
+IMPROVE_READABILITY = False
 BACKEND = "matplotlib"
 
 
@@ -76,20 +77,27 @@ def load_data(files: List[str]) -> pd.DataFrame:
 
 
 def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, str]:
-    fig, ax = plt.subplots(figsize=(9, 4))
-    x = np.arange(len(y))
-    if PLOT_MODE in ("raw", "both"):
-        ax.scatter(x, y.to_numpy(), s=MARKER_SIZE, label="raw")
-    if PLOT_MODE in ("processed", "both"):
-        med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
-        proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-        ax.scatter(x, proc.to_numpy(), s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
-    ax.set_xlabel("Sample index")
-    ax.set_ylabel("T1+T2 (arb units)")
-    ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
-    ax.grid(True)
-    ax.legend()
-    fig.tight_layout()
+    rc = {
+        'font.size': 14,
+        'axes.titlesize': 16,
+        'axes.labelsize': 14,
+        'legend.fontsize': 12,
+    } if IMPROVE_READABILITY else {}
+    with plt.rc_context(rc):
+        fig, ax = plt.subplots(figsize=(9, 4))
+        x = np.arange(len(y))
+        if PLOT_MODE in ("raw", "both"):
+            ax.scatter(x, y.to_numpy(), s=MARKER_SIZE, label="raw")
+        if PLOT_MODE in ("processed", "both"):
+            med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
+            proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+            ax.scatter(x, proc.to_numpy(), s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
+        ax.set_xlabel("Sample index")
+        ax.set_ylabel("T1+T2 (arb units)")
+        ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
+        ax.grid(True)
+        ax.legend()
+        fig.tight_layout()
     fname = f"head{head}_{coils}coils_CH{ch}_sum"
     if SAVE_PLOTS:
         os.makedirs(OUTPUT_DIR, exist_ok=True)

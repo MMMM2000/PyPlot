@@ -54,9 +54,15 @@ class SettingsDialog(QtWidgets.QDialog):
         self.backend_combo.setCurrentIndex(0)
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-        out_layout.addWidget(self.out_dir_edit, 4, 0)
-        out_layout.addWidget(browse_btn, 4, 1)
+        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
+        out_layout.addWidget(self.fmt_combo, 3, 1)
+        out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
+        out_layout.addWidget(self.dpi_spin, 4, 1)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 5, 0)
+        out_layout.addWidget(self.out_dir_edit, 6, 0)
+        out_layout.addWidget(browse_btn, 6, 1)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -69,17 +75,19 @@ class SettingsDialog(QtWidgets.QDialog):
         if not self.files:
             QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
             return
-        cfg = {
-            "TT": self.tt_cb.isChecked(),
-            "HH": self.hh_cb.isChecked(),
-            "raw": self.raw_cb.isChecked(),
-            "hist": self.hist_cb.isChecked(),
-            "share_y": self.share_cb.isChecked(),
-            "show": self.show_cb.isChecked(),
-            "save": self.save_cb.isChecked(),
-            "out_dir": self.out_dir_edit.text(),
-            "BACKEND": ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()],
-        }
+          cfg = {
+              "TT": self.tt_cb.isChecked(),
+              "HH": self.hh_cb.isChecked(),
+              "raw": self.raw_cb.isChecked(),
+              "hist": self.hist_cb.isChecked(),
+              "share_y": self.share_cb.isChecked(),
+              "show": self.show_cb.isChecked(),
+              "save": self.save_cb.isChecked(),
+              "out_dir": self.out_dir_edit.text(),
+              "BACKEND": ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()],
+          }
+          orig.SAVE_FORMAT = self.fmt_combo.currentText()
+          orig.PNG_DPI = int(self.dpi_spin.value())
         orig.SAME_HIST_Y = cfg["share_y"]
         orig.SHOW_PLOTS = cfg["show"]
         orig.SAVE_PLOTS = cfg["save"]
