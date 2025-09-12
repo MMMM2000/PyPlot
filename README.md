@@ -57,11 +57,12 @@ restarting the tool.  Export options include a choice of PNG, PDF, or SVG
 format with a configurable DPI (PNG defaults to 1200 dpi).  The current
 annealing plotter also omits the initial 0 mA data point so figures start with
 the first real sample.  The Maxion plotter features a collapsible
-**Readability** section that can enlarge or hide tick labels, axis labels, and
-titles individually, optionally hide the legend, and applies ×10³/×10⁴ axis
-scaling to reduce zero clutter.  Legend entries drop symbols and inherit each
-curve’s colour for clearer attribution.  All readability preferences, including
-label visibility, are remembered between runs.
+**Readability** section that can enlarge or hide tick labels, axis labels,
+titles, and the legend, and applies ×10³/×10⁴ axis scaling to reduce zero
+clutter.  Legend text size is adjustable, entries can stack horizontally or
+vertically (or automatically choose a layout), and symbols can be shown or
+hidden with configurable size.  All readability preferences, including label
+visibility, are remembered between runs.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 

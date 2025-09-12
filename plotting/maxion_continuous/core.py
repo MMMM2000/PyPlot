@@ -27,6 +27,10 @@ SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = _CFG.get("PNG_DPI", 1200)
 IMPROVE_READABILITY = _CFG.get("IMPROVE_READABILITY", False)
 SHOW_LEGEND = _CFG.get("SHOW_LEGEND", True)
+LEGEND_SIZE = _CFG.get("LEGEND_SIZE", 18)
+LEGEND_ORIENTATION = _CFG.get("LEGEND_ORIENTATION", "auto")  # 'auto', 'horizontal', 'vertical'
+LEGEND_SHOW_SYMBOLS = _CFG.get("LEGEND_SHOW_SYMBOLS", False)
+LEGEND_SYMBOL_SIZE = _CFG.get("LEGEND_SYMBOL_SIZE", 10)
 TICK_SIZE = _CFG.get("TICK_SIZE", 18)
 AXIS_LABEL_SIZE = _CFG.get("AXIS_LABEL_SIZE", 18)
 TITLE_SIZE = _CFG.get("TITLE_SIZE", 22)
@@ -91,7 +95,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
         {
             "axes.titlesize": TITLE_SIZE,
             "axes.labelsize": AXIS_LABEL_SIZE,
-            "legend.fontsize": AXIS_LABEL_SIZE,
+            "legend.fontsize": LEGEND_SIZE,
             "xtick.labelsize": TICK_SIZE,
             "ytick.labelsize": TICK_SIZE,
         }
@@ -132,7 +136,18 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
             ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
         ax.grid(True)
         if SHOW_LEGEND and artists:
-            leg = ax.legend(artists, labels, handlelength=0, handletextpad=0)
+            ncol = 1
+            if LEGEND_ORIENTATION == "horizontal":
+                ncol = len(labels)
+            elif LEGEND_ORIENTATION == "auto" and len(labels) > 3:
+                ncol = len(labels)
+            leg = ax.legend(
+                artists,
+                labels,
+                ncol=ncol,
+                handlelength=1 if LEGEND_SHOW_SYMBOLS else 0,
+                handletextpad=0,
+            )
             for handle, text in zip(leg.legend_handles, leg.get_texts()):
                 color = (
                     handle.get_facecolor()[0]
@@ -140,7 +155,16 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
                     else handle.get_color()
                 )
                 text.set_color(color)
-                handle.set_visible(False)
+                if not LEGEND_SHOW_SYMBOLS:
+                    handle.set_visible(False)
+                else:
+                    try:
+                        handle.set_sizes([LEGEND_SYMBOL_SIZE])
+                    except Exception:
+                        try:
+                            handle.set_markersize(LEGEND_SYMBOL_SIZE)
+                        except Exception:
+                            pass
         fig.tight_layout()
     fname = f"head{head}_{coils}coils_CH{ch}_sum"
     if SAVE_PLOTS:
