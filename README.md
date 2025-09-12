@@ -67,6 +67,8 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * configurable current ramp with optional automatic reversal
 * **Reverse current now** button for an immediate ramp down
 * default **Reverse to zero after max** behaviour
+* remembers the last max-current setting and keeps serial controls adjustable after connection
+* optional infinite looping displays "∞" and locks the loop count
 * automatic halt at **30 V** with a dialog to hold, reverse or stop
 * live display of measured current, set current and resistance
 * streamlined start-up sequence that begins logging immediately

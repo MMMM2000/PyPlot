@@ -100,6 +100,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.lineEdit_log_file.setText("anneal_log")
         self.settings = QtCore.QSettings("microwire", "current_annealing")
         self.restore_name_preset()
+        try:
+            last_max = int(self.settings.value("max_current", 10))
+            self.ui.spinBox_hodnota_staly_prud.setValue(last_max)
+        except Exception:
+            pass
         self.init_live_values()
         self.odpoved_portu = ''
         self.prikaz_portu = ''
@@ -174,6 +179,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.populate_ports()
             except Exception:
                 pass
+        self._set_port_controls_enabled(True)
         
         #prepojenie signalov a slotov
         self.ui.pushButton_pripojPort.clicked.connect(self.handle_pushButton_pripojPort_clicked)
@@ -224,7 +230,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'spinBox_loops'):
             self.ui.spinBox_loops.valueChanged.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'checkBox_infinite_loops'):
-            self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
+            self.ui.checkBox_infinite_loops.toggled.connect(self.handle_checkBox_infinite_loops_toggled)
         if hasattr(self.ui, 'spinBox_step_mA'):
             self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_file_name_from_preset)
@@ -343,6 +349,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.canvas.draw()
         except Exception:
             pass
+        try:
+            self.adjustSize()
+        except Exception:
+            pass
 
     # utilities
     def dbg(self, *args):
@@ -351,6 +361,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(*args)
             except Exception:
                 pass
+
+    def _set_port_controls_enabled(self, enabled: bool) -> None:
+        for name in ('spinBox_cislo_portu', 'comboBox_baudrate', 'comboBox_port', 'pushButton_refresh_ports'):
+            w = getattr(self.ui, name, None)
+            if w is not None:
+                w.setEnabled(enabled)
+
+    def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
+        if hasattr(self.ui, 'spinBox_loops'):
+            if checked:
+                self.ui.spinBox_loops.setValue(0)
+                self.ui.spinBox_loops.setEnabled(False)
+            else:
+                if self.ui.spinBox_loops.value() == 0:
+                    self.ui.spinBox_loops.setValue(1)
+                self.ui.spinBox_loops.setEnabled(True)
+        self.update_planned_time_label()
 
     #definovanie slotov
     def handle_pushButton_pripojPort_clicked(self):
@@ -390,7 +417,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.pripojene = True
                     self.ui.pushButton_pripojPort.setText('Disconnect')
                     self.ui.frame_modus_operandi.setEnabled(True)
-                    self.ui.frame_zakladne_nastavenia_portu.setEnabled(False)
+                    self._set_port_controls_enabled(False)
                     self.ui.frame_command_and_response.setEnabled(True)
                     # Respect the selected mode rather than forcing raw VCP
                     try:
@@ -422,13 +449,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pripojene = False
             self.ui.pushButton_pripojPort.setText('Pripojiť sa k portu')
             self.ui.pushButton_pripojPort.setText('Connect to port')
-            # Dim the left panel again until connected
             self._show_connect_overlay(True)
             self.ui.frame_command_and_response.setEnabled(False)
-            self.ui.frame_zakladne_nastavenia_portu.setEnabled(True)
             self.ui.frame_nastavenia_procesu.setEnabled(False)
             self.ui.frame_modus_operandi.setEnabled(False)
-            self._show_connect_overlay(True)
+            self._set_port_controls_enabled(True)
 
     def handle_spinBox_cislo_portu_valueChanged(self):
         self.cislo_portu = self.ui.spinBox_cislo_portu.value()
@@ -732,7 +757,10 @@ class MainWindow(QtWidgets.QMainWindow):
         
     def handle_spinBox_hodnota_staly_prud_valueChanged(self):
         self.hodnota_staly_prud = self.ui.spinBox_hodnota_staly_prud.value()
-        # print("Hodnota staleho prudu: ", self.hodnota_staly_prud)
+        try:
+            self.settings.setValue("max_current", self.hodnota_staly_prud)
+        except Exception:
+            pass
         
     def handle_spinBox_doba_staly_prud_valueChanged(self):
         self.doba_staly_prud = self.ui.spinBox_doba_staly_prud.value()
@@ -1132,7 +1160,7 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(0, len(self.commands_safe_end)):
             self.prikaz_portu = self.commands_safe_end[i]
             self.send_serial_command()
-            self.simple_delay(1000)
+            self.simple_delay(200)
             
 
     def send_init_commands(self):
@@ -1276,19 +1304,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 _title = format_annealing_title(Path(self.f_name).stem)
             except Exception:
                 _title = format_annealing_title(self.f_name)
-            # Place the title above the graph area using a Qt label instead of
-            # drawing inside the figure. This keeps it clearly outside axes.
-            self.title_label = QtWidgets.QLabel(_title)
-            self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            # Style to match palette
-            try:
-                self.title_label.setStyleSheet(
-                    "font-weight: 600; font-size: 18px; margin: 2px 0 2px 0;"
-                )
-                self.title_label.setForegroundRole(QtGui.QPalette.ColorRole.Text)
-            except Exception:
-                pass
-            layout.addWidget(self.title_label)
+            self.fig.suptitle(_title)
             if NavigationToolbar is not None and self.canvas is not None:
                 self.toolbar = NavigationToolbar(self.canvas, container)
                 layout.addWidget(self.toolbar)
