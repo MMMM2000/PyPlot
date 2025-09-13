@@ -301,6 +301,10 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     files: list[str] = []
     file_list = QtWidgets.QListWidget()
     file_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+    file_list.setHorizontalScrollBarPolicy(
+        QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    file_list.setMinimumWidth(400)
 
     def add_files() -> None:
         new = select_files_or_folder(parent, ext)
@@ -326,13 +330,13 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     remove_btn.clicked.connect(remove_selected)
 
     container = QtWidgets.QWidget()
-    layout = QtWidgets.QHBoxLayout(container)
-    layout.addWidget(file_list, 1)
-    btn_layout = QtWidgets.QVBoxLayout()
-    btn_layout.addWidget(add_btn)
-    btn_layout.addWidget(remove_btn)
-    btn_layout.addStretch()
-    layout.addLayout(btn_layout)
+    layout = QtWidgets.QVBoxLayout(container)
+    btn_row = QtWidgets.QHBoxLayout()
+    btn_row.addWidget(add_btn)
+    btn_row.addWidget(remove_btn)
+    btn_row.addStretch()
+    layout.addLayout(btn_row)
+    layout.addWidget(file_list)
 
     return files, container
 
@@ -354,11 +358,11 @@ def arrange_side_panel(
 
     right = QtWidgets.QWidget()
     side_layout = QtWidgets.QVBoxLayout(right)
-    side_layout.addWidget(file_widget)
-    side_layout.addWidget(console)
+    side_layout.addWidget(file_widget, 3)
+    side_layout.addWidget(console, 1)
     splitter.addWidget(right)
-    splitter.setStretchFactor(0, 3)
-    splitter.setStretchFactor(1, 2)
+    splitter.setStretchFactor(0, 2)
+    splitter.setStretchFactor(1, 3)
 
     main_layout = QtWidgets.QVBoxLayout(dialog)
     main_layout.addWidget(splitter)

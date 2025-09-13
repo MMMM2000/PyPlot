@@ -15,8 +15,8 @@ if __package__ is None or __package__ == "":
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
-        get_readability,
-        set_readability,
+        create_readability_group,
+        sync_readability,
         arrange_side_panel,
     )
 else:
@@ -28,8 +28,8 @@ else:
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
-        get_readability,
-        set_readability,
+        create_readability_group,
+        sync_readability,
         arrange_side_panel,
     )
 
@@ -45,7 +45,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.console.setMaximumHeight(120)
 
         left = QtWidgets.QWidget()
-        layout = QtWidgets.QGridLayout(left)
+        layout = QtWidgets.QVBoxLayout(left)
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
@@ -78,17 +78,14 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.out_dir_edit, 7, 0)
         out_layout.addWidget(browse_btn, 7, 1)
 
-        self.read_cb = QtWidgets.QCheckBox("Improve readability")
-        self.read_cb.setChecked(get_readability("current_annealing"))
-        read_group = QtWidgets.QGroupBox("Readability")
-        rl = QtWidgets.QVBoxLayout(read_group); rl.addWidget(self.read_cb)
+        self.read_ctrl, read_group = create_readability_group("current_annealing", orig)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
-        layout.addWidget(out_group, 0, 0, 1, 2)
-        layout.addWidget(read_group, 1, 0, 1, 2)
-        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+        layout.addWidget(out_group)
+        layout.addWidget(read_group)
+        layout.addWidget(self.run_btn)
 
         arrange_side_panel(self, left, file_widget, self.console)
 
