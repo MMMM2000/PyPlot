@@ -53,10 +53,9 @@ Closing the launcher warns about other open windows and will close them.
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 offers buttons to add or remove entries, so datasets can be refined without
-restarting the tool.  Each settings window now embeds a small console at the
-bottom, keeping logs close to the controls instead of spawning a separate
-window.  The file list and console sit beside the options in a wider dialog, so
-expanded readability sections remain on screen.  File dialogs remember the last directories used—falling back to the
+restarting the tool.  Each settings window embeds a small console and places it
+next to the file list in a side panel beside the plot options, so the terminal
+never needs to span the full window width.  File dialogs remember the last directories used—falling back to the
 repository’s `sample_data` folder for inputs and the user’s `Downloads` folder
 for outputs—so frequent paths need not be reselected.  When saving, an optional
 **Create subfolder** checkbox stores figures under `<script name> data
@@ -64,10 +63,8 @@ YYYY-MM-DD` for easier organisation.  Export options include a choice of PNG,
 PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
 current annealing plotter also omits the initial 0 mA data point so figures
 start with the first real sample.  Plotting dialogs keep their windows open
-after running and arrange selected files at the top, settings in the middle and
-an embedded console at the bottom.  Windows open wide enough to avoid vertical
-scrolling and have generous minimum sizes so widgets remain visible when
-resized.
+after running and display settings, file list and console side by side within
+a single resizable window.
 
 Each plotting dialog now provides a full **Readability** section with controls
 to toggle titles, axis labels, tick labels, and legends, adjust their font

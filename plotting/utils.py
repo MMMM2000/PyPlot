@@ -370,22 +370,15 @@ def arrange_top_layout(
     center: QtWidgets.QWidget,
     console: QtWidgets.QPlainTextEdit,
 ) -> None:
-    """Arrange file list on top, settings in the middle and console at bottom.
+    """Place settings beside file list and console for a compact dialog."""
 
-    The dialog is resized to fit on screen and given a generous minimum size so
-    that widgets remain visible even when the window is resized. No scroll areas
-    are used to avoid internal scrolling; instead the dialog expands
-    horizontally when needed.
-    """
+    # Reuse the side-panel arrangement to keep the console narrow while giving
+    # the scrolling settings area ample width.
+    arrange_side_panel(dialog, center, file_widget, console)
 
-    layout = QtWidgets.QVBoxLayout(dialog)
-    layout.addWidget(file_widget)
-    layout.addWidget(center, 1)
-    layout.addWidget(console, 1)
-
-    file_widget.setMinimumHeight(150)
-    console.setMinimumHeight(150)
-
+    # Ensure the dialog fits comfortably on screen and widgets remain visible
+    # when resized. This mirrors the sizing logic of the previous top layout but
+    # applies it to the side-panel arrangement.
     screen = dialog.screen() or QtGui.QGuiApplication.primaryScreen()
     if screen is not None:
         rect = screen.availableGeometry()
