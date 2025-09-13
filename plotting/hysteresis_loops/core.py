@@ -7,12 +7,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from ..backends import wants_matplotlib, wants_origin
 from ..config import load_config
-from ..utils import show_plots
+from ..utils import show_plots, apply_readability_fonts
 
 _CFG = load_config().get("hysteresis_loops", {})
 MODE = _CFG.get("MODE", "Combined")
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
 
 
 def load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
@@ -158,6 +159,8 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, 
     mode: "Combined" (one axes with legend), "Stacked" (zero spacing),
           or "Separate" (one window per file).
     """
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     if not wants_matplotlib(backend) and wants_origin(backend):
         loaded: List[Tuple[str, np.ndarray, np.ndarray]] = []
         for path in paths:

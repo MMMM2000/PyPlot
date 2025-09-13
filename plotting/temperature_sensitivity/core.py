@@ -18,7 +18,7 @@ from matplotlib.typing import ColorType
 
 from ..config import load_config
 from .. import common
-from ..utils import save_figure, show_plots
+from ..utils import save_figure, show_plots, apply_readability_fonts
 from ..backends import wants_matplotlib, wants_origin
 
 # Load default configuration
@@ -38,6 +38,7 @@ MEAN_MARKER = 'o'
 MEAN_MSIZE = 8
 MEAN_LW = 3
 LEGEND_MARKER_SIZE = 6
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
 OFFSET = 0.25
 JITTER_SPAN = 0.25
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
@@ -577,6 +578,8 @@ from ..common import maybe_handle_outliers
 
 
 def main(files: List[str], backend: str = BACKEND):
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     data = load_data(files)
     data = maybe_handle_outliers(data)
     groups = data.groupby(['composition', 'anneal'])

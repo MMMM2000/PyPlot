@@ -12,7 +12,7 @@ from matplotlib.figure import Figure
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
-from ..utils import save_figure, origin_session, show_plots
+from ..utils import save_figure, origin_session, show_plots, apply_readability_fonts
 from ..backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("temperature_dependence", {})
@@ -31,6 +31,7 @@ SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
 
 RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
 OVERALL_COLOR = "#6B6B6B"
@@ -262,6 +263,8 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     data = load_data(files)
     data = maybe_handle_outliers(data)
     total = len(PLOT_VARS)

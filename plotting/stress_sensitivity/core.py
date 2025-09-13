@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
-from ..utils import save_figure, show_plots
+from ..utils import save_figure, show_plots, apply_readability_fonts
 from ..backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("stress_sensitivity", {})
@@ -39,6 +39,7 @@ SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
 
 BASE_LOAD = float(_CFG.get("BASE_LOAD", 2.5))
 END_LOAD = float(_CFG.get("END_LOAD", 17.5))
@@ -538,6 +539,8 @@ def plot_samples_origin(
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     data = load_data(files)
     data = maybe_handle_outliers(data)
     groups = data.groupby(['composition', 'title', 'anneal'])

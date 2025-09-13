@@ -251,37 +251,38 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = "
     return list(paths)
 
 
-class ConsoleWindow(QtWidgets.QDialog):
-    def __init__(self, title: str):
-        super().__init__()
-        self.setWindowTitle(title)
-        self.resize(600, 400)
-        layout = QtWidgets.QVBoxLayout(self)
-        self.text = QtWidgets.QPlainTextEdit()
-        self.text.setReadOnly(True)
-        layout.addWidget(self.text)
+class _ConsoleStream:
+    def __init__(self, widget: QtWidgets.QPlainTextEdit):
+        self.widget = widget
 
     def write(self, msg: str) -> None:
-        self.text.appendPlainText(msg)
+        self.widget.appendPlainText(msg.rstrip())
 
     def flush(self) -> None:  # pragma: no cover - required by file-like API
         pass
 
 
-_CONSOLES: list[ConsoleWindow] = []
-
-
-def run_with_console(func: Callable[[], None], title: str) -> None:
-    console = ConsoleWindow(title)
-    console.show()
-    _CONSOLES.append(console)
+def run_with_console(func: Callable[[], None], console: QtWidgets.QPlainTextEdit) -> None:
     old_out, old_err = sys.stdout, sys.stderr
-    sys.stdout = sys.stderr = console
+    stream = _ConsoleStream(console)
+    sys.stdout = sys.stderr = stream
     try:
         func()
     finally:
         sys.stdout = old_out
         sys.stderr = old_err
+
+
+def get_readability(key: str) -> bool:
+    return _settings().value(f"{key}_readability", False, type=bool)
+
+
+def set_readability(key: str, value: bool) -> None:
+    _settings().setValue(f"{key}_readability", value)
+
+
+def apply_readability_fonts(title_size: int = 22, base_size: int = 18) -> None:
+    plt.rcParams.update({"font.size": base_size, "axes.titlesize": title_size})
 
 
 def prepare_output_dir(base: str, script: str, create_sub: bool) -> str:

@@ -8,10 +8,10 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.hysteresis_loops import core
-    from plotting.utils import apply_system_theme, create_file_widget
+    from plotting.utils import apply_system_theme, create_file_widget, run_with_console, get_readability, set_readability
 else:
     from . import core
-    from ..utils import apply_system_theme, create_file_widget
+    from ..utils import apply_system_theme, create_file_widget, run_with_console, get_readability, set_readability
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -34,11 +34,18 @@ class SettingsDialog(QtWidgets.QDialog):
         mode_layout.addWidget(QtWidgets.QLabel("Backend:"), 1, 0)
         mode_layout.addWidget(self.backend_combo, 1, 1)
 
+        self.read_cb = QtWidgets.QCheckBox("Improve readability")
+        self.read_cb.setChecked(get_readability("hysteresis_loops"))
+        mode_layout.addWidget(self.read_cb, 2, 0, 1, 2)
+
         self.run_btn = QtWidgets.QPushButton("Plot")
         self.run_btn.clicked.connect(self.run)
 
+        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+
         layout.addWidget(mode_group, 1, 0, 1, 2)
         layout.addWidget(self.run_btn, 2, 0, 1, 2)
+        layout.addWidget(self.console, 3, 0, 1, 2)
 
     def run(self) -> None:
         if not self.files:
@@ -46,7 +53,9 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         mode = self.mode_combo.currentText()
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        core.plot_loops(self.files, mode=mode, show=True, backend=backend)
+        core.IMPROVE_READABILITY = self.read_cb.isChecked()
+        set_readability("hysteresis_loops", core.IMPROVE_READABILITY)
+        run_with_console(lambda: core.plot_loops(self.files, mode=mode, show=True, backend=backend), self.console)
 
 
 def main() -> None:

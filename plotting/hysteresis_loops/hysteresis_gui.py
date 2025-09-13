@@ -8,9 +8,27 @@ from PyQt6 import QtWidgets
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import apply_system_theme, create_file_widget, show_plots
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        show_plots,
+        run_with_console,
+        get_readability,
+        set_readability,
+        apply_readability_fonts,
+    )
 else:
-    from ..utils import apply_system_theme, create_file_widget, show_plots
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        show_plots,
+        run_with_console,
+        get_readability,
+        set_readability,
+        apply_readability_fonts,
+    )
+
+IMPROVE_READABILITY = False
 
 def _load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path, usecols=(0,1))
@@ -46,6 +64,8 @@ def _parse_meta(filename: str) -> Tuple[str, float, str]:
     return base, float('-inf'), 'as-cast'
 
 def plot_stacked(paths: List[str]) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     # Parse and sort with as-cast top, highest temp bottom
     metas = [(_parse_meta(p) + (p,)) for p in paths]  # (base, sort, label, path)
     # Choose the most common base for suptitle
@@ -74,6 +94,8 @@ def plot_stacked(paths: List[str]) -> None:
     show_plots()
 
 def plot_separate(paths: List[str]) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     for p in paths:
         base, _, label = _parse_meta(p)
         x, y = _load_loop(p)
@@ -87,6 +109,8 @@ def plot_separate(paths: List[str]) -> None:
     show_plots()
 
 def plot_combined(paths: List[str]) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     fig, ax = plt.subplots()
     base_title = None
     for p in paths:
@@ -120,7 +144,12 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(QtWidgets.QLabel("Mode:"), 1, 0)
         layout.addWidget(self.mode_combo, 1, 1)
-        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+        self.read_cb = QtWidgets.QCheckBox("Improve readability")
+        self.read_cb.setChecked(get_readability("hysteresis_hyst"))
+        layout.addWidget(self.read_cb, 2, 0, 1, 2)
+        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+        layout.addWidget(self.run_btn, 3, 0, 1, 2)
+        layout.addWidget(self.console, 4, 0, 1, 2)
 
     def run(self) -> None:
         if not self.files:
@@ -128,11 +157,15 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         mode = self.mode_combo.currentText()
         if mode == 'Stacked':
-            plot_stacked(self.files)
+            func = lambda: plot_stacked(self.files)
         elif mode == 'Combined':
-            plot_combined(self.files)
+            func = lambda: plot_combined(self.files)
         else:
-            plot_separate(self.files)
+            func = lambda: plot_separate(self.files)
+        global IMPROVE_READABILITY
+        IMPROVE_READABILITY = self.read_cb.isChecked()
+        set_readability("hysteresis_hyst", IMPROVE_READABILITY)
+        run_with_console(func, self.console)
 
 
 def main() -> None:

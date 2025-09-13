@@ -15,6 +15,8 @@ if __package__ is None or __package__ == "":
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
+        get_readability,
+        set_readability,
     )
 else:
     from . import core as orig
@@ -25,6 +27,8 @@ else:
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
+        get_readability,
+        set_readability,
     )
 
 
@@ -54,7 +58,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.mode_combo = QtWidgets.QComboBox(); self.mode_combo.addItems(["Raw", "Processed", "Both"])
         mode_map = {"raw": 0, "processed": 1, "both": 2}
         self.mode_combo.setCurrentIndex(mode_map.get(orig.PLOT_MODE, 0))
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(orig.OUTPUT_DIR))
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
         browse_btn = QtWidgets.QPushButton("Browse")
         self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
         self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
@@ -93,13 +97,22 @@ class SettingsDialog(QtWidgets.QDialog):
         proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 0, 2)
         proc_layout.addWidget(self.ma_spin, 0, 3)
 
+        self.read_cb = QtWidgets.QCheckBox("Improve readability")
+        self.read_cb.setChecked(get_readability("temperature_dependence"))
+        read_group = QtWidgets.QGroupBox("Readability")
+        rl = QtWidgets.QVBoxLayout(read_group); rl.addWidget(self.read_cb)
+
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
+
+        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
 
         layout.addWidget(var_group, 1, 0)
         layout.addWidget(out_group, 1, 1)
         layout.addWidget(proc_group, 2, 0, 1, 2)
-        layout.addWidget(self.run_btn, 3, 0, 1, 2)
+        layout.addWidget(read_group, 3, 0, 1, 2)
+        layout.addWidget(self.run_btn, 4, 0, 1, 2)
+        layout.addWidget(self.console, 5, 0, 1, 2)
 
     def run(self) -> None:
         if not self.files:
@@ -120,12 +133,14 @@ class SettingsDialog(QtWidgets.QDialog):
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "temperature_dependence", self.subdir_cb.isChecked())
         set_last_output_dir(base)
+        orig.IMPROVE_READABILITY = self.read_cb.isChecked()
+        set_readability("temperature_dependence", orig.IMPROVE_READABILITY)
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        run_with_console(lambda: orig.main(self.files, backend=backend), self.windowTitle())
+        run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 
 class ProgressDialog:

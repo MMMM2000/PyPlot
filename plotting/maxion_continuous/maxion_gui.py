@@ -41,7 +41,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(orig.OUTPUT_DIR))
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -183,6 +183,8 @@ class SettingsDialog(QtWidgets.QDialog):
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
+        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+
         layout.addWidget(out_group, 1, 0)
         layout.addWidget(mode_group, 1, 1)
         layout.addWidget(proc_group, 2, 0)
@@ -194,6 +196,7 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addLayout(read_header, 3, 0, 1, 2)
         layout.addWidget(self._read_container, 4, 0, 1, 2)
         layout.addWidget(self.run_btn, 5, 0, 1, 2)
+        layout.addWidget(self.console, 6, 0, 1, 2)
 
         self._read_container.setVisible(False)
 
@@ -286,7 +289,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings.setValue("axis_size", orig.AXIS_LABEL_SIZE)
         self.settings.setValue("title_size", orig.TITLE_SIZE)
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        run_with_console(lambda: orig.main(self.files, backend=backend), self.windowTitle())
+        run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 
 class ProgressDialog:

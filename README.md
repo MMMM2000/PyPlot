@@ -53,21 +53,22 @@ Closing the launcher warns about other open windows and will close them.
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 offers buttons to add or remove entries, so datasets can be refined without
-restarting the tool.  All console output now appears in a dedicated window per
-plotter instead of the parent terminal.  File dialogs remember the last
-directories used—falling back to the repository’s `sample_data` folder for
-inputs and the user’s `Downloads` folder for outputs—so frequent paths need not
-be reselected.  When saving, an optional **Create subfolder** checkbox stores
-figures under `<script name> data YYYY-MM-DD` for easier organisation.  Export
-options include a choice of PNG, PDF, or SVG format with a configurable DPI
-(PNG defaults to 1200 dpi).  The current annealing plotter also omits the
-initial 0 mA data point so figures start with the first real sample.  The Maxion
-plotter features a collapsible **Readability** section that can enlarge or hide
-tick labels, axis labels, titles, and the legend, and applies ×10³/×10⁴ axis
-scaling to reduce zero clutter.  Legend text size is adjustable, entries can
-stack horizontally or vertically (or automatically choose a layout), and
+restarting the tool.  Each settings window now embeds a small console at the
+bottom, keeping logs close to the controls instead of spawning a separate
+window.  File dialogs remember the last directories used—falling back to the
+repository’s `sample_data` folder for inputs and the user’s `Downloads` folder
+for outputs—so frequent paths need not be reselected.  When saving, an optional
+**Create subfolder** checkbox stores figures under `<script name> data
+YYYY-MM-DD` for easier organisation.  Export options include a choice of PNG,
+PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
+current annealing plotter also omits the initial 0 mA data point so figures
+start with the first real sample.  Every plotting dialog now exposes an
+**Improve readability** toggle that enlarges fonts for titles, axes, and tick
+labels; the Maxion plotter extends this with legend layout controls and ×10³/×10⁴
+axis scaling to reduce zero clutter.  Legend text size is adjustable, entries
+can stack horizontally or vertically (or automatically choose a layout), and
 symbols can be shown or hidden with configurable size.  All readability
-preferences, including label visibility, are remembered between runs.
+preferences are remembered between runs.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 

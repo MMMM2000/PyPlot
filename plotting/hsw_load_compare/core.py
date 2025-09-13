@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from ..utils import save_figure, origin_session, show_plots
+from ..utils import save_figure, origin_session, show_plots, apply_readability_fonts
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -22,6 +22,7 @@ SAME_HIST_Y = True
 SAVE_FORMAT = "png"
 PNG_DPI = 1200
 BACKEND = "matplotlib"
+IMPROVE_READABILITY = False
 
 FNAME_RE = re.compile(
     r"^(?P<comp>.+?)\s+"
@@ -133,6 +134,8 @@ def load_file(path: str):
 
 
 def main(files: List[str], cfg: Dict[str, Any]):
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     backend = cfg.get("BACKEND", BACKEND)
     cfg_show = cfg["show"]
     cfg_save = cfg["save"]

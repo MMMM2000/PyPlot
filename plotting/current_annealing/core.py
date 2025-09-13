@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..utils import save_figure, format_annealing_title, show_plots
+from ..utils import save_figure, format_annealing_title, show_plots, apply_readability_fonts
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -19,6 +19,7 @@ SAVE_PLOTS = False
 SAVE_FORMAT = "png"
 PNG_DPI = 1200
 BACKEND = "matplotlib"
+IMPROVE_READABILITY = False
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -84,6 +85,8 @@ def plot_one_origin(df: pd.DataFrame, title: str) -> None:
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     outs: List[Tuple[Figure, str]] = []
     for path in files:
         df = load_file(path)

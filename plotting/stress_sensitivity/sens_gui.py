@@ -15,6 +15,8 @@ if __package__ is None or __package__ == "":
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
+        get_readability,
+        set_readability,
     )
 else:
     from . import core as orig
@@ -25,6 +27,8 @@ else:
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
+        get_readability,
+        set_readability,
     )
 
 
@@ -51,7 +55,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
         self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
         self.backend_combo.setCurrentIndex(0)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(orig.OUTPUT_DIR))
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -79,12 +83,21 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.out_dir_edit, 7, 0)
         out_layout.addWidget(browse_btn, 7, 1)
 
+        self.read_cb = QtWidgets.QCheckBox("Improve readability")
+        self.read_cb.setChecked(get_readability("stress_sensitivity"))
+        read_group = QtWidgets.QGroupBox("Readability")
+        rl = QtWidgets.QVBoxLayout(read_group); rl.addWidget(self.read_cb)
+
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
+        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+
         layout.addWidget(var_group, 1, 0)
         layout.addWidget(out_group, 1, 1)
-        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+        layout.addWidget(read_group, 2, 0, 1, 2)
+        layout.addWidget(self.run_btn, 3, 0, 1, 2)
+        layout.addWidget(self.console, 4, 0, 1, 2)
 
     def run(self) -> None:
         if not self.files:
@@ -104,11 +117,13 @@ class SettingsDialog(QtWidgets.QDialog):
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "stress_sensitivity", self.subdir_cb.isChecked())
         set_last_output_dir(base)
+        orig.IMPROVE_READABILITY = self.read_cb.isChecked()
+        set_readability("stress_sensitivity", orig.IMPROVE_READABILITY)
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         orig.INCLUDE_DEPENDENCE = False
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        run_with_console(lambda: orig.main(self.files, backend=backend), self.windowTitle())
+        run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 
 class ProgressDialog:

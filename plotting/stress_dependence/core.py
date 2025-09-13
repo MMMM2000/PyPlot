@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Tuple, cast
 from PyQt6 import QtWidgets
 
 from ..config import load_config
-from ..utils import save_figure, show_plots
+from ..utils import save_figure, show_plots, apply_readability_fonts
 from ..backends import wants_matplotlib, wants_origin
 
 import numpy as np
@@ -60,6 +60,7 @@ SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
 PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
 
 # Origin styling knobs (roughly matching Matplotlib appearance)
 # Raw symbol size (keep small as requested)
@@ -490,6 +491,8 @@ def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use, var, delta)
 
 def main(files: List[str], backend: str = BACKEND) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     data = load_data(files)
     data = maybe_handle_outliers(data)
     groups = data.groupby(['composition','title','sample_end','anneal'])
