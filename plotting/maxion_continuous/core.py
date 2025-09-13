@@ -40,6 +40,7 @@ SHOW_TITLE = _CFG.get("SHOW_TITLE", True)
 SCALE_X_1E4 = _CFG.get("SCALE_X_1E4", True)
 SCALE_Y_1E3 = _CFG.get("SCALE_Y_1E3", True)
 CENTER_MEDIAN_Y = _CFG.get("CENTER_MEDIAN_Y", False)
+CENTER_MEDIAN_SOURCE = _CFG.get("CENTER_MEDIAN_SOURCE", "raw")
 BACKEND = _CFG.get("BACKEND", "matplotlib")
 
 
@@ -107,8 +108,19 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
     )
     with plt.rc_context(rc):
         fig, ax = plt.subplots(figsize=(9, 4))
+        proc = None
+        if PLOT_MODE in ("processed", "both") or (CENTER_MEDIAN_Y and CENTER_MEDIAN_SOURCE == "processed"):
+            med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
+            proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+        offset = 0.0
         if CENTER_MEDIAN_Y:
-            y = y - y.median()
+            if CENTER_MEDIAN_SOURCE == "raw":
+                offset = float(y.median())
+            else:
+                offset = float(proc.median()) if proc is not None else 0.0
+            y = y - offset
+            if proc is not None:
+                proc = proc - offset
         x = np.arange(len(y))
         x_label = "Sample index"
         if IMPROVE_READABILITY and SCALE_X_1E4:
@@ -122,9 +134,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
         if PLOT_MODE in ("raw", "both"):
             sc = ax.scatter(x, y_vals, s=MARKER_SIZE, label="raw")
             artists.append(sc); labels.append("raw")
-        if PLOT_MODE in ("processed", "both"):
-            med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
-            proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+        if PLOT_MODE in ("processed", "both") and proc is not None:
             proc_vals = proc.to_numpy()
             if IMPROVE_READABILITY and SCALE_Y_1E3:
                 proc_vals = proc_vals / 1e3
@@ -191,8 +201,19 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
     with origin_session() as op:
+        proc = None
+        if PLOT_MODE in ("processed", "both") or (CENTER_MEDIAN_Y and CENTER_MEDIAN_SOURCE == "processed"):
+            med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
+            proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+        offset = 0.0
         if CENTER_MEDIAN_Y:
-            y = y - y.median()
+            if CENTER_MEDIAN_SOURCE == "raw":
+                offset = float(y.median())
+            else:
+                offset = float(proc.median()) if proc is not None else 0.0
+            y = y - offset
+            if proc is not None:
+                proc = proc - offset
         x = np.arange(len(y))
         if IMPROVE_READABILITY and SCALE_X_1E4:
             x = x / 1e4
@@ -213,9 +234,7 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
         gl.add_plot(w_raw, coly=1, colx=0, type='s')
 
         # Processed
-        if PLOT_MODE in ("processed", "both"):
-            med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
-            proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+        if PLOT_MODE in ("processed", "both") and proc is not None:
             proc_vals = proc.to_numpy()
             if IMPROVE_READABILITY and SCALE_Y_1E3:
                 proc_vals = proc_vals / 1e3

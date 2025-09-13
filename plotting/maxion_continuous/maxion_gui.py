@@ -91,6 +91,15 @@ class SettingsDialog(QtWidgets.QDialog):
         self.center_cb = QtWidgets.QCheckBox("Median at 0")
         self.center_cb.setChecked(bool(self.settings.value("center_median_y", orig.CENTER_MEDIAN_Y, type=bool)))
         proc_layout.addWidget(self.center_cb, 1, 0, 1, 4)
+        self.center_source_combo = QtWidgets.QComboBox()
+        self.center_source_combo.addItems(["Raw", "Processed"])
+        self.center_source_combo.setCurrentText(
+            self.settings.value("center_source", orig.CENTER_MEDIAN_SOURCE, type=str).capitalize()
+        )
+        self.center_source_combo.setEnabled(self.center_cb.isChecked())
+        self.center_cb.toggled.connect(self.center_source_combo.setEnabled)
+        proc_layout.addWidget(QtWidgets.QLabel("Use median from:"), 2, 0)
+        proc_layout.addWidget(self.center_source_combo, 2, 1, 1, 3)
 
         style_group = QtWidgets.QGroupBox("Scatter")
         style_layout = QtWidgets.QGridLayout(style_group)
@@ -280,6 +289,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())
         orig.CENTER_MEDIAN_Y = self.center_cb.isChecked()
+        orig.CENTER_MEDIAN_SOURCE = self.center_source_combo.currentText().lower()
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         orig.IMPROVE_READABILITY = self.readable_cb.isChecked()
@@ -311,6 +321,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings.setValue("axis_size", orig.AXIS_LABEL_SIZE)
         self.settings.setValue("title_size", orig.TITLE_SIZE)
         self.settings.setValue("center_median_y", orig.CENTER_MEDIAN_Y)
+        self.settings.setValue("center_source", orig.CENTER_MEDIAN_SOURCE)
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 

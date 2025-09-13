@@ -112,7 +112,8 @@
     "SHOW_TITLE": true,
     "SCALE_X_1E4": true,
     "SCALE_Y_1E3": true,
-    "CENTER_MEDIAN_Y": false
+    "CENTER_MEDIAN_Y": false,
+    "CENTER_MEDIAN_SOURCE": "raw"
   },
   "current_annealing": {
     "OUTPUT_DIR": "",
