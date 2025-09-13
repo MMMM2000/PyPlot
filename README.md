@@ -64,8 +64,9 @@ PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
 current annealing plotter also omits the initial 0 mA data point so figures
 start with the first real sample.  Every plotting dialog now exposes an
 **Improve readability** toggle that enlarges fonts for titles, axes, and tick
-labels; the Maxion plotter extends this with legend layout controls and ×10³/×10⁴
-axis scaling to reduce zero clutter.  Legend text size is adjustable, entries
+labels; the Maxion plotter extends this with legend layout controls, optional
+×10³/×10⁴ axis scaling, and a switch to centre the Y axis on its median.
+Legend text size is adjustable, entries
 can stack horizontally or vertically (or automatically choose a layout), and
 symbols can be shown or hidden with configurable size.  All readability
 preferences are remembered between runs.

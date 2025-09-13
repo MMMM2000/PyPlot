@@ -37,6 +37,9 @@ TITLE_SIZE = _CFG.get("TITLE_SIZE", 22)
 SHOW_TICK_LABELS = _CFG.get("SHOW_TICK_LABELS", True)
 SHOW_AXIS_LABELS = _CFG.get("SHOW_AXIS_LABELS", True)
 SHOW_TITLE = _CFG.get("SHOW_TITLE", True)
+SCALE_X_1E4 = _CFG.get("SCALE_X_1E4", True)
+SCALE_Y_1E3 = _CFG.get("SCALE_Y_1E3", True)
+CENTER_MEDIAN_Y = _CFG.get("CENTER_MEDIAN_Y", False)
 BACKEND = _CFG.get("BACKEND", "matplotlib")
 
 
@@ -104,35 +107,48 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
     )
     with plt.rc_context(rc):
         fig, ax = plt.subplots(figsize=(9, 4))
-        x = np.arange(len(y)) / 1e4
+        if CENTER_MEDIAN_Y:
+            y = y - y.median()
+        x = np.arange(len(y))
+        x_label = "Sample index"
+        if IMPROVE_READABILITY and SCALE_X_1E4:
+            x = x / 1e4
+            x_label += " (×10⁴)"
         artists: list[Any] = []
         labels: list[str] = []
+        y_vals = y.to_numpy()
+        if IMPROVE_READABILITY and SCALE_Y_1E3:
+            y_vals = y_vals / 1e3
         if PLOT_MODE in ("raw", "both"):
-            sc = ax.scatter(x, y.to_numpy() / 1e3, s=MARKER_SIZE, label="raw")
+            sc = ax.scatter(x, y_vals, s=MARKER_SIZE, label="raw")
             artists.append(sc); labels.append("raw")
         if PLOT_MODE in ("processed", "both"):
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
             proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
-            sc = ax.scatter(x, proc.to_numpy() / 1e3, s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
+            proc_vals = proc.to_numpy()
+            if IMPROVE_READABILITY and SCALE_Y_1E3:
+                proc_vals = proc_vals / 1e3
+            sc = ax.scatter(x, proc_vals, s=MARKER_SIZE, label=f"med{MED_WINDOW}+mwa{MA_WINDOW}")
             artists.append(sc); labels.append(f"med{MED_WINDOW}+mwa{MA_WINDOW}")
+        y_label = "T1+T2 (arb. u.)"
+        if IMPROVE_READABILITY and SCALE_Y_1E3:
+            y_label = "T1+T2 (arb. u., ×10³)"
         if IMPROVE_READABILITY:
             if SHOW_AXIS_LABELS:
-                ax.set_xlabel("Sample index (×10⁴)")
-                ax.set_ylabel("T1+T2 (arb. u., ×10³)")
+                ax.set_xlabel(x_label)
+                ax.set_ylabel(y_label)
             else:
                 ax.set_xlabel("")
                 ax.set_ylabel("")
-            if SHOW_TICK_LABELS:
-                pass
-            else:
+            if not SHOW_TICK_LABELS:
                 ax.tick_params(labelbottom=False, labelleft=False)
             if SHOW_TITLE:
                 ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
             else:
                 ax.set_title("")
         else:
-            ax.set_xlabel("Sample index (×10⁴)")
-            ax.set_ylabel("T1+T2 (arb. u., ×10³)")
+            ax.set_xlabel(x_label)
+            ax.set_ylabel(y_label)
             ax.set_title(f"Head {head} — {coils} coils — CH{ch} T1+T2")
         ax.grid(True)
         if SHOW_LEGEND and artists:
@@ -175,7 +191,15 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
 
 def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
     with origin_session() as op:
-        x = (np.arange(len(y)) / 1e4).tolist()
+        if CENTER_MEDIAN_Y:
+            y = y - y.median()
+        x = np.arange(len(y))
+        if IMPROVE_READABILITY and SCALE_X_1E4:
+            x = x / 1e4
+        x_list = x.tolist()
+        y_vals = y.to_numpy()
+        if IMPROVE_READABILITY and SCALE_Y_1E3:
+            y_vals = y_vals / 1e3
         book = op.new_book('w', lname="Maxion (Python)")
         book.activate()
         gp = op.new_graph(template='scatter')
@@ -183,8 +207,8 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
 
         # Raw
         w_raw = op.new_sheet('w', lname='raw')
-        w_raw.from_list(0, x)
-        w_raw.from_list(1, (y.to_numpy() / 1e3).tolist())
+        w_raw.from_list(0, x_list)
+        w_raw.from_list(1, y_vals.tolist())
         w_raw.cols_axis('XY')
         gl.add_plot(w_raw, coly=1, colx=0, type='s')
 
@@ -192,9 +216,12 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
         if PLOT_MODE in ("processed", "both"):
             med = y.rolling(MED_WINDOW, center=True, min_periods=1).median()
             proc = med.rolling(MA_WINDOW, center=True, min_periods=1).mean()
+            proc_vals = proc.to_numpy()
+            if IMPROVE_READABILITY and SCALE_Y_1E3:
+                proc_vals = proc_vals / 1e3
             w_proc = op.new_sheet('w', lname='proc')
-            w_proc.from_list(0, x)
-            w_proc.from_list(1, (proc.to_numpy() / 1e3).tolist())
+            w_proc.from_list(0, x_list)
+            w_proc.from_list(1, proc_vals.tolist())
             w_proc.cols_axis('XY')
             p = gl.add_plot(w_proc, coly=1, colx=0, type='y')
             try:
@@ -206,8 +233,10 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
             gp.activate()
             op.lt_exec('page.antialias=1;')
             op.lt_exec('layer -aa 1;')
-            op.lt_exec('lab -xb "Sample index (x10^4)";')
-            op.lt_exec('lab -yl "T1+T2 (arb. u., x10^3)";')
+            x_lab = "Sample index (x10^4)" if IMPROVE_READABILITY and SCALE_X_1E4 else "Sample index"
+            y_lab = "T1+T2 (arb. u., x10^3)" if IMPROVE_READABILITY and SCALE_Y_1E3 else "T1+T2 (arb. u.)"
+            op.lt_exec(f'lab -xb "{x_lab}";')
+            op.lt_exec(f'lab -yl "{y_lab}";')
             esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
             op.lt_exec(f'title -s "{esc}";')
             if SHOW_LEGEND:

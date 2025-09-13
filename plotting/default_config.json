@@ -109,7 +109,10 @@
     "TITLE_SIZE": 22,
     "SHOW_TICK_LABELS": true,
     "SHOW_AXIS_LABELS": true,
-    "SHOW_TITLE": true
+    "SHOW_TITLE": true,
+    "SCALE_X_1E4": true,
+    "SCALE_Y_1E3": true,
+    "CENTER_MEDIAN_Y": false
   },
   "current_annealing": {
     "OUTPUT_DIR": "",
