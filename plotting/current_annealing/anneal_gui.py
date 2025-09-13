@@ -101,10 +101,9 @@ class SettingsDialog(QtWidgets.QDialog):
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "current_annealing", self.subdir_cb.isChecked())
         set_last_output_dir(base)
-        orig.IMPROVE_READABILITY = self.read_cb.isChecked()
-        set_readability("current_annealing", orig.IMPROVE_READABILITY)
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
+        sync_readability("current_annealing", self.read_ctrl, orig)
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 

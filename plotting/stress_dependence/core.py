@@ -6,7 +6,7 @@ from typing import List, Dict, Any, Tuple, cast
 from PyQt6 import QtWidgets
 
 from ..config import load_config
-from ..utils import save_figure, show_plots, apply_readability_fonts
+from ..utils import save_figure, show_plots, apply_readability_fonts, apply_readability
 from ..backends import wants_matplotlib, wants_origin
 
 import numpy as np
@@ -61,6 +61,17 @@ PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
+SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
+LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
+LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
+LEGEND_SHOW_SYMBOLS = bool(_CFG.get("LEGEND_SHOW_SYMBOLS", False))
+LEGEND_SYMBOL_SIZE = float(_CFG.get("LEGEND_SYMBOL_SIZE", 10))
+TICK_SIZE = int(_CFG.get("TICK_SIZE", 18))
+AXIS_LABEL_SIZE = int(_CFG.get("AXIS_LABEL_SIZE", 18))
+TITLE_SIZE = int(_CFG.get("TITLE_SIZE", 22))
+SHOW_TICK_LABELS = bool(_CFG.get("SHOW_TICK_LABELS", True))
+SHOW_AXIS_LABELS = bool(_CFG.get("SHOW_AXIS_LABELS", True))
+SHOW_TITLE = bool(_CFG.get("SHOW_TITLE", True))
 
 # Origin styling knobs (roughly matching Matplotlib appearance)
 # Raw symbol size (keep small as requested)
@@ -286,6 +297,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
+    apply_readability(ax, globals())
     fname = f"{comp} {title} {samp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)

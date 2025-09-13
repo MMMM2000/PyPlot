@@ -15,7 +15,7 @@ if __package__ is None or __package__ == "":
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
-        arrange_side_panel,
+        arrange_top_layout,
     )
 else:
     from . import core as orig
@@ -26,7 +26,7 @@ else:
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
-        arrange_side_panel,
+        arrange_top_layout,
     )
 
 
@@ -225,7 +225,7 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(self._read_container, 3, 0, 1, 2)
         layout.addWidget(self.run_btn, 4, 0, 1, 2)
 
-        arrange_side_panel(self, left, file_widget, self.console)
+        arrange_top_layout(self, file_widget, left, self.console)
 
         self._read_container.setVisible(False)
 

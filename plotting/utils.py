@@ -362,3 +362,230 @@ def arrange_side_panel(
 
     main_layout = QtWidgets.QVBoxLayout(dialog)
     main_layout.addWidget(splitter)
+
+
+def arrange_top_layout(
+    dialog: QtWidgets.QDialog,
+    file_widget: QtWidgets.QWidget,
+    center: QtWidgets.QWidget,
+    console: QtWidgets.QPlainTextEdit,
+) -> None:
+    """Arrange file list on top, settings in the middle and console at bottom.
+
+    The dialog is resized to fit on screen and given a generous minimum size so
+    that widgets remain visible even when the window is resized. No scroll areas
+    are used to avoid internal scrolling; instead the dialog expands
+    horizontally when needed.
+    """
+
+    layout = QtWidgets.QVBoxLayout(dialog)
+    layout.addWidget(file_widget)
+    layout.addWidget(center, 1)
+    layout.addWidget(console, 1)
+
+    file_widget.setMinimumHeight(150)
+    console.setMinimumHeight(150)
+
+    screen = dialog.screen() or QtGui.QGuiApplication.primaryScreen()
+    if screen is not None:
+        rect = screen.availableGeometry()
+        width = min(1200, rect.width() - 80)
+        height = min(900, rect.height() - 80)
+    else:
+        width, height = 1000, 800
+    dialog.resize(width, height)
+    dialog.setMinimumSize(min(width, 900), min(height, 600))
+
+
+class ReadabilityControls:
+    def __init__(self) -> None:
+        self.read_cb: QtWidgets.QCheckBox
+        self.legend_show: QtWidgets.QCheckBox
+        self.legend_size: QtWidgets.QSpinBox
+        self.legend_orient: QtWidgets.QComboBox
+        self.legend_symbol: QtWidgets.QCheckBox
+        self.legend_symbol_size: QtWidgets.QDoubleSpinBox
+        self.tick_show: QtWidgets.QCheckBox
+        self.tick_size: QtWidgets.QSpinBox
+        self.axis_show: QtWidgets.QCheckBox
+        self.axis_size: QtWidgets.QSpinBox
+        self.title_show: QtWidgets.QCheckBox
+        self.title_size: QtWidgets.QSpinBox
+
+
+def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls, QtWidgets.QGroupBox]:
+    """Return a fully featured readability group and its controls."""
+
+    s = _settings()
+    ctrl = ReadabilityControls()
+    grp = QtWidgets.QGroupBox("Readability")
+    lay = QtWidgets.QGridLayout(grp)
+
+    ctrl.read_cb = QtWidgets.QCheckBox("Improve readability")
+    ctrl.read_cb.setChecked(bool(s.value(f"{key}_readable", orig_module.IMPROVE_READABILITY, type=bool)))
+
+    ctrl.legend_size = QtWidgets.QSpinBox()
+    ctrl.legend_size.setRange(6, 72)
+    ctrl.legend_size.setValue(int(s.value(f"{key}_legend_size", getattr(orig_module, "LEGEND_SIZE", 18), type=int)))
+    ctrl.legend_show = QtWidgets.QCheckBox("Show")
+    ctrl.legend_show.setChecked(bool(s.value(f"{key}_show_legend", getattr(orig_module, "SHOW_LEGEND", True), type=bool)))
+    ctrl.legend_orient = QtWidgets.QComboBox()
+    ctrl.legend_orient.addItems(["Auto", "Vertical", "Horizontal"])
+    ctrl.legend_orient.setCurrentText(s.value(f"{key}_legend_orient", getattr(orig_module, "LEGEND_ORIENTATION", "auto"), type=str).capitalize())
+    ctrl.legend_symbol_size = QtWidgets.QDoubleSpinBox()
+    ctrl.legend_symbol_size.setRange(1.0, 50.0)
+    ctrl.legend_symbol_size.setValue(float(s.value(f"{key}_legend_symbol_size", getattr(orig_module, "LEGEND_SYMBOL_SIZE", 10), type=float)))
+    ctrl.legend_symbol = QtWidgets.QCheckBox("Show symbols")
+    ctrl.legend_symbol.setChecked(bool(s.value(f"{key}_legend_symbols", getattr(orig_module, "LEGEND_SHOW_SYMBOLS", False), type=bool)))
+
+    ctrl.tick_size = QtWidgets.QSpinBox()
+    ctrl.tick_size.setRange(6, 72)
+    ctrl.tick_size.setValue(int(s.value(f"{key}_tick_size", getattr(orig_module, "TICK_SIZE", 18), type=int)))
+    ctrl.tick_show = QtWidgets.QCheckBox("Show")
+    ctrl.tick_show.setChecked(bool(s.value(f"{key}_show_ticks", getattr(orig_module, "SHOW_TICK_LABELS", True), type=bool)))
+
+    ctrl.axis_size = QtWidgets.QSpinBox()
+    ctrl.axis_size.setRange(6, 72)
+    ctrl.axis_size.setValue(int(s.value(f"{key}_axis_size", getattr(orig_module, "AXIS_LABEL_SIZE", 18), type=int)))
+    ctrl.axis_show = QtWidgets.QCheckBox("Show")
+    ctrl.axis_show.setChecked(bool(s.value(f"{key}_show_axis", getattr(orig_module, "SHOW_AXIS_LABELS", True), type=bool)))
+
+    ctrl.title_size = QtWidgets.QSpinBox()
+    ctrl.title_size.setRange(6, 96)
+    ctrl.title_size.setValue(int(s.value(f"{key}_title_size", getattr(orig_module, "TITLE_SIZE", 22), type=int)))
+    ctrl.title_show = QtWidgets.QCheckBox("Show")
+    ctrl.title_show.setChecked(bool(s.value(f"{key}_show_title", getattr(orig_module, "SHOW_TITLE", True), type=bool)))
+
+    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 0, 0)
+    lay.addWidget(ctrl.legend_size, 0, 1)
+    lay.addWidget(ctrl.legend_show, 0, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 1, 0)
+    lay.addWidget(ctrl.legend_orient, 1, 1, 1, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 2, 0)
+    lay.addWidget(ctrl.legend_symbol_size, 2, 1)
+    lay.addWidget(ctrl.legend_symbol, 2, 2)
+    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 3, 0)
+    lay.addWidget(ctrl.tick_size, 3, 1)
+    lay.addWidget(ctrl.tick_show, 3, 2)
+    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 4, 0)
+    lay.addWidget(ctrl.axis_size, 4, 1)
+    lay.addWidget(ctrl.axis_show, 4, 2)
+    lay.addWidget(QtWidgets.QLabel("Title size:"), 5, 0)
+    lay.addWidget(ctrl.title_size, 5, 1)
+    lay.addWidget(ctrl.title_show, 5, 2)
+    lay.addWidget(ctrl.read_cb, 6, 0, 1, 3)
+
+    def _toggle_readable(checked: bool) -> None:
+        ctrl.legend_show.setEnabled(checked)
+        ctrl.tick_show.setEnabled(checked)
+        ctrl.axis_show.setEnabled(checked)
+        ctrl.title_show.setEnabled(checked)
+        _toggle_legend(ctrl.legend_show.isChecked())
+        _toggle_tick(ctrl.tick_show.isChecked())
+        _toggle_axis(ctrl.axis_show.isChecked())
+        _toggle_title(ctrl.title_show.isChecked())
+
+    def _toggle_legend(checked: bool) -> None:
+        enable = checked and ctrl.read_cb.isChecked()
+        ctrl.legend_size.setEnabled(enable)
+        ctrl.legend_orient.setEnabled(enable)
+        ctrl.legend_symbol.setEnabled(enable)
+        ctrl.legend_symbol_size.setEnabled(enable and ctrl.legend_symbol.isChecked())
+
+    def _toggle_tick(checked: bool) -> None:
+        ctrl.tick_size.setEnabled(checked and ctrl.read_cb.isChecked())
+
+    def _toggle_axis(checked: bool) -> None:
+        ctrl.axis_size.setEnabled(checked and ctrl.read_cb.isChecked())
+
+    def _toggle_title(checked: bool) -> None:
+        ctrl.title_size.setEnabled(checked and ctrl.read_cb.isChecked())
+
+    ctrl.read_cb.toggled.connect(_toggle_readable)
+    ctrl.legend_show.toggled.connect(_toggle_legend)
+    ctrl.legend_symbol.toggled.connect(lambda c: ctrl.legend_symbol_size.setEnabled(c and ctrl.legend_show.isChecked() and ctrl.read_cb.isChecked()))
+    ctrl.tick_show.toggled.connect(_toggle_tick)
+    ctrl.axis_show.toggled.connect(_toggle_axis)
+    ctrl.title_show.toggled.connect(_toggle_title)
+
+    _toggle_readable(ctrl.read_cb.isChecked())
+
+    return ctrl, grp
+
+
+def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
+    """Copy readability UI state into ``orig_module`` and persist to settings."""
+
+    orig_module.IMPROVE_READABILITY = ctrl.read_cb.isChecked()
+    orig_module.SHOW_LEGEND = ctrl.legend_show.isChecked()
+    orig_module.LEGEND_SIZE = int(ctrl.legend_size.value())
+    orig_module.LEGEND_ORIENTATION = ctrl.legend_orient.currentText().lower()
+    orig_module.LEGEND_SHOW_SYMBOLS = ctrl.legend_symbol.isChecked()
+    orig_module.LEGEND_SYMBOL_SIZE = float(ctrl.legend_symbol_size.value())
+    orig_module.SHOW_TICK_LABELS = ctrl.tick_show.isChecked()
+    orig_module.TICK_SIZE = int(ctrl.tick_size.value())
+    orig_module.SHOW_AXIS_LABELS = ctrl.axis_show.isChecked()
+    orig_module.AXIS_LABEL_SIZE = int(ctrl.axis_size.value())
+    orig_module.SHOW_TITLE = ctrl.title_show.isChecked()
+    orig_module.TITLE_SIZE = int(ctrl.title_size.value())
+    s = _settings()
+    s.setValue(f"{key}_readable", orig_module.IMPROVE_READABILITY)
+    s.setValue(f"{key}_show_legend", orig_module.SHOW_LEGEND)
+    s.setValue(f"{key}_legend_size", orig_module.LEGEND_SIZE)
+    s.setValue(f"{key}_legend_orient", orig_module.LEGEND_ORIENTATION)
+    s.setValue(f"{key}_legend_symbols", orig_module.LEGEND_SHOW_SYMBOLS)
+    s.setValue(f"{key}_legend_symbol_size", orig_module.LEGEND_SYMBOL_SIZE)
+    s.setValue(f"{key}_show_ticks", orig_module.SHOW_TICK_LABELS)
+    s.setValue(f"{key}_tick_size", orig_module.TICK_SIZE)
+    s.setValue(f"{key}_show_axis", orig_module.SHOW_AXIS_LABELS)
+    s.setValue(f"{key}_axis_size", orig_module.AXIS_LABEL_SIZE)
+    s.setValue(f"{key}_show_title", orig_module.SHOW_TITLE)
+    s.setValue(f"{key}_title_size", orig_module.TITLE_SIZE)
+
+
+def apply_readability(ax: plt.Axes, cfg: dict) -> None:
+    """Apply common readability settings to ``ax`` using values from ``cfg``."""
+
+    if not cfg.get("IMPROVE_READABILITY", False):
+        return
+
+    apply_readability_fonts(
+        cfg.get("TITLE_SIZE", 22), cfg.get("TICK_SIZE", 18)
+    )
+
+    if not cfg.get("SHOW_TICK_LABELS", True):
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+    else:
+        ax.tick_params(labelsize=cfg.get("TICK_SIZE", 18))
+
+    if not cfg.get("SHOW_AXIS_LABELS", True):
+        ax.set_xlabel("")
+        ax.set_ylabel("")
+    else:
+        ax.xaxis.label.set_size(cfg.get("AXIS_LABEL_SIZE", 18))
+        ax.yaxis.label.set_size(cfg.get("AXIS_LABEL_SIZE", 18))
+
+    if not cfg.get("SHOW_TITLE", True):
+        ax.set_title("")
+    else:
+        ax.title.set_size(cfg.get("TITLE_SIZE", 22))
+
+    legend = ax.get_legend()
+    if legend:
+        if cfg.get("SHOW_LEGEND", True):
+            legend.set_visible(True)
+            legend.set_fontsize(cfg.get("LEGEND_SIZE", 18))
+            orient = cfg.get("LEGEND_ORIENTATION", "auto")
+            if orient == "horizontal":
+                legend.set_ncol(len(legend.get_texts()))
+            elif orient == "vertical":
+                legend.set_ncol(1)
+            for h in legend.legend_handles:
+                try:
+                    h.set_markersize(cfg.get("LEGEND_SYMBOL_SIZE", 10))
+                    h.set_marker("o" if cfg.get("LEGEND_SHOW_SYMBOLS", False) else "")
+                except Exception:
+                    pass
+        else:
+            legend.set_visible(False)

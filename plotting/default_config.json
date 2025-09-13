@@ -13,7 +13,18 @@
     "MA_WINDOW": 20,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   },
   "stress_sensitivity": {
     "OUTPUT_DIR": "",
@@ -30,7 +41,18 @@
     "CURVE_WIDTH": 1.0,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   },
   "temperature_sensitivity": {
     "OUTPUT_DIR": "",
@@ -47,7 +69,18 @@
     "MA_WINDOW": 20,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   },
   "temperature_dependence": {
     "OUTPUT_DIR": "",
@@ -63,7 +96,18 @@
     "MA_WINDOW": 20,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   },
   "hsw_load_compare": {
     "CORE_BINS": 50,
@@ -79,13 +123,35 @@
     "BACKEND": "matplotlib",
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   },
   "hysteresis_loops": {
     "MODE": "Combined",
     "SHOW_PLOTS": true,
     "BACKEND": "matplotlib",
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   },
   "maxion_continuous": {
     "OUTPUT_DIR": "",
@@ -122,6 +188,17 @@
     "BACKEND": "matplotlib",
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
-    "IMPROVE_READABILITY": false
+    "IMPROVE_READABILITY": false,
+    "SHOW_LEGEND": true,
+    "LEGEND_SIZE": 18,
+    "LEGEND_ORIENTATION": "auto",
+    "LEGEND_SHOW_SYMBOLS": false,
+    "LEGEND_SYMBOL_SIZE": 10,
+    "TICK_SIZE": 18,
+    "AXIS_LABEL_SIZE": 18,
+    "TITLE_SIZE": 22,
+    "SHOW_TICK_LABELS": true,
+    "SHOW_AXIS_LABELS": true,
+    "SHOW_TITLE": true
   }
 }

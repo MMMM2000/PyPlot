@@ -12,9 +12,9 @@ if __package__ is None or __package__ == "":
         apply_system_theme,
         create_file_widget,
         run_with_console,
-        get_readability,
-        set_readability,
-        arrange_side_panel,
+        create_readability_group,
+        sync_readability,
+        arrange_top_layout,
     )
 else:
     from . import core
@@ -22,9 +22,9 @@ else:
         apply_system_theme,
         create_file_widget,
         run_with_console,
-        get_readability,
-        set_readability,
-        arrange_side_panel,
+        create_readability_group,
+        sync_readability,
+        arrange_top_layout,
     )
 
 
@@ -52,9 +52,8 @@ class SettingsDialog(QtWidgets.QDialog):
         mode_layout.addWidget(QtWidgets.QLabel("Backend:"), 1, 0)
         mode_layout.addWidget(self.backend_combo, 1, 1)
 
-        self.read_cb = QtWidgets.QCheckBox("Improve readability")
-        self.read_cb.setChecked(get_readability("hysteresis_loops"))
-        mode_layout.addWidget(self.read_cb, 2, 0, 1, 2)
+        self.read_ctrl, read_group = create_readability_group("hysteresis_loops", core)
+        mode_layout.addWidget(read_group, 2, 0, 1, 2)
 
         self.run_btn = QtWidgets.QPushButton("Plot")
         self.run_btn.clicked.connect(self.run)
@@ -62,7 +61,7 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(mode_group, 0, 0, 1, 2)
         layout.addWidget(self.run_btn, 1, 0, 1, 2)
 
-        arrange_side_panel(self, left, file_widget, self.console)
+        arrange_top_layout(self, file_widget, left, self.console)
 
     def run(self) -> None:
         if not self.files:
@@ -70,8 +69,7 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         mode = self.mode_combo.currentText()
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        core.IMPROVE_READABILITY = self.read_cb.isChecked()
-        set_readability("hysteresis_loops", core.IMPROVE_READABILITY)
+        sync_readability("hysteresis_loops", self.read_ctrl, core)
         run_with_console(lambda: core.plot_loops(self.files, mode=mode, show=True, backend=backend), self.console)
 
 

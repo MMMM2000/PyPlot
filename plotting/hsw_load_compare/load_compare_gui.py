@@ -15,9 +15,9 @@ if __package__ is None or __package__ == "":
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
-        get_readability,
-        set_readability,
-        arrange_side_panel,
+        create_readability_group,
+        sync_readability,
+        arrange_top_layout,
     )
 else:
     from . import core as orig
@@ -28,9 +28,9 @@ else:
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
-        get_readability,
-        set_readability,
-        arrange_side_panel,
+        create_readability_group,
+        sync_readability,
+        arrange_top_layout,
     )
 
 
@@ -90,10 +90,7 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.out_dir_edit, 7, 0)
         out_layout.addWidget(browse_btn, 7, 1)
 
-        self.read_cb = QtWidgets.QCheckBox("Improve readability")
-        self.read_cb.setChecked(get_readability("hsw_load_compare"))
-        read_group = QtWidgets.QGroupBox("Readability")
-        rl = QtWidgets.QVBoxLayout(read_group); rl.addWidget(self.read_cb)
+        self.read_ctrl, read_group = create_readability_group("hsw_load_compare", orig)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -103,7 +100,7 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(read_group, 1, 0, 1, 2)
         layout.addWidget(self.run_btn, 2, 0, 1, 2)
 
-        arrange_side_panel(self, left, file_widget, self.console)
+        arrange_top_layout(self, file_widget, left, self.console)
 
     def run(self) -> None:
         if not self.files:
@@ -126,8 +123,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SHOW_PLOTS = cfg["show"]
         orig.SAVE_PLOTS = cfg["save"]
         orig.OUTPUT_DIR = cfg["out_dir"]
-        orig.IMPROVE_READABILITY = self.read_cb.isChecked()
-        set_readability("hsw_load_compare", orig.IMPROVE_READABILITY)
+        sync_readability("hsw_load_compare", self.read_ctrl, orig)
         set_last_output_dir(self.out_dir_edit.text())
         run_with_console(lambda: orig.main(self.files, cfg), self.console)
 

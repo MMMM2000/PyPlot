@@ -10,7 +10,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
-from ..utils import save_figure, origin_session, show_plots
+from ..utils import save_figure, origin_session, show_plots, apply_readability_fonts, apply_readability
 from ..backends import wants_matplotlib, wants_origin
 from ..config import load_config
 
@@ -192,6 +192,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
                         except Exception:
                             pass
         fig.tight_layout()
+        apply_readability(ax, globals())
     fname = f"head{head}_{coils}coils_CH{ch}_sum"
     if SAVE_PLOTS:
         os.makedirs(OUTPUT_DIR, exist_ok=True)
@@ -266,6 +267,8 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
 
 def main(files: List[str], backend: str = BACKEND):
     total = len(files) * 3
+    if IMPROVE_READABILITY:
+        apply_readability_fonts(TITLE_SIZE, TICK_SIZE)
     progress = ProgressDialog(total) if total else None
     plots: List[Tuple[Figure, str]] = []
     for path in files:

@@ -63,14 +63,18 @@ for outputs—so frequent paths need not be reselected.  When saving, an optiona
 YYYY-MM-DD` for easier organisation.  Export options include a choice of PNG,
 PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
 current annealing plotter also omits the initial 0 mA data point so figures
-start with the first real sample.  Every plotting dialog now exposes an
-**Improve readability** toggle that enlarges fonts for titles, axes, and tick
-labels; the Maxion plotter extends this with legend layout controls, optional
-×10³/×10⁴ axis scaling, and a switch to centre the Y axis on its median (from raw or processed data).
-Legend text size is adjustable, entries
-can stack horizontally or vertically (or automatically choose a layout), and
-symbols can be shown or hidden with configurable size.  All readability
-preferences are remembered between runs.
+start with the first real sample.  Plotting dialogs keep their windows open
+after running and arrange selected files at the top, settings in the middle and
+an embedded console at the bottom.  Windows open wide enough to avoid vertical
+scrolling and have generous minimum sizes so widgets remain visible when
+resized.
+
+Each plotting dialog now provides a full **Readability** section with controls
+to toggle titles, axis labels, tick labels, and legends, adjust their font
+sizes, choose legend orientation, and show or hide legend symbols.  All
+readability preferences are remembered between runs.  The Maxion plotter adds
+optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
+(from raw or processed data).
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 

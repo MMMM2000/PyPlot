@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..utils import save_figure, format_annealing_title, show_plots, apply_readability_fonts
+from ..utils import save_figure, format_annealing_title, show_plots, apply_readability_fonts, apply_readability
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -20,6 +20,17 @@ SAVE_FORMAT = "png"
 PNG_DPI = 1200
 BACKEND = "matplotlib"
 IMPROVE_READABILITY = False
+SHOW_LEGEND = True
+LEGEND_SIZE = 18
+LEGEND_ORIENTATION = "auto"
+LEGEND_SHOW_SYMBOLS = False
+LEGEND_SYMBOL_SIZE = 10.0
+TICK_SIZE = 18
+AXIS_LABEL_SIZE = 18
+TITLE_SIZE = 22
+SHOW_TICK_LABELS = True
+SHOW_AXIS_LABELS = True
+SHOW_TITLE = True
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -47,6 +58,7 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
     fig.tight_layout()
+    apply_readability(ax, globals())
     fname = title.replace(os.sep, "_")
     return fig, fname
 

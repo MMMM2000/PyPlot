@@ -13,10 +13,10 @@ if __package__ is None or __package__ == "":
         create_file_widget,
         show_plots,
         run_with_console,
-        get_readability,
-        set_readability,
+        create_readability_group,
+        sync_readability,
         apply_readability_fonts,
-        arrange_side_panel,
+        arrange_top_layout,
     )
 else:
     from ..utils import (
@@ -24,10 +24,10 @@ else:
         create_file_widget,
         show_plots,
         run_with_console,
-        get_readability,
-        set_readability,
+        create_readability_group,
+        sync_readability,
         apply_readability_fonts,
-        arrange_side_panel,
+        arrange_top_layout,
     )
 
 IMPROVE_READABILITY = False
@@ -150,12 +150,11 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(QtWidgets.QLabel("Mode:"), 0, 0)
         layout.addWidget(self.mode_combo, 0, 1)
-        self.read_cb = QtWidgets.QCheckBox("Improve readability")
-        self.read_cb.setChecked(get_readability("hysteresis_hyst"))
-        layout.addWidget(self.read_cb, 1, 0, 1, 2)
+        self.read_ctrl, read_group = create_readability_group("hysteresis_hyst", sys.modules[__name__])
+        layout.addWidget(read_group, 1, 0, 1, 2)
         layout.addWidget(self.run_btn, 2, 0, 1, 2)
 
-        arrange_side_panel(self, left, file_widget, self.console)
+        arrange_top_layout(self, file_widget, left, self.console)
 
     def run(self) -> None:
         if not self.files:
@@ -169,8 +168,7 @@ class SettingsDialog(QtWidgets.QDialog):
         else:
             func = lambda: plot_separate(self.files)
         global IMPROVE_READABILITY
-        IMPROVE_READABILITY = self.read_cb.isChecked()
-        set_readability("hysteresis_hyst", IMPROVE_READABILITY)
+        sync_readability("hysteresis_hyst", self.read_ctrl, sys.modules[__name__])
         run_with_console(func, self.console)
 
 
