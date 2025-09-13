@@ -177,9 +177,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         scroll = QtWidgets.QScrollArea(self)
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         outer.addWidget(scroll)
 
         content = QtWidgets.QWidget()
+        content.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         form = QtWidgets.QFormLayout(content)
         scroll.setWidget(content)
 

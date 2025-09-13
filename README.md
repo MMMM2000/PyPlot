@@ -54,8 +54,11 @@ Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 places **Add Files/Folders** and **Remove Selected** buttons above a wide,
 non‑scrolling list so datasets can be refined without restarting the tool.
-Each settings window embeds a small console and places it next to the file list
-in a side panel beside the plot options, so the terminal never needs to span the full window width.  File dialogs remember the last directories used—falling back to the
+Settings panels wrap content vertically and disable horizontal scrollbars for a
+clean, uncluttered layout. Each settings window embeds a small console and
+places it next to the file list in a side panel beside the plot options, so the
+terminal never needs to span the full window width.  File dialogs remember the
+last directories used—falling back to the
 repository’s `sample_data` folder for inputs and the user’s `Downloads` folder
 for outputs—so frequent paths need not be reselected.  When saving, an optional
 **Create subfolder** checkbox stores figures under `<script name> data

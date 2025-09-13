@@ -352,8 +352,19 @@ def arrange_side_panel(
     splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
 
     scroll = QtWidgets.QScrollArea()
+    left.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Ignored,
+        QtWidgets.QSizePolicy.Policy.Preferred,
+    )
     scroll.setWidget(left)
     scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(
+        QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    scroll.setSizeAdjustPolicy(
+        QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
+    )
     splitter.addWidget(scroll)
 
     right = QtWidgets.QWidget()
