@@ -8,10 +8,24 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.hsw_load_compare import core as orig
-    from plotting.utils import apply_system_theme, create_file_widget
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+    )
 else:
     from . import core as orig
-    from ..utils import apply_system_theme, create_file_widget
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+    )
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -36,7 +50,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(str(orig.OUTPUT_DIR))
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(str(orig.OUTPUT_DIR)))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse() -> None:
@@ -60,9 +74,11 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.fmt_combo, 3, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
         out_layout.addWidget(self.dpi_spin, 4, 1)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 5, 0)
-        out_layout.addWidget(self.out_dir_edit, 6, 0)
-        out_layout.addWidget(browse_btn, 6, 1)
+        self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
+        out_layout.addWidget(self.subdir_cb, 5, 0, 1, 2)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
+        out_layout.addWidget(self.out_dir_edit, 7, 0)
+        out_layout.addWidget(browse_btn, 7, 1)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -83,7 +99,7 @@ class SettingsDialog(QtWidgets.QDialog):
             "share_y": self.share_cb.isChecked(),
             "show": self.show_cb.isChecked(),
             "save": self.save_cb.isChecked(),
-            "out_dir": self.out_dir_edit.text(),
+            "out_dir": prepare_output_dir(self.out_dir_edit.text(), "hsw_load_compare", self.subdir_cb.isChecked()),
             "BACKEND": ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()],
         }
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
@@ -92,7 +108,8 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SHOW_PLOTS = cfg["show"]
         orig.SAVE_PLOTS = cfg["save"]
         orig.OUTPUT_DIR = cfg["out_dir"]
-        orig.main(self.files, cfg)
+        set_last_output_dir(self.out_dir_edit.text())
+        run_with_console(lambda: orig.main(self.files, cfg), self.windowTitle())
 
 
 class ProgressDialog:

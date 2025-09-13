@@ -19,7 +19,15 @@ try:  # optional dependency
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
-from ..utils import apply_system_theme, select_files_or_folder, save_figure  # type: ignore
+from ..utils import (
+    apply_system_theme,
+    select_files_or_folder,
+    save_figure,
+    prepare_output_dir,
+    get_last_output_dir,
+    set_last_output_dir,
+    run_with_console,
+)  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
@@ -289,10 +297,11 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Save options
         self.save_cb = QtWidgets.QCheckBox()
         self.save_cb.setChecked(False)
-        self.out_dir = QtWidgets.QLineEdit(os.getcwd())
+        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd()))
         self.browse_out_btn = QtWidgets.QPushButton("Browse…")
         self.browse_out_btn.clicked.connect(self._browse_out)
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
+        self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
         self.format_combo = QtWidgets.QComboBox()
         self.format_combo.addItems(["png", "pdf", "svg"])
         fmt_box = self._hbox(self.format_combo)
@@ -323,6 +332,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.save_now_btn.clicked.connect(self.save_current)
         form.addRow("Save on plot", self.save_cb)
         form.addRow("Output dir", out_box)
+        form.addRow("Create subfolder", self.subdir_cb)
         form.addRow("Format", fmt_box)
         form.addRow("DPI", self.dpi_spin)
         form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
@@ -333,7 +343,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.auto_cb.setChecked(True)
         self.plot_btn = QtWidgets.QPushButton("Plot")
         self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.plot_btn.clicked.connect(self.plot)
+        self.plot_btn.clicked.connect(lambda: run_with_console(self.plot, self.windowTitle()))
         self.clear_btn.clicked.connect(self.clear_plot)
         btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn)
 
@@ -481,6 +491,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir.text())
         if d:
             self.out_dir.setText(d)
+            set_last_output_dir(d)
 
     def _maybe_auto_plot(self) -> None:
         if self.auto_cb.isChecked():
@@ -685,7 +696,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if not out_dir:
             return
         fmt = self.format_combo.currentText()
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = prepare_output_dir(out_dir, "pdf_plotter", self.subdir_cb.isChecked())
+        set_last_output_dir(self.out_dir.text())
         base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)

@@ -8,10 +8,24 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.maxion_continuous import core as orig
-    from plotting.utils import apply_system_theme, create_file_widget
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+    )
 else:
     from . import core as orig
-    from ..utils import apply_system_theme, create_file_widget
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+    )
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -27,7 +41,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(orig.OUTPUT_DIR))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -51,9 +65,11 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.fmt_combo, 3, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
         out_layout.addWidget(self.dpi_spin, 4, 1)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 5, 0)
-        out_layout.addWidget(self.out_dir_edit, 6, 0)
-        out_layout.addWidget(browse_btn, 6, 1)
+        self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
+        out_layout.addWidget(self.subdir_cb, 5, 0, 1, 2)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
+        out_layout.addWidget(self.out_dir_edit, 7, 0)
+        out_layout.addWidget(browse_btn, 7, 1)
 
         mode_group = QtWidgets.QGroupBox("Data to plot")
         mode_layout = QtWidgets.QVBoxLayout(mode_group)
@@ -146,24 +162,23 @@ class SettingsDialog(QtWidgets.QDialog):
         self.title_show_cb.setChecked(
             bool(self.settings.value("show_title", orig.SHOW_TITLE, type=bool))
         )
-        read_layout.addWidget(self.readable_cb, 0, 0, 1, 3)
-        read_layout.addWidget(QtWidgets.QLabel("Legend text size:"), 1, 0)
-        read_layout.addWidget(self.legend_size_spin, 1, 1)
-        read_layout.addWidget(self.legend_show_cb, 1, 2)
-        read_layout.addWidget(QtWidgets.QLabel("Legend orientation:"), 2, 0)
-        read_layout.addWidget(self.legend_orient_combo, 2, 1, 1, 2)
-        read_layout.addWidget(QtWidgets.QLabel("Legend symbol size:"), 3, 0)
-        read_layout.addWidget(self.legend_symbol_size_spin, 3, 1)
-        read_layout.addWidget(self.legend_symbol_cb, 3, 2)
-        read_layout.addWidget(QtWidgets.QLabel("Tick label size:"), 4, 0)
-        read_layout.addWidget(self.tick_size_spin, 4, 1)
-        read_layout.addWidget(self.tick_show_cb, 4, 2)
-        read_layout.addWidget(QtWidgets.QLabel("Axis label size:"), 5, 0)
-        read_layout.addWidget(self.axis_size_spin, 5, 1)
-        read_layout.addWidget(self.axis_show_cb, 5, 2)
-        read_layout.addWidget(QtWidgets.QLabel("Title size:"), 6, 0)
-        read_layout.addWidget(self.title_size_spin, 6, 1)
-        read_layout.addWidget(self.title_show_cb, 6, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Legend text size:"), 0, 0)
+        read_layout.addWidget(self.legend_size_spin, 0, 1)
+        read_layout.addWidget(self.legend_show_cb, 0, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Legend orientation:"), 1, 0)
+        read_layout.addWidget(self.legend_orient_combo, 1, 1, 1, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Legend symbol size:"), 2, 0)
+        read_layout.addWidget(self.legend_symbol_size_spin, 2, 1)
+        read_layout.addWidget(self.legend_symbol_cb, 2, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Tick label size:"), 3, 0)
+        read_layout.addWidget(self.tick_size_spin, 3, 1)
+        read_layout.addWidget(self.tick_show_cb, 3, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Axis label size:"), 4, 0)
+        read_layout.addWidget(self.axis_size_spin, 4, 1)
+        read_layout.addWidget(self.axis_show_cb, 4, 2)
+        read_layout.addWidget(QtWidgets.QLabel("Title size:"), 5, 0)
+        read_layout.addWidget(self.title_size_spin, 5, 1)
+        read_layout.addWidget(self.title_show_cb, 5, 2)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
@@ -172,7 +187,11 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(mode_group, 1, 1)
         layout.addWidget(proc_group, 2, 0)
         layout.addWidget(style_group, 2, 1)
-        layout.addWidget(header, 3, 0, 1, 2)
+        read_header = QtWidgets.QHBoxLayout()
+        read_header.addWidget(header)
+        read_header.addWidget(self.readable_cb)
+        read_header.addStretch()
+        layout.addLayout(read_header, 3, 0, 1, 2)
         layout.addWidget(self._read_container, 4, 0, 1, 2)
         layout.addWidget(self.run_btn, 5, 0, 1, 2)
 
@@ -224,6 +243,8 @@ class SettingsDialog(QtWidgets.QDialog):
 
         _toggle_readable(self.readable_cb.isChecked())
         self.readable_cb.toggled.connect(_toggle_readable)
+        header.setEnabled(self.readable_cb.isChecked())
+        self.readable_cb.toggled.connect(header.setEnabled)
 
     def run(self) -> None:
         if not self.files:
@@ -231,7 +252,9 @@ class SettingsDialog(QtWidgets.QDialog):
             return
         orig.SHOW_PLOTS = self.show_cb.isChecked()
         orig.SAVE_PLOTS = self.save_cb.isChecked()
-        orig.OUTPUT_DIR = self.out_dir_edit.text()
+        base = self.out_dir_edit.text()
+        orig.OUTPUT_DIR = prepare_output_dir(base, "maxion_continuous", self.subdir_cb.isChecked())
+        set_last_output_dir(base)
         orig.PLOT_MODE = "raw" if self.raw_rb.isChecked() else "processed" if self.proc_rb.isChecked() else "both"
         orig.MARKER_SIZE = self.marker_spin.value()
         orig.MED_WINDOW = int(self.med_spin.value())
@@ -263,7 +286,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings.setValue("axis_size", orig.AXIS_LABEL_SIZE)
         self.settings.setValue("title_size", orig.TITLE_SIZE)
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        orig.main(self.files, backend=backend)
+        run_with_console(lambda: orig.main(self.files, backend=backend), self.windowTitle())
 
 
 class ProgressDialog:

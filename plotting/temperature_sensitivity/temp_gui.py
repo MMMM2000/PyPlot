@@ -8,10 +8,24 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.temperature_sensitivity import core as orig
-    from plotting.utils import apply_system_theme, create_file_widget
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+    )
 else:
     from . import core as orig
-    from ..utils import apply_system_theme, create_file_widget
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+    )
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -40,7 +54,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.baseline_combo = QtWidgets.QComboBox(); self.baseline_combo.addItems(["None", "Zero 25°c", "Both"])
         baseline_map = {"none": 0, "zero_25": 1, "both": 2}
         self.baseline_combo.setCurrentIndex(baseline_map.get(orig.BASELINE_MODE, 0))
-        self.out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(orig.OUTPUT_DIR))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -64,9 +78,11 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.fmt_combo, 4, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 5, 0)
         out_layout.addWidget(self.dpi_spin, 5, 1)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
-        out_layout.addWidget(self.out_dir_edit, 7, 0)
-        out_layout.addWidget(browse_btn, 7, 1)
+        self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
+        out_layout.addWidget(self.subdir_cb, 6, 0, 1, 2)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 7, 0)
+        out_layout.addWidget(self.out_dir_edit, 8, 0)
+        out_layout.addWidget(browse_btn, 8, 1)
 
         cont_group = QtWidgets.QGroupBox("Continuous data")
         cont_layout = QtWidgets.QGridLayout(cont_group)
@@ -103,14 +119,16 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SHOW_PLOTS = self.show_cb.isChecked()
         orig.SAVE_PLOTS = self.save_cb.isChecked()
         orig.BASELINE_MODE = {0: "none", 1: "zero_25", 2: "both"}[self.baseline_combo.currentIndex()]
-        orig.OUTPUT_DIR = self.out_dir_edit.text()
+        base = self.out_dir_edit.text()
+        orig.OUTPUT_DIR = prepare_output_dir(base, "temperature_sensitivity", self.subdir_cb.isChecked())
+        set_last_output_dir(base)
         orig.INCLUDE_CONTINUOUS = self.cont_cb.isChecked()
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        orig.main(self.files, backend=backend)
+        run_with_console(lambda: orig.main(self.files, backend=backend), self.windowTitle())
 
 
 class ProgressDialog:

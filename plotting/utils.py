@@ -4,7 +4,9 @@ import sys
 from pathlib import Path
 from matplotlib.figure import Figure
 from contextlib import contextmanager
+from typing import Callable
 import matplotlib.pyplot as plt
+import datetime
 
 
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -186,14 +188,37 @@ def apply_dark_theme(app: QtWidgets.QApplication) -> None:
     apply_system_theme(app)
 
 
+def _download_dir() -> str:
+    return str(Path.home() / "Downloads")
+
+
+def _sample_dir() -> str:
+    sample = Path(__file__).resolve().parents[1] / "sample_data"
+    return str(sample) if sample.exists() else _download_dir()
+
+
+def _settings() -> QtCore.QSettings:
+    return QtCore.QSettings("microwire", "plotting")
+
+
+def get_last_output_dir(default: str | None = None) -> str:
+    return _settings().value("last_output_dir", default or _download_dir(), type=str)
+
+
+def set_last_output_dir(path: str) -> None:
+    _settings().setValue("last_output_dir", path)
+
+
 def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = ".txt") -> list[str]:
     """Return a list of files with extension ``ext`` chosen by the user.
 
-    A small dialog lets the user pick between selecting individual files or a
-    directory.  When a directory is chosen all matching files inside it and any
-    sub-directories are returned sorted alphabetically.
+    Remembers the last input directory and defaults to the repository's
+    ``sample_data`` folder or the user's ``Downloads`` directory if it does not
+    exist.
     """
 
+    settings = _settings()
+    start_dir = settings.value("last_input_dir", _sample_dir(), type=str)
     box = QtWidgets.QMessageBox(parent)
     box.setWindowTitle("Select Input")
     box.setText("Choose input files or a folder with data")
@@ -209,18 +234,64 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = "
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             parent,
             f"Select {label} files",
-            "",
+            start_dir,
             f"{label} files (*{ext});;All files (*)",
         )
+        if paths:
+            settings.setValue("last_input_dir", os.path.dirname(paths[0]))
     elif clicked == folder_btn:
-        directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder")
+        directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder", start_dir)
         if directory:
+            settings.setValue("last_input_dir", directory)
             for root, _dirs, files in os.walk(directory):
                 for name in files:
                     if name.lower().endswith(ext.lower()):
                         paths.append(os.path.join(root, name))
             paths.sort()
     return list(paths)
+
+
+class ConsoleWindow(QtWidgets.QDialog):
+    def __init__(self, title: str):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.resize(600, 400)
+        layout = QtWidgets.QVBoxLayout(self)
+        self.text = QtWidgets.QPlainTextEdit()
+        self.text.setReadOnly(True)
+        layout.addWidget(self.text)
+
+    def write(self, msg: str) -> None:
+        self.text.appendPlainText(msg)
+
+    def flush(self) -> None:  # pragma: no cover - required by file-like API
+        pass
+
+
+_CONSOLES: list[ConsoleWindow] = []
+
+
+def run_with_console(func: Callable[[], None], title: str) -> None:
+    console = ConsoleWindow(title)
+    console.show()
+    _CONSOLES.append(console)
+    old_out, old_err = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = console
+    try:
+        func()
+    finally:
+        sys.stdout = old_out
+        sys.stderr = old_err
+
+
+def prepare_output_dir(base: str, script: str, create_sub: bool) -> str:
+    path = Path(base or _download_dir())
+    if create_sub:
+        stamp = datetime.date.today().isoformat()
+        folder = f"{script} data {stamp}"
+        path = path / folder
+    path.mkdir(parents=True, exist_ok=True)
+    return str(path)
 
 
 def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[list[str], QtWidgets.QWidget]:
