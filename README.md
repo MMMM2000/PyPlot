@@ -55,7 +55,8 @@ open after generating figures.  Each dialog lists the selected input files and
 offers buttons to add or remove entries, so datasets can be refined without
 restarting the tool.  Each settings window now embeds a small console at the
 bottom, keeping logs close to the controls instead of spawning a separate
-window.  File dialogs remember the last directories used—falling back to the
+window.  The file list and console sit beside the options in a wider dialog, so
+expanded readability sections remain on screen.  File dialogs remember the last directories used—falling back to the
 repository’s `sample_data` folder for inputs and the user’s `Downloads` folder
 for outputs—so frequent paths need not be reselected.  When saving, an optional
 **Create subfolder** checkbox stores figures under `<script name> data

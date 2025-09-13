@@ -16,6 +16,7 @@ if __package__ is None or __package__ == "":
         get_readability,
         set_readability,
         apply_readability_fonts,
+        arrange_side_panel,
     )
 else:
     from ..utils import (
@@ -26,6 +27,7 @@ else:
         get_readability,
         set_readability,
         apply_readability_fonts,
+        arrange_side_panel,
     )
 
 IMPROVE_READABILITY = False
@@ -131,10 +133,14 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Hysteresis Loops")
-        layout = QtWidgets.QGridLayout(self)
 
         self.files, file_widget = create_file_widget(self, ext=".dat")
-        layout.addWidget(file_widget, 0, 0, 1, 2)
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(120)
+
+        left = QtWidgets.QWidget()
+        layout = QtWidgets.QGridLayout(left)
 
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Stacked", "Combined", "Separate"])
@@ -142,14 +148,14 @@ class SettingsDialog(QtWidgets.QDialog):
         self.run_btn = QtWidgets.QPushButton("Plot")
         self.run_btn.clicked.connect(self.run)
 
-        layout.addWidget(QtWidgets.QLabel("Mode:"), 1, 0)
-        layout.addWidget(self.mode_combo, 1, 1)
+        layout.addWidget(QtWidgets.QLabel("Mode:"), 0, 0)
+        layout.addWidget(self.mode_combo, 0, 1)
         self.read_cb = QtWidgets.QCheckBox("Improve readability")
         self.read_cb.setChecked(get_readability("hysteresis_hyst"))
-        layout.addWidget(self.read_cb, 2, 0, 1, 2)
-        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
-        layout.addWidget(self.run_btn, 3, 0, 1, 2)
-        layout.addWidget(self.console, 4, 0, 1, 2)
+        layout.addWidget(self.read_cb, 1, 0, 1, 2)
+        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+
+        arrange_side_panel(self, left, file_widget, self.console)
 
     def run(self) -> None:
         if not self.files:

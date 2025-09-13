@@ -15,6 +15,7 @@ if __package__ is None or __package__ == "":
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
+        arrange_side_panel,
     )
 else:
     from . import core as orig
@@ -25,6 +26,7 @@ else:
         get_last_output_dir,
         set_last_output_dir,
         run_with_console,
+        arrange_side_panel,
     )
 
 
@@ -32,12 +34,16 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Maxion Continuous Settings")
-        layout = QtWidgets.QGridLayout(self)
 
         self.settings = QtCore.QSettings("microwire", "maxion_continuous")
 
         self.files, file_widget = create_file_widget(self)
-        layout.addWidget(file_widget, 0, 0, 1, 2)
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(120)
+
+        left = QtWidgets.QWidget()
+        layout = QtWidgets.QGridLayout(left)
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
@@ -207,20 +213,19 @@ class SettingsDialog(QtWidgets.QDialog):
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
-        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
-
-        layout.addWidget(out_group, 1, 0)
-        layout.addWidget(mode_group, 1, 1)
-        layout.addWidget(proc_group, 2, 0)
-        layout.addWidget(style_group, 2, 1)
+        layout.addWidget(out_group, 0, 0)
+        layout.addWidget(mode_group, 0, 1)
+        layout.addWidget(proc_group, 1, 0)
+        layout.addWidget(style_group, 1, 1)
         read_header = QtWidgets.QHBoxLayout()
         read_header.addWidget(header)
         read_header.addWidget(self.readable_cb)
         read_header.addStretch()
-        layout.addLayout(read_header, 3, 0, 1, 2)
-        layout.addWidget(self._read_container, 4, 0, 1, 2)
-        layout.addWidget(self.run_btn, 5, 0, 1, 2)
-        layout.addWidget(self.console, 6, 0, 1, 2)
+        layout.addLayout(read_header, 2, 0, 1, 2)
+        layout.addWidget(self._read_container, 3, 0, 1, 2)
+        layout.addWidget(self.run_btn, 4, 0, 1, 2)
+
+        arrange_side_panel(self, left, file_widget, self.console)
 
         self._read_container.setVisible(False)
 

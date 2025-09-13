@@ -8,20 +8,38 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.hysteresis_loops import core
-    from plotting.utils import apply_system_theme, create_file_widget, run_with_console, get_readability, set_readability
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        run_with_console,
+        get_readability,
+        set_readability,
+        arrange_side_panel,
+    )
 else:
     from . import core
-    from ..utils import apply_system_theme, create_file_widget, run_with_console, get_readability, set_readability
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        run_with_console,
+        get_readability,
+        set_readability,
+        arrange_side_panel,
+    )
 
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Hysteresis Loop Settings")
-        layout = QtWidgets.QGridLayout(self)
 
         self.files, file_widget = create_file_widget(self, ext=".dat")
-        layout.addWidget(file_widget, 0, 0, 1, 2)
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(120)
+
+        left = QtWidgets.QWidget()
+        layout = QtWidgets.QGridLayout(left)
 
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Combined", "Separate", "Stacked"])
@@ -41,11 +59,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.run_btn = QtWidgets.QPushButton("Plot")
         self.run_btn.clicked.connect(self.run)
 
-        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+        layout.addWidget(mode_group, 0, 0, 1, 2)
+        layout.addWidget(self.run_btn, 1, 0, 1, 2)
 
-        layout.addWidget(mode_group, 1, 0, 1, 2)
-        layout.addWidget(self.run_btn, 2, 0, 1, 2)
-        layout.addWidget(self.console, 3, 0, 1, 2)
+        arrange_side_panel(self, left, file_widget, self.console)
 
     def run(self) -> None:
         if not self.files:

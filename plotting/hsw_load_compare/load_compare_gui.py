@@ -17,6 +17,7 @@ if __package__ is None or __package__ == "":
         run_with_console,
         get_readability,
         set_readability,
+        arrange_side_panel,
     )
 else:
     from . import core as orig
@@ -29,6 +30,7 @@ else:
         run_with_console,
         get_readability,
         set_readability,
+        arrange_side_panel,
     )
 
 
@@ -36,10 +38,14 @@ class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Hsw Load Compare Settings")
-        layout = QtWidgets.QGridLayout(self)
 
         self.files, file_widget = create_file_widget(self)
-        layout.addWidget(file_widget, 0, 0, 1, 2)
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(120)
+
+        left = QtWidgets.QWidget()
+        layout = QtWidgets.QGridLayout(left)
 
         self.tt_cb = QtWidgets.QCheckBox("Plot TT"); self.tt_cb.setChecked(True)
         self.hh_cb = QtWidgets.QCheckBox("Plot HH"); self.hh_cb.setChecked(True)
@@ -92,13 +98,12 @@ class SettingsDialog(QtWidgets.QDialog):
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
-        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+        layout.addWidget(plot_group, 0, 0)
+        layout.addWidget(out_group, 0, 1)
+        layout.addWidget(read_group, 1, 0, 1, 2)
+        layout.addWidget(self.run_btn, 2, 0, 1, 2)
 
-        layout.addWidget(plot_group, 1, 0)
-        layout.addWidget(out_group, 1, 1)
-        layout.addWidget(read_group, 2, 0, 1, 2)
-        layout.addWidget(self.run_btn, 3, 0, 1, 2)
-        layout.addWidget(self.console, 4, 0, 1, 2)
+        arrange_side_panel(self, left, file_widget, self.console)
 
     def run(self) -> None:
         if not self.files:

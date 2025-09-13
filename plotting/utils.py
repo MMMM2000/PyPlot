@@ -335,3 +335,30 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     layout.addLayout(btn_layout)
 
     return files, container
+
+
+def arrange_side_panel(
+    dialog: QtWidgets.QDialog,
+    left: QtWidgets.QWidget,
+    file_widget: QtWidgets.QWidget,
+    console: QtWidgets.QPlainTextEdit,
+) -> None:
+    """Place settings beside file list and console to keep dialogs compact."""
+
+    splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+
+    scroll = QtWidgets.QScrollArea()
+    scroll.setWidget(left)
+    scroll.setWidgetResizable(True)
+    splitter.addWidget(scroll)
+
+    right = QtWidgets.QWidget()
+    side_layout = QtWidgets.QVBoxLayout(right)
+    side_layout.addWidget(file_widget)
+    side_layout.addWidget(console)
+    splitter.addWidget(right)
+    splitter.setStretchFactor(0, 3)
+    splitter.setStretchFactor(1, 2)
+
+    main_layout = QtWidgets.QVBoxLayout(dialog)
+    main_layout.addWidget(splitter)
