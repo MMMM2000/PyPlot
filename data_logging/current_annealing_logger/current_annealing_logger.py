@@ -91,14 +91,16 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         except Exception:
             pass
-        # Provide sensible defaults for separate directory and file name
-        if hasattr(self.ui, 'lineEdit_log_dir'):
-            if not self.ui.lineEdit_log_dir.text().strip():
-                self.ui.lineEdit_log_dir.setText(DEFAULT_LOG_DIR)
-        if hasattr(self.ui, 'lineEdit_log_file'):
-            if not self.ui.lineEdit_log_file.text().strip():
-                self.ui.lineEdit_log_file.setText("anneal_log")
+        # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
+        if hasattr(self.ui, 'lineEdit_log_dir'):
+            self.ui.lineEdit_log_dir.setText(
+                self.settings.value("log_dir", DEFAULT_LOG_DIR, type=str)
+            )
+        if hasattr(self.ui, 'lineEdit_log_file'):
+            self.ui.lineEdit_log_file.setText(
+                self.settings.value("log_file", "anneal_log", type=str)
+            )
         self.restore_name_preset()
         try:
             last_max = int(self.settings.value("max_current", 10))
@@ -1402,12 +1404,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self.ui, 'lineEdit_log_file'):
                 self.ui.lineEdit_log_file.setText(b)
             self.ui.lineEdit_log_subor.setText(fpath)
+            self.settings.setValue("log_dir", d)
+            self.settings.setValue("log_file", b)
 
     def handle_browse_log_dir(self):
         start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, 'lineEdit_log_dir') else DEFAULT_LOG_DIR
         new_dir = QFileDialog.getExistingDirectory(self, "Select log directory", start_dir)
         if new_dir and hasattr(self.ui, 'lineEdit_log_dir'):
             self.ui.lineEdit_log_dir.setText(new_dir)
+            self.settings.setValue("log_dir", new_dir)
 
     def handle_browse_full_file(self):
         # Unified handler to select full path then split into directory + base name
@@ -1428,6 +1433,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self.ui, 'lineEdit_log_file'):
                 self.ui.lineEdit_log_file.setText(b)
             self.ui.lineEdit_log_subor.setText(fpath)
+            self.settings.setValue("log_dir", d)
+            self.settings.setValue("log_file", b)
 
     def sync_full_log_path(self):
         # Update hidden full-path edit and internal f_name
@@ -1435,6 +1442,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'lineEdit_log_subor'):
             self.ui.lineEdit_log_subor.setText(full)
         self.f_name = full
+        try:
+            d = self.ui.lineEdit_log_dir.text().strip()
+            b = self.ui.lineEdit_log_file.text().strip()
+            if d:
+                self.settings.setValue("log_dir", d)
+            if b:
+                self.settings.setValue("log_file", b)
+        except Exception:
+            pass
 
     def build_log_path(self) -> str:
         try:

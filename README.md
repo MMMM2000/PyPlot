@@ -57,10 +57,11 @@ non‑scrolling list so datasets can be refined without restarting the tool.
 Settings panels wrap content vertically and disable horizontal scrollbars for a
 clean, uncluttered layout. Each settings window embeds a small console and
 places it next to the file list in a side panel beside the plot options, so the
-terminal never needs to span the full window width.  File dialogs remember the
-last directories used—falling back to the
-repository’s `sample_data` folder for inputs and the user’s `Downloads` folder
-for outputs—so frequent paths need not be reselected.  When saving, an optional
+terminal never needs to span the full window width.  The file list wraps long
+paths to new lines, and file dialogs remember the last directories used—
+maintaining separate input and output locations.  If no history exists, they
+fall back to the repository’s `sample_data` folder for inputs and the user’s
+`Downloads` folder for outputs.  When saving, an optional
 **Create subfolder** checkbox stores figures under `<script name> data
 YYYY-MM-DD` for easier organisation.  Export options include a choice of PNG,
 PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
@@ -87,6 +88,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * configurable current ramp with optional automatic reversal
 * **Reverse current now** button for an immediate ramp down
 * default **Reverse to zero after max** behaviour
+* remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
 * optional infinite looping displays "∞" and locks the loop count
 * automatic halt at **30 V** with a dialog to hold, reverse or stop
@@ -110,6 +112,8 @@ dialog and live values panel.  Select a VISA resource (e.g.
 The ramp-down path is plotted in a contrasting colour to distinguish it from the
 current ramp-up, and the first zero sample is ignored just like in the serial
 logger.
+
+The PyVISA logger also remembers its last log directory and file name.
 
 Launch from the master launcher or run
 

@@ -107,11 +107,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.proc_cb = QtWidgets.QCheckBox("Plot processed"); self.proc_cb.setChecked(orig.PLOT_PROCESSED)
         self.med_spin = QtWidgets.QSpinBox(); self.med_spin.setRange(1, 9999); self.med_spin.setValue(int(orig.MED_WINDOW))
         self.ma_spin = QtWidgets.QSpinBox(); self.ma_spin.setRange(1, 9999); self.ma_spin.setValue(int(orig.MA_WINDOW))
-        proc_layout.addWidget(self.proc_cb, 0, 0, 1, 4)
+        proc_layout.addWidget(self.proc_cb, 0, 0, 1, 2)
         proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
         proc_layout.addWidget(self.med_spin, 1, 1)
-        proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 1, 2)
-        proc_layout.addWidget(self.ma_spin, 1, 3)
+        proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 2, 0)
+        proc_layout.addWidget(self.ma_spin, 2, 1)
 
         self.read_ctrl, read_group = create_readability_group("stress_dependence", orig)
 

@@ -304,7 +304,14 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     file_list.setHorizontalScrollBarPolicy(
         QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
     )
+    file_list.setWordWrap(True)
+    file_list.setTextElideMode(QtCore.Qt.TextElideMode.ElideNone)
+    file_list.setUniformItemSizes(False)
     file_list.setMinimumWidth(400)
+    file_list.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Expanding,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
 
     def add_files() -> None:
         new = select_files_or_folder(parent, ext)
@@ -330,6 +337,10 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     remove_btn.clicked.connect(remove_selected)
 
     container = QtWidgets.QWidget()
+    container.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Expanding,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
     layout = QtWidgets.QVBoxLayout(container)
     btn_row = QtWidgets.QHBoxLayout()
     btn_row.addWidget(add_btn)
@@ -369,6 +380,14 @@ def arrange_side_panel(
 
     right = QtWidgets.QWidget()
     side_layout = QtWidgets.QVBoxLayout(right)
+    file_widget.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Expanding,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
+    console.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Expanding,
+        QtWidgets.QSizePolicy.Policy.Expanding,
+    )
     side_layout.addWidget(file_widget, 3)
     side_layout.addWidget(console, 1)
     splitter.addWidget(right)
@@ -464,24 +483,24 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.title_show = QtWidgets.QCheckBox("Show")
     ctrl.title_show.setChecked(bool(s.value(f"{key}_show_title", getattr(orig_module, "SHOW_TITLE", True), type=bool)))
 
-    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 0, 0)
-    lay.addWidget(ctrl.legend_size, 0, 1)
-    lay.addWidget(ctrl.legend_show, 0, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 1, 0)
-    lay.addWidget(ctrl.legend_orient, 1, 1, 1, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 2, 0)
-    lay.addWidget(ctrl.legend_symbol_size, 2, 1)
-    lay.addWidget(ctrl.legend_symbol, 2, 2)
-    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 3, 0)
-    lay.addWidget(ctrl.tick_size, 3, 1)
-    lay.addWidget(ctrl.tick_show, 3, 2)
-    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 4, 0)
-    lay.addWidget(ctrl.axis_size, 4, 1)
-    lay.addWidget(ctrl.axis_show, 4, 2)
-    lay.addWidget(QtWidgets.QLabel("Title size:"), 5, 0)
-    lay.addWidget(ctrl.title_size, 5, 1)
-    lay.addWidget(ctrl.title_show, 5, 2)
-    lay.addWidget(ctrl.read_cb, 6, 0, 1, 3)
+    lay.addWidget(ctrl.read_cb, 0, 0, 1, 3)
+    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 1, 0)
+    lay.addWidget(ctrl.legend_size, 1, 1)
+    lay.addWidget(ctrl.legend_show, 1, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 2, 0)
+    lay.addWidget(ctrl.legend_orient, 2, 1, 1, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 3, 0)
+    lay.addWidget(ctrl.legend_symbol_size, 3, 1)
+    lay.addWidget(ctrl.legend_symbol, 3, 2)
+    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 4, 0)
+    lay.addWidget(ctrl.tick_size, 4, 1)
+    lay.addWidget(ctrl.tick_show, 4, 2)
+    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 5, 0)
+    lay.addWidget(ctrl.axis_size, 5, 1)
+    lay.addWidget(ctrl.axis_show, 5, 2)
+    lay.addWidget(QtWidgets.QLabel("Title size:"), 6, 0)
+    lay.addWidget(ctrl.title_size, 6, 1)
+    lay.addWidget(ctrl.title_show, 6, 2)
 
     def _toggle_readable(checked: bool) -> None:
         ctrl.legend_show.setEnabled(checked)

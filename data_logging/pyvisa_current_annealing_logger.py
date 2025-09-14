@@ -38,6 +38,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.rm = pyvisa.ResourceManager()
         self.inst: pyvisa.resources.Resource | None = None
         self.logfile: Path | None = None
+        self.settings = QtCore.QSettings("microwire", "pyvisa_annealing")
 
         # ------------------------------------------------------------------ widgets
         # connection
@@ -47,8 +48,10 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.connect_button = QtWidgets.QPushButton("Connect")
 
         # logging path
-        self.dir_edit = QtWidgets.QLineEdit(str(Path.home() / "Downloads"))
-        self.file_edit = QtWidgets.QLineEdit("anneal_log.txt")
+        default_dir = self.settings.value("log_dir", str(Path.home() / "Downloads"), type=str)
+        default_file = self.settings.value("log_file", "anneal_log.txt", type=str)
+        self.dir_edit = QtWidgets.QLineEdit(default_dir)
+        self.file_edit = QtWidgets.QLineEdit(default_file)
         self.dir_button = QtWidgets.QPushButton("Browse…")
         self.log_button = QtWidgets.QPushButton("Start Log")
         self.log_button.setEnabled(False)
@@ -268,9 +271,12 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.log(f"Connected to {resource}")
 
     def choose_dir(self) -> None:  # pragma: no cover - interactive
-        path = QtWidgets.QFileDialog.getExistingDirectory(self, "Select log directory", self.dir_edit.text())
+        path = QtWidgets.QFileDialog.getExistingDirectory(
+            self, "Select log directory", self.dir_edit.text()
+        )
         if path:
             self.dir_edit.setText(path)
+            self.settings.setValue("log_dir", path)
 
     # -------------------------------------------------------------------- logging
     def handle_log(self) -> None:
@@ -292,6 +298,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             QtWidgets.QMessageBox.critical(self, "Error", f"Cannot create {log_dir}")
             return
         fname = log_dir / self.file_edit.text()
+        self.settings.setValue("log_dir", str(log_dir))
+        self.settings.setValue("log_file", fname.name)
         try:
             self.logfile = open(fname, "a", encoding="utf-8")
         except OSError as exc:
