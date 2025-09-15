@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 from typing import Callable, Dict
 
 from PyQt6 import QtWidgets, QtGui
@@ -207,6 +208,14 @@ class MasterLauncher(QtWidgets.QDialog):
 
 
 def main() -> None:
+    # Ensure a GUI platform plugin is used (not an offscreen one from tests)
+    # Some test environments set QT_QPA_PLATFORM=offscreen. If that leaks into
+    # an interactive run, Qt's style engine may try to paint using QPainter on
+    # an invalid device, producing warnings like "QPainter::begin: Paint device
+    # returned engine == 0". Clear it so the default (e.g. 'windows') is used.
+    if os.environ.get("QT_QPA_PLATFORM", "").lower() in {"offscreen", "minimal", "headless"}:
+        os.environ.pop("QT_QPA_PLATFORM", None)
+
     app = QtWidgets.QApplication(sys.argv)
     apply_system_theme(app)
     dlg = MasterLauncher()
