@@ -9,7 +9,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..utils import save_figure, format_annealing_title
+from ..utils import save_figure, format_annealing_title, show_plots, apply_readability_fonts, apply_readability
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -17,8 +17,20 @@ OUTPUT_DIR = os.getcwd()
 SHOW_PLOTS = True
 SAVE_PLOTS = False
 SAVE_FORMAT = "png"
-PNG_DPI = 1000
+PNG_DPI = 1200
 BACKEND = "matplotlib"
+IMPROVE_READABILITY = False
+SHOW_LEGEND = True
+LEGEND_SIZE = 18
+LEGEND_ORIENTATION = "auto"
+LEGEND_SHOW_SYMBOLS = False
+LEGEND_SYMBOL_SIZE = 10.0
+TICK_SIZE = 18
+AXIS_LABEL_SIZE = 18
+TITLE_SIZE = 22
+SHOW_TICK_LABELS = True
+SHOW_AXIS_LABELS = True
+SHOW_TITLE = True
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -31,8 +43,10 @@ def load_file(path: str) -> pd.DataFrame:
         raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3]
     df.columns = ["I_A", "V_V", "R_Ohm"]
-    df["I_mA"] = df["I_A"].astype(float) * 1e3
+    df["I_A"] = df["I_A"].astype(float)
+    df["I_mA"] = df["I_A"] * 1e3
     df["R_Ohm"] = df["R_Ohm"].astype(float)
+    df = df[df["I_mA"] != 0].reset_index(drop=True)
     return df[["I_mA", "R_Ohm"]]
 
 
@@ -44,6 +58,7 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
     fig.tight_layout()
+    apply_readability(ax, globals())
     fname = title.replace(os.sep, "_")
     return fig, fname
 
@@ -75,8 +90,15 @@ def plot_one_origin(df: pd.DataFrame, title: str) -> None:
     except Exception:
         pass
 
+    try:
+        op.exit()
+    except Exception:
+        pass
+
 
 def main(files: List[str], backend: str = BACKEND) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     outs: List[Tuple[Figure, str]] = []
     for path in files:
         df = load_file(path)
@@ -92,7 +114,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
 
     if wants_matplotlib(backend):
         if SHOW_PLOTS:
-            plt.show()
+            show_plots()
         else:
             plt.close('all')
         if SAVE_PLOTS and outs:

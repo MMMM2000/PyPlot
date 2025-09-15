@@ -13,10 +13,10 @@ if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
     # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.utils import apply_system_theme, select_files_or_folder, show_plots
     from plotting.backends import wants_matplotlib, wants_origin
 else:
-    from ..utils import apply_system_theme, select_files_or_folder
+    from ..utils import apply_system_theme, select_files_or_folder, show_plots
     from ..backends import wants_matplotlib, wants_origin
 
 
@@ -85,7 +85,6 @@ def ask_options() -> Dict[str, Any] | None:
     out_l.addWidget(backend_combo)
     layout.addWidget(out_box, 2, 0, 1, 2)
     layout.addWidget(run_btn, 3, 0, 1, 2)
-    dialog.setLayout(layout)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         return None
@@ -315,6 +314,10 @@ def main() -> None:
                 op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
             except Exception:
                 pass
+            try:
+                op.exit()
+            except Exception:
+                pass
         except Exception as e:
             print(f"Origin plot failed: {e}")
 
@@ -325,7 +328,7 @@ def main() -> None:
         print("Cancelled.")
         return
 
-    plt.show()
+    show_plots()
 
 
 if __name__ == "__main__":

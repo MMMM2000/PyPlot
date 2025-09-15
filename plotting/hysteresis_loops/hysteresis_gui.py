@@ -6,16 +6,31 @@ import numpy as np
 import matplotlib.pyplot as plt
 from PyQt6 import QtWidgets
 
-# Try to import theme helper if available
-try:
-    from ..utils import apply_system_theme  # when run in package
-except Exception:
-    try:
-        sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-        from plotting.utils import apply_system_theme  # when run directly
-    except Exception:
-        def apply_system_theme(app):  # no-op fallback
-            return
+if __package__ is None or __package__ == "":
+    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        show_plots,
+        run_with_console,
+        create_readability_group,
+        sync_readability,
+        apply_readability_fonts,
+        arrange_top_layout,
+    )
+else:
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        show_plots,
+        run_with_console,
+        create_readability_group,
+        sync_readability,
+        apply_readability_fonts,
+        arrange_top_layout,
+    )
+
+IMPROVE_READABILITY = False
 
 def _load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path, usecols=(0,1))
@@ -51,6 +66,8 @@ def _parse_meta(filename: str) -> Tuple[str, float, str]:
     return base, float('-inf'), 'as-cast'
 
 def plot_stacked(paths: List[str]) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     # Parse and sort with as-cast top, highest temp bottom
     metas = [(_parse_meta(p) + (p,)) for p in paths]  # (base, sort, label, path)
     # Choose the most common base for suptitle
@@ -76,9 +93,11 @@ def plot_stacked(paths: List[str]) -> None:
     axes[-1].set_xlabel('H (A/m)')
     fig.suptitle(base_title)
     fig.tight_layout()
-    plt.show()
+    show_plots()
 
 def plot_separate(paths: List[str]) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     for p in paths:
         base, _, label = _parse_meta(p)
         x, y = _load_loop(p)
@@ -89,9 +108,11 @@ def plot_separate(paths: List[str]) -> None:
         ax.set_xlabel('H (A/m)')
         ax.set_ylabel('F (Wb)')
         fig.tight_layout()
-    plt.show()
+    show_plots()
 
 def plot_combined(paths: List[str]) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     fig, ax = plt.subplots()
     base_title = None
     for p in paths:
@@ -106,36 +127,63 @@ def plot_combined(paths: List[str]) -> None:
     ax.set_ylabel('F (Wb)')
     ax.legend(title='Anneal', loc='best')
     fig.tight_layout()
-    plt.show()
+    show_plots()
 
-def _select_dat_files(start_dir: str | None=None) -> list[str]:
-    dlg = QtWidgets.QFileDialog()
-    dlg.setFileMode(QtWidgets.QFileDialog.FileMode.ExistingFiles)
-    dlg.setNameFilters(['Data files (*.dat *.txt)', 'All files (*.*)'])
-    if start_dir:
-        dlg.setDirectory(start_dir)
-    if dlg.exec():
-        return [str(p) for p in dlg.selectedFiles()]
-    return []
+class SettingsDialog(QtWidgets.QDialog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Hysteresis Loops")
+
+        self.files, file_widget = create_file_widget(self, ext=".dat")
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(120)
+
+        left = QtWidgets.QWidget()
+        layout = QtWidgets.QGridLayout(left)
+
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["Stacked", "Combined", "Separate"])
+
+        self.run_btn = QtWidgets.QPushButton("Plot")
+        self.run_btn.clicked.connect(self.run)
+
+        layout.addWidget(QtWidgets.QLabel("Mode:"), 0, 0)
+        layout.addWidget(self.mode_combo, 0, 1)
+        self.read_ctrl, read_group = create_readability_group("hysteresis_hyst", sys.modules[__name__])
+        layout.addWidget(read_group, 1, 0, 1, 2)
+        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+
+        arrange_top_layout(self, file_widget, left, self.console)
+
+    def run(self) -> None:
+        if not self.files:
+            QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
+            return
+        mode = self.mode_combo.currentText()
+        if mode == 'Stacked':
+            func = lambda: plot_stacked(self.files)
+        elif mode == 'Combined':
+            func = lambda: plot_combined(self.files)
+        else:
+            func = lambda: plot_separate(self.files)
+        global IMPROVE_READABILITY
+        sync_readability("hysteresis_hyst", self.read_ctrl, sys.modules[__name__])
+        run_with_console(func, self.console)
+
 
 def main() -> None:
-    app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
-    files = _select_dat_files()
-    if not files:
-        sys.exit(0)
-    # Ask mode
-    combo = QtWidgets.QInputDialog()
-    modes = ['Stacked', 'Combined', 'Separate']
-    ok, mode = QtWidgets.QInputDialog.getItem(None, 'Plot mode', 'Mode:', modes, 0, False)
-    if not ok:
-        sys.exit(0)
-    if mode == 'Stacked':
-        plot_stacked(files)
-    elif mode == 'Combined':
-        plot_combined(files)
-    else:
-        plot_separate(files)
+    app = QtWidgets.QApplication.instance()
+    owns = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        apply_system_theme(app)
+        owns = True
+    dlg = SettingsDialog()
+    dlg.show()
+    if owns:
+        app.exec()
 
-if __name__ == '__main__':  # pragma: no cover
+
+if __name__ == '__main__':
     main()

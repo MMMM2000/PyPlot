@@ -35,6 +35,8 @@ def _discover_modules() -> Dict[str, Tuple[Any, str]]:
                 package = importlib.import_module(f"plotting.{name}")
             except ModuleNotFoundError:
                 continue
+            if not hasattr(package, "__path__"):
+                continue
             for sub in pkgutil.iter_modules(package.__path__):
                 if sub.name.endswith("_gui"):
                     submod = importlib.import_module(
@@ -65,6 +67,10 @@ class DataPlotter(QtWidgets.QDialog):
         self.combo.currentTextChanged.connect(self.on_module_change)
         layout.addWidget(self.combo)
 
+        self.settings_group = QtWidgets.QGroupBox("Settings")
+        self.settings_layout = QtWidgets.QFormLayout(self.settings_group)
+        layout.addWidget(self.settings_group)
+
         file_layout = QtWidgets.QHBoxLayout()
         self.file_list = QtWidgets.QListWidget()
         self.file_list.setSelectionMode(
@@ -82,10 +88,6 @@ class DataPlotter(QtWidgets.QDialog):
         btn_layout.addStretch()
         file_layout.addLayout(btn_layout)
         layout.addLayout(file_layout)
-
-        self.settings_group = QtWidgets.QGroupBox("Settings")
-        self.settings_layout = QtWidgets.QFormLayout(self.settings_group)
-        layout.addWidget(self.settings_group)
 
         self.outlier_btn = QtWidgets.QPushButton("Check Outliers")
         self.outlier_btn.clicked.connect(self.check_outliers)

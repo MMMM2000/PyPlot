@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from ..config import load_config
 from ..common import maybe_handle_outliers
-from ..utils import save_figure
+from ..utils import save_figure, show_plots, apply_readability_fonts, apply_readability
 from ..backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("stress_sensitivity", {})
@@ -36,9 +36,21 @@ MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 SHOW_PLOTS = bool(_CFG.get("SHOW_PLOTS", True))
 SAVE_PLOTS = bool(_CFG.get("SAVE_PLOTS", False))
 SAVE_FORMAT = _CFG.get("SAVE_FORMAT", "png")
-PNG_DPI = int(_CFG.get("PNG_DPI", 1000))
+PNG_DPI = int(_CFG.get("PNG_DPI", 1200))
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
+SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
+LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
+LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
+LEGEND_SHOW_SYMBOLS = bool(_CFG.get("LEGEND_SHOW_SYMBOLS", False))
+LEGEND_SYMBOL_SIZE = float(_CFG.get("LEGEND_SYMBOL_SIZE", 10))
+TICK_SIZE = int(_CFG.get("TICK_SIZE", 18))
+AXIS_LABEL_SIZE = int(_CFG.get("AXIS_LABEL_SIZE", 18))
+TITLE_SIZE = int(_CFG.get("TITLE_SIZE", 22))
+SHOW_TICK_LABELS = bool(_CFG.get("SHOW_TICK_LABELS", True))
+SHOW_AXIS_LABELS = bool(_CFG.get("SHOW_AXIS_LABELS", True))
+SHOW_TITLE = bool(_CFG.get("SHOW_TITLE", True))
 
 BASE_LOAD = float(_CFG.get("BASE_LOAD", 2.5))
 END_LOAD = float(_CFG.get("END_LOAD", 17.5))
@@ -228,6 +240,7 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
+    apply_readability(ax, globals())
     fname = f"{comp} {title} {sample} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
@@ -395,6 +408,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
+    apply_readability(ax, globals())
     fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
@@ -531,8 +545,15 @@ def plot_samples_origin(
     except Exception:
         pass
 
+    try:
+        op.exit()
+    except Exception:
+        pass
+
 
 def main(files: List[str], backend: str = BACKEND) -> None:
+    if IMPROVE_READABILITY:
+        apply_readability_fonts()
     data = load_data(files)
     data = maybe_handle_outliers(data)
     groups = data.groupby(['composition', 'title', 'anneal'])
@@ -569,27 +590,11 @@ def main(files: List[str], backend: str = BACKEND) -> None:
 
     if wants_matplotlib(backend):
         if do_show:
-            plt.show()
+            show_plots()
         else:
             plt.close('all')
-        if not SAVE_PLOTS and plots and QtWidgets.QApplication.instance() is not None:
-            reply = QtWidgets.QMessageBox.question(
-                None,
-                "Save Plots",
-                "Save generated plots?",
-                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
-            )
-            if reply == QtWidgets.QMessageBox.StandardButton.Yes:
-                out = QtWidgets.QFileDialog.getExistingDirectory(None, "Select output directory", str(OUTPUT_DIR))
-                if out:
-                    os.makedirs(out, exist_ok=True)
-                    for fig, fname in plots:
-                        base = os.path.join(out, Path(fname).stem)
-                        save_figure(fig, base, SAVE_FORMAT, PNG_DPI)
     else:
         plt.close('all')
-
-    print(f'Done: processed {total} plots.')
 
 
 class ProgressDialog:

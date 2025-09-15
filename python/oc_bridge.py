@@ -1,6 +1,6 @@
 from pathlib import Path
 import pandas as pd
-import originpro as op
+from plotting.utils import origin_session
 
 def _pad(df: pd.DataFrame, n: int) -> pd.DataFrame:
     return df.reindex(range(n))
@@ -44,14 +44,14 @@ def export_and_plot_in_oc(
     df_out.to_csv(csv_path, index=False)
 
     # Call Origin / OC
-    op.set_show()  # visible while iterating; switch to op.set_hidden() if preferred
-    export_arg = export_png if export_png else ""
-    # Ensure backslashes escaped for LabTalk
-    def esc(p: Path | str) -> str:
-        return str(p).replace("\\", "\\\\")
-    op.lt_exec(
-        rf'plot_stress_csv("{esc(csv_path)}", "{gtitle}", "{xlabel}", "{ylabel}", {float(delta)}, "{esc(template)}", "{esc(export_arg)}")'
-    )
+    with origin_session() as op:
+        export_arg = export_png if export_png else ""
+        # Ensure backslashes escaped for LabTalk
+        def esc(p: Path | str) -> str:
+            return str(p).replace("\\", "\\\\")
+        op.lt_exec(
+            rf'plot_stress_csv("{esc(csv_path)}", "{gtitle}", "{xlabel}", "{ylabel}", {float(delta)}, "{esc(template)}", "{esc(export_arg)}")'
+        )
 
     return csv_path
 

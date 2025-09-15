@@ -19,7 +19,18 @@ try:  # optional dependency
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
-from ..utils import apply_system_theme, select_files_or_folder, save_figure  # type: ignore
+from ..utils import (
+    apply_system_theme,
+    select_files_or_folder,
+    save_figure,
+    prepare_output_dir,
+    get_last_output_dir,
+    set_last_output_dir,
+    run_with_console,
+    get_readability,
+    set_readability,
+    apply_readability_fonts,
+)  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
@@ -166,9 +177,17 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         scroll = QtWidgets.QScrollArea(self)
         scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         outer.addWidget(scroll)
 
         content = QtWidgets.QWidget()
+        content.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Ignored,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
         form = QtWidgets.QFormLayout(content)
         scroll.setWidget(content)
 
@@ -285,20 +304,24 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Title size", self.title_fs)
         form.addRow("Label size", self.label_fs)
         form.addRow("Tick size", self.tick_fs)
+        self.read_cb = QtWidgets.QCheckBox()
+        self.read_cb.setChecked(get_readability("pdf_plotter"))
+        form.addRow("Improve readability", self.read_cb)
 
         # Save options
         self.save_cb = QtWidgets.QCheckBox()
         self.save_cb.setChecked(False)
-        self.out_dir = QtWidgets.QLineEdit(os.getcwd())
+        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd()))
         self.browse_out_btn = QtWidgets.QPushButton("Browse…")
         self.browse_out_btn.clicked.connect(self._browse_out)
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
+        self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
         self.format_combo = QtWidgets.QComboBox()
         self.format_combo.addItems(["png", "pdf", "svg"])
         fmt_box = self._hbox(self.format_combo)
         self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 3000)
-        self.dpi_spin.setValue(1000)
+        self.dpi_spin.setValue(1200)
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm
@@ -323,6 +346,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.save_now_btn.clicked.connect(self.save_current)
         form.addRow("Save on plot", self.save_cb)
         form.addRow("Output dir", out_box)
+        form.addRow("Create subfolder", self.subdir_cb)
         form.addRow("Format", fmt_box)
         form.addRow("DPI", self.dpi_spin)
         form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
@@ -333,13 +357,15 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.auto_cb.setChecked(True)
         self.plot_btn = QtWidgets.QPushButton("Plot")
         self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.plot_btn.clicked.connect(self.plot)
+        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
+        self.plot_btn.clicked.connect(lambda: run_with_console(self.plot, self.console))
         self.clear_btn.clicked.connect(self.clear_plot)
         btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn)
 
         # Ensure the plot controls are always visible without scrolling by placing the
         # button row outside the scrollable area.
         outer.addWidget(btn_box)
+        outer.addWidget(self.console)
 
     # --- Helpers ---------------------------------------------------------------
     def _hbox(self, *widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -481,6 +507,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir.text())
         if d:
             self.out_dir.setText(d)
+            set_last_output_dir(d)
 
     def _maybe_auto_plot(self) -> None:
         if self.auto_cb.isChecked():
@@ -537,6 +564,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return lines_by_file
 
     def _plot_single(self, x_name: str) -> None:
+        if self.read_cb.isChecked():
+            apply_readability_fonts()
+        set_readability("pdf_plotter", self.read_cb.isChecked())
         lines_by_file = self._collect_lines_by_file(x_name)
         if not lines_by_file:
             QtWidgets.QMessageBox.information(self, "No data", "No valid rows to plot.")
@@ -669,6 +699,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             op.lt_exec(f'lab -xb "{x_label}"; lab -yl "{y_label}"; legend;')
         except Exception:
             pass
+        try:
+            op.exit()
+        except Exception:
+            pass
 
     def _save_lines(
         self,
@@ -681,7 +715,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if not out_dir:
             return
         fmt = self.format_combo.currentText()
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = prepare_output_dir(out_dir, "pdf_plotter", self.subdir_cb.isChecked())
+        set_last_output_dir(self.out_dir.text())
         base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)

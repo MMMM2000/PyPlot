@@ -531,7 +531,7 @@ class Main(QWidget):
         try:
             baud = int(self.combo_baud.currentText())
         except Exception:
-            baud = 9600
+            baud = 115200
         if serial is not None:
             try:
                 test = serial.serial_for_url(port, baudrate=baud, timeout=0)
@@ -621,7 +621,7 @@ class Main(QWidget):
     def on_apply_preset(self) -> None:
         is_serial = self.cmb_mode.currentText().startswith("Serial")
         # Set recommended baud and mode-specific fields
-        self.combo_baud.setCurrentText("921600" if is_serial else "9600")
+        self.combo_baud.setCurrentText("921600" if is_serial else "115200")
         if is_serial:
             self.spin_rate.setValue(1000)
         else:
@@ -671,7 +671,7 @@ class Main(QWidget):
     def on_mode_changed(self) -> None:
         is_serial = self.cmb_mode.currentText().startswith("Serial")
         # Recommended baud per mode
-        self.combo_baud.setCurrentText("921600" if is_serial else "9600")
+        self.combo_baud.setCurrentText("921600" if is_serial else "115200")
         # Show/Hide controls per mode
         self.lbl_rate.setVisible(is_serial)
         self.spin_rate.setVisible(is_serial)

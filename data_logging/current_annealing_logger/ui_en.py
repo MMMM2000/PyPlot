@@ -104,7 +104,7 @@ class Ui_MainWindow(object):
             "19200",
             "9600",
         ])
-        self.comboBox_baudrate.setCurrentText("9600")
+        self.comboBox_baudrate.setCurrentText("115200")
         gb_layout.addWidget(self.comboBox_baudrate)
 
         gb_layout.addStretch(1)
@@ -118,29 +118,25 @@ class Ui_MainWindow(object):
         frame_layout_serial.addWidget(gb_serial)
 
         # ------------------------------------------------------------------
-        # Modus operandi (frame_modus_operandi)
+        # Mode of operation (simple combo box)
         # ------------------------------------------------------------------
         self.frame_modus_operandi = QtWidgets.QFrame(self.centralWidget)
-        self.frame_modus_operandi.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.frame_modus_operandi.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        self.frame_modus_operandi.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         main_layout.addWidget(self.frame_modus_operandi)
 
-        gb_mode = QtWidgets.QGroupBox("Mode of operation", self.frame_modus_operandi)
-        self.groupBox_modus_operandi = gb_mode
-        mode_layout = QtWidgets.QHBoxLayout(gb_mode)
-        self.radioButton_raw_VCP = QtWidgets.QRadioButton("Raw VCP")
-        self.radioButton_manualne_zihanie = QtWidgets.QRadioButton("Manual annealing")
-        self.radioButton_automatizovane_zihanie = QtWidgets.QRadioButton("Automatic annealing")
-        # Default to automatic annealing
-        self.radioButton_automatizovane_zihanie.setChecked(True)
-        mode_layout.addWidget(self.radioButton_raw_VCP)
-        mode_layout.addWidget(self.radioButton_manualne_zihanie)
-        mode_layout.addWidget(self.radioButton_automatizovane_zihanie)
-        mode_layout.addStretch(1)
-
-        frame_layout_mode = QtWidgets.QVBoxLayout(self.frame_modus_operandi)
+        frame_layout_mode = QtWidgets.QHBoxLayout(self.frame_modus_operandi)
         frame_layout_mode.setContentsMargins(0, 0, 0, 0)
-        frame_layout_mode.addWidget(gb_mode)
+        self.label_mode = QtWidgets.QLabel("Mode of operation:")
+        frame_layout_mode.addWidget(self.label_mode)
+        self.comboBox_mode = QtWidgets.QComboBox()
+        self.comboBox_mode.addItems([
+            "Raw VCP",
+            "Manual annealing",
+            "Automatic annealing",
+        ])
+        self.comboBox_mode.setCurrentIndex(2)
+        frame_layout_mode.addWidget(self.comboBox_mode)
+        frame_layout_mode.addStretch(1)
 
         # ------------------------------------------------------------------
         # Process settings (frame_nastavenia_procesu)
@@ -223,9 +219,9 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setMinimumWidth(200)
+        self.pushButton_start_stop_drzania_prudu.setMaximumWidth(220)
         self.pushButton_start_stop_drzania_prudu.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
@@ -250,6 +246,24 @@ class Ui_MainWindow(object):
         h.addStretch(1)
         # Align with Hold time row
         grid.addLayout(h, 3, 2)
+
+        # Reverse sweep and loops controls
+        rev = QtWidgets.QHBoxLayout()
+        self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
+        self.checkBox_reverse.setChecked(True)
+        self.spinBox_loops = QtWidgets.QSpinBox()
+        self.spinBox_loops.setRange(0, 100000)
+        self.spinBox_loops.setSpecialValueText("∞")
+        self.spinBox_loops.setValue(1)
+        self.checkBox_infinite_loops = QtWidgets.QCheckBox("∞")
+        self.checkBox_infinite_loops.setToolTip("Repeat indefinitely")
+        rev.addWidget(self.checkBox_reverse)
+        rev.addSpacing(12)
+        rev.addWidget(QtWidgets.QLabel("Loops:"))
+        rev.addWidget(self.spinBox_loops)
+        rev.addWidget(self.checkBox_infinite_loops)
+        rev.addStretch(1)
+        grid.addLayout(rev, 4, 0, 1, 3)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
@@ -314,23 +328,7 @@ class Ui_MainWindow(object):
             1,
             QtCore.Qt.AlignmentFlag.AlignRight,
         )
-        grid.addWidget(gb_name, 4, 0, 1, 3)
-
-        # Reverse sweep and loops controls
-        rev = QtWidgets.QHBoxLayout()
-        self.checkBox_reverse = QtWidgets.QCheckBox("Reverse to zero after max")
-        self.spinBox_loops = QtWidgets.QSpinBox()
-        self.spinBox_loops.setRange(1, 100000)
-        self.spinBox_loops.setValue(1)
-        self.checkBox_infinite_loops = QtWidgets.QCheckBox("∞")
-        self.checkBox_infinite_loops.setToolTip("Repeat indefinitely")
-        rev.addWidget(self.checkBox_reverse)
-        rev.addSpacing(12)
-        rev.addWidget(QtWidgets.QLabel("Loops:"))
-        rev.addWidget(self.spinBox_loops)
-        rev.addWidget(self.checkBox_infinite_loops)
-        rev.addStretch(1)
-        grid.addLayout(rev, 5, 0, 1, 3)
+        grid.addWidget(gb_name, 5, 0, 1, 3)
 
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
@@ -379,12 +377,18 @@ class Ui_MainWindow(object):
         hr_layout.addStretch(1)
         grid.addLayout(hr_layout, 9, 0, 1, 3)
 
-        # Start/Stop process button
+        # Start/Stop and reverse buttons
+        buttons = QtWidgets.QHBoxLayout()
         self.pushButton_spusti_proces = QtWidgets.QPushButton("Start annealing process")
         bfont = QtGui.QFont()
         bfont.setPointSize(12)
         self.pushButton_spusti_proces.setFont(bfont)
-        grid.addWidget(self.pushButton_spusti_proces, 10, 0, 1, 3)
+        self.pushButton_reverse_now = QtWidgets.QPushButton("Reverse current now")
+        self.pushButton_reverse_now.setFont(bfont)
+        self.pushButton_reverse_now.setEnabled(False)
+        buttons.addWidget(self.pushButton_spusti_proces)
+        buttons.addWidget(self.pushButton_reverse_now)
+        grid.addLayout(buttons, 10, 0, 1, 3)
 
         frame_layout_proc = QtWidgets.QVBoxLayout(self.frame_nastavenia_procesu)
         frame_layout_proc.setContentsMargins(0, 0, 0, 0)

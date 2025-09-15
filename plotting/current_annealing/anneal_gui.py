@@ -1,79 +1,123 @@
 from __future__ import annotations
 
 import sys
-import pathlib
-from typing import List, Dict, Any
-
 from PyQt6 import QtWidgets
+
+import pathlib
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.current_annealing import core as orig
-    from plotting.utils import apply_system_theme, select_files_or_folder
+    from plotting.utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+        create_readability_group,
+        sync_readability,
+        arrange_side_panel,
+    )
 else:
     from . import core as orig
-    from ..utils import apply_system_theme, select_files_or_folder
+    from ..utils import (
+        apply_system_theme,
+        create_file_widget,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+        create_readability_group,
+        sync_readability,
+        arrange_side_panel,
+    )
 
 
-def ask_user() -> tuple[List[str], Dict[str, Any]]:
-    paths = select_files_or_folder()
-    if not paths:
-        sys.exit("No files selected.")
+class SettingsDialog(QtWidgets.QDialog):
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Current Annealing Plot Settings")
 
-    dialog = QtWidgets.QDialog()
-    dialog.setWindowTitle("Current Annealing Plot Settings")
-    layout = QtWidgets.QGridLayout(dialog)
+        self.files, file_widget = create_file_widget(self)
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(120)
 
-    show_cb = QtWidgets.QCheckBox("Show plots"); show_cb.setChecked(orig.SHOW_PLOTS)
-    save_cb = QtWidgets.QCheckBox("Save plots"); save_cb.setChecked(orig.SAVE_PLOTS)
-    out_dir_edit = QtWidgets.QLineEdit(orig.OUTPUT_DIR)
-    browse_btn = QtWidgets.QPushButton("Browse")
-    backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+        left = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(left)
 
-    def browse() -> None:
-        d = QtWidgets.QFileDialog.getExistingDirectory(dialog, "Select output directory", out_dir_edit.text())
-        if d:
-            out_dir_edit.setText(d)
+        self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
+        self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        browse_btn = QtWidgets.QPushButton("Browse")
+        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
 
-    browse_btn.clicked.connect(browse)
+        def browse() -> None:
+            d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir_edit.text())
+            if d:
+                self.out_dir_edit.setText(d)
 
-    out_group = QtWidgets.QGroupBox("Output")
-    out_layout = QtWidgets.QGridLayout(out_group)
-    out_layout.addWidget(show_cb, 0, 0)
-    out_layout.addWidget(save_cb, 1, 0)
-    out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
-    out_layout.addWidget(backend_combo, 2, 1)
-    out_layout.addWidget(QtWidgets.QLabel("Directory:"), 3, 0)
-    out_layout.addWidget(out_dir_edit, 4, 0)
-    out_layout.addWidget(browse_btn, 4, 1)
+        browse_btn.clicked.connect(browse)
 
-    run_btn = QtWidgets.QPushButton("Run"); run_btn.clicked.connect(dialog.accept)
-    layout.addWidget(out_group, 0, 0)
-    layout.addWidget(run_btn, 1, 0)
-    dialog.setLayout(layout)
+        out_group = QtWidgets.QGroupBox("Output")
+        out_layout = QtWidgets.QGridLayout(out_group)
+        out_layout.addWidget(self.show_cb, 0, 0)
+        out_layout.addWidget(self.save_cb, 1, 0)
+        out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
+        out_layout.addWidget(self.backend_combo, 2, 1)
+        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
+        out_layout.addWidget(self.fmt_combo, 3, 1)
+        out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
+        out_layout.addWidget(self.dpi_spin, 4, 1)
+        self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
+        out_layout.addWidget(self.subdir_cb, 5, 0, 1, 2)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
+        out_layout.addWidget(self.out_dir_edit, 7, 0)
+        out_layout.addWidget(browse_btn, 7, 1)
 
-    if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
-        sys.exit(0)
+        self.read_ctrl, read_group = create_readability_group("current_annealing", orig)
 
-    cfg = {
-        "show": show_cb.isChecked(),
-        "save": save_cb.isChecked(),
-        "out_dir": out_dir_edit.text(),
-        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
-    }
-    return paths, cfg
+        self.run_btn = QtWidgets.QPushButton("Run")
+        self.run_btn.clicked.connect(self.run)
+
+        layout.addWidget(out_group)
+        layout.addWidget(read_group)
+        layout.addWidget(self.run_btn)
+
+        arrange_side_panel(self, left, file_widget, self.console)
+
+    def run(self) -> None:
+        if not self.files:
+            QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
+            return
+        orig.SHOW_PLOTS = self.show_cb.isChecked()
+        orig.SAVE_PLOTS = self.save_cb.isChecked()
+        base = self.out_dir_edit.text()
+        orig.OUTPUT_DIR = prepare_output_dir(base, "current_annealing", self.subdir_cb.isChecked())
+        set_last_output_dir(base)
+        orig.SAVE_FORMAT = self.fmt_combo.currentText()
+        orig.PNG_DPI = int(self.dpi_spin.value())
+        sync_readability("current_annealing", self.read_ctrl, orig)
+        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 
 def main() -> None:
-    paths, cfg = ask_user()
-    orig.SHOW_PLOTS = cfg["show"]
-    orig.SAVE_PLOTS = cfg["save"]
-    orig.OUTPUT_DIR = cfg["out_dir"]
-    orig.main(paths, backend=cfg["backend"])
+    app = QtWidgets.QApplication.instance()
+    owns = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        apply_system_theme(app)
+        owns = True
+    dlg = SettingsDialog()
+    dlg.show()
+    if owns:
+        app.exec()
 
 
-if __name__ == "__main__":  # pragma: no cover
-    app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
+if __name__ == "__main__":
     main()
 

@@ -18,7 +18,7 @@ from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
-from plotting.utils import apply_system_theme, format_annealing_title
+from plotting.utils import apply_system_theme, format_annealing_title, show_plots
 
 import numpy as np
 import matplotlib
@@ -91,15 +91,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         except Exception:
             pass
-        # Provide sensible defaults for separate directory and file name
-        if hasattr(self.ui, 'lineEdit_log_dir'):
-            if not self.ui.lineEdit_log_dir.text().strip():
-                self.ui.lineEdit_log_dir.setText(DEFAULT_LOG_DIR)
-        if hasattr(self.ui, 'lineEdit_log_file'):
-            if not self.ui.lineEdit_log_file.text().strip():
-                self.ui.lineEdit_log_file.setText("anneal_log")
+        # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
+        if hasattr(self.ui, 'lineEdit_log_dir'):
+            self.ui.lineEdit_log_dir.setText(
+                self.settings.value("log_dir", DEFAULT_LOG_DIR, type=str)
+            )
+        if hasattr(self.ui, 'lineEdit_log_file'):
+            self.ui.lineEdit_log_file.setText(
+                self.settings.value("log_file", "anneal_log", type=str)
+            )
         self.restore_name_preset()
+        try:
+            last_max = int(self.settings.value("max_current", 10))
+            self.ui.spinBox_hodnota_staly_prud.setValue(last_max)
+        except Exception:
+            pass
+        self.init_live_values()
         self.odpoved_portu = ''
         self.prikaz_portu = ''
         self.pripojene = False
@@ -149,8 +157,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_voltage = 0
         self.current_resistance = 0
         self.open_threshold = 30
+        self.max_voltage = 30.0
+        self._max_voltage_dialog = False
         self.direction_ascending = True
         self.sample_ready = False
+        self.force_stop_at_zero = False
         # Debug + progress/time tracking
         self.DEBUG = False
         self.sample_rate: float | None = None
@@ -170,6 +181,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.populate_ports()
             except Exception:
                 pass
+        self._set_port_controls_enabled(True)
         
         #prepojenie signalov a slotov
         self.ui.pushButton_pripojPort.clicked.connect(self.handle_pushButton_pripojPort_clicked)
@@ -177,9 +189,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.handle_comboBox_baudrate_currentIndexChanged)
         self.ui.pushButton_posli_prikaz_portu.clicked.connect(self.handle_pushButton_posli_prikaz_portu_clicked)
         
-        self.ui.radioButton_raw_VCP.clicked.connect(self.handle_radioButton_raw_VCP_clicked)
-        self.ui.radioButton_manualne_zihanie.clicked.connect(self.handle_radioButton_manualne_zihanie_clicked)
-        self.ui.radioButton_automatizovane_zihanie.clicked.connect(self.handle_radioButton_automatizovane_zihanie_clicked)
+        if hasattr(self.ui, 'comboBox_mode'):
+            self.ui.comboBox_mode.currentIndexChanged.connect(self.handle_mode_changed)
         
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.handle_spinBox_hodnota_staly_prud_valueChanged)
         self.ui.spinBox_doba_staly_prud.valueChanged.connect(self.handle_spinBox_doba_staly_prud_valueChanged)
@@ -191,6 +202,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Also hook legacy browse button to new unified handler
         if hasattr(self.ui, 'pushButton_select_filename'):
             self.ui.pushButton_select_filename.clicked.connect(self.handle_browse_full_file)
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            self.ui.pushButton_reverse_now.clicked.connect(self.handle_pushButton_reverse_now_clicked)
+            self.ui.pushButton_reverse_now.setEnabled(False)
         # New UI pieces: port dropdown and separate log directory/name
         if hasattr(self.ui, 'comboBox_port'):
             self.ui.comboBox_port.currentIndexChanged.connect(self.handle_comboBox_port_changed)
@@ -217,7 +231,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'spinBox_loops'):
             self.ui.spinBox_loops.valueChanged.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'checkBox_infinite_loops'):
-            self.ui.checkBox_infinite_loops.toggled.connect(self.update_planned_time_label)
+            self.ui.checkBox_infinite_loops.toggled.connect(self.handle_checkBox_infinite_loops_toggled)
         if hasattr(self.ui, 'spinBox_step_mA'):
             self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
         self.ui.spinBox_hodnota_staly_prud.valueChanged.connect(self.update_file_name_from_preset)
@@ -236,12 +250,8 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         # Apply initial mode selection
         try:
-            if self.ui.radioButton_automatizovane_zihanie.isChecked():
-                self.handle_radioButton_automatizovane_zihanie_clicked()
-            elif self.ui.radioButton_manualne_zihanie.isChecked():
-                self.handle_radioButton_manualne_zihanie_clicked()
-            else:
-                self.handle_radioButton_raw_VCP_clicked()
+            if hasattr(self.ui, 'comboBox_mode'):
+                self.handle_mode_changed(self.ui.comboBox_mode.currentIndex())
         except Exception:
             pass
         
@@ -286,10 +296,11 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         #premenne na kreslenie grafu z dat
-        self.prev_value_x = 0
+        self.prev_value_x = None
         self.curr_value_x = 0
-        self.prev_value_y = 0
+        self.prev_value_y = None
         self.curr_value_y = 0
+        self.first_sample = True
         
         self.fig = None
         self.ax1 = None
@@ -335,6 +346,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.canvas.draw()
         except Exception:
             pass
+        try:
+            self.adjustSize()
+        except Exception:
+            pass
 
     # utilities
     def dbg(self, *args):
@@ -343,6 +358,23 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(*args)
             except Exception:
                 pass
+
+    def _set_port_controls_enabled(self, enabled: bool) -> None:
+        for name in ('spinBox_cislo_portu', 'comboBox_baudrate', 'comboBox_port', 'pushButton_refresh_ports'):
+            w = getattr(self.ui, name, None)
+            if w is not None:
+                w.setEnabled(enabled)
+
+    def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
+        if hasattr(self.ui, 'spinBox_loops'):
+            if checked:
+                self.ui.spinBox_loops.setValue(0)
+                self.ui.spinBox_loops.setEnabled(False)
+            else:
+                if self.ui.spinBox_loops.value() == 0:
+                    self.ui.spinBox_loops.setValue(1)
+                self.ui.spinBox_loops.setEnabled(True)
+        self.update_planned_time_label()
 
     #definovanie slotov
     def handle_pushButton_pripojPort_clicked(self):
@@ -382,14 +414,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.pripojene = True
                     self.ui.pushButton_pripojPort.setText('Disconnect')
                     self.ui.frame_modus_operandi.setEnabled(True)
-                    self.ui.frame_zakladne_nastavenia_portu.setEnabled(False)
+                    self._set_port_controls_enabled(False)
                     self.ui.frame_command_and_response.setEnabled(True)
                     # Respect the selected mode rather than forcing raw VCP
                     try:
-                        if self.ui.radioButton_automatizovane_zihanie.isChecked():
-                            self.handle_radioButton_automatizovane_zihanie_clicked()
-                        elif self.ui.radioButton_manualne_zihanie.isChecked():
-                            self.handle_radioButton_manualne_zihanie_clicked()
+                        if hasattr(self.ui, 'comboBox_mode'):
+                            self.handle_mode_changed(self.ui.comboBox_mode.currentIndex())
                         else:
                             self.handle_radioButton_raw_VCP_clicked()
                     except Exception:
@@ -414,13 +444,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.pripojene = False
             self.ui.pushButton_pripojPort.setText('Pripojiť sa k portu')
             self.ui.pushButton_pripojPort.setText('Connect to port')
-            # Dim the left panel again until connected
             self._show_connect_overlay(True)
             self.ui.frame_command_and_response.setEnabled(False)
-            self.ui.frame_zakladne_nastavenia_portu.setEnabled(True)
             self.ui.frame_nastavenia_procesu.setEnabled(False)
             self.ui.frame_modus_operandi.setEnabled(False)
-            self._show_connect_overlay(True)
+            self._set_port_controls_enabled(True)
 
     def handle_spinBox_cislo_portu_valueChanged(self):
         self.cislo_portu = self.ui.spinBox_cislo_portu.value()
@@ -454,6 +482,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 if(self.napatie == True):
                     try:
                         self.current_voltage = float(self.odpoved_portu.strip())
+                        if hasattr(self.ui, 'label_live_voltage'):
+                            self.ui.label_live_voltage.display(f"{self.current_voltage:.2f}")
                     except ValueError:
                         # Ignore non-numeric responses (e.g., from config commands)
                         self.zamok.unlock()
@@ -481,37 +511,43 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.zamok.unlock()
                         return
                     #na tomto mieste zapiseme data do suboru
-                    if(not self.f_out):
-                        try:
-                            from os import makedirs
-                            from os.path import dirname
-                            makedirs(dirname(self.f_name), exist_ok=True)
-                        except Exception:
-                            pass
-                        self.f_out = open(self.f_name, "a")
-                    if(self.f_out):
-                        self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
-                        self.f_out.write(self.line)
-                        self.f_out.close()
-                        self.f_out = None
+                    if not self.first_sample:
+                        if(not self.f_out):
+                            try:
+                                from os import makedirs
+                                from os.path import dirname
+                                makedirs(dirname(self.f_name), exist_ok=True)
+                            except Exception:
+                                pass
+                            self.f_out = open(self.f_name, "a")
+                        if(self.f_out):
+                            self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
+                            self.f_out.write(self.line)
+                            self.f_out.close()
+                            self.f_out = None
 
-                        # progress and rate tracking on each sample
-                        now = time.perf_counter()
-                        if self.last_sample_time is not None:
-                            dt = now - self.last_sample_time
-                            if dt > 0:
-                                rate = 1.0 / dt
-                                self._rate_window.append(rate)
-                                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                                if self.total_steps:
-                                    remaining = max(0, self.total_steps - self.step_idx)
-                                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
-                        self.last_sample_time = now
-                        self.step_idx += 1
-                        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
-                            self.ui.progressBar_process.setMaximum(self.total_steps)
-                            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
-                
+                            # progress and rate tracking on each sample
+                            now = time.perf_counter()
+                            if self.last_sample_time is not None:
+                                dt = now - self.last_sample_time
+                                if dt > 0:
+                                    rate = 1.0 / dt
+                                    self._rate_window.append(rate)
+                                    self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                                    if self.total_steps:
+                                        remaining = max(0, self.total_steps - self.step_idx)
+                                        self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
+                            self.last_sample_time = now
+                            self.step_idx += 1
+                            if hasattr(self.ui, 'progressBar_process') and self.total_steps:
+                                self.ui.progressBar_process.setMaximum(self.total_steps)
+                                self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+                if (
+                    self.current_increment > 0
+                    and self.current_voltage >= self.max_voltage
+                    and not self._max_voltage_dialog
+                ):
+                    self.handle_max_voltage()
                 self.sample_ready = True
                 #print("tutaj lala")
             self.zamok.unlock()
@@ -693,32 +729,37 @@ class MainWindow(QtWidgets.QMainWindow):
         # print('Poslaný príkaz: ' + self.prikaz_portu)
         
     def handle_radioButton_raw_VCP_clicked(self):
-        self.ui.radioButton_raw_VCP.setChecked(True)
         self.modus_operandi = 0
         self.ui.frame_nastavenia_procesu.setEnabled(False)
-        # print("ModOp: raw VCP ", self.modus_operandi)
-        
+
     def handle_radioButton_manualne_zihanie_clicked(self):
-        self.ui.radioButton_manualne_zihanie.setChecked(True)
         self.modus_operandi = 1
         self.ui.frame_nastavenia_procesu.setEnabled(True)
         self.ui.spinBox_hodnota_staly_prud.setEnabled(False)
         self.ui.spinBox_doba_staly_prud.setEnabled(False)
         self.ui.pushButton_start_stop_drzania_prudu.setEnabled(True)
-        # print("ModOp: manualne zihanie ", self.modus_operandi)
-        
+
     def handle_radioButton_automatizovane_zihanie_clicked(self):
-        self.ui.radioButton_automatizovane_zihanie.setChecked(True)
         self.modus_operandi = 2
         self.ui.frame_nastavenia_procesu.setEnabled(True)
         self.ui.spinBox_hodnota_staly_prud.setEnabled(True)
         self.ui.spinBox_doba_staly_prud.setEnabled(True)
         self.ui.pushButton_start_stop_drzania_prudu.setEnabled(False)
-        # print("ModOp: automatizovane zihanie ", self.modus_operandi)
+
+    def handle_mode_changed(self, index: int) -> None:
+        if index == 0:
+            self.handle_radioButton_raw_VCP_clicked()
+        elif index == 1:
+            self.handle_radioButton_manualne_zihanie_clicked()
+        else:
+            self.handle_radioButton_automatizovane_zihanie_clicked()
         
     def handle_spinBox_hodnota_staly_prud_valueChanged(self):
         self.hodnota_staly_prud = self.ui.spinBox_hodnota_staly_prud.value()
-        # print("Hodnota staleho prudu: ", self.hodnota_staly_prud)
+        try:
+            self.settings.setValue("max_current", self.hodnota_staly_prud)
+        except Exception:
+            pass
         
     def handle_spinBox_doba_staly_prud_valueChanged(self):
         self.doba_staly_prud = self.ui.spinBox_doba_staly_prud.value()
@@ -751,10 +792,17 @@ class MainWindow(QtWidgets.QMainWindow):
         if(self.proces_on == False):
             self.proces_on = True
             self.sekundy = 0
+            self._max_voltage_dialog = False
             self.ui.frame_modus_operandi.setEnabled(False)
-            self.ui.groupBox_nastavenia_procesu.setEnabled(False)
+            self._set_process_controls_enabled(False)
+            if hasattr(self.ui, 'pushButton_reverse_now'):
+                self.ui.pushButton_reverse_now.setEnabled(True)
+            self.force_stop_at_zero = False
             self.command_number = 0
             self.vzorka_N = 0
+            self.prev_value_x = None
+            self.prev_value_y = None
+            self.first_sample = True
             # print("Proces bezi")
             self.ui.pushButton_spusti_proces.setText("Stop annealing process")
             if(self.modus_operandi == 0):
@@ -774,9 +822,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
+                self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
+                self.ui.lcdNumber_aktualny_prud_mA.display("0")
+                if hasattr(self.ui, 'label_live_voltage'):
+                    self.ui.label_live_voltage.display("0")
                 self.ui.lcdNumber_uplynute_sekundy.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percento_from_hold.setText("0")
@@ -785,6 +837,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ciara_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
+                # Immediately request the first sample instead of waiting
+                # for the one‑second timer interval to elapse.  This avoids
+                # an unnecessary pause after the user presses *Start*.
+                self.handle_send_new_command()
                 self.timer_command.start(1000)
                 # print("Spusteny mod manualneho zihania")
                 
@@ -796,9 +852,13 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
+                self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
+                self.ui.lcdNumber_aktualny_prud_mA.display("0")
+                if hasattr(self.ui, 'label_live_voltage'):
+                    self.ui.label_live_voltage.display("0")
                 # reverse + loop configuration
                 self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
                 self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
@@ -829,6 +889,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ciara_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
+                # Kick off the first acquisition immediately so the
+                # measurement starts without a one‑second delay.
+                self.handle_send_new_command()
                 self.timer_command.start(1000)
                 # print("Spusteny mod automatizovaneho zihania")
                 
@@ -836,11 +899,41 @@ class MainWindow(QtWidgets.QMainWindow):
                 pass
         else:
             self.stop_annealing()
+    def handle_pushButton_reverse_now_clicked(self):
+        """Immediately ramp current down toward zero."""
+        if not self.proces_on:
+            return
+        try:
+            self.timer_prud.stop()
+        except Exception:
+            pass
+        self.prud_timer_on = False
+        self.current_increment = -abs(self.current_step_A)
+        self.ciara_color = "b"
+        self.force_stop_at_zero = True
+
+    def _set_process_controls_enabled(self, enabled: bool) -> None:
+        if not hasattr(self.ui, 'groupBox_nastavenia_procesu'):
+            return
+        keep = {self.ui.pushButton_spusti_proces}
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            keep.add(self.ui.pushButton_reverse_now)
+        if hasattr(self.ui, 'progressBar_process'):
+            keep.add(self.ui.progressBar_process)
+        if hasattr(self.ui, 'label_time_remaining'):
+            keep.add(self.ui.label_time_remaining)
+        if hasattr(self.ui, 'groupBox_aktualne_hodnoty'):
+            keep.add(self.ui.groupBox_aktualne_hodnoty)
+        for child in self.ui.groupBox_nastavenia_procesu.findChildren(QtWidgets.QWidget):
+            if child in keep:
+                continue
+            child.setEnabled(enabled)
 
     def stop_annealing(self):
         """Abort the annealing run and power down the supply safely."""
         self.proces_on = False
         self.wait = False  # break any pending delays
+        self.force_stop_at_zero = False
         try:
             self.timer_command.stop()
             self.timer_prud.stop()
@@ -865,8 +958,12 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         self.ui.pushButton_spusti_proces.setText("Start annealing process")
-        self.ui.groupBox_nastavenia_procesu.setEnabled(True)
+        self._set_process_controls_enabled(True)
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            self.ui.pushButton_reverse_now.setEnabled(False)
         self.ui.frame_modus_operandi.setEnabled(True)
+        self.ui.label_set_current.display("0")
+        self._max_voltage_dialog = False
         
     def handle_send_new_command(self):
         if not self.proces_on:
@@ -903,35 +1000,40 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curr_value_x = self.current_current_read*1000
             self.curr_value_y = self.current_resistance
             self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
-            self.ui.lcdNumber_aktualny_odpor.display("{:.1f}".format(self.curr_value_y))
-           
-            
+            if hasattr(self.ui, 'label_live_voltage'):
+                self.ui.label_live_voltage.display("{:.2f}".format(self.current_voltage))
+
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
-            self.vzorka_N +=1
-            
-            if(self.vzorka_N > 1):
-                #pridame novu vzroku do grafu
-                self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax1.add_line(self.line1)
-            
-                self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax2.add_line(self.line2)
-            
-                # Voliteľné: dynamické prispôsobenie rozsahov
-                self.ax1.relim()
-                self.ax1.autoscale_view()
-                self.ax2.relim()
-                self.ax2.autoscale_view()
-            
-                self.fig.canvas.draw()
-                self.fig.canvas.flush_events()
-            
-            self.prev_value_x = self.curr_value_x
-            self.prev_value_y = self.curr_value_y
-            
-            
+            if self.first_sample:
+                self.first_sample = False
+                self.prev_value_x = None
+                self.prev_value_y = None
+            else:
+                self.vzorka_N +=1
+                if self.prev_value_x is not None:
+                    #pridame novu vzroku do grafu
+                    self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax1.add_line(self.line1)
+
+                    self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax2.add_line(self.line2)
+
+                    # Voliteľné: dynamické prispôsobenie rozsahov
+                    self.ax1.relim()
+                    self.ax1.autoscale_view()
+                    self.ax2.relim()
+                    self.ax2.autoscale_view()
+
+                    self.fig.canvas.draw()
+                    self.fig.canvas.flush_events()
+
+                self.prev_value_x = self.curr_value_x
+                self.prev_value_y = self.curr_value_y
+
+
             #iteracia prudu
             self.current_current_set += self.current_increment
+            self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
 
             #vypnutie ako pri tlacidle
             if(self.current_current_set < 0.001):
@@ -975,32 +1077,35 @@ class MainWindow(QtWidgets.QMainWindow):
             self.curr_value_x = self.current_current_read*1000
             self.curr_value_y = self.current_resistance
             self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
-            self.ui.lcdNumber_aktualny_odpor.display("{:.1f}".format(self.curr_value_y))
-           
-            
+            if hasattr(self.ui, 'label_live_voltage'):
+                self.ui.label_live_voltage.display("{:.2f}".format(self.current_voltage))
+
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
-            self.vzorka_N +=1
-            
-                       
-            if(self.vzorka_N > 1):
-                #pridame novu vzroku do grafu
-                self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax1.add_line(self.line1)
-            
-                self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                self.ax2.add_line(self.line2)
-            
-                # Voliteľné: dynamické prispôsobenie rozsahov
-                self.ax1.relim()
-                self.ax1.autoscale_view()
-                self.ax2.relim()
-                self.ax2.autoscale_view()
-            
-                self.fig.canvas.draw()
-                self.fig.canvas.flush_events()
-            
-            self.prev_value_x = self.curr_value_x
-            self.prev_value_y = self.curr_value_y
+            if self.first_sample:
+                self.first_sample = False
+                self.prev_value_x = None
+                self.prev_value_y = None
+            else:
+                self.vzorka_N +=1
+                if self.prev_value_x is not None:
+                    #pridame novu vzroku do grafu
+                    self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax1.add_line(self.line1)
+
+                    self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
+                    self.ax2.add_line(self.line2)
+
+                    # Voliteľné: dynamické prispôsobenie rozsahov
+                    self.ax1.relim()
+                    self.ax1.autoscale_view()
+                    self.ax2.relim()
+                    self.ax2.autoscale_view()
+
+                    self.fig.canvas.draw()
+                    self.fig.canvas.flush_events()
+
+                self.prev_value_x = self.curr_value_x
+                self.prev_value_y = self.curr_value_y
             
             
                       
@@ -1017,6 +1122,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             #iteracia prudu
             self.current_current_set += self.current_increment
+            self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
 
             # end of hold: either reverse (if enabled) or stop
             if(self.prud_timer_on and (self.sekundy >= self.doba_staly_prud)):
@@ -1032,18 +1138,21 @@ class MainWindow(QtWidgets.QMainWindow):
                 return
             self.prikaz_portu = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
-            # completed descending to zero? manage loops
-            if getattr(self, 'reverse_enabled', False) and (self.current_current_set < self.current_step_A):
-                self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
-                if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
-                    # prepare next loop
-                    self.current_increment = self.current_step_A
-                    self.current_current_set = 0.001
-                    self.ciara_color = "r"
-                    self.direction_ascending = True
-                    self.sekundy = 0
-                else:
+            # completed descending to zero? manage loops or stop
+            if (self.current_increment < 0) and (self.current_current_set < self.current_step_A):
+                if getattr(self, 'force_stop_at_zero', False) or not getattr(self, 'reverse_enabled', False):
                     self.handle_pushButton_spusti_proces_clicked()
+                else:
+                    self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
+                    if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
+                        # prepare next loop
+                        self.current_increment = self.current_step_A
+                        self.current_current_set = 0.001
+                        self.ciara_color = "r"
+                        self.direction_ascending = True
+                        self.sekundy = 0
+                    else:
+                        self.handle_pushButton_spusti_proces_clicked()
 
         else:
             pass
@@ -1058,15 +1167,21 @@ class MainWindow(QtWidgets.QMainWindow):
         for i in range(0, len(self.commands_safe_end)):
             self.prikaz_portu = self.commands_safe_end[i]
             self.send_serial_command()
-            self.simple_delay(1000)
+            self.simple_delay(200)
             
 
     def send_init_commands(self):
         # print("teraz posielam univerzalnu zostavu prikazov pri spusteni")
-        for i in range(0, len(self.commands_init)):
-            self.prikaz_portu = self.commands_init[i]
+        for cmd in self.commands_init:
+            if not self.proces_on:
+                break
+            self.prikaz_portu = cmd
             self.send_serial_command()
-            self.simple_delay(1000)
+            # The original implementation paused for a full second between
+            # initialisation commands, which caused a noticeable start-up
+            # delay.  A brief 200 ms gap gives the supply time to process
+            # each command while keeping the UI responsive.
+            self.simple_delay(200)
             
     def simple_delay(self, delay_ms):
         self.wait = True
@@ -1103,6 +1218,54 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.f_name = self.ui.lineEdit_log_subor.text()
         # print("Zaznam subor:", self.f_name)
+
+    def init_live_values(self) -> None:
+        box = getattr(self.ui, "groupBox_aktualne_hodnoty", None)
+        if box is None:
+            return
+        for child in box.findChildren(QtWidgets.QWidget):
+            child.deleteLater()
+        old_layout = box.layout()
+        if old_layout is not None:
+            QtWidgets.QWidget().setLayout(old_layout)
+        layout = QtWidgets.QFormLayout(box)
+        layout.setContentsMargins(6, 6, 6, 6)
+        self.label_live_current = QtWidgets.QLabel("0")
+        self.label_live_set = QtWidgets.QLabel("0")
+        self.label_live_voltage = QtWidgets.QLabel("0")
+        for lbl in (self.label_live_current, self.label_live_set, self.label_live_voltage):
+            lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        layout.addRow("Set current (mA)", self.label_live_set)
+        layout.addRow("Current (mA)", self.label_live_current)
+        layout.addRow("Voltage (V)", self.label_live_voltage)
+        # Alias old names for compatibility
+        self.ui.lcdNumber_aktualny_prud_mA = self.label_live_current
+        self.ui.label_set_current = self.label_live_set
+        self.ui.label_live_voltage = self.label_live_voltage
+        self.ui.lcdNumber_aktualny_prud_mA.display = self.label_live_current.setText
+        self.ui.label_set_current.display = self.label_live_set.setText
+        self.ui.label_live_voltage.display = self.label_live_voltage.setText
+
+    def handle_max_voltage(self) -> None:
+        self._max_voltage_dialog = True
+        self.current_increment = 0
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Voltage limit reached")
+        msg.setText("Power supply reached 30 V. What do you want to do?")
+        hold_btn = msg.addButton("Hold current", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        reverse_btn = msg.addButton("Reverse to zero", QtWidgets.QMessageBox.ButtonRole.ActionRole)
+        stop_btn = msg.addButton("Stop measurement", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is reverse_btn:
+            self.current_increment = -abs(self.current_step_A)
+            self.ciara_color = "b"
+            self.force_stop_at_zero = True
+            self.direction_ascending = False
+        elif clicked is stop_btn:
+            self.handle_pushButton_spusti_proces_clicked()
+        else:
+            pass
     
     def init_graph_window(self):
         """
@@ -1151,19 +1314,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 _title = format_annealing_title(Path(self.f_name).stem)
             except Exception:
                 _title = format_annealing_title(self.f_name)
-            # Place the title above the graph area using a Qt label instead of
-            # drawing inside the figure. This keeps it clearly outside axes.
-            self.title_label = QtWidgets.QLabel(_title)
-            self.title_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            # Style to match palette
-            try:
-                self.title_label.setStyleSheet(
-                    "font-weight: 600; font-size: 18px; margin: 2px 0 2px 0;"
-                )
-                self.title_label.setForegroundRole(QtGui.QPalette.ColorRole.Text)
-            except Exception:
-                pass
-            layout.addWidget(self.title_label)
+            self.fig.suptitle(_title, color=text_rgb)
             if NavigationToolbar is not None and self.canvas is not None:
                 self.toolbar = NavigationToolbar(self.canvas, container)
                 layout.addWidget(self.toolbar)
@@ -1215,7 +1366,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.line2 = Line2D([], [], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
             self.ax2.add_line(self.line2)
             plt.ion()
-            plt.show()
+            show_plots()
         
         
     def handle_pushButton_select_filename_clicked(self):
@@ -1253,12 +1404,15 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self.ui, 'lineEdit_log_file'):
                 self.ui.lineEdit_log_file.setText(b)
             self.ui.lineEdit_log_subor.setText(fpath)
+            self.settings.setValue("log_dir", d)
+            self.settings.setValue("log_file", b)
 
     def handle_browse_log_dir(self):
         start_dir = self.ui.lineEdit_log_dir.text() if hasattr(self.ui, 'lineEdit_log_dir') else DEFAULT_LOG_DIR
         new_dir = QFileDialog.getExistingDirectory(self, "Select log directory", start_dir)
         if new_dir and hasattr(self.ui, 'lineEdit_log_dir'):
             self.ui.lineEdit_log_dir.setText(new_dir)
+            self.settings.setValue("log_dir", new_dir)
 
     def handle_browse_full_file(self):
         # Unified handler to select full path then split into directory + base name
@@ -1279,6 +1433,8 @@ class MainWindow(QtWidgets.QMainWindow):
             if hasattr(self.ui, 'lineEdit_log_file'):
                 self.ui.lineEdit_log_file.setText(b)
             self.ui.lineEdit_log_subor.setText(fpath)
+            self.settings.setValue("log_dir", d)
+            self.settings.setValue("log_file", b)
 
     def sync_full_log_path(self):
         # Update hidden full-path edit and internal f_name
@@ -1286,6 +1442,15 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'lineEdit_log_subor'):
             self.ui.lineEdit_log_subor.setText(full)
         self.f_name = full
+        try:
+            d = self.ui.lineEdit_log_dir.text().strip()
+            b = self.ui.lineEdit_log_file.text().strip()
+            if d:
+                self.settings.setValue("log_dir", d)
+            if b:
+                self.settings.setValue("log_file", b)
+        except Exception:
+            pass
 
     def build_log_path(self) -> str:
         try:
