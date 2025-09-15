@@ -21,7 +21,7 @@ else:
 
 
 def ask_files() -> List[str]:
-    paths = select_files_or_folder()
+    paths = select_files_or_folder(key="hsw_distribution")
     if not paths:
         sys.exit("No files selected.")
     return list(paths)

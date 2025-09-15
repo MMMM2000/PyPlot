@@ -85,8 +85,13 @@ def plot_one_origin(df: pd.DataFrame, title: str) -> None:
         gp.activate()
         esc = title.replace('"', "'")
         op.lt_exec('page.antialias=1; layer -aa 1;')
-        op.lt_exec(f'title -s "{esc}";')
         op.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
+        # Put the title text into the legend and freeze it
+        try:
+            gl.label('Legend').text = esc
+        except Exception:
+            pass
+        op.lt_exec('legend.update=0;')
     except Exception:
         pass
 

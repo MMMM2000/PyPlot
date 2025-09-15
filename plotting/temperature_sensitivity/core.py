@@ -1,4 +1,4 @@
-import os
+﻿import os
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, cast, Callable
@@ -67,11 +67,11 @@ MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
-LABELS = {
-    "T1": "T1 (µs)",
-    "T2": "T2 (µs)",
-    "dT": "T2–T1 (µs)",
-    "sum": "T1+T2 (µs)",
+TS_LABELS = {
+    "T1": "T1 (\u03BCs)",
+    "T2": "T2 (\u03BCs)",
+    "dT": "T2-T1 (\u03BCs)",
+    "sum": "T1+T2 (\u03BCs)",
 }
 
 FNAME_RE = re.compile(
@@ -260,7 +260,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
         ax.plot(sub["line"], sub["sum"], "ro", ms=6, label="outlier")
         ax.set_title(fname)
         ax.set_xlabel("Index")
-        ax.set_ylabel("T1+T2 (µs)")
+        ax.set_ylabel("T1+T2 (\u03BCs)")
         ax.legend()
         fig.tight_layout()
         apply_readability(ax, globals())
@@ -363,7 +363,7 @@ def plot_variable(
             label=f'mean {int(temp)}\N{DEGREE SIGN}C',
         )
 
-    # Connect 25°C and 100°C means per sample and show delta
+    # Connect 25Â°C and 100Â°C means per sample and show delta
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
@@ -413,8 +413,8 @@ def plot_variable(
     ax.set_xticks(ticks)
     ax.set_xticklabels(samples)
     ax.set_xlabel('Sample')
-    ax.set_ylabel(LABELS[var])
-    ax.set_title(f"{comp} {anneal} — {LABELS[var]}")
+    ax.set_ylabel(TS_LABELS[var])
+    ax.set_title(f"{comp} {anneal} — {TS_LABELS[var]}")
     ax.grid(True)
 
     legend = ax.legend(loc='best')
@@ -493,6 +493,7 @@ def plot_variable_origin(
     gl = gp[0]
 
     # Raw scatter for 25C and 100C
+    raw_plot_indices = []
     for t, color in ((25, RAW_COLORS.get(25, '#45A1D6')), (100, RAW_COLORS.get(100, '#F09C67'))):
         sub = raw[raw['temp'] == t][['X', 'Y']]
         if sub.empty:
@@ -502,9 +503,17 @@ def plot_variable_origin(
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         try:
+            # Ensure small raw symbols as requested
             p.color = color
+            p.symbol_shape = 2  # circle
+            p.symbol_size = 1
+            p.symbol_edge_color = color
+            p.symbol_fill_color = color
+            p.line_width = 0
         except Exception:
             pass
+        # Remember that we added a raw scatter; used to enforce size via LabTalk
+        raw_plot_indices.append(len(gl))
 
     # Mean markers per temperature
     for t, color in ((25, MEAN_COLORS.get(25, 'black')), (100, MEAN_COLORS.get(100, 'black'))):
@@ -517,10 +526,21 @@ def plot_variable_origin(
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         try:
-            p.color = MEAN_COLORS.get( 'a' if t==25 else 'b', color)
+            p.color = MEAN_COLORS.get('a' if t == 25 else 'b', color)
             p.symbol_shape = 2  # circle marker type
+            p.symbol_size = 8
+            p.symbol_edge_color = p.color
+            p.symbol_fill_color = p.color
         except Exception:
             pass
+
+    # As a safety net, enforce raw symbol size=1 via LabTalk indexes
+    try:
+        gp.activate()
+        for idx in raw_plot_indices:
+            op.lt_exec(f'layer -i {idx}; set %C -z 1; set %C -kf 0;')
+    except Exception:
+        pass
 
     # Connect 25C and 100C per sample when no continuous data
     if not cont.empty:
@@ -573,14 +593,35 @@ def plot_variable_origin(
         gp.activate()
         op.lt_exec('page.antialias=1;')
         op.lt_exec('layer -aa 1;')
+        # X axis: show integer ticks per sample
         op.lt_exec('lab -xb "Sample";')
-        op.lt_exec(f'lab -yl "{LABELS[var]}";')
-        esc = (f"{comp} {anneal} - {LABELS[var]}").replace('"', "'")
-        op.lt_exec(f'title -s "{esc}";')
-        op.lt_exec('legend;')
+        op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
+        # Set fixed major tick increment to 1 and bounds around samples
+        op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples)+0.5};')
+        op.lt_exec('layer.x.inc=1;')
+        # Map tick labels to sample names from a helper sheet
+        try:
+            wlab = op.new_sheet('w', lname='labels')
+            wlab.from_list(0, samples)
+            # Use Text from Dataset for tick labels
+            b = getattr(book, 'name', '')
+            s = getattr(wlab, 'name', 'labels')
+            rng = f'[{b}]{s}!col(1)'
+            op.lt_exec('layer.x.label.form=2;')
+            op.lt_exec(f'layer.x.label.dataset$="{rng}";')
+        except Exception:
+            pass
+        # Put the title text into the legend and freeze it
+        esc = (f"{comp} {anneal} — {TS_LABELS[var]}").replace('"', "'")
+        try:
+            gl.label('Legend').text = esc
+        except Exception:
+            pass
+        op.lt_exec('legend.update=0;')
     except Exception:
         pass
 
+    # Release Origin control so the application can be closed independently
     try:
         op.exit()
     except Exception:
@@ -656,3 +697,4 @@ def main(files: List[str], backend: str = BACKEND):
             plt.close('all')
     else:
         plt.close('all')
+

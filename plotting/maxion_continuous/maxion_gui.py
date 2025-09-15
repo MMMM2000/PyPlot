@@ -41,7 +41,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.settings = QtCore.QSettings("microwire", "maxion_continuous")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="maxion_continuous")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -51,7 +51,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="maxion_continuous"))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -164,7 +164,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_PLOTS = self.save_cb.isChecked()
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "maxion_continuous", self.subdir_cb.isChecked())
-        set_last_output_dir(base)
+        set_last_output_dir(base, key="maxion_continuous")
         orig.PLOT_MODE = "raw" if self.raw_rb.isChecked() else "processed" if self.proc_rb.isChecked() else "both"
         orig.MARKER_SIZE = self.marker_spin.value()
         orig.MED_WINDOW = int(self.med_spin.value())

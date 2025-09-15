@@ -201,15 +201,27 @@ def _settings() -> QtCore.QSettings:
     return QtCore.QSettings("microwire", "plotting")
 
 
-def get_last_output_dir(default: str | None = None) -> str:
-    return _settings().value("last_output_dir", default or _download_dir(), type=str)
+def get_last_output_dir(default: str | None = None, *, key: str | None = None) -> str:
+    s = _settings()
+    if key:
+        return s.value(f"{key}_last_output_dir", default or _download_dir(), type=str)
+    return s.value("last_output_dir", default or _download_dir(), type=str)
 
 
-def set_last_output_dir(path: str) -> None:
-    _settings().setValue("last_output_dir", path)
+def set_last_output_dir(path: str, *, key: str | None = None) -> None:
+    s = _settings()
+    if key:
+        s.setValue(f"{key}_last_output_dir", path)
+    else:
+        s.setValue("last_output_dir", path)
 
 
-def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = ".txt") -> list[str]:
+def select_files_or_folder(
+    parent: QtWidgets.QWidget | None = None,
+    ext: str = ".txt",
+    *,
+    key: str | None = None,
+) -> list[str]:
     """Return a list of files with extension ``ext`` chosen by the user.
 
     Remembers the last input directory and defaults to the repository's
@@ -218,7 +230,8 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = "
     """
 
     settings = _settings()
-    start_dir = settings.value("last_input_dir", _sample_dir(), type=str)
+    last_in_key = f"{key}_last_input_dir" if key else "last_input_dir"
+    start_dir = settings.value(last_in_key, _sample_dir(), type=str)
     box = QtWidgets.QMessageBox(parent)
     box.setWindowTitle("Select Input")
     box.setText("Choose input files or a folder with data")
@@ -238,11 +251,11 @@ def select_files_or_folder(parent: QtWidgets.QWidget | None = None, ext: str = "
             f"{label} files (*{ext});;All files (*)",
         )
         if paths:
-            settings.setValue("last_input_dir", os.path.dirname(paths[0]))
+            settings.setValue(last_in_key, os.path.dirname(paths[0]))
     elif clicked == folder_btn:
         directory = QtWidgets.QFileDialog.getExistingDirectory(parent, "Select folder", start_dir)
         if directory:
-            settings.setValue("last_input_dir", directory)
+            settings.setValue(last_in_key, directory)
             for root, _dirs, files in os.walk(directory):
                 for name in files:
                     if name.lower().endswith(ext.lower()):
@@ -295,7 +308,12 @@ def prepare_output_dir(base: str, script: str, create_sub: bool) -> str:
     return str(path)
 
 
-def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[list[str], QtWidgets.QWidget]:
+def create_file_widget(
+    parent: QtWidgets.QWidget,
+    ext: str = ".txt",
+    *,
+    key: str | None = None,
+) -> tuple[list[str], QtWidgets.QWidget]:
     """Return a widget managing a list of input files and the backing list."""
 
     files: list[str] = []
@@ -314,7 +332,7 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     )
 
     def add_files() -> None:
-        new = select_files_or_folder(parent, ext)
+        new = select_files_or_folder(parent, ext, key=key)
         for f in new:
             if f not in files:
                 files.append(f)
@@ -331,10 +349,20 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
 
     file_list.itemDoubleClicked.connect(open_item)
 
+    # Controls row
     add_btn = QtWidgets.QPushButton("Add Files/Folders")
     add_btn.clicked.connect(add_files)
     remove_btn = QtWidgets.QPushButton("Remove Selected")
     remove_btn.clicked.connect(remove_selected)
+    # Optional outlier toggles now live with each plotting dialog
+    from . import common as _common  # local import to avoid cycles at module import
+    chk_out_btn = QtWidgets.QPushButton("Check Outliers")
+    chk_out_btn.setCheckable(True)
+    chk_out_btn.setToolTip("Enable outlier detection during plotting")
+    chk_out_btn.toggled.connect(lambda b: setattr(_common, "CHECK_OUTLIERS", bool(b)))
+    auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
+    auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
+    auto_rm_cb.toggled.connect(lambda b: setattr(_common, "AUTO_REMOVE_OUTLIERS", bool(b)))
 
     container = QtWidgets.QWidget()
     container.setSizePolicy(
@@ -345,6 +373,8 @@ def create_file_widget(parent: QtWidgets.QWidget, ext: str = ".txt") -> tuple[li
     btn_row = QtWidgets.QHBoxLayout()
     btn_row.addWidget(add_btn)
     btn_row.addWidget(remove_btn)
+    btn_row.addWidget(chk_out_btn)
+    btn_row.addWidget(auto_rm_cb)
     btn_row.addStretch()
     layout.addLayout(btn_row)
     layout.addWidget(file_list)

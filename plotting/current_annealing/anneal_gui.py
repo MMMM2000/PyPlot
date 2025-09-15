@@ -39,7 +39,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Current Annealing Plot Settings")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="current_annealing")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -49,7 +49,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="current_annealing"))
         browse_btn = QtWidgets.QPushButton("Browse")
         self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
 
@@ -97,7 +97,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_PLOTS = self.save_cb.isChecked()
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "current_annealing", self.subdir_cb.isChecked())
-        set_last_output_dir(base)
+        set_last_output_dir(base, key="current_annealing")
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         sync_readability("current_annealing", self.read_ctrl, orig)

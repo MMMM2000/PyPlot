@@ -39,7 +39,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Stress Sensitivity Settings")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="stress_sensitivity")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -61,7 +61,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
         self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
         self.backend_combo.setCurrentIndex(0)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="stress_sensitivity"))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -118,7 +118,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_PLOTS = self.save_cb.isChecked()
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "stress_sensitivity", self.subdir_cb.isChecked())
-        set_last_output_dir(base)
+        set_last_output_dir(base, key="stress_sensitivity")
         sync_readability("stress_sensitivity", self.read_ctrl, orig)
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())

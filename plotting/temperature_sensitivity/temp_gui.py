@@ -39,7 +39,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Temperature Sensitivity Settings")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="temperature_sensitivity")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -48,7 +48,8 @@ class SettingsDialog(QtWidgets.QDialog):
         layout = QtWidgets.QGridLayout(left)
 
         self.sum_cb = QtWidgets.QCheckBox("T1+T2"); self.sum_cb.setChecked(orig.PLOT_SUM)
-        self.dt_cb = QtWidgets.QCheckBox("T2–T1"); self.dt_cb.setChecked(orig.PLOT_DT)
+        # Use ASCII hyphen to avoid encoding issues on some systems
+        self.dt_cb = QtWidgets.QCheckBox("T2-T1"); self.dt_cb.setChecked(orig.PLOT_DT)
         self.t1_cb = QtWidgets.QCheckBox("T1"); self.t1_cb.setChecked(orig.PLOT_T1)
         self.t2_cb = QtWidgets.QCheckBox("T2"); self.t2_cb.setChecked(orig.PLOT_T2)
 
@@ -61,10 +62,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
         self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
         self.backend_combo.setCurrentIndex(0)
-        self.baseline_combo = QtWidgets.QComboBox(); self.baseline_combo.addItems(["None", "Zero 25°c", "Both"])
+        # Correct capitalization and degree symbol
+        self.baseline_combo = QtWidgets.QComboBox(); self.baseline_combo.addItems(["None", "Zero 25°C", "Both"])
         baseline_map = {"none": 0, "zero_25": 1, "both": 2}
         self.baseline_combo.setCurrentIndex(baseline_map.get(orig.BASELINE_MODE, 0))
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="temperature_sensitivity"))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -136,7 +138,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.BASELINE_MODE = {0: "none", 1: "zero_25", 2: "both"}[self.baseline_combo.currentIndex()]
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "temperature_sensitivity", self.subdir_cb.isChecked())
-        set_last_output_dir(base)
+        set_last_output_dir(base, key="temperature_sensitivity")
         sync_readability("temperature_sensitivity", self.read_ctrl, orig)
         orig.INCLUDE_CONTINUOUS = self.cont_cb.isChecked()
         orig.MED_WINDOW = int(self.med_spin.value())
@@ -186,4 +188,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -63,7 +63,7 @@
     "BACKEND": "matplotlib",
     "SHOW_PLOTS": true,
     "SAVE_PLOTS": false,
-    "BASELINE_MODE": "none",
+    "BASELINE_MODE": "zero_25",
     "INCLUDE_CONTINUOUS": true,
     "MED_WINDOW": 5,
     "MA_WINDOW": 20,

@@ -39,7 +39,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Temperature Dependence Settings")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="temperature_dependence")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -64,7 +64,7 @@ class SettingsDialog(QtWidgets.QDialog):
         self.mode_combo = QtWidgets.QComboBox(); self.mode_combo.addItems(["Raw", "Processed", "Both"])
         mode_map = {"raw": 0, "processed": 1, "both": 2}
         self.mode_combo.setCurrentIndex(mode_map.get(orig.PLOT_MODE, 0))
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="temperature_dependence"))
         browse_btn = QtWidgets.QPushButton("Browse")
         self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
         self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
@@ -134,7 +134,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.PLOT_MODE = {0: "raw", 1: "processed", 2: "both"}[self.mode_combo.currentIndex()]
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "temperature_dependence", self.subdir_cb.isChecked())
-        set_last_output_dir(base)
+        set_last_output_dir(base, key="temperature_dependence")
         sync_readability("temperature_dependence", self.read_ctrl, orig)
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())

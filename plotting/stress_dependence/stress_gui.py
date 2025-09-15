@@ -41,7 +41,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Stress Dependence Settings")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="stress_dependence")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -72,7 +72,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="stress_dependence"))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse_out() -> None:
@@ -145,7 +145,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_PLOTS = self.save_cb.isChecked()
         base = self.out_dir_edit.text()
         orig.OUTPUT_DIR = prepare_output_dir(base, "stress_dependence", self.subdir_cb.isChecked())
-        set_last_output_dir(base)
+        set_last_output_dir(base, key="stress_dependence")
         sync_readability("stress_dependence", self.read_ctrl, orig)
         orig.PLOT_PROCESSED = self.proc_cb.isChecked()
         orig.MED_WINDOW = int(self.med_spin.value())

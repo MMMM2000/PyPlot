@@ -39,7 +39,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Hsw Load Compare Settings")
 
-        self.files, file_widget = create_file_widget(self)
+        self.files, file_widget = create_file_widget(self, key="hsw_load_compare")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -60,7 +60,7 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir())
+        self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="hsw_load_compare"))
         browse_btn = QtWidgets.QPushButton("Browse")
 
         def browse() -> None:
@@ -124,7 +124,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_PLOTS = cfg["save"]
         orig.OUTPUT_DIR = cfg["out_dir"]
         sync_readability("hsw_load_compare", self.read_ctrl, orig)
-        set_last_output_dir(self.out_dir_edit.text())
+        set_last_output_dir(self.out_dir_edit.text(), key="hsw_load_compare")
         run_with_console(lambda: orig.main(self.files, cfg), self.console)
 
 

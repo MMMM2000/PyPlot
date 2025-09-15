@@ -311,7 +311,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         # Save options
         self.save_cb = QtWidgets.QCheckBox()
         self.save_cb.setChecked(False)
-        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd()))
+        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd(), key="pdf_plotter"))
         self.browse_out_btn = QtWidgets.QPushButton("Browse…")
         self.browse_out_btn.clicked.connect(self._browse_out)
         out_box = self._hbox(self.out_dir, self.browse_out_btn)
@@ -514,7 +514,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             self.plot()
 
     def _load_files(self) -> None:
-        paths = select_files_or_folder(self, ext=".pdf")
+        paths = select_files_or_folder(self, ext=".pdf", key="pdf_plotter")
         if not paths:
             return
         self.file_edit.setText(" ; ".join(paths))
@@ -716,7 +716,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             return
         fmt = self.format_combo.currentText()
         out_dir = prepare_output_dir(out_dir, "pdf_plotter", self.subdir_cb.isChecked())
-        set_last_output_dir(self.out_dir.text())
+        set_last_output_dir(self.out_dir.text(), key="pdf_plotter")
         base = title or "plot"
         safe = re.sub(r"[^\w\-\.]+", "_", base)
         base_path = os.path.join(out_dir, safe)

@@ -1,0 +1,626 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+
+<!--[if IE 6]><html class="ie6" xmlns="http://www.w3.org/1999/xhtml"><![endif]-->
+<!--[if IE 7]><html class="lt-ie8 lt-ie9" xmlns="http://www.w3.org/1999/xhtml"><![endif]-->
+<!--[if IE 8]><html class="lt-ie9" xmlns="http://www.w3.org/1999/xhtml"><![endif]-->
+<!--[if gt IE 8]><!--><html xmlns="http://www.w3.org/1999/xhtml"><!--<![endif]-->
+<head>
+  <meta http-equiv="content-type" content="text/html; charset=UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=3.0, user-scalable=1" />
+  <meta name="referrer" content="origin" />
+  <meta name="HandheldFriendly" content="true" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>LabTalk layer.x major increment at DuckDuckGo</title>
+  <link title="DuckDuckGo (HTML)" type="application/opensearchdescription+xml" rel="search" href="//duckduckgo.com/opensearch_html_v2.xml" />
+  <link href="//duckduckgo.com/favicon.ico" rel="shortcut icon" />
+  <link rel="icon" href="//duckduckgo.com/favicon.ico" type="image/x-icon" />
+  <link id="icon60" rel="apple-touch-icon" href="//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_60x60.png?v=2"/>
+  <link id="icon76" rel="apple-touch-icon" sizes="76x76" href="//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_76x76.png?v=2"/>
+  <link id="icon120" rel="apple-touch-icon" sizes="120x120" href="//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_120x120.png?v=2"/>
+  <link id="icon152" rel="apple-touch-icon" sizes="152x152" href="//duckduckgo.com/assets/icons/meta/DDG-iOS-icon_152x152.png?v=2"/>
+  <link rel="image_src" href="//duckduckgo.com/assets/icons/meta/DDG-icon_256x256.png">
+  <link rel="stylesheet" media="handheld, all" href="//duckduckgo.com/dist/h.5cdd129b369a4236564b.css" type="text/css"/>
+</head>
+
+<body class="body--html">
+  <a name="top" id="top"></a>
+
+  <form action="/html/" method="post">
+    <input type="text" name="state_hidden" id="state_hidden" />
+  </form>
+
+  <div>
+    <div class="site-wrapper-border"></div>
+
+    <div id="header" class="header cw header--html">
+      <a title="DuckDuckGo" href="/html/" class="header__logo-wrap"></a>
+
+      <form name="x" class="header__form" action="/html/" method="post">
+        <div class="search search--header">
+          <input name="q" autocomplete="off" class="search__input" id="search_form_input_homepage" type="text" value="LabTalk layer.x major increment" />
+          <input name="b" id="search_button_homepage" class="search__button search__button--html" value="" title="Search" alt="Search" type="submit" />
+        </div>
+
+        
+        
+        
+        
+
+        <div class="frm__select">
+          <select name="kl">
+            
+              <option value="" >All Regions</option>
+            
+              <option value="ar-es" >Argentina</option>
+            
+              <option value="au-en" >Australia</option>
+            
+              <option value="at-de" >Austria</option>
+            
+              <option value="be-fr" >Belgium (fr)</option>
+            
+              <option value="be-nl" >Belgium (nl)</option>
+            
+              <option value="br-pt" >Brazil</option>
+            
+              <option value="bg-bg" >Bulgaria</option>
+            
+              <option value="ca-en" >Canada (en)</option>
+            
+              <option value="ca-fr" >Canada (fr)</option>
+            
+              <option value="ct-ca" >Catalonia</option>
+            
+              <option value="cl-es" >Chile</option>
+            
+              <option value="cn-zh" >China</option>
+            
+              <option value="co-es" >Colombia</option>
+            
+              <option value="hr-hr" >Croatia</option>
+            
+              <option value="cz-cs" >Czech Republic</option>
+            
+              <option value="dk-da" >Denmark</option>
+            
+              <option value="ee-et" >Estonia</option>
+            
+              <option value="fi-fi" >Finland</option>
+            
+              <option value="fr-fr" >France</option>
+            
+              <option value="de-de" >Germany</option>
+            
+              <option value="gr-el" >Greece</option>
+            
+              <option value="hk-tzh" >Hong Kong</option>
+            
+              <option value="hu-hu" >Hungary</option>
+            
+              <option value="is-is" >Iceland</option>
+            
+              <option value="in-en" >India (en)</option>
+            
+              <option value="id-en" >Indonesia (en)</option>
+            
+              <option value="ie-en" >Ireland</option>
+            
+              <option value="il-en" >Israel (en)</option>
+            
+              <option value="it-it" >Italy</option>
+            
+              <option value="jp-jp" >Japan</option>
+            
+              <option value="kr-kr" >Korea</option>
+            
+              <option value="lv-lv" >Latvia</option>
+            
+              <option value="lt-lt" >Lithuania</option>
+            
+              <option value="my-en" >Malaysia (en)</option>
+            
+              <option value="mx-es" >Mexico</option>
+            
+              <option value="nl-nl" >Netherlands</option>
+            
+              <option value="nz-en" >New Zealand</option>
+            
+              <option value="no-no" >Norway</option>
+            
+              <option value="pk-en" >Pakistan (en)</option>
+            
+              <option value="pe-es" >Peru</option>
+            
+              <option value="ph-en" >Philippines (en)</option>
+            
+              <option value="pl-pl" >Poland</option>
+            
+              <option value="pt-pt" >Portugal</option>
+            
+              <option value="ro-ro" >Romania</option>
+            
+              <option value="ru-ru" >Russia</option>
+            
+              <option value="xa-ar" >Saudi Arabia</option>
+            
+              <option value="sg-en" >Singapore</option>
+            
+              <option value="sk-sk" >Slovakia</option>
+            
+              <option value="sl-sl" >Slovenia</option>
+            
+              <option value="za-en" >South Africa</option>
+            
+              <option value="es-ca" >Spain (ca)</option>
+            
+              <option value="es-es" >Spain (es)</option>
+            
+              <option value="se-sv" >Sweden</option>
+            
+              <option value="ch-de" >Switzerland (de)</option>
+            
+              <option value="ch-fr" >Switzerland (fr)</option>
+            
+              <option value="tw-tzh" >Taiwan</option>
+            
+              <option value="th-en" >Thailand (en)</option>
+            
+              <option value="tr-tr" >Turkey</option>
+            
+              <option value="us-en" >US (English)</option>
+            
+              <option value="us-es" >US (Spanish)</option>
+            
+              <option value="ua-uk" >Ukraine</option>
+            
+              <option value="uk-en" >United Kingdom</option>
+            
+              <option value="vn-en" >Vietnam (en)</option>
+            
+          </select>
+        </div>
+
+        <div class="frm__select frm__select--last">
+          <select class="" name="df">
+            
+              <option value="" selected>Any Time</option>
+            
+              <option value="d" >Past Day</option>
+            
+              <option value="w" >Past Week</option>
+            
+              <option value="m" >Past Month</option>
+            
+              <option value="y" >Past Year</option>
+            
+          </select>
+        </div>
+      </form>
+    </div>
+
+    
+
+    
+      <!-- Web results are present -->
+      <div>
+        <div class="serp__results">
+          <div id="links" class="results">
+            
+
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2DAxis%2Dobj&amp;rut=736cf8347e91e2d94a5681cd8eaaadd598eab08f20d12ae057fc39278ced166d">Help Online - LabTalk Programming - Layer.Axis - OriginLab</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2DAxis%2Dobj&amp;rut=736cf8347e91e2d94a5681cd8eaaadd598eab08f20d12ae057fc39278ced166d">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/www.originlab.com.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2DAxis%2Dobj&amp;rut=736cf8347e91e2d94a5681cd8eaaadd598eab08f20d12ae057fc39278ced166d">
+                            www.originlab.com/doc/LabTalk/ref/Layer-Axis-obj
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2DAxis%2Dobj&amp;rut=736cf8347e91e2d94a5681cd8eaaadd598eab08f20d12ae057fc39278ced166d">This script sets the <b>major</b> ticks out and minor ticks in for the top X axis in the active layer: range ll = !; ll. x2. ticks = 6; This script specifies the custom linking formulae for linked layers: <b>layer</b>. <b>x.</b> link. from$ = &quot;X1-X2&quot;; <b>layer</b>. <b>x.</b> link. to$ = &quot;X1+X2&quot;; This script specifies a dataset to control X axis <b>major</b> tick mark positions and labels:</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fpdfs%2FOrigin2025b_Documentation%2FEnglish%2FLabTalk_Scripting_Guide_E.pdf&amp;rut=fbb9817436e1d8c8114bf9655bfe33d2080f18fb0ac93602485858ce76f84300"><span class="result__type">PDF</span> LabTalk Scripting Guide</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fpdfs%2FOrigin2025b_Documentation%2FEnglish%2FLabTalk_Scripting_Guide_E.pdf&amp;rut=fbb9817436e1d8c8114bf9655bfe33d2080f18fb0ac93602485858ce76f84300">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/d2mvzyuse3lwjc.cloudfront.net.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fpdfs%2FOrigin2025b_Documentation%2FEnglish%2FLabTalk_Scripting_Guide_E.pdf&amp;rut=fbb9817436e1d8c8114bf9655bfe33d2080f18fb0ac93602485858ce76f84300">
+                            d2mvzyuse3lwjc.cloudfront.net/pdfs/Origin2025b_Documentation/English/LabTalk_Scripting_Guide_E.pdf
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fpdfs%2FOrigin2025b_Documentation%2FEnglish%2FLabTalk_Scripting_Guide_E.pdf&amp;rut=fbb9817436e1d8c8114bf9655bfe33d2080f18fb0ac93602485858ce76f84300">1 <b>LabTalk</b> Scripting Guide In this guide we introduce <b>LabTalk</b>, the scripting language in Origin. <b>LabTalk</b> is designed for users who wish to write and execute scripts to perform analysis and graphing of their data.</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fscc.ustc.edu.cn%2Fhmli%2Fdoc%2Fapp%2FOrigin%2FDocument%2Flabtalkcategoryref.pdf&amp;rut=eeef28f03e7fe9b2093fe56b5859bb8774de9197081210ae5f2e0a2b1e49a16f"><span class="result__type">PDF</span> Category Reference for LabTalk Commands, Objects, Functions, and Macros</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fscc.ustc.edu.cn%2Fhmli%2Fdoc%2Fapp%2FOrigin%2FDocument%2Flabtalkcategoryref.pdf&amp;rut=eeef28f03e7fe9b2093fe56b5859bb8774de9197081210ae5f2e0a2b1e49a16f">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/scc.ustc.edu.cn.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fscc.ustc.edu.cn%2Fhmli%2Fdoc%2Fapp%2FOrigin%2FDocument%2Flabtalkcategoryref.pdf&amp;rut=eeef28f03e7fe9b2093fe56b5859bb8774de9197081210ae5f2e0a2b1e49a16f">
+                            scc.ustc.edu.cn/hmli/doc/app/Origin/Document/labtalkcategoryref.pdf
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fscc.ustc.edu.cn%2Fhmli%2Fdoc%2Fapp%2FOrigin%2FDocument%2Flabtalkcategoryref.pdf&amp;rut=eeef28f03e7fe9b2093fe56b5859bb8774de9197081210ae5f2e0a2b1e49a16f">Category Reference for <b>LabTalk</b> Commands, Objects, Functions, and Macros The following sections categorize the <b>LabTalk</b> commands, objects, functions, and macros based on their purpose. For detailed information on a specific command, object, function, or macro, refer to the <b>LabTalk</b> Manual or the <b>LabTalk</b> Help file.</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmy.originlab.com%2Fforum%2Ftopic.asp%3FTOPIC_ID%3D8102&amp;rut=6ef993208a4eedd2e2a0f396135b6da6bb043c437c267d423070acf9eb2b2b9f">The Origin Forum - increment between axes tick marks</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmy.originlab.com%2Fforum%2Ftopic.asp%3FTOPIC_ID%3D8102&amp;rut=6ef993208a4eedd2e2a0f396135b6da6bb043c437c267d423070acf9eb2b2b9f">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/my.originlab.com.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmy.originlab.com%2Fforum%2Ftopic.asp%3FTOPIC_ID%3D8102&amp;rut=6ef993208a4eedd2e2a0f396135b6da6bb043c437c267d423070acf9eb2b2b9f">
+                            my.originlab.com/forum/topic.asp?TOPIC_ID=8102
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmy.originlab.com%2Fforum%2Ftopic.asp%3FTOPIC_ID%3D8102&amp;rut=6ef993208a4eedd2e2a0f396135b6da6bb043c437c267d423070acf9eb2b2b9f">I am using a <b>LabTalk</b> script file to process some data and then create a plot. I am able to set the axes range on the plot using layer.x.from and layer.x.to, but when I try to set the <b>increment</b> using layer.x.inc, it does not set the <b>increment</b>.</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fguide%2FManaging%2DLayers&amp;rut=4d2f0acf9830b861450b25ce8d1d38d2023de0272e60a3b429bc8e5d040534d3">Help Online - LabTalk Programming - Managing Layers - OriginLab</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fguide%2FManaging%2DLayers&amp;rut=4d2f0acf9830b861450b25ce8d1d38d2023de0272e60a3b429bc8e5d040534d3">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/www.originlab.com.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fguide%2FManaging%2DLayers&amp;rut=4d2f0acf9830b861450b25ce8d1d38d2023de0272e60a3b429bc8e5d040534d3">
+                            www.originlab.com/doc/LabTalk/guide/Managing-Layers
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fguide%2FManaging%2DLayers&amp;rut=4d2f0acf9830b861450b25ce8d1d38d2023de0272e60a3b429bc8e5d040534d3">The layalign X-Function is used to align one or more layers relative to a source/reference layer. The following example will bottom align layer 2 with layer 1 in the active graph window.</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmicro.ustc.edu.cn%2FOrigin%2FDocument%2FLabtalkDevelopmentGuide.pdf&amp;rut=d20af9492b26c1769c48edbe5f4b7d68ef260077458fd797e8ad68cd61bb9344"><span class="result__type">PDF</span> Origin 5 LabTalk Developer&#x27;s Guide - USTC</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmicro.ustc.edu.cn%2FOrigin%2FDocument%2FLabtalkDevelopmentGuide.pdf&amp;rut=d20af9492b26c1769c48edbe5f4b7d68ef260077458fd797e8ad68cd61bb9344">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/micro.ustc.edu.cn.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmicro.ustc.edu.cn%2FOrigin%2FDocument%2FLabtalkDevelopmentGuide.pdf&amp;rut=d20af9492b26c1769c48edbe5f4b7d68ef260077458fd797e8ad68cd61bb9344">
+                            micro.ustc.edu.cn/Origin/Document/LabtalkDevelopmentGuide.pdf
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fmicro.ustc.edu.cn%2FOrigin%2FDocument%2FLabtalkDevelopmentGuide.pdf&amp;rut=d20af9492b26c1769c48edbe5f4b7d68ef260077458fd797e8ad68cd61bb9344">The <b>LabTalk</b> Developer&#x27;s Guide provides tips to assist you in building your own well-written Origin application. However, this manual is not intended as an Origin or <b>LabTalk</b>® reference. Nor is it intended as a reference for the development tools available with OriginPro.</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fde%2FLabTalk%2Fref%2FLayer%2DAxis%2DGrid%2Dobj&amp;rut=91de9935fb57e2610a3ab9d1d9304a756974ea969b65528fb32cba3ffd90eba3">Help Online - LabTalk Programming - Layer.Axis.Grid</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fde%2FLabTalk%2Fref%2FLayer%2DAxis%2DGrid%2Dobj&amp;rut=91de9935fb57e2610a3ab9d1d9304a756974ea969b65528fb32cba3ffd90eba3">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/d2mvzyuse3lwjc.cloudfront.net.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fde%2FLabTalk%2Fref%2FLayer%2DAxis%2DGrid%2Dobj&amp;rut=91de9935fb57e2610a3ab9d1d9304a756974ea969b65528fb32cba3ffd90eba3">
+                            d2mvzyuse3lwjc.cloudfront.net/doc/de/LabTalk/ref/Layer-Axis-Grid-obj
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fde%2FLabTalk%2Fref%2FLayer%2DAxis%2DGrid%2Dobj&amp;rut=91de9935fb57e2610a3ab9d1d9304a756974ea969b65528fb32cba3ffd90eba3">Examples: This (Script window) script types to the Script window the width of the <b>major</b> grid lines of the X axis of layer 3 of the active window. Layer3. x. grid. majorwidth= The next script sets the color of the minor grid lines of the Y axis in the first layer of the Graph3 window to be purple. Graph3! layer1. y. grid. minorcolor= color ...</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FAxis%2Dcmd&amp;rut=e151a27db1cdf95cec1ea22f6eacbf925915480876226a0e13b37c8c9d46467a">Help Online - LabTalk Programming - Axis - OriginLab</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FAxis%2Dcmd&amp;rut=e151a27db1cdf95cec1ea22f6eacbf925915480876226a0e13b37c8c9d46467a">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/www.originlab.com.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FAxis%2Dcmd&amp;rut=e151a27db1cdf95cec1ea22f6eacbf925915480876226a0e13b37c8c9d46467a">
+                            www.originlab.com/doc/LabTalk/ref/Axis-cmd
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FAxis%2Dcmd&amp;rut=e151a27db1cdf95cec1ea22f6eacbf925915480876226a0e13b37c8c9d46467a">Syntax: axis -s axis inc Scroll the indicated axis (X or Y) by the specified <b>increment</b> inc.inc is given in <b>major</b> tick units, so:axis -s x 3;scrolls the X axis by three <b>major</b> ticks. -tt; Set color of axis title to follow the plot&#x27;s Syntax: axis -tt The color of selected axis title will follow the plot specified in its % () substitution. Examples:</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fen%2FLabTalk%2FLabTalk%2FLayer.Axis.Grid_(object).html&amp;rut=ea8992a15f2358831fd442b13da38f0841eb893315b7a9ba47eec90a9499d227">d2mvzyuse3lwjc.cloudfront.net</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fen%2FLabTalk%2FLabTalk%2FLayer.Axis.Grid_(object).html&amp;rut=ea8992a15f2358831fd442b13da38f0841eb893315b7a9ba47eec90a9499d227">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/d2mvzyuse3lwjc.cloudfront.net.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fen%2FLabTalk%2FLabTalk%2FLayer.Axis.Grid_(object).html&amp;rut=ea8992a15f2358831fd442b13da38f0841eb893315b7a9ba47eec90a9499d227">
+                            d2mvzyuse3lwjc.cloudfront.net/doc/en/LabTalk/LabTalk/Layer.Axis.Grid_(object).html
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fd2mvzyuse3lwjc.cloudfront.net%2Fdoc%2Fen%2FLabTalk%2FLabTalk%2FLayer.Axis.Grid_(object).html&amp;rut=ea8992a15f2358831fd442b13da38f0841eb893315b7a9ba47eec90a9499d227">The grid object is a sub-object of the (layer) axis object. It is also a window object. And axis is a sub-object of layer object. You can use range notation to define a layer object: range layerObject = [pageName] layerName!</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+              
+                <div class="result results_links results_links_deep web-result ">
+                  <div class="links_main links_deep result__body"> <!-- This is the visible part -->
+                    
+                      <h2 class="result__title">
+                        <a rel="nofollow" class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2Dcmd&amp;rut=f02461b7eb0c644fd0dbb495ef3dde1bc2154989de191a4f8b88f442b3f09a54">Help Online - LabTalk Programming - Layer - OriginLab</a>
+                      </h2>
+
+                    
+
+                    
+                      <div class="result__extras">
+                        <div class="result__extras__url">
+                          <span class="result__icon">
+                            <a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2Dcmd&amp;rut=f02461b7eb0c644fd0dbb495ef3dde1bc2154989de191a4f8b88f442b3f09a54">
+                              <img class="result__icon__img" width="16" height="16" alt="" src="//external-content.duckduckgo.com/ip3/www.originlab.com.ico" name="i15" />
+                            </a>
+                          </span>
+                          <a class="result__url" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2Dcmd&amp;rut=f02461b7eb0c644fd0dbb495ef3dde1bc2154989de191a4f8b88f442b3f09a54">
+                            www.originlab.com/doc/LabTalk/ref/Layer-cmd
+                          </a>
+                          
+                        </div>
+                      </div>
+                    
+
+                    
+                      
+                        <a class="result__snippet" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fwww.originlab.com%2Fdoc%2FLabTalk%2Fref%2FLayer%2Dcmd&amp;rut=f02461b7eb0c644fd0dbb495ef3dde1bc2154989de191a4f8b88f442b3f09a54">Brief Introduction Performs various operations on existing layers. The layer command operates on the active layer, except where specified. Many of these features can now be handled with the laymanage X-Function.</a>
+                      
+                    
+
+                    <div class="clear"></div>
+                  </div>
+                </div>
+              
+            
+
+            
+              
+              
+                <div class="nav-link">
+                  <form action="/html/" method="post">
+                    <input type="submit" class='btn btn--alt' value="Next" />
+                    <input type="hidden" name="q" value="LabTalk layer.x major increment" />
+                    <input type="hidden" name="s" value="10" />
+                    <input type="hidden" name="nextParams" value="" />
+                    <input type="hidden" name="v" value="l" />
+                    <input type="hidden" name="o" value="json" />
+                    <input type="hidden" name="dc" value="11" />
+                    <input type="hidden" name="api" value="d.js" />
+                    <input type="hidden" name="vqd" value="4-225690592020400491467470833560183258971" />
+
+                    
+                    
+                    
+                      <input name="kl" value="wt-wt" type="hidden" />
+                    
+                    
+                    
+                    
+                  </form>
+                </div>
+              
+            
+
+            <div class="feedback-btn">
+              <a rel="nofollow" href="//duckduckgo.com/feedback.html" target="_new">Feedback</a>
+            </div>
+            <div class="clear"></div>
+          </div>
+        </div>
+      </div> <!-- links wrapper //-->
+    
+  </div>
+
+  <div id="bottom_spacing2"></div>
+
+  
+    <img src="//duckduckgo.com/t/sl_h"/>
+  
+</body>
+</html>
