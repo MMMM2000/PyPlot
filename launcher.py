@@ -4,7 +4,7 @@ import sys
 import os
 from typing import Callable, Dict
 
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
@@ -56,7 +56,7 @@ class MasterLauncher(QtWidgets.QDialog):
 
         # Keep references to launched windows so they stay open when
         # the launcher calls their ``main`` functions.
-        self._open_windows = []
+        self._open_windows: list[QtWidgets.QWidget] = []
 
         self.tabs = QtWidgets.QTabWidget()
         self.log_tab = QtWidgets.QWidget()
@@ -110,6 +110,22 @@ class MasterLauncher(QtWidgets.QDialog):
         mode = ["system", "light", "dark"][idx]
         apply_theme(app_instance, mode)
 
+    def _register_window(self, widget: QtWidgets.QWidget) -> None:
+        """Track ``widget`` so closing the launcher can warn appropriately."""
+
+        if widget in self._open_windows:
+            return
+
+        self._open_windows.append(widget)
+
+        def _remove(_: object = None, w: QtWidgets.QWidget = widget) -> None:
+            try:
+                self._open_windows.remove(w)
+            except ValueError:
+                pass
+
+        widget.destroyed.connect(_remove)
+
     def run_selected(self) -> None:
         if self.tabs.currentWidget() is self.log_tab:
             item = self.log_list.currentItem()
@@ -138,7 +154,6 @@ class MasterLauncher(QtWidgets.QDialog):
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
-        app_instance.setQuitOnLastWindowClosed(False)
 
         existing_windows = set(app_instance.topLevelWidgets())
 
@@ -147,8 +162,7 @@ class MasterLauncher(QtWidgets.QDialog):
         try:
             result = func()
             if isinstance(result, QtWidgets.QWidget):
-                self._open_windows.append(result)
-                result.destroyed.connect(lambda: self._open_windows.remove(result))
+                self._register_window(result)
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):
@@ -157,8 +171,6 @@ class MasterLauncher(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
             )
-        finally:
-            app_instance.setQuitOnLastWindowClosed(True)
 
         new_windows = [
             w for w in app_instance.topLevelWidgets() if w not in existing_windows
@@ -171,6 +183,8 @@ class MasterLauncher(QtWidgets.QDialog):
                 w.activateWindow()
             except RuntimeError:
                 pass
+            if isinstance(w, QtWidgets.QWidget):
+                self._register_window(w)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         open_windows = [w for w in list(self._open_windows) if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
@@ -191,6 +205,9 @@ class MasterLauncher(QtWidgets.QDialog):
                 except Exception:
                     pass
         event.accept()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            QtCore.QTimer.singleShot(0, app.quit)
 
 
 def main() -> None:
@@ -203,6 +220,7 @@ def main() -> None:
         os.environ.pop("QT_QPA_PLATFORM", None)
 
     app = QtWidgets.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     apply_system_theme(app)
     dlg = MasterLauncher()
     dlg.show()

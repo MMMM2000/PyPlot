@@ -170,6 +170,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finish_time: float | None = None
         self.step_idx = 0
         self.total_steps = 0
+        self._contact_lost = False
+        self._zero_current_count = 0
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -494,12 +496,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ValueError:
                         self.zamok.unlock()
                         return
-                    try:
-                        if abs(self.current_current_read) < 1e-12:
-                            raise ZeroDivisionError
-                        self.current_resistance = self.current_voltage/self.current_current_read
-                    except ZeroDivisionError:
-                        if not hasattr(self, '_contact_lost') or not self._contact_lost:
+                    if abs(self.current_current_read) < 1e-12:
+                        self._zero_current_count += 1
+                        if self._zero_current_count < 3:
+                            self.zamok.unlock()
+                            return
+                        if not self._contact_lost:
                             self._contact_lost = True
                             QtWidgets.QMessageBox.warning(
                                 self,
@@ -508,6 +510,13 @@ class MainWindow(QtWidgets.QMainWindow):
                             )
                             if self.proces_on:
                                 self.handle_pushButton_spusti_proces_clicked()
+                        self.zamok.unlock()
+                        return
+                    self._zero_current_count = 0
+                    self._contact_lost = False
+                    try:
+                        self.current_resistance = self.current_voltage / self.current_current_read
+                    except ZeroDivisionError:
                         self.zamok.unlock()
                         return
                     #na tomto mieste zapiseme data do suboru
@@ -793,6 +802,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.proces_on = True
             self.sekundy = 0
             self._max_voltage_dialog = False
+            self._contact_lost = False
+            self._zero_current_count = 0
             self.ui.frame_modus_operandi.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -934,6 +945,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.proces_on = False
         self.wait = False  # break any pending delays
         self.force_stop_at_zero = False
+        self._contact_lost = False
+        self._zero_current_count = 0
         try:
             self.timer_command.stop()
             self.timer_prud.stop()

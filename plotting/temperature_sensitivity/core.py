@@ -470,21 +470,37 @@ def plot_variable(
         bbox_to_anchor=(1.02, 0.5),
         borderaxespad=0.0,
     )
-    for text, handle in zip(legend.get_texts(), legend.legend_handles):
+    legend_handles: list[Any] = []
+    for attr in ("legendHandles", "legend_handles"):
+        found = getattr(legend, attr, None)
+        if found:
+            legend_handles = list(found)
+            break
+    for text, handle in zip(legend.get_texts(), legend_handles):
         if isinstance(handle, Line2D):
             rawcol = handle.get_color()
-            if handle.get_markerfacecolor() and handle.get_markerfacecolor() != 'none':
-                rawcol = handle.get_markerfacecolor()
-            handle.set_markersize(LEGEND_MARKER_SIZE)
+            face = handle.get_markerfacecolor()
+            if face not in (None, 'none'):
+                rawcol = face
+            try:
+                handle.set_markersize(LEGEND_MARKER_SIZE)
+            except Exception:
+                pass
         elif isinstance(handle, (Patch, PathCollection)):
             rawcol = handle.get_facecolor()
             if isinstance(handle, PathCollection):
-                handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
+                try:
+                    handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
+                except Exception:
+                    pass
             if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
                 rawcol = rawcol[0]
         else:
             rawcol = 'black'
-        text.set_color(to_hex(cast(ColorType, rawcol)))
+        try:
+            text.set_color(to_hex(cast(ColorType, rawcol)))
+        except Exception:
+            pass
 
     fig.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
     apply_readability(ax, globals())
@@ -630,7 +646,7 @@ def plot_variable_origin(
         try:
             p.color = color
             p.symbol_shape = 2
-            p.symbol_size = 1
+            p.symbol_size = RAW_MARKER_SIZE
             p.symbol_edge_color = color
             p.symbol_fill_color = color
             p.line_width = 0
@@ -708,9 +724,13 @@ def plot_variable_origin(
         gp.activate()
         op.lt_exec('page.antialias=1;')
         op.lt_exec('layer -aa 1;')
+        op.lt_exec('layer -s off;')
         op.lt_exec('layer.speedmode=0;')
         op.lt_exec('legend;')
         op.lt_exec('legend.update=0;')
+        op.lt_exec('legend.box=0;')
+        op.lt_exec('legend.just=1;')
+        op.lt_exec('legend.x=1.02; legend.y=0.5;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
         op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
@@ -721,11 +741,13 @@ def plot_variable_origin(
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, display_samples)
-            book_name = getattr(book, 'name', '')
-            sheet_name = getattr(wlab, 'name', 'labels')
-            rng = f"[{book_name}]{sheet_name}!col(1)"
-            op.lt_exec('layer.x.label.form=2;')
-            op.lt_exec(f'layer.x.label.dataset$="{rng}";')
+            book_name = getattr(book, 'lt_name', getattr(book, 'name', ''))
+            sheet_name = getattr(wlab, 'lt_name', getattr(wlab, 'name', 'labels'))
+            if book_name and sheet_name:
+                col_ref = "col(1)"
+                rng = f"[{book_name}]{sheet_name}!{col_ref}"
+                op.lt_exec('layer.x.label.type=2;')
+                op.lt_exec(f'layer.x.label.dataset$="{rng}";')
         except Exception:
             pass
         try:

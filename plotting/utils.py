@@ -377,13 +377,10 @@ def create_file_widget(
     auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
     auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
     auto_rm_cb.setChecked(bool(_common.AUTO_REMOVE_OUTLIERS))
-    auto_rm_cb.setEnabled(bool(_common.CHECK_OUTLIERS))
 
     def _set_outlier_enabled(enabled: bool) -> None:
         _common.CHECK_OUTLIERS = bool(enabled)
-        auto_rm_cb.setEnabled(bool(enabled))
-        if not enabled and auto_rm_cb.isChecked():
-            auto_rm_cb.setChecked(False)
+        _common.AUTO_REMOVE_OUTLIERS = bool(enabled) and auto_rm_cb.isChecked()
         if on_outlier_toggle is not None:
             try:
                 proceed = on_outlier_toggle(bool(enabled), list(files))
@@ -396,9 +393,7 @@ def create_file_widget(
                 proceed = False
             if proceed is False and enabled:
                 _common.CHECK_OUTLIERS = False
-                auto_rm_cb.setEnabled(False)
-                if auto_rm_cb.isChecked():
-                    auto_rm_cb.setChecked(False)
+                _common.AUTO_REMOVE_OUTLIERS = False
                 chk_out_btn.blockSignals(True)
                 chk_out_btn.setChecked(False)
                 chk_out_btn.blockSignals(False)
@@ -406,7 +401,7 @@ def create_file_widget(
     def _set_auto_remove(enabled: bool) -> None:
         if enabled and not chk_out_btn.isChecked():
             chk_out_btn.setChecked(True)
-        _common.AUTO_REMOVE_OUTLIERS = bool(enabled)
+        _common.AUTO_REMOVE_OUTLIERS = bool(enabled) and _common.CHECK_OUTLIERS
 
     chk_out_btn.toggled.connect(_set_outlier_enabled)
     auto_rm_cb.toggled.connect(_set_auto_remove)
@@ -664,17 +659,59 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
     if legend:
         if cfg.get("SHOW_LEGEND", True):
             legend.set_visible(True)
-            legend.set_fontsize(cfg.get("LEGEND_SIZE", 18))
-            orient = cfg.get("LEGEND_ORIENTATION", "auto")
-            if orient == "horizontal":
-                legend.set_ncol(len(legend.get_texts()))
-            elif orient == "vertical":
-                legend.set_ncol(1)
-            for h in legend.legend_handles:
+            size = cfg.get("LEGEND_SIZE", 18)
+            for text in legend.get_texts():
                 try:
-                    h.set_markersize(cfg.get("LEGEND_SYMBOL_SIZE", 10))
-                    h.set_marker("o" if cfg.get("LEGEND_SHOW_SYMBOLS", False) else "")
+                    text.set_fontsize(size)
                 except Exception:
                     pass
+            orient = cfg.get("LEGEND_ORIENTATION", "auto")
+            if orient == "horizontal":
+                legend.set_ncol(max(1, len(legend.get_texts())))
+            elif orient == "vertical":
+                legend.set_ncol(1)
+            handles: list[object] = []
+            for attr in ("legendHandles", "legend_handles"):
+                found = getattr(legend, attr, None)
+                if found:
+                    handles = list(found)
+                    break
+            show_symbols = bool(cfg.get("LEGEND_SHOW_SYMBOLS", False))
+            marker_size = cfg.get("LEGEND_SYMBOL_SIZE", 10)
+            for handle in handles:
+                if hasattr(handle, "set_markersize"):
+                    try:
+                        handle.set_markersize(marker_size)
+                    except Exception:
+                        pass
+                marker_getter = getattr(handle, "get_marker", None)
+                marker_setter = getattr(handle, "set_marker", None)
+                linestyle_getter = getattr(handle, "get_linestyle", None)
+                has_line = False
+                if callable(linestyle_getter):
+                    try:
+                        ls = linestyle_getter()
+                    except Exception:
+                        ls = None
+                    has_line = ls not in (None, "None", "", " ")
+                if callable(marker_setter):
+                    if not show_symbols:
+                        try:
+                            marker_setter(None)
+                        except Exception:
+                            try:
+                                marker_setter("")
+                            except Exception:
+                                pass
+                    elif not has_line and callable(marker_getter):
+                        try:
+                            current = marker_getter()
+                        except Exception:
+                            current = None
+                        if current in (None, "", " ", "None"):
+                            try:
+                                marker_setter("o")
+                            except Exception:
+                                pass
         else:
             legend.set_visible(False)
