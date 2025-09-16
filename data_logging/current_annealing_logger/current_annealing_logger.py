@@ -175,6 +175,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._nonzero_current_seen = False
         self._process_start_time: float | None = None
         self._last_nonzero_current_time: float | None = None
+        self._contact_grace_period = 5.0
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -518,8 +519,15 @@ class MainWindow(QtWidgets.QMainWindow):
                             self._last_nonzero_current_time = None
                             self.zamok.unlock()
                             return
-                        zero_limit = 3
+                        zero_limit = 6
                         zero_delay = 2.0
+                        if (
+                            now is not None
+                            and self._process_start_time is not None
+                            and (now - self._process_start_time) < self._contact_grace_period
+                        ):
+                            self.zamok.unlock()
+                            return
                         if (
                             now is not None
                             and self._last_nonzero_current_time is not None

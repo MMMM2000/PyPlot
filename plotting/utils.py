@@ -742,11 +742,21 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
             except Exception:
                 pass
 
-        orient = cfg.get("LEGEND_ORIENTATION", "auto")
-        if orient == "horizontal":
-            legend.set_ncol(max(1, len(legend.get_texts())))
-        elif orient == "vertical":
-            legend.set_ncol(1)
+        orient = str(cfg.get("LEGEND_ORIENTATION", "auto") or "auto").strip().lower()
+        setter = getattr(legend, "set_ncols", None)
+        if not callable(setter):
+            setter = getattr(legend, "set_ncol", None)
+        if callable(setter):
+            if orient == "horizontal":
+                try:
+                    setter(max(1, len(legend.get_texts())))
+                except Exception:
+                    pass
+            elif orient == "vertical":
+                try:
+                    setter(1)
+                except Exception:
+                    pass
 
         handles: list[object] = []
         for attr in ("legendHandles", "legend_handles"):

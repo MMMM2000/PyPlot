@@ -79,8 +79,10 @@ per plotting script so each tool can keep its own automatic-removal default.
 Each plotting dialog now provides a full **Readability** section with controls
 to toggle titles, axis labels, tick labels, and legends, adjust their font
 sizes, choose legend orientation, pick whether the legend lives inside the
-axes or just outside the figure, and show or hide legend symbols.  All
-readability preferences are remembered between runs.  The Maxion plotter adds
+axes or just outside the figure, and show or hide legend symbols.  The master
+"Improve readability" toggle has been removed, so the adjustments are always
+active and take effect immediately.  All readability preferences are
+remembered between runs.  The Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 Origin sessions are closed automatically after plots are generated so the
@@ -115,8 +117,9 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * plots of resistance vs. current and sample number that follow the system theme
 * ignores the initial zero sample when logging and plotting
 * contact-loss detection waits until the logger has measured a non-zero current,
-  then requires multiple zeros spread over a short delay before stopping, so
-  start-up ramps and momentary dips no longer trip the burn-out warning
+  then applies a short start-up grace period and requires multiple zeros spread
+  over a short delay before stopping, so start-up ramps and momentary dips no
+  longer trip the burn-out warning
 
 Launch from the master launcher or run
 

@@ -56,6 +56,11 @@ class MasterLauncher(QtWidgets.QWidget):
 
         self._closing = False
 
+        try:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+        except Exception:
+            pass
+
         app = QtWidgets.QApplication.instance()
         if isinstance(app, QtWidgets.QApplication):
             try:
@@ -217,6 +222,12 @@ class MasterLauncher(QtWidgets.QWidget):
                 w.activateWindow()
             except RuntimeError:
                 pass
+            if isinstance(w, QtWidgets.QWidget):
+                self._register_window(w)
+
+        for w in app_instance.topLevelWidgets():
+            if w is self:
+                continue
             if isinstance(w, QtWidgets.QWidget):
                 self._register_window(w)
 
