@@ -80,11 +80,12 @@ per plotting script so each tool can keep its own automatic-removal default.
 Each plotting dialog now provides a full **Readability** section with controls
 to toggle titles, axis labels, tick labels, and legends, adjust their font
 sizes, choose legend orientation, pick whether the legend lives inside the
-axes or just outside the figure, and show or hide legend symbols.  The master
-"Improve readability" toggle has been removed, so the adjustments are always
-active and take effect immediately.  All readability preferences are
-remembered between runs, and the legend orientation selector now flips between
-single-column and single-row layouts so horizontal legends behave correctly.  The
+axes or just outside the figure, show or hide legend symbols, and optionally
+match legend text colours to the curves they describe.  The master "Improve
+readability" toggle has been removed, so the adjustments are always active and
+take effect immediately.  All readability preferences are remembered between
+runs, and the legend orientation selector now flips between single-column and
+single-row layouts so horizontal legends behave correctly.  The
 Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).

@@ -6,6 +6,7 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.collections import PathCollection
+from matplotlib import colors as mcolors
 from contextlib import contextmanager
 from typing import Callable
 import matplotlib.pyplot as plt
@@ -581,6 +582,7 @@ class ReadabilityControls:
         self.legend_loc: QtWidgets.QComboBox
         self.legend_symbol: QtWidgets.QCheckBox
         self.legend_symbol_size: QtWidgets.QDoubleSpinBox
+        self.legend_color_match: QtWidgets.QCheckBox
         self.tick_show: QtWidgets.QCheckBox
         self.tick_size: QtWidgets.QSpinBox
         self.axis_show: QtWidgets.QCheckBox
@@ -635,6 +637,16 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.legend_symbol.setChecked(
         bool(s.value(f"{key}_legend_symbols", getattr(orig_module, "LEGEND_SHOW_SYMBOLS", False), type=bool))
     )
+    ctrl.legend_color_match = QtWidgets.QCheckBox("Match legend text to curve colors")
+    ctrl.legend_color_match.setChecked(
+        bool(
+            s.value(
+                f"{key}_legend_match_colors",
+                getattr(orig_module, "LEGEND_MATCH_COLORS", False),
+                type=bool,
+            )
+        )
+    )
 
     ctrl.tick_size = QtWidgets.QSpinBox()
     ctrl.tick_size.setRange(6, 72)
@@ -661,18 +673,19 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     lay.addWidget(ctrl.legend_orient, 1, 1, 1, 2)
     lay.addWidget(QtWidgets.QLabel("Legend location:"), 2, 0)
     lay.addWidget(ctrl.legend_loc, 2, 1, 1, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 3, 0)
-    lay.addWidget(ctrl.legend_symbol_size, 3, 1)
-    lay.addWidget(ctrl.legend_symbol, 3, 2)
-    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 4, 0)
-    lay.addWidget(ctrl.tick_size, 4, 1)
-    lay.addWidget(ctrl.tick_show, 4, 2)
-    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 5, 0)
-    lay.addWidget(ctrl.axis_size, 5, 1)
-    lay.addWidget(ctrl.axis_show, 5, 2)
-    lay.addWidget(QtWidgets.QLabel("Title size:"), 6, 0)
-    lay.addWidget(ctrl.title_size, 6, 1)
-    lay.addWidget(ctrl.title_show, 6, 2)
+    lay.addWidget(ctrl.legend_color_match, 3, 0, 1, 3)
+    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 4, 0)
+    lay.addWidget(ctrl.legend_symbol_size, 4, 1)
+    lay.addWidget(ctrl.legend_symbol, 4, 2)
+    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 5, 0)
+    lay.addWidget(ctrl.tick_size, 5, 1)
+    lay.addWidget(ctrl.tick_show, 5, 2)
+    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 6, 0)
+    lay.addWidget(ctrl.axis_size, 6, 1)
+    lay.addWidget(ctrl.axis_show, 6, 2)
+    lay.addWidget(QtWidgets.QLabel("Title size:"), 7, 0)
+    lay.addWidget(ctrl.title_size, 7, 1)
+    lay.addWidget(ctrl.title_show, 7, 2)
 
     def _toggle_legend(checked: bool) -> None:
         ctrl.legend_size.setEnabled(checked)
@@ -680,6 +693,7 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
         ctrl.legend_loc.setEnabled(checked)
         ctrl.legend_symbol.setEnabled(checked)
         ctrl.legend_symbol_size.setEnabled(checked and ctrl.legend_symbol.isChecked())
+        ctrl.legend_color_match.setEnabled(checked)
 
     def _toggle_symbol(checked: bool) -> None:
         ctrl.legend_symbol_size.setEnabled(checked and ctrl.legend_show.isChecked())
@@ -693,6 +707,7 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     _toggle_legend(ctrl.legend_show.isChecked())
     _toggle_symbol(ctrl.legend_symbol.isChecked())
     ctrl.legend_loc.setEnabled(ctrl.legend_show.isChecked())
+    ctrl.legend_color_match.setEnabled(ctrl.legend_show.isChecked())
     ctrl.tick_size.setEnabled(ctrl.tick_show.isChecked())
     ctrl.axis_size.setEnabled(ctrl.axis_show.isChecked())
     ctrl.title_size.setEnabled(ctrl.title_show.isChecked())
@@ -711,6 +726,7 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     orig_module.LEGEND_LOCATION = str(loc_data).lower() if loc_data else "inside"
     orig_module.LEGEND_SHOW_SYMBOLS = ctrl.legend_symbol.isChecked()
     orig_module.LEGEND_SYMBOL_SIZE = float(ctrl.legend_symbol_size.value())
+    orig_module.LEGEND_MATCH_COLORS = ctrl.legend_color_match.isChecked()
     orig_module.SHOW_TICK_LABELS = ctrl.tick_show.isChecked()
     orig_module.TICK_SIZE = int(ctrl.tick_size.value())
     orig_module.SHOW_AXIS_LABELS = ctrl.axis_show.isChecked()
@@ -724,6 +740,7 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     s.setValue(f"{key}_legend_location", orig_module.LEGEND_LOCATION)
     s.setValue(f"{key}_legend_symbols", orig_module.LEGEND_SHOW_SYMBOLS)
     s.setValue(f"{key}_legend_symbol_size", orig_module.LEGEND_SYMBOL_SIZE)
+    s.setValue(f"{key}_legend_match_colors", orig_module.LEGEND_MATCH_COLORS)
     s.setValue(f"{key}_show_ticks", orig_module.SHOW_TICK_LABELS)
     s.setValue(f"{key}_tick_size", orig_module.TICK_SIZE)
     s.setValue(f"{key}_show_axis", orig_module.SHOW_AXIS_LABELS)
@@ -815,6 +832,7 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
 
         show_symbols = bool(cfg.get("LEGEND_SHOW_SYMBOLS", False))
         marker_size = cfg.get("LEGEND_SYMBOL_SIZE", 10)
+        match_colors = bool(cfg.get("LEGEND_MATCH_COLORS", False))
         for handle in handles:
             if hasattr(handle, "set_markersize"):
                 try:
@@ -865,3 +883,34 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
                             marker_setter("o")
                         except Exception:
                             pass
+
+        if match_colors and handles:
+            def _extract_color(handle: object) -> tuple[float, float, float, float] | None:
+                candidates: list[object] = []
+                for attr in ("get_color", "get_facecolor", "get_facecolors", "get_edgecolor"):
+                    getter = getattr(handle, attr, None)
+                    if not callable(getter):
+                        continue
+                    try:
+                        value = getter()
+                    except Exception:
+                        continue
+                    if value is None:
+                        continue
+                    candidates.append(value)
+                for value in candidates:
+                    try:
+                        rgba = mcolors.to_rgba_array(value)
+                    except Exception:
+                        continue
+                    if len(rgba):
+                        return tuple(rgba[0])
+                return None
+
+            for handle, text in zip(handles, legend.get_texts()):
+                color = _extract_color(handle)
+                if color is not None:
+                    try:
+                        text.set_color(color)
+                    except Exception:
+                        pass
