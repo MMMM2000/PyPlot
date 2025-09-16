@@ -63,14 +63,15 @@ terminal never needs to span the full window width.  The file list wraps long
 paths to new lines, and file dialogs remember the last directories used—
 maintaining separate input and output locations.  If no history exists, they
 fall back to the repository’s `sample_data` folder for inputs and the user’s
-`Downloads` folder for outputs.  When saving, an optional
-**Create subfolder** checkbox stores figures under `<script name> data
+`Downloads` folder for outputs.  When saving, an optional **Create subfolder** checkbox stores figures under `<script name> data
 YYYY-MM-DD` for easier organisation.  Export options include a choice of PNG,
-PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
-current annealing plotter also omits the initial 0 mA data point so figures
-start with the first real sample.  Plotting dialogs keep their windows open
-after running and display settings, file list and console side by side within
-a single resizable window.
+PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  Each
+plotting dialog remembers its most recent backend selection and PNG DPI
+independently, so Matplotlib/Origin toggles and export resolution reopen the way
+you left them.  The current annealing plotter also omits the initial 0 mA data
+point so figures start with the first real sample.  Plotting dialogs keep their
+windows open after running and display settings, file list and console side by
+side within a single resizable window.
 
 Outlier detection remains opt-in.  Toggling **Remove automatically** no longer
 forces the outlier check to start immediately, and the preference is remembered
@@ -82,7 +83,9 @@ sizes, choose legend orientation, pick whether the legend lives inside the
 axes or just outside the figure, and show or hide legend symbols.  The master
 "Improve readability" toggle has been removed, so the adjustments are always
 active and take effect immediately.  All readability preferences are
-remembered between runs.  The Maxion plotter adds
+remembered between runs, and the legend orientation selector now flips between
+single-column and single-row layouts so horizontal legends behave correctly.  The
+Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 Origin sessions are closed automatically after plots are generated so the
@@ -171,7 +174,9 @@ PyInstaller specifications are provided.  After installing the requirements run
 pyinstaller launcher.spec
 ```
 
-to create a standalone `dist/launcher` for the current platform.
+to create a standalone `dist/launcher` for the current platform.  The
+specification bundles the plotting configuration automatically, so no manual
+data copying is required before running the command.
 
 ## 6. Experiments
 

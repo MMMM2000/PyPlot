@@ -18,6 +18,11 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
 else:
     from . import core as orig
@@ -31,6 +36,11 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
 
 
@@ -59,15 +69,24 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-        self.backend_combo.setCurrentIndex(0)
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        orig.BACKEND = restore_backend_choice(
+            "temperature_dependence", self.backend_combo, getattr(orig, "BACKEND", "matplotlib")
+        )
         self.mode_combo = QtWidgets.QComboBox(); self.mode_combo.addItems(["Raw", "Processed", "Both"])
         mode_map = {"raw": 0, "processed": 1, "both": 2}
         self.mode_combo.setCurrentIndex(mode_map.get(orig.PLOT_MODE, 0))
         self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="temperature_dependence"))
         browse_btn = QtWidgets.QPushButton("Browse")
-        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
-        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        self.fmt_combo = QtWidgets.QComboBox()
+        self.fmt_combo.addItems(["png", "pdf", "svg"])
+        self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox()
+        self.dpi_spin.setRange(72, 3000)
+        orig.PNG_DPI = restore_png_dpi(
+            "temperature_dependence", self.dpi_spin, getattr(orig, "PNG_DPI", 1200)
+        )
 
         def browse_out() -> None:
             d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir_edit.text())
@@ -139,8 +158,11 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
-        orig.PNG_DPI = int(self.dpi_spin.value())
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        orig.PNG_DPI = store_png_dpi("temperature_dependence", int(self.dpi_spin.value()))
+        backend = store_backend_choice(
+            "temperature_dependence", selected_backend(self.backend_combo)
+        )
+        orig.BACKEND = backend
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 

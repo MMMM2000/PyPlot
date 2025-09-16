@@ -30,6 +30,11 @@ from ..utils import (
     get_readability,
     set_readability,
     apply_readability_fonts,
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+    restore_png_dpi,
+    store_png_dpi,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
 
@@ -218,7 +223,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Combined", "Separate"])
         self.mode_combo.currentIndexChanged.connect(self._maybe_auto_plot)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+        restore_backend_choice("pdf_plotter", self.backend_combo, "matplotlib")
         self.backend_combo.currentIndexChanged.connect(self._maybe_auto_plot)
         self.zero_cb = QtWidgets.QCheckBox("First point at zero")
         self.zero_cb.setChecked(True)
@@ -321,7 +328,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         fmt_box = self._hbox(self.format_combo)
         self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 3000)
-        self.dpi_spin.setValue(1200)
+        restore_png_dpi("pdf_plotter", self.dpi_spin, 1200)
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm
@@ -577,7 +584,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         y_label = f"{' / '.join(selected)} (arb. u.)"
         x_label = x_name
         mode = self.mode_combo.currentText()
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        store_png_dpi("pdf_plotter", int(self.dpi_spin.value()))
+        backend = store_backend_choice(
+            "pdf_plotter", selected_backend(self.backend_combo)
+        )
         if mode == "Combined":
             lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
             for path, sets in lines_by_file.items():

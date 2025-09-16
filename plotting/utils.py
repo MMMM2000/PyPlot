@@ -232,6 +232,63 @@ def set_last_output_dir(path: str, *, key: str | None = None) -> None:
         s.setValue("last_output_dir", path)
 
 
+_BACKEND_CHOICES: tuple[str, ...] = ("matplotlib", "origin", "both")
+
+
+def restore_backend_choice(
+    key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
+) -> str:
+    """Set ``combo`` to the last backend stored for ``key``.
+
+    Returns the normalised backend string that was applied.
+    """
+
+    stored = str(_settings().value(f"{key}_backend", default, type=str) or default).lower()
+    if stored not in _BACKEND_CHOICES:
+        fallback = str(default or _BACKEND_CHOICES[0]).lower()
+        stored = fallback if fallback in _BACKEND_CHOICES else _BACKEND_CHOICES[0]
+    combo.setCurrentIndex(_BACKEND_CHOICES.index(stored))
+    return stored
+
+
+def store_backend_choice(key: str, backend: str) -> str:
+    """Persist ``backend`` for ``key`` and return the normalised value."""
+
+    normalised = str(backend or "").lower()
+    if normalised not in _BACKEND_CHOICES:
+        normalised = _BACKEND_CHOICES[0]
+    _settings().setValue(f"{key}_backend", normalised)
+    return normalised
+
+
+def selected_backend(combo: QtWidgets.QComboBox) -> str:
+    """Return the backend represented by ``combo``'s current index."""
+
+    idx = combo.currentIndex()
+    if 0 <= idx < len(_BACKEND_CHOICES):
+        return _BACKEND_CHOICES[idx]
+    return _BACKEND_CHOICES[0]
+
+
+def restore_png_dpi(key: str, spin: QtWidgets.QSpinBox, default: int) -> int:
+    """Set ``spin`` to the last stored PNG DPI for ``key`` and return it."""
+
+    try:
+        value = int(_settings().value(f"{key}_png_dpi", int(default), type=int))
+    except Exception:
+        value = int(default)
+    spin.setValue(value)
+    return value
+
+
+def store_png_dpi(key: str, dpi: int) -> int:
+    """Persist ``dpi`` for ``key`` and return the stored integer value."""
+
+    value = int(dpi)
+    _settings().setValue(f"{key}_png_dpi", value)
+    return value
+
+
 def select_files_or_folder(
     parent: QtWidgets.QWidget | None = None,
     ext: str = ".txt",
@@ -713,6 +770,7 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
                 handles_existing = list(found)
                 break
         labels_existing = [text.get_text() for text in legend.get_texts()]
+        entry_count = max(len(labels_existing), len(handles_existing), 1)
         location_raw = str(cfg.get("LEGEND_LOCATION", "inside") or "inside").strip().lower()
         legend.remove()
 
@@ -729,6 +787,12 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
             legend_kwargs["bbox_to_anchor"] = bbox
             legend_kwargs["borderaxespad"] = 0.0
 
+        orient = str(cfg.get("LEGEND_ORIENTATION", "auto") or "auto").strip().lower()
+        if orient == "horizontal":
+            legend_kwargs["ncol"] = entry_count
+        elif orient == "vertical":
+            legend_kwargs["ncol"] = 1
+
         if handles_existing and labels_existing:
             legend = ax.legend(handles=handles_existing, labels=labels_existing, **legend_kwargs)
         else:
@@ -741,22 +805,6 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
                 text.set_fontsize(size)
             except Exception:
                 pass
-
-        orient = str(cfg.get("LEGEND_ORIENTATION", "auto") or "auto").strip().lower()
-        setter = getattr(legend, "set_ncols", None)
-        if not callable(setter):
-            setter = getattr(legend, "set_ncol", None)
-        if callable(setter):
-            if orient == "horizontal":
-                try:
-                    setter(max(1, len(legend.get_texts())))
-                except Exception:
-                    pass
-            elif orient == "vertical":
-                try:
-                    setter(1)
-                except Exception:
-                    pass
 
         handles: list[object] = []
         for attr in ("legendHandles", "legend_handles"):

@@ -18,6 +18,11 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
 else:
     from . import core as orig
@@ -31,6 +36,11 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
 
 
@@ -74,12 +84,21 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout = QtWidgets.QGridLayout(out_group)
         out_layout.addWidget(self.show_cb, 0, 0)
         out_layout.addWidget(self.save_cb, 1, 0)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-        self.backend_combo.setCurrentIndex(0)
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        orig.BACKEND = restore_backend_choice(
+            "hsw_load_compare", self.backend_combo, getattr(orig, "BACKEND", "matplotlib")
+        )
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
-        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
-        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        self.fmt_combo = QtWidgets.QComboBox()
+        self.fmt_combo.addItems(["png", "pdf", "svg"])
+        self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox()
+        self.dpi_spin.setRange(72, 3000)
+        orig.PNG_DPI = restore_png_dpi(
+            "hsw_load_compare", self.dpi_spin, getattr(orig, "PNG_DPI", 1200)
+        )
         out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
         out_layout.addWidget(self.fmt_combo, 3, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
@@ -118,13 +137,18 @@ class SettingsDialog(QtWidgets.QDialog):
             "BACKEND": ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()],
         }
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
-        orig.PNG_DPI = int(self.dpi_spin.value())
+        orig.PNG_DPI = store_png_dpi("hsw_load_compare", int(self.dpi_spin.value()))
         orig.SAME_HIST_Y = cfg["share_y"]
         orig.SHOW_PLOTS = cfg["show"]
         orig.SAVE_PLOTS = cfg["save"]
         orig.OUTPUT_DIR = cfg["out_dir"]
         sync_readability("hsw_load_compare", self.read_ctrl, orig)
         set_last_output_dir(self.out_dir_edit.text(), key="hsw_load_compare")
+        backend = store_backend_choice(
+            "hsw_load_compare", selected_backend(self.backend_combo)
+        )
+        orig.BACKEND = backend
+        cfg["BACKEND"] = backend
         run_with_console(lambda: orig.main(self.files, cfg), self.console)
 
 

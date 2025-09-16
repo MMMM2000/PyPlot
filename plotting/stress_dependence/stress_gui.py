@@ -20,6 +20,11 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
 else:
     from . import core as orig
@@ -33,6 +38,11 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
 
 
@@ -84,14 +94,23 @@ class SettingsDialog(QtWidgets.QDialog):
 
         out_group = QtWidgets.QGroupBox("Output")
         out_layout = QtWidgets.QGridLayout(out_group)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-        self.backend_combo.setCurrentIndex(0)
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        orig.BACKEND = restore_backend_choice(
+            "stress_dependence", self.backend_combo, getattr(orig, "BACKEND", "matplotlib")
+        )
         out_layout.addWidget(self.show_cb, 0, 0)
         out_layout.addWidget(self.save_cb, 1, 0)
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
-        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
-        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        self.fmt_combo = QtWidgets.QComboBox()
+        self.fmt_combo.addItems(["png", "pdf", "svg"])
+        self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox()
+        self.dpi_spin.setRange(72, 3000)
+        orig.PNG_DPI = restore_png_dpi(
+            "stress_dependence", self.dpi_spin, getattr(orig, "PNG_DPI", 1200)
+        )
         out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
         out_layout.addWidget(self.fmt_combo, 3, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
@@ -151,8 +170,11 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.MED_WINDOW = int(self.med_spin.value())
         orig.MA_WINDOW = int(self.ma_spin.value())
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
-        orig.PNG_DPI = int(self.dpi_spin.value())
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        orig.PNG_DPI = store_png_dpi("stress_dependence", int(self.dpi_spin.value()))
+        backend = store_backend_choice(
+            "stress_dependence", selected_backend(self.backend_combo)
+        )
+        orig.BACKEND = backend
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 

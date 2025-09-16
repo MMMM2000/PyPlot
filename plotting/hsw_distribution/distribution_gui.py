@@ -13,10 +13,24 @@ if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
     # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import apply_system_theme, select_files_or_folder, show_plots
+    from plotting.utils import (
+        apply_system_theme,
+        select_files_or_folder,
+        show_plots,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+    )
     from plotting.backends import wants_matplotlib, wants_origin
 else:
-    from ..utils import apply_system_theme, select_files_or_folder, show_plots
+    from ..utils import (
+        apply_system_theme,
+        select_files_or_folder,
+        show_plots,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+    )
     from ..backends import wants_matplotlib, wants_origin
 
 
@@ -66,6 +80,7 @@ def ask_options() -> Dict[str, Any] | None:
     naming_layout.addWidget(t1t2_rb)
 
     backend_combo = QtWidgets.QComboBox(); backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+    restore_backend_choice("hsw_distribution", backend_combo, "matplotlib")
     run_btn = QtWidgets.QPushButton("Run")
     run_btn.clicked.connect(dialog.accept)
 
@@ -89,6 +104,10 @@ def ask_options() -> Dict[str, Any] | None:
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         return None
 
+    backend = store_backend_choice(
+        "hsw_distribution", selected_backend(backend_combo)
+    )
+
     return {
         "raw": raw_cb.isChecked(),
         "show_trimmed": trim_cb.isChecked(),
@@ -101,7 +120,7 @@ def ask_options() -> Dict[str, Any] | None:
         "core_bins": bins_spin.value(),
         "core_min": min_spin.value(),
         "labels": ("TT", "HH") if tthh_rb.isChecked() else ("T1", "T2"),
-        "backend": ["matplotlib", "origin", "both"][backend_combo.currentIndex()],
+        "backend": backend,
     }
 
 
