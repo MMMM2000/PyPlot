@@ -42,6 +42,7 @@ IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", True))
 SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
 LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
 LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
+LEGEND_LOCATION = str(_CFG.get("LEGEND_LOCATION", "inside")).lower()
 LEGEND_SHOW_SYMBOLS = bool(_CFG.get("LEGEND_SHOW_SYMBOLS", False))
 LEGEND_SYMBOL_SIZE = float(_CFG.get("LEGEND_SYMBOL_SIZE", 10))
 TICK_SIZE = int(_CFG.get("TICK_SIZE", 18))
@@ -376,6 +377,8 @@ def plot_variable(
     y_max = max(s.max() for s in all_y)
     y_range = y_max - y_min if y_max != y_min else 1.0
     delta_offset = 0.05 * y_range
+    plot_top = y_max + 0.08 * y_range
+    title_level = y_max + 0.06 * y_range
 
     fig, ax = plt.subplots(figsize=(9, 5))
     legend_done: set[str] = set()
@@ -460,50 +463,67 @@ def plot_variable(
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
     ax.set_xticklabels(display_samples)
+
+    def _legend_kwargs_from_location(loc_value: str) -> dict[str, Any]:
+        loc = (loc_value or "inside").strip().lower()
+        if loc in {"outside_right", "outside", "outside right"}:
+            return {"loc": "center left", "bbox_to_anchor": (1.02, 0.5), "borderaxespad": 0.0}
+        if loc in {"inside", "auto", "best", ""}:
+            return {"loc": "best"}
+        return {"loc": loc}
+
+    def _colorize_legend(legend_obj: Any, adjust_sizes: bool = False) -> None:
+        if legend_obj is None:
+            return
+        handles: list[Any] = []
+        for attr in ("legendHandles", "legend_handles"):
+            found = getattr(legend_obj, attr, None)
+            if found:
+                handles = list(found)
+                break
+        for text, handle in zip(legend_obj.get_texts(), handles):
+            rawcol: ColorType | str = 'black'
+            if isinstance(handle, Line2D):
+                rawcol = handle.get_color()
+                face = handle.get_markerfacecolor()
+                if face not in (None, 'none'):
+                    rawcol = face
+                if adjust_sizes:
+                    try:
+                        handle.set_markersize(LEGEND_MARKER_SIZE)
+                    except Exception:
+                        pass
+            elif isinstance(handle, (Patch, PathCollection)):
+                rawcol = handle.get_facecolor()
+                if isinstance(handle, PathCollection) and adjust_sizes:
+                    try:
+                        handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
+                    except Exception:
+                        pass
+                if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
+                    rawcol = rawcol[0]
+            try:
+                text.set_color(to_hex(cast(ColorType, rawcol)))
+            except Exception:
+                pass
+
     ax.set_xlabel('Sample')
     ax.set_ylabel(TS_LABELS[var])
     ax.set_title(f"{comp} {anneal} — {TS_LABELS[var]}")
     ax.grid(True)
 
-    legend = ax.legend(
-        loc='center left',
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
-    )
-    legend_handles: list[Any] = []
-    for attr in ("legendHandles", "legend_handles"):
-        found = getattr(legend, attr, None)
-        if found:
-            legend_handles = list(found)
-            break
-    for text, handle in zip(legend.get_texts(), legend_handles):
-        if isinstance(handle, Line2D):
-            rawcol = handle.get_color()
-            face = handle.get_markerfacecolor()
-            if face not in (None, 'none'):
-                rawcol = face
-            try:
-                handle.set_markersize(LEGEND_MARKER_SIZE)
-            except Exception:
-                pass
-        elif isinstance(handle, (Patch, PathCollection)):
-            rawcol = handle.get_facecolor()
-            if isinstance(handle, PathCollection):
-                try:
-                    handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
-                except Exception:
-                    pass
-            if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
-                rawcol = rawcol[0]
-        else:
-            rawcol = 'black'
-        try:
-            text.set_color(to_hex(cast(ColorType, rawcol)))
-        except Exception:
-            pass
+    legend_kwargs = _legend_kwargs_from_location(str(globals().get("LEGEND_LOCATION", "inside")))
+    legend = ax.legend(**legend_kwargs)
+    _colorize_legend(legend, adjust_sizes=True)
 
-    fig.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
     apply_readability(ax, globals())
+    _colorize_legend(ax.get_legend())
+
+    final_loc = str(globals().get("LEGEND_LOCATION", "inside") or "inside").strip().lower()
+    if final_loc in {"outside_right", "outside", "outside right"}:
+        fig.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
+    else:
+        fig.tight_layout()
     fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
@@ -650,6 +670,7 @@ def plot_variable_origin(
             p.symbol_edge_color = color
             p.symbol_fill_color = color
             p.line_width = 0
+            p.legend = legend_label
         except Exception:
             pass
 
@@ -680,6 +701,7 @@ def plot_variable_origin(
             p.symbol_size = MEAN_MSIZE
             p.symbol_edge_color = color
             p.symbol_fill_color = color
+            p.legend = legend_label
         except Exception:
             pass
 
@@ -715,6 +737,10 @@ def plot_variable_origin(
                     op.lt_exec(f'wks.col2.lname$ = "{cont_label}";')
                 except Exception:
                     pass
+                try:
+                    p.legend = cont_label
+                except Exception:
+                    pass
                 cont_label_added = True
         except Exception:
             pass
@@ -722,22 +748,34 @@ def plot_variable_origin(
     try:
         gl.rescale()
         gp.activate()
-        op.lt_exec('page.antialias=1;')
-        op.lt_exec('layer -aa 1;')
-        op.lt_exec('layer -s off;')
-        op.lt_exec('layer.speedmode=0;')
+        op.lt_exec('doc -e P {page.antialias=1;}')
+        op.lt_exec('doc -e L {layer.speedmode=0; layer -s off; layer -aa 1;}')
         op.lt_exec('legend;')
         op.lt_exec('legend.update=0;')
         op.lt_exec('legend.box=0;')
         op.lt_exec('legend.just=1;')
-        op.lt_exec('legend.x=1.02; legend.y=0.5;')
+        legend_loc = str(globals().get("LEGEND_LOCATION", "inside")).lower()
+        if legend_loc in {"outside_right", "outside", "outside right"}:
+            op.lt_exec('legend.x=1.02; legend.y=0.5;')
+        else:
+            op.lt_exec('legend.x=0.18; legend.y=0.88;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
         op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
         op.lt_exec('layer.x.inc=1;')
         op.lt_exec('layer.x.step=1;')
         op.lt_exec(f'layer.y.from={y_min - 0.02 * y_range};')
-        op.lt_exec(f'layer.y.to={y_max + 0.02 * y_range};')
+        op.lt_exec(f'layer.y.to={plot_top};')
+        try:
+            op.lt_exec('layer -lx 0; layer -ly 0;')
+        except Exception:
+            pass
+        try:
+            op.lt_exec('layer.x.top=0; layer.y.right=0;')
+            op.lt_exec('layer.x.top.label.show=0; layer.y.right.label.show=0;')
+            op.lt_exec('layer.x.top.ticklabels=0; layer.y.right.ticklabels=0;')
+        except Exception:
+            pass
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, display_samples)
@@ -769,6 +807,17 @@ def plot_variable_origin(
             pass
         try:
             op.lt_exec(f'title -s "{esc_title}";')
+        except Exception:
+            pass
+        try:
+            op.lt_exec('label -r py_title;')
+        except Exception:
+            pass
+        title_center = (len(samples) + 1) / 2.0
+        try:
+            op.lt_exec(
+                f'label -n py_title -a {title_center:.6g} {title_level:.6g} "{esc_title}";'
+            )
         except Exception:
             pass
     except Exception:

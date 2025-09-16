@@ -498,6 +498,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         return
                     if abs(self.current_current_read) < 1e-12:
                         self._zero_current_count += 1
+                        # Treat a zero reading as a valid response so callers
+                        # waiting on ``sample_ready`` do not interpret the
+                        # timeout as a communication failure.
+                        self.sample_ready = True
                         if self._zero_current_count < 3:
                             self.zamok.unlock()
                             return

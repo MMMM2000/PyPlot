@@ -72,12 +72,19 @@ a single resizable window.
 
 Each plotting dialog now provides a full **Readability** section with controls
 to toggle titles, axis labels, tick labels, and legends, adjust their font
-sizes, choose legend orientation, and show or hide legend symbols.  All
+sizes, choose legend orientation, pick whether the legend lives inside the
+axes or just outside the figure, and show or hide legend symbols.  All
 readability preferences are remembered between runs.  The Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
+
+Temperature-sensitivity plots now match between Matplotlib and Origin: sample
+labels use slashes instead of underscores, legends inherit the same ordering,
+marker sizes and anti-aliasing settings mirror the Matplotlib defaults, speed
+mode is disabled during export, and the 100 °C means are annotated with their
+Δ(100 °C−25 °C) offsets.
 
 ## 3. Loggers
 

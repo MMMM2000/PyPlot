@@ -118,6 +118,11 @@ class MasterLauncher(QtWidgets.QDialog):
 
         self._open_windows.append(widget)
 
+        try:
+            widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+        except Exception:
+            pass
+
         def _remove(_: object = None, w: QtWidgets.QWidget = widget) -> None:
             try:
                 self._open_windows.remove(w)
@@ -171,6 +176,11 @@ class MasterLauncher(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
             )
+
+        try:
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
 
         new_windows = [
             w for w in app_instance.topLevelWidgets() if w not in existing_windows
