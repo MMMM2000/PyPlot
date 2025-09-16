@@ -48,16 +48,22 @@ EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
 }
 
 
-class MasterLauncher(QtWidgets.QDialog):
+class MasterLauncher(QtWidgets.QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        self._closing = False
+
         app = QtWidgets.QApplication.instance()
         if isinstance(app, QtWidgets.QApplication):
             try:
                 app.setQuitOnLastWindowClosed(False)
+            except Exception:
+                pass
+            try:
+                app.lastWindowClosed.connect(self._restore_launcher)
             except Exception:
                 pass
 
@@ -116,6 +122,17 @@ class MasterLauncher(QtWidgets.QDialog):
         idx = self.theme_combo.currentIndex()
         mode = ["system", "light", "dark"][idx]
         apply_theme(app_instance, mode)
+
+    def _restore_launcher(self) -> None:
+        if self._closing:
+            return
+        if not self.isVisible():
+            self.show()
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
 
     def _register_window(self, widget: QtWidgets.QWidget) -> None:
         """Track ``widget`` so closing the launcher can warn appropriately."""
@@ -214,6 +231,7 @@ class MasterLauncher(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.StandardButton.No,
             )
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                self._closing = False
                 event.ignore()
                 return
             for w in list(open_windows):
@@ -221,6 +239,7 @@ class MasterLauncher(QtWidgets.QDialog):
                     w.close()
                 except Exception:
                     pass
+        self._closing = True
         event.accept()
         app = QtWidgets.QApplication.instance()
         if app is not None:

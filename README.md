@@ -87,14 +87,15 @@ Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: sample
-ticks read `2/1`, `2/2`, … in both outputs, legends share the same ordering and
-colour coding, symbol visibility follows the **Show symbols** option, and raw
-traces advertise `25 °C` instead of `25.0 °C`.  Origin exports disable speed
-mode, enable anti-aliasing, shrink raw scatter markers to size 1, reuse the
-Matplotlib graph title, and stamp the Δ(100 °C−25 °C) annotations at the same
-locations, while the Matplotlib legend sits outside the axes to avoid covering
-data points.  The default moving-average window now spans 200 samples for
-smoother continuous traces straight out of the box.
+ticks read `2/1`, `2/2`, … in both outputs thanks to a dedicated text dataset on
+the Origin X axis, legends share the same ordering and colour coding, symbol
+visibility follows the **Show symbols** option, and raw traces advertise `25 °C`
+instead of `25.0 °C`.  Origin exports disable speed mode, enable
+anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
+title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
+annotations at the same locations, while the Matplotlib legend sits outside the
+axes to avoid covering data points.  The default moving-average window now
+spans 200 samples for smoother continuous traces straight out of the box.
 
 ## 3. Loggers
 
@@ -113,9 +114,9 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
 * ignores the initial zero sample when logging and plotting
-* contact-loss detection waits until the logger has measured a non-zero current
-  and then sees several consecutive zeros before stopping, so start-up ramps no
-  longer trip the burn-out warning
+* contact-loss detection waits until the logger has measured a non-zero current,
+  then requires multiple zeros spread over a short delay before stopping, so
+  start-up ramps and momentary dips no longer trip the burn-out warning
 
 Launch from the master launcher or run
 

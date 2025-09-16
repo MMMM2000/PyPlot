@@ -174,6 +174,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._zero_current_count = 0
         self._nonzero_current_seen = False
         self._process_start_time: float | None = None
+        self._last_nonzero_current_time: float | None = None
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -499,6 +500,10 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.zamok.unlock()
                         return
                     if abs(self.current_current_read) < 1e-12:
+                        try:
+                            now = time.monotonic()
+                        except Exception:
+                            now = None
                         self._zero_current_count += 1
                         # Treat a zero reading as a valid response so callers
                         # waiting on ``sample_ready`` do not interpret the
@@ -510,9 +515,18 @@ class MainWindow(QtWidgets.QMainWindow):
                             # current at least once. This prevents false
                             # alarms immediately after a process starts when
                             # the supply has not ramped yet.
+                            self._last_nonzero_current_time = None
                             self.zamok.unlock()
                             return
                         zero_limit = 3
+                        zero_delay = 2.0
+                        if (
+                            now is not None
+                            and self._last_nonzero_current_time is not None
+                            and (now - self._last_nonzero_current_time) < zero_delay
+                        ):
+                            self.zamok.unlock()
+                            return
                         if self._zero_current_count < zero_limit:
                             self.zamok.unlock()
                             return
@@ -530,6 +544,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._zero_current_count = 0
                     self._contact_lost = False
                     self._nonzero_current_seen = True
+                    try:
+                        self._last_nonzero_current_time = time.monotonic()
+                    except Exception:
+                        self._last_nonzero_current_time = None
                     try:
                         self.current_resistance = self.current_voltage / self.current_current_read
                     except ZeroDivisionError:
@@ -825,6 +843,7 @@ class MainWindow(QtWidgets.QMainWindow):
             except Exception:
                 self._process_start_time = None
             self._nonzero_current_seen = False
+            self._last_nonzero_current_time = None
             self.ui.frame_modus_operandi.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -971,6 +990,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._zero_current_count = 0
         self._nonzero_current_seen = False
         self._process_start_time = None
+        self._last_nonzero_current_time = None
         try:
             self.timer_command.stop()
             self.timer_prud.stop()

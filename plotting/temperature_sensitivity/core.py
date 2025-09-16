@@ -666,6 +666,8 @@ def plot_variable_origin(
         y_min = y_max = 0.0
     y_range = y_max - y_min if y_max != y_min else 1.0
     delta_offset = 0.05 * y_range
+    plot_top = y_max + 0.08 * y_range
+    title_level = y_max + 0.06 * y_range
 
     cont_samples = set(cont['sample']) if include_cont else set()
     means['plot_x'] = means['sample_idx']
@@ -681,15 +683,12 @@ def plot_variable_origin(
             return row['sample_idx']
         means['plot_x'] = means.apply(_shift, axis=1)
 
-    connectors: list[pd.DataFrame] = []
     delta_labels: list[tuple[float, float, str]] = []
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
             sample = idx_to_sample.get(idx)
             has_cont = sample in cont_samples
-            if not has_cont:
-                connectors.append(pd.DataFrame({'X': [idx, idx], 'Y': [row[25], row[100]]}))
             delta = row[100] - row[25]
             y_top = row[100] + (delta_offset if has_cont else 0.0)
             delta_labels.append((idx - 0.1, y_top, f"{delta:.1f}"))
@@ -771,22 +770,6 @@ def plot_variable_origin(
         except Exception:
             pass
 
-    for idx, conn in enumerate(connectors, start=1):
-        w = op.new_sheet('w', lname=f'link_{idx}')
-        w.from_list(0, conn['X'].to_list())
-        w.from_list(1, conn['Y'].to_list())
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='y')
-        try:
-            p.color = 'black'
-            p.line_width = 1
-            try:
-                p.legend = ''
-            except Exception:
-                p.legend = False
-        except Exception:
-            pass
-
     cont_label = f"25-100C med {med_window} mwa {ma_window}"
     cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
@@ -851,16 +834,21 @@ def plot_variable_origin(
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, display_samples)
+            col_short = "SampleLbl"
             try:
                 wlab.activate()
-                op.lt_exec('wks.col1.type=4; wks.col1.format=2;')
+                op.lt_exec(
+                    f'wks.col1.type=4; wks.col1.format=2; wks.col1.name$="{col_short}";'
+                )
             except Exception:
                 pass
             book_name = getattr(book, 'lt_name', getattr(book, 'name', ''))
             sheet_name = getattr(wlab, 'lt_name', getattr(wlab, 'name', 'labels'))
             if book_name and sheet_name:
-                col_ref = "col(1)"
-                rng = f"[{book_name}]{sheet_name}!{col_ref}"
+                book_ref = str(book_name).replace('"', "'")
+                sheet_ref = str(sheet_name).replace('"', "'")
+                col_ref = f"col({col_short})"
+                rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
                 op.lt_exec('layer.x.label.auto=0; layer.x.label.type=2; layer.x.label.by=1;')
                 op.lt_exec(f'layer.x.label.dataset$="{rng}";')
                 op.lt_exec('layer.x.label.apply=1;')
