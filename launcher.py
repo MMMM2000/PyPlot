@@ -79,16 +79,6 @@ class MasterLauncher(QtWidgets.QDialog):
         self.plot_list.setCurrentRow(0)
         plot_layout = QtWidgets.QVBoxLayout(self.plot_tab)
         plot_layout.addWidget(self.plot_list)
-        self.outlier_cb = QtWidgets.QCheckBox("Check for outliers")
-        self.outlier_cb.setChecked(False)
-        self.auto_outlier_cb = QtWidgets.QCheckBox("Automatically remove outliers")
-        self.auto_outlier_cb.setChecked(False)
-        self.auto_outlier_cb.setEnabled(False)
-        self.outlier_cb.stateChanged.connect(
-            lambda state: self.auto_outlier_cb.setEnabled(bool(state))
-        )
-        plot_layout.addWidget(self.outlier_cb)
-        plot_layout.addWidget(self.auto_outlier_cb)
 
         self.emu_list = QtWidgets.QListWidget()
         for name in EMULATORS:
@@ -135,12 +125,8 @@ class MasterLauncher(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select a plotting script")
                 return
             func = PLOTTERS[item.text()]
-            if item.text() in ("Hsw Distribution", "Hsw Load Compare"):
-                common.CHECK_OUTLIERS = False
-                common.AUTO_REMOVE_OUTLIERS = False
-            else:
-                common.CHECK_OUTLIERS = self.outlier_cb.isChecked()
-                common.AUTO_REMOVE_OUTLIERS = self.auto_outlier_cb.isChecked()
+            common.CHECK_OUTLIERS = False
+            common.AUTO_REMOVE_OUTLIERS = False
         else:
             item = self.emu_list.currentItem()
             if item is None:
@@ -225,3 +211,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

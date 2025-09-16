@@ -30,6 +30,19 @@ def origin_session():
             pass
 
 
+def release_origin() -> None:
+    """Release control of Origin so the application can be closed."""
+
+    try:
+        import originpro as op  # type: ignore
+    except Exception:
+        return
+    try:
+        op.detach()
+    except Exception:
+        pass
+
+
 def format_annealing_title(base: str) -> str:
     """Return ``base`` with composition digits subscripted and microwire
     identifiers using a slash instead of an underscore."""
@@ -313,6 +326,7 @@ def create_file_widget(
     ext: str = ".txt",
     *,
     key: str | None = None,
+    on_outlier_toggle: Callable[[bool, list[str]], bool | None] | None = None,
 ) -> tuple[list[str], QtWidgets.QWidget]:
     """Return a widget managing a list of input files and the backing list."""
 
@@ -359,10 +373,43 @@ def create_file_widget(
     chk_out_btn = QtWidgets.QPushButton("Check Outliers")
     chk_out_btn.setCheckable(True)
     chk_out_btn.setToolTip("Enable outlier detection during plotting")
-    chk_out_btn.toggled.connect(lambda b: setattr(_common, "CHECK_OUTLIERS", bool(b)))
+    chk_out_btn.setChecked(bool(_common.CHECK_OUTLIERS))
     auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
     auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
-    auto_rm_cb.toggled.connect(lambda b: setattr(_common, "AUTO_REMOVE_OUTLIERS", bool(b)))
+    auto_rm_cb.setChecked(bool(_common.AUTO_REMOVE_OUTLIERS))
+    auto_rm_cb.setEnabled(bool(_common.CHECK_OUTLIERS))
+
+    def _set_outlier_enabled(enabled: bool) -> None:
+        _common.CHECK_OUTLIERS = bool(enabled)
+        auto_rm_cb.setEnabled(bool(enabled))
+        if not enabled and auto_rm_cb.isChecked():
+            auto_rm_cb.setChecked(False)
+        if on_outlier_toggle is not None:
+            try:
+                proceed = on_outlier_toggle(bool(enabled), list(files))
+            except Exception as exc:
+                QtWidgets.QMessageBox.critical(
+                    parent,
+                    "Outlier Check Failed",
+                    str(exc),
+                )
+                proceed = False
+            if proceed is False and enabled:
+                _common.CHECK_OUTLIERS = False
+                auto_rm_cb.setEnabled(False)
+                if auto_rm_cb.isChecked():
+                    auto_rm_cb.setChecked(False)
+                chk_out_btn.blockSignals(True)
+                chk_out_btn.setChecked(False)
+                chk_out_btn.blockSignals(False)
+
+    def _set_auto_remove(enabled: bool) -> None:
+        if enabled and not chk_out_btn.isChecked():
+            chk_out_btn.setChecked(True)
+        _common.AUTO_REMOVE_OUTLIERS = bool(enabled)
+
+    chk_out_btn.toggled.connect(_set_outlier_enabled)
+    auto_rm_cb.toggled.connect(_set_auto_remove)
 
     container = QtWidgets.QWidget()
     container.setSizePolicy(

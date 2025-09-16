@@ -65,6 +65,7 @@ MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
 MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
 MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
+OUTLIER_PROGRESS_THRESHOLD = 1000
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 
 TS_LABELS = {
@@ -88,10 +89,25 @@ class ProgressDialog:
         self.count = 0
         self.cancelled = False
         self.root = self
+        self._step = max(1, total // 10) if total else 0
+        self._next = self._step
+
     def update(self) -> None:
         self.count += 1
+        if not self.total or not self._step:
+            return
+        if self.count >= self._next or self.count == self.total:
+            pct = (self.count / self.total) * 100
+            print(f"Progress: {self.count}/{self.total} ({pct:.0f}%)")
+            self._next = min(self.total, self.count + self._step)
+
     def destroy(self) -> None:
         pass
+
+
+
+class _OutlierCancelled(Exception):
+    """Raised when outlier detection is cancelled by the user."""
 
 
 def non_modal_question(
@@ -193,12 +209,13 @@ def detect_outliers(
     if not (0 < quantile < 1):
         raise ValueError("quantile must be between 0 and 1")
 
-    out_rows = []
+    out_rows: list[pd.DataFrame] = []
     low_q = (1 - quantile) / 2
     high_q = 1 - low_q
 
     total = int(df[column].count())
     processed = 0
+    progress_obj = getattr(progress, "update", None) if progress is not None else None
 
     for fname, grp in df.groupby("filename"):
         sub = grp[[column]].dropna().reset_index()
@@ -215,20 +232,32 @@ def detect_outliers(
             rng = q_high - q_low
             if rng <= 0:
                 processed += 1
-                if progress:
-                    progress(processed, total)
+                if progress_obj is not None:
+                    progress_obj()
+                    if getattr(progress, "cancelled", False):
+                        raise _OutlierCancelled()
+                elif progress:
+                    try:
+                        progress(processed, total)
+                    except TypeError:
+                        progress()
                 continue
             if abs(val - med) > factor * rng:
                 out_rows.append(grp.loc[[sub["index"].iloc[idx]]])
             processed += 1
-            if progress:
-                progress(processed, total)
+            if progress_obj is not None:
+                progress_obj()
+                if getattr(progress, "cancelled", False):
+                    raise _OutlierCancelled()
+            elif progress:
+                try:
+                    progress(processed, total)
+                except TypeError:
+                    progress()
 
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
     return pd.DataFrame(columns=df.columns)
-
-
 def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Check for and optionally remove outliers.
 
@@ -237,7 +266,25 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     application asking whether to remove them. When no Qt application is
     running the outliers are removed automatically with a short notice.
     """
-    out_df = detect_outliers(df)
+    progress: ProgressDialog | None = None
+    out_df = pd.DataFrame()
+    total_points = int(df["sum"].count())
+    try:
+        if total_points >= OUTLIER_PROGRESS_THRESHOLD:
+            progress = ProgressDialog(total_points)
+            out_df = detect_outliers(df, progress=progress)
+        else:
+            out_df = detect_outliers(df)
+    except _OutlierCancelled:
+        if progress:
+            progress.destroy()
+            progress = None
+        plt.close('all')
+        print("Outlier detection cancelled.")
+        return df
+    finally:
+        if progress:
+            progress.destroy()
     if out_df.empty:
         return df
 
@@ -453,8 +500,10 @@ def plot_variable_origin(
 ) -> None:
     """Create an Origin graph roughly matching the Matplotlib style."""
 
+    if df.empty:
+        return
+
     import originpro as op  # lazy import
-    # Ensure Origin UI is shown
     try:
         op.set_show()
     except Exception:
@@ -464,178 +513,184 @@ def plot_variable_origin(
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
-    df = df.copy()
-    df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
+    idx_to_sample = {idx: sample for sample, idx in sample_idx.items()}
 
-    raw = df[~df['continuous']].copy()
-    cont = df[df['continuous']].copy()
+    work = df.copy()
+    work['sample_idx'] = work['sample'].map(sample_idx).astype(float)
+    raw = work[~work['continuous']].copy()
+    cont = work[work['continuous']].copy()
 
     means = raw.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
     baseline = means[means['temp'] == 25].set_index('sample_idx')[var].to_dict()
 
-    raw['x_center'] = raw['sample_idx'] + raw['temp'].map({25: -OFFSET, 100: OFFSET}).fillna(0)
     rng = np.random.default_rng(0)
+    raw['x_center'] = raw['sample_idx'] + raw['temp'].map({25: -OFFSET, 100: OFFSET}).fillna(0.0)
     raw['X'] = raw['x_center'] + rng.uniform(-JITTER_SPAN, JITTER_SPAN, len(raw))
+
+    def _baseline_for(idx: float) -> float:
+        return baseline.get(idx, 0.0)
+
     if baseline_mode == 'zero_25':
-        raw['Y'] = raw.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
-        means[var] = means.apply(lambda r: r[var] - baseline.get(r['sample_idx'], 0.0), axis=1)
+        raw['Y'] = raw.apply(lambda r: r[var] - _baseline_for(r['sample_idx']), axis=1)
+        means[var] = means.apply(lambda r: r[var] - _baseline_for(r['sample_idx']), axis=1)
         if include_cont and not cont.empty:
-            cont['Y'] = cont.apply(lambda r: r[var] - baseline.get(sample_idx.get(r['sample'], 0.0), 0.0), axis=1)
+            cont['Y'] = cont.apply(lambda r: r[var] - _baseline_for(r['sample_idx']), axis=1)
     else:
         raw['Y'] = raw[var]
         if include_cont and not cont.empty:
             cont['Y'] = cont[var]
 
-    # Build Origin graph
-    book = op.new_book('w', lname="Temp Sens (Python)")
-    book.activate()
-    gp = op.new_graph(template='scatter')
-    gl = gp[0]
+    cont_samples = set(cont['sample']) if include_cont else set()
+    means['plot_x'] = means['sample_idx']
+    if include_cont and cont_samples:
+        def _shift(row: pd.Series) -> float:
+            sample = idx_to_sample.get(row['sample_idx'])
+            if sample not in cont_samples:
+                return row['sample_idx']
+            if row['temp'] == 25:
+                return row['sample_idx'] - MEAN_SHIFT
+            if row['temp'] == 100:
+                return row['sample_idx'] + MEAN_SHIFT
+            return row['sample_idx']
+        means['plot_x'] = means.apply(_shift, axis=1)
 
-    # Raw scatter for 25C and 100C
-    raw_plot_indices = []
-    for t, color in ((25, RAW_COLORS.get(25, '#45A1D6')), (100, RAW_COLORS.get(100, '#F09C67'))):
-        sub = raw[raw['temp'] == t][['X', 'Y']]
-        if sub.empty:
-            continue
-        w = op.new_sheet('w', lname=f'raw_{t}')
-        w.from_df(sub.reset_index(drop=True))
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
-        try:
-            # Ensure small raw symbols as requested
-            p.color = color
-            p.symbol_shape = 2  # circle
-            p.symbol_size = 1
-            p.symbol_edge_color = color
-            p.symbol_fill_color = color
-            p.line_width = 0
-        except Exception:
-            pass
-        # Remember that we added a raw scatter; used to enforce size via LabTalk
-        raw_plot_indices.append(len(gl))
-
-    # Mean markers per temperature
-    for t, color in ((25, MEAN_COLORS.get(25, 'black')), (100, MEAN_COLORS.get(100, 'black'))):
-        m = means[means['temp'] == t]
-        if m.empty:
-            continue
-        mdf = pd.DataFrame({'X': m['sample_idx'], 'Y': m[var]})
-        w = op.new_sheet('w', lname=f'mean_{t}')
-        w.from_df(mdf.reset_index(drop=True))
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
-        try:
-            p.color = MEAN_COLORS.get('a' if t == 25 else 'b', color)
-            p.symbol_shape = 2  # circle marker type
-            p.symbol_size = 8
-            p.symbol_edge_color = p.color
-            p.symbol_fill_color = p.color
-        except Exception:
-            pass
-
-    # As a safety net, enforce raw symbol size=1 via LabTalk indexes
-    try:
-        gp.activate()
-        for idx in raw_plot_indices:
-            op.lt_exec(f'layer -i {idx}; set %C -z 1; set %C -kf 0;')
-    except Exception:
-        pass
-
-    # Connect 25C and 100C per sample when no continuous data
-    if not cont.empty:
-        cont_samples = set(cont['sample'].unique())
-    else:
-        cont_samples = set()
-    piv = means.pivot(index='sample_idx', columns='temp', values=var)
-    if 25 in piv.columns and 100 in piv.columns:
-        for idx, row in piv.dropna(subset=[25, 100]).iterrows():
-            if samples[int(idx)-1] in cont_samples:
+    connectors: list[pd.DataFrame] = []
+    pivot = means.pivot(index='sample_idx', columns='temp', values=var)
+    if 25 in pivot.columns and 100 in pivot.columns:
+        for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
+            sample = idx_to_sample.get(idx)
+            if sample in cont_samples:
                 continue
-            w = op.new_sheet('w', lname=f'link_{int(idx)}')
-            w.from_list(0, [idx, idx])
-            w.from_list(1, [row[25], row[100]])
-            w.cols_axis('XY')
-            p = gl.add_plot(w, coly=1, colx=0, type='y')
-            try:
-                p.color = 'black'
-                p.line_width = 1
-            except Exception:
-                pass
+            connectors.append(pd.DataFrame({'X': [idx, idx], 'Y': [row[25], row[100]]}))
 
-    # Continuous processed per sample
+    cont_processed: list[pd.DataFrame] = []
     if include_cont and not cont.empty:
-        for s in samples:
-            sub = cont[cont['sample'] == s].sort_values('temp')
+        cont = cont.sort_values('temp')
+        for sample in samples:
+            sub = cont[cont['sample'] == sample]
             if sub.empty:
                 continue
             med = sub['Y'].rolling(med_window, center=True, min_periods=1).median()
             proc = med.rolling(ma_window, center=True, min_periods=1).mean()
             start = sub['temp'].iloc[0]
             end = sub['temp'].iloc[-1]
-            x_start = sample_idx[s] - MEAN_SHIFT
-            x_end = sample_idx[s] + MEAN_SHIFT
+            x_start = sample_idx[sample] - MEAN_SHIFT
+            x_end = sample_idx[sample] + MEAN_SHIFT
             scale = (x_end - x_start) / (end - start) if end != start else 1.0
             x_vals = (sub['temp'] - start) * scale + x_start
-            w = op.new_sheet('w', lname=f'cont_{s}')
-            w.from_list(0, x_vals.to_numpy())
-            w.from_list(1, proc.to_numpy())
-            w.cols_axis('XY')
-            p = gl.add_plot(w, coly=1, colx=0, type='y')
-            try:
-                p.color = 'black'
-                p.line_width = 1
-            except Exception:
-                pass
+            cont_processed.append(pd.DataFrame({'X': x_vals.to_numpy(), 'Y': proc.to_numpy(), 'sample': sample}))
+
+    book = op.new_book('w', lname="Temp Sens (Python)")
+    book.activate()
+    gp = op.new_graph(template='scatter')
+    gl = gp[0]
+
+    for temp in sorted(raw['temp'].dropna().unique()):
+        sub = raw[raw['temp'] == temp]
+        if sub.empty:
+            continue
+        temp_label = f"{int(temp)}" if float(temp).is_integer() else f"{temp:g}"
+        w = op.new_sheet('w', lname=f'raw_{temp_label}')
+        w.from_list(0, sub['X'].to_list())
+        w.from_list(1, sub['Y'].to_list())
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
+        try:
+            p.color = color
+            p.symbol_shape = 2
+            p.symbol_size = max(1, int(round(RAW_MARKER_SIZE * 12)))
+            p.symbol_edge_color = color
+            p.symbol_fill_color = color
+            p.line_width = 0
+        except Exception:
+            pass
+
+    for temp in sorted(means['temp'].dropna().unique()):
+        sub = means[means['temp'] == temp]
+        if sub.empty:
+            continue
+        temp_label = f"{int(temp)}" if float(temp).is_integer() else f"{temp:g}"
+        w = op.new_sheet('w', lname=f'mean_{temp_label}')
+        w.from_list(0, sub['plot_x'].to_list())
+        w.from_list(1, sub[var].to_list())
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
+        try:
+            p.color = color
+            p.symbol_shape = 2
+            p.symbol_size = MEAN_MSIZE
+            p.symbol_edge_color = color
+            p.symbol_fill_color = color
+        except Exception:
+            pass
+
+    for idx, conn in enumerate(connectors, start=1):
+        w = op.new_sheet('w', lname=f'link_{idx}')
+        w.from_list(0, conn['X'].to_list())
+        w.from_list(1, conn['Y'].to_list())
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        try:
+            p.color = 'black'
+            p.line_width = 1
+        except Exception:
+            pass
+
+    for idx, cont_df in enumerate(cont_processed, start=1):
+        w = op.new_sheet('w', lname=f'cont_{idx}')
+        w.from_list(0, cont_df['X'].tolist())
+        w.from_list(1, cont_df['Y'].tolist())
+        w.cols_axis('XY')
+        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        try:
+            p.color = 'black'
+            p.line_width = 1
+        except Exception:
+            pass
 
     try:
         gl.rescale()
         gp.activate()
-        op.lt_exec('page.antialias=1;')
-        op.lt_exec('layer -aa 1;')
-        # X axis: show integer ticks per sample
+        op.lt_exec('page.antialias=1; layer -aa 1;')
+        op.lt_exec('legend;')
+        op.lt_exec('legend.update=0;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
-        # Set fixed major tick increment to 1 and bounds around samples
-        op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples)+0.5};')
+        op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
         op.lt_exec('layer.x.inc=1;')
-        # Map tick labels to sample names from a helper sheet
+        op.lt_exec('layer.x.step=1;')
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, samples)
-            # Use Text from Dataset for tick labels
-            b = getattr(book, 'name', '')
-            s = getattr(wlab, 'name', 'labels')
-            rng = f'[{b}]{s}!col(1)'
+            book_name = getattr(book, 'name', '')
+            sheet_name = getattr(wlab, 'name', 'labels')
+            rng = f"[{book_name}]{sheet_name}!col(1)"
             op.lt_exec('layer.x.label.form=2;')
             op.lt_exec(f'layer.x.label.dataset$="{rng}";')
         except Exception:
             pass
-        # Put the title text into the legend and freeze it
-        esc = (f"{comp} {anneal} — {TS_LABELS[var]}").replace('"', "'")
+        title = f"{comp} {anneal} - {TS_LABELS[var]}"
         try:
-            gl.label('Legend').text = esc
+            gl.label('Legend').text = title.replace('"', "'")
         except Exception:
             pass
-        op.lt_exec('legend.update=0;')
     except Exception:
         pass
-
-    # Release Origin control so the application can be closed independently
-    try:
-        op.exit()
-    except Exception:
-        pass
-
 
 from ..common import maybe_handle_outliers
 
 
-def main(files: List[str], backend: str = BACKEND):
+def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFrame | None = None):
     if IMPROVE_READABILITY:
         apply_readability_fonts()
-    data = load_data(files)
-    data = maybe_handle_outliers(data)
+    if preprocessed_data is not None:
+        data = preprocessed_data.copy(deep=True)
+        print("Using results from the immediate outlier check.")
+    else:
+        data = load_data(files)
+        data = maybe_handle_outliers(data)
     groups = data.groupby(['composition', 'anneal'])
     modes = [BASELINE_MODE] if BASELINE_MODE != "both" else ["none", "zero_25"]
     total = len(groups) * len(PLOT_VARS) * len(modes)
@@ -687,7 +742,7 @@ def main(files: List[str], backend: str = BACKEND):
         progress.destroy()
     elif progress and getattr(progress, 'cancelled', False):
         plt.close('all')
-        print('Cancelled.')
+        print("Cancelled.")
         return
 
     if wants_matplotlib(backend):

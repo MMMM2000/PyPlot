@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from PyQt6 import QtWidgets
+from PyQt6 import QtWidgets, QtGui
 
 import pathlib
 
@@ -18,6 +18,7 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        release_origin,
     )
 else:
     from . import core as orig
@@ -31,6 +32,7 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        release_origin,
     )
 
 
@@ -39,7 +41,11 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Temperature Sensitivity Settings")
 
-        self.files, file_widget = create_file_widget(self, key="temperature_sensitivity")
+        self.files, file_widget = create_file_widget(
+            self, key="temperature_sensitivity", on_outlier_toggle=self._handle_outlier_toggle
+        )
+        self._preprocessed_data = None
+        self._preprocessed_snapshot: tuple[str, ...] | None = None
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)
@@ -120,6 +126,31 @@ class SettingsDialog(QtWidgets.QDialog):
 
         arrange_top_layout(self, file_widget, left, self.console)
 
+    def _handle_outlier_toggle(self, enabled: bool, files: list[str]) -> bool:
+        if not enabled:
+            self._preprocessed_data = None
+            self._preprocessed_snapshot = None
+            return True
+        if not files:
+            QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
+            return False
+        file_snapshot = tuple(sorted(files))
+        load_list = list(file_snapshot)
+
+        def _task() -> None:
+            data = orig.load_data(load_list)
+            cleaned = orig.handle_outliers(data)
+            self._preprocessed_data = cleaned.copy(deep=True)
+            self._preprocessed_snapshot = file_snapshot
+            print("Outlier check complete.")
+
+        try:
+            run_with_console(_task, self.console)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(self, "Outlier Check Failed", str(exc))
+            return False
+        return True
+
     def run(self) -> None:
         if not self.files:
             QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
@@ -146,8 +177,23 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
         orig.PNG_DPI = int(self.dpi_spin.value())
         backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
-        run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
+        snapshot = tuple(sorted(self.files))
+        preloaded = None
+        if self._preprocessed_data is not None and self._preprocessed_snapshot == snapshot:
+            preloaded = self._preprocessed_data.copy(deep=True)
+        run_with_console(
+            lambda: orig.main(self.files, backend=backend, preprocessed_data=preloaded),
+            self.console,
+        )
 
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        orig.common.CHECK_OUTLIERS = False
+        orig.common.AUTO_REMOVE_OUTLIERS = False
+        self._preprocessed_data = None
+        self._preprocessed_snapshot = None
+        release_origin()
+        super().closeEvent(event)
 
 class ProgressDialog:
     def __init__(self, total: int):
