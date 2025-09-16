@@ -379,11 +379,22 @@ def create_file_widget(
     chk_out_btn.setChecked(bool(_common.CHECK_OUTLIERS))
     auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
     auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
-    auto_rm_cb.setChecked(bool(_common.AUTO_REMOVE_OUTLIERS))
+
+    prefs = _settings()
+    auto_key = f"{key}_auto_remove_outliers" if key else None
+    auto_pref = bool(_common.AUTO_REMOVE_OUTLIERS)
+    if auto_key is not None:
+        try:
+            auto_pref = bool(prefs.value(auto_key, auto_pref, type=bool))
+        except Exception:
+            auto_pref = bool(auto_pref)
+    auto_rm_cb.setChecked(auto_pref)
+    _common.AUTO_REMOVE_OUTLIERS = bool(_common.CHECK_OUTLIERS and auto_rm_cb.isChecked())
 
     def _set_outlier_enabled(enabled: bool) -> None:
         _common.CHECK_OUTLIERS = bool(enabled)
         _common.AUTO_REMOVE_OUTLIERS = bool(enabled) and auto_rm_cb.isChecked()
+        proceed = True
         if on_outlier_toggle is not None:
             try:
                 proceed = on_outlier_toggle(bool(enabled), list(files))
@@ -394,17 +405,23 @@ def create_file_widget(
                     str(exc),
                 )
                 proceed = False
-            if proceed is False and enabled:
-                _common.CHECK_OUTLIERS = False
-                _common.AUTO_REMOVE_OUTLIERS = False
-                chk_out_btn.blockSignals(True)
-                chk_out_btn.setChecked(False)
-                chk_out_btn.blockSignals(False)
+        if proceed is False and enabled:
+            _common.CHECK_OUTLIERS = False
+            _common.AUTO_REMOVE_OUTLIERS = False
+            chk_out_btn.blockSignals(True)
+            chk_out_btn.setChecked(False)
+            chk_out_btn.blockSignals(False)
+            return
+        if auto_key is not None:
+            prefs.setValue(auto_key, auto_rm_cb.isChecked())
 
     def _set_auto_remove(enabled: bool) -> None:
-        if enabled and not chk_out_btn.isChecked():
-            chk_out_btn.setChecked(True)
-        _common.AUTO_REMOVE_OUTLIERS = bool(enabled) and _common.CHECK_OUTLIERS
+        if auto_key is not None:
+            prefs.setValue(auto_key, bool(enabled))
+        if not _common.CHECK_OUTLIERS:
+            _common.AUTO_REMOVE_OUTLIERS = False
+            return
+        _common.AUTO_REMOVE_OUTLIERS = bool(enabled)
 
     chk_out_btn.toggled.connect(_set_outlier_enabled)
     auto_rm_cb.toggled.connect(_set_auto_remove)

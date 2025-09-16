@@ -134,7 +134,7 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Hysteresis Loops")
 
-        self.files, file_widget = create_file_widget(self, ext=".dat")
+        self.files, file_widget = create_file_widget(self, ext=".dat", key="hysteresis_hyst")
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
         self.console.setMaximumHeight(120)

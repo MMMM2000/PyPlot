@@ -75,7 +75,7 @@
     "SHOW_LEGEND": true,
     "LEGEND_SIZE": 18,
     "LEGEND_ORIENTATION": "auto",
-    "LEGEND_LOCATION": "inside",
+    "LEGEND_LOCATION": "outside_right",
     "LEGEND_SHOW_SYMBOLS": false,
     "LEGEND_SYMBOL_SIZE": 10,
     "TICK_SIZE": 18,

@@ -172,6 +172,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.total_steps = 0
         self._contact_lost = False
         self._zero_current_count = 0
+        self._nonzero_current_seen = False
+        self._process_start_time: float | None = None
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -502,7 +504,17 @@ class MainWindow(QtWidgets.QMainWindow):
                         # waiting on ``sample_ready`` do not interpret the
                         # timeout as a communication failure.
                         self.sample_ready = True
-                        if self._zero_current_count < 3:
+                        elapsed = 0.0
+                        if self._process_start_time is not None:
+                            try:
+                                elapsed = max(0.0, time.monotonic() - self._process_start_time)
+                            except Exception:
+                                elapsed = 0.0
+                        if not self._nonzero_current_seen and elapsed < 5.0:
+                            self.zamok.unlock()
+                            return
+                        zero_limit = 3 if self._nonzero_current_seen else 15
+                        if self._zero_current_count < zero_limit:
                             self.zamok.unlock()
                             return
                         if not self._contact_lost:
@@ -518,6 +530,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         return
                     self._zero_current_count = 0
                     self._contact_lost = False
+                    self._nonzero_current_seen = True
                     try:
                         self.current_resistance = self.current_voltage / self.current_current_read
                     except ZeroDivisionError:
@@ -808,6 +821,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self._max_voltage_dialog = False
             self._contact_lost = False
             self._zero_current_count = 0
+            try:
+                self._process_start_time = time.monotonic()
+            except Exception:
+                self._process_start_time = None
+            self._nonzero_current_seen = False
             self.ui.frame_modus_operandi.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -828,6 +846,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Prepare output file with overwrite prompt
                 if not self.prepare_output_file():
                     self.proces_on = False
+                    self._process_start_time = None
                     self.ui.pushButton_spusti_proces.setText("Start annealing process")
                     return
                 if hasattr(self.ui, 'progressBar_process'):
@@ -951,6 +970,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.force_stop_at_zero = False
         self._contact_lost = False
         self._zero_current_count = 0
+        self._nonzero_current_seen = False
+        self._process_start_time = None
         try:
             self.timer_command.stop()
             self.timer_prud.stop()

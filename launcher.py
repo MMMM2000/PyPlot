@@ -54,6 +54,13 @@ class MasterLauncher(QtWidgets.QDialog):
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            try:
+                app.setQuitOnLastWindowClosed(False)
+            except Exception:
+                pass
+
         # Keep references to launched windows so they stay open when
         # the launcher calls their ``main`` functions.
         self._open_windows: list[QtWidgets.QWidget] = []

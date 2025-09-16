@@ -48,7 +48,9 @@ Run the launcher to access all utilities in a single window:
 python -m launcher
 ```
 
-Closing the launcher warns about other open windows and will close them.
+Closing the launcher warns about other open windows and will close them.  Plot
+settings dialogs can now be closed independently without shutting down the
+launcher, so you can move between tools without relaunching the hub.
 
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
@@ -70,6 +72,10 @@ start with the first real sample.  Plotting dialogs keep their windows open
 after running and display settings, file list and console side by side within
 a single resizable window.
 
+Outlier detection remains opt-in.  Toggling **Remove automatically** no longer
+forces the outlier check to start immediately, and the preference is remembered
+per plotting script so each tool can keep its own automatic-removal default.
+
 Each plotting dialog now provides a full **Readability** section with controls
 to toggle titles, axis labels, tick labels, and legends, adjust their font
 sizes, choose legend orientation, pick whether the legend lives inside the
@@ -84,7 +90,8 @@ Temperature-sensitivity plots now match between Matplotlib and Origin: sample
 labels use slashes instead of underscores, legends inherit the same ordering,
 marker sizes and anti-aliasing settings mirror the Matplotlib defaults, speed
 mode is disabled during export, and the 100 °C means are annotated with their
-Δ(100 °C−25 °C) offsets.
+Δ(100 °C−25 °C) offsets.  The Matplotlib legend defaults to the right of the
+axes so long sample names no longer overlap with the data points.
 
 ## 3. Loggers
 
@@ -103,6 +110,9 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
 * ignores the initial zero sample when logging and plotting
+* contact-loss detection waits for several zero-current readings (after a brief
+  warm-up) before stopping so runs no longer abort immediately when the process
+  starts
 
 Launch from the master launcher or run
 
