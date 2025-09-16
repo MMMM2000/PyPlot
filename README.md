@@ -87,11 +87,14 @@ Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: sample
-labels use slashes instead of underscores, legends inherit the same ordering,
-marker sizes and anti-aliasing settings mirror the Matplotlib defaults, speed
-mode is disabled during export, and the 100 °C means are annotated with their
-Δ(100 °C−25 °C) offsets.  The Matplotlib legend defaults to the right of the
-axes so long sample names no longer overlap with the data points.
+ticks read `2/1`, `2/2`, … in both outputs, legends share the same ordering and
+colour coding, symbol visibility follows the **Show symbols** option, and raw
+traces advertise `25 °C` instead of `25.0 °C`.  Origin exports disable speed
+mode, enable anti-aliasing, shrink raw scatter markers to size 1, reuse the
+Matplotlib graph title, and stamp the Δ(100 °C−25 °C) annotations at the same
+locations, while the Matplotlib legend sits outside the axes to avoid covering
+data points.  The default moving-average window now spans 200 samples for
+smoother continuous traces straight out of the box.
 
 ## 3. Loggers
 
@@ -110,9 +113,9 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
 * ignores the initial zero sample when logging and plotting
-* contact-loss detection waits for several zero-current readings (after a brief
-  warm-up) before stopping so runs no longer abort immediately when the process
-  starts
+* contact-loss detection waits until the logger has measured a non-zero current
+  and then sees several consecutive zeros before stopping, so start-up ramps no
+  longer trip the burn-out warning
 
 Launch from the master launcher or run
 

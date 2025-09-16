@@ -504,16 +504,15 @@ class MainWindow(QtWidgets.QMainWindow):
                         # waiting on ``sample_ready`` do not interpret the
                         # timeout as a communication failure.
                         self.sample_ready = True
-                        elapsed = 0.0
-                        if self._process_start_time is not None:
-                            try:
-                                elapsed = max(0.0, time.monotonic() - self._process_start_time)
-                            except Exception:
-                                elapsed = 0.0
-                        if not self._nonzero_current_seen and elapsed < 5.0:
+                        if not self._nonzero_current_seen:
+                            # Ignore sustained zero readings until we have
+                            # confirmed the setup is capable of sourcing
+                            # current at least once. This prevents false
+                            # alarms immediately after a process starts when
+                            # the supply has not ramped yet.
                             self.zamok.unlock()
                             return
-                        zero_limit = 3 if self._nonzero_current_seen else 15
+                        zero_limit = 3
                         if self._zero_current_count < zero_limit:
                             self.zamok.unlock()
                             return

@@ -63,7 +63,7 @@ if BASELINE_MODE not in {"none", "zero_25", "both"}:
     BASELINE_MODE = "zero_25" if bool(_CFG.get("ZERO_25_BASELINE", False)) else "none"
 INCLUDE_CONTINUOUS = bool(_CFG.get("INCLUDE_CONTINUOUS", True))
 MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
-MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
+MA_WINDOW = int(_CFG.get("MA_WINDOW", 200))
 MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
 OUTLIER_PROGRESS_THRESHOLD = 1000
@@ -75,6 +75,16 @@ TS_LABELS = {
     "dT": "T2-T1 (\u03BCs)",
     "sum": "T1+T2 (\u03BCs)",
 }
+
+
+def _format_temp_label(temp: float | int) -> str:
+    """Return ``temp`` formatted without unnecessary decimal places."""
+
+    try:
+        value = float(temp)
+    except Exception:
+        return str(temp)
+    return f"{int(value)}" if value.is_integer() else f"{value:g}"
 
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -391,7 +401,7 @@ def plot_variable(
             marker=RAW_MARKER,
             s=RAW_MARKER_SIZE,
             alpha=RAW_ALPHA,
-            label=f'raw {temp}\N{DEGREE SIGN}C',
+            label=f'raw {_format_temp_label(temp)}\N{DEGREE SIGN}C',
         )
 
     for temp in sorted(raw['temp'].unique()):
@@ -411,7 +421,7 @@ def plot_variable(
             linestyle='None',
             c=MEAN_COLORS.get(temp, 'gray'),
             markersize=MEAN_MSIZE,
-            label=f'mean {int(temp)}\N{DEGREE SIGN}C',
+            label=f'mean {_format_temp_label(temp)}\N{DEGREE SIGN}C',
         )
 
     # Connect 25Â°C and 100Â°C means per sample and show delta
@@ -507,6 +517,67 @@ def plot_variable(
             except Exception:
                 pass
 
+    def _apply_symbol_visibility(legend_obj: Any) -> None:
+        if legend_obj is None:
+            return
+
+        show_symbols = bool(globals().get("LEGEND_SHOW_SYMBOLS", False))
+        marker_size = float(globals().get("LEGEND_SYMBOL_SIZE", 10))
+        handles: list[Any] = []
+        for attr in ("legendHandles", "legend_handles"):
+            found = getattr(legend_obj, attr, None)
+            if found:
+                handles = list(found)
+                break
+
+        for handle in handles:
+            if isinstance(handle, PathCollection):
+                try:
+                    if show_symbols:
+                        handle.set_alpha(1.0)
+                        handle.set_sizes([marker_size ** 2])
+                    else:
+                        handle.set_alpha(0.0)
+                        handle.set_sizes([0.1])
+                except Exception:
+                    pass
+            elif isinstance(handle, Patch):
+                try:
+                    handle.set_alpha(1.0 if show_symbols else 0.0)
+                except Exception:
+                    pass
+
+            if hasattr(handle, "set_markersize"):
+                try:
+                    handle.set_markersize(marker_size if show_symbols else 0.1)
+                except Exception:
+                    pass
+
+            marker_setter = getattr(handle, "set_marker", None)
+            if callable(marker_setter):
+                if show_symbols:
+                    marker_getter = getattr(handle, "get_marker", None)
+                    current = None
+                    if callable(marker_getter):
+                        try:
+                            current = marker_getter()
+                        except Exception:
+                            current = None
+                    if current in (None, "", " ", "None"):
+                        for candidate in ("o", "s", "."):
+                            try:
+                                marker_setter(candidate)
+                                break
+                            except Exception:
+                                continue
+                else:
+                    for empty in (None, "", " "):
+                        try:
+                            marker_setter(empty)
+                            break
+                        except Exception:
+                            continue
+
     ax.set_xlabel('Sample')
     ax.set_ylabel(TS_LABELS[var])
     ax.set_title(f"{comp} {anneal} — {TS_LABELS[var]}")
@@ -515,9 +586,12 @@ def plot_variable(
     legend_kwargs = _legend_kwargs_from_location(str(globals().get("LEGEND_LOCATION", "inside")))
     legend = ax.legend(**legend_kwargs)
     _colorize_legend(legend, adjust_sizes=True)
+    _apply_symbol_visibility(legend)
 
     apply_readability(ax, globals())
-    _colorize_legend(ax.get_legend())
+    updated = ax.get_legend()
+    _apply_symbol_visibility(updated)
+    _colorize_legend(updated)
 
     final_loc = str(globals().get("LEGEND_LOCATION", "inside") or "inside").strip().lower()
     if final_loc in {"outside_right", "outside", "outside right"}:
@@ -646,18 +720,14 @@ def plot_variable_origin(
         sub = raw[raw['temp'] == temp]
         if sub.empty:
             continue
-        temp_label = f"{int(temp)}" if float(temp).is_integer() else f"{temp:g}"
+        temp_label = _format_temp_label(temp)
         w = op.new_sheet('w', lname=f'raw_{temp_label}')
         w.from_list(0, sub['X'].to_list())
         w.from_list(1, sub['Y'].to_list())
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
-        legend_label = (
-            f"raw {int(temp)}\N{DEGREE SIGN}C"
-            if float(temp).is_integer()
-            else f"raw {temp:g}\N{DEGREE SIGN}C"
-        )
+        legend_label = f"raw {temp_label}\N{DEGREE SIGN}C"
         try:
             w.activate()
             op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
@@ -678,18 +748,14 @@ def plot_variable_origin(
         sub = means[means['temp'] == temp]
         if sub.empty:
             continue
-        temp_label = f"{int(temp)}" if float(temp).is_integer() else f"{temp:g}"
+        temp_label = _format_temp_label(temp)
         w = op.new_sheet('w', lname=f'mean_{temp_label}')
         w.from_list(0, sub['plot_x'].to_list())
         w.from_list(1, sub[var].to_list())
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
-        legend_label = (
-            f"mean {int(temp)}\N{DEGREE SIGN}C"
-            if float(temp).is_integer()
-            else f"mean {temp:g}\N{DEGREE SIGN}C"
-        )
+        legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
         try:
             w.activate()
             op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
@@ -714,7 +780,10 @@ def plot_variable_origin(
         try:
             p.color = 'black'
             p.line_width = 1
-            p.legend = False
+            try:
+                p.legend = ''
+            except Exception:
+                p.legend = False
         except Exception:
             pass
 
@@ -730,7 +799,10 @@ def plot_variable_origin(
             p.color = 'black'
             p.line_width = 1
             if cont_label_added:
-                p.legend = False
+                try:
+                    p.legend = ''
+                except Exception:
+                    p.legend = False
             else:
                 try:
                     w.activate()
@@ -749,7 +821,7 @@ def plot_variable_origin(
         gl.rescale()
         gp.activate()
         op.lt_exec('doc -e P {page.antialias=1;}')
-        op.lt_exec('doc -e L {layer.speedmode=0; layer -s off; layer -aa 1;}')
+        op.lt_exec('doc -e L {layer.speedmode=0; layer -s 0; layer -aa 1; layer.antialias=1;}')
         op.lt_exec('legend;')
         op.lt_exec('legend.update=0;')
         op.lt_exec('legend.box=0;')
@@ -779,13 +851,19 @@ def plot_variable_origin(
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, display_samples)
+            try:
+                wlab.activate()
+                op.lt_exec('wks.col1.type=4; wks.col1.format=2;')
+            except Exception:
+                pass
             book_name = getattr(book, 'lt_name', getattr(book, 'name', ''))
             sheet_name = getattr(wlab, 'lt_name', getattr(wlab, 'name', 'labels'))
             if book_name and sheet_name:
                 col_ref = "col(1)"
                 rng = f"[{book_name}]{sheet_name}!{col_ref}"
-                op.lt_exec('layer.x.label.type=2;')
+                op.lt_exec('layer.x.label.auto=0; layer.x.label.type=2; layer.x.label.by=1;')
                 op.lt_exec(f'layer.x.label.dataset$="{rng}";')
+                op.lt_exec('layer.x.label.apply=1;')
         except Exception:
             pass
         try:
@@ -827,8 +905,7 @@ from ..common import maybe_handle_outliers
 
 
 def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFrame | None = None):
-    if IMPROVE_READABILITY:
-        apply_readability_fonts()
+    apply_readability_fonts()
     if preprocessed_data is not None:
         data = preprocessed_data.copy(deep=True)
         print("Using results from the immediate outlier check.")

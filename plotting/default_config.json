@@ -68,7 +68,7 @@
     "BASELINE_MODE": "zero_25",
     "INCLUDE_CONTINUOUS": true,
     "MED_WINDOW": 5,
-    "MA_WINDOW": 20,
+    "MA_WINDOW": 200,
     "SAVE_FORMAT": "png",
     "PNG_DPI": 1200,
     "IMPROVE_READABILITY": true,
