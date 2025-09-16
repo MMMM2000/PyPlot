@@ -30,7 +30,7 @@ else:
         arrange_top_layout,
     )
 
-IMPROVE_READABILITY = False
+IMPROVE_READABILITY = True
 
 def _load_loop(path: str) -> Tuple[np.ndarray, np.ndarray]:
     data = np.loadtxt(path, usecols=(0,1))

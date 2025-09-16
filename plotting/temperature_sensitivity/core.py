@@ -31,14 +31,14 @@ PLOT_T2 = bool(_CFG.get("PLOT_T2", True))
 PLOT_VARS = [v for v, b in [("sum", PLOT_SUM), ("dT", PLOT_DT), ("T1", PLOT_T1), ("T2", PLOT_T2)] if b]
 RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
 RAW_MARKER = "o"
-RAW_MARKER_SIZE = 0.3
+RAW_MARKER_SIZE = 1.0
 RAW_ALPHA = 1.0
 MEAN_COLORS = {25: "#00306E", 100: "#965308"}
 MEAN_MARKER = 'o'
 MEAN_MSIZE = 8
 MEAN_LW = 3
 LEGEND_MARKER_SIZE = 6
-IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
+IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", True))
 SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
 LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
 LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
@@ -344,6 +344,7 @@ def plot_variable(
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
+    display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
 
@@ -458,13 +459,17 @@ def plot_variable(
 
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
-    ax.set_xticklabels(samples)
+    ax.set_xticklabels(display_samples)
     ax.set_xlabel('Sample')
     ax.set_ylabel(TS_LABELS[var])
     ax.set_title(f"{comp} {anneal} — {TS_LABELS[var]}")
     ax.grid(True)
 
-    legend = ax.legend(loc='best')
+    legend = ax.legend(
+        loc='center left',
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+    )
     for text, handle in zip(legend.get_texts(), legend.legend_handles):
         if isinstance(handle, Line2D):
             rawcol = handle.get_color()
@@ -481,7 +486,7 @@ def plot_variable(
             rawcol = 'black'
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
-    fig.tight_layout()
+    fig.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
     apply_readability(ax, globals())
     fname = f"{comp} {anneal} {var}"
     if save_flag:
@@ -512,6 +517,7 @@ def plot_variable_origin(
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
+    display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     idx_to_sample = {idx: sample for sample, idx in sample_idx.items()}
 
@@ -540,6 +546,17 @@ def plot_variable_origin(
         if include_cont and not cont.empty:
             cont['Y'] = cont[var]
 
+    all_y = [raw['Y']] if not raw.empty else []
+    if include_cont and not cont.empty:
+        all_y.append(cont['Y'])
+    if all_y:
+        y_min = min(series.min() for series in all_y)
+        y_max = max(series.max() for series in all_y)
+    else:
+        y_min = y_max = 0.0
+    y_range = y_max - y_min if y_max != y_min else 1.0
+    delta_offset = 0.05 * y_range
+
     cont_samples = set(cont['sample']) if include_cont else set()
     means['plot_x'] = means['sample_idx']
     if include_cont and cont_samples:
@@ -555,13 +572,17 @@ def plot_variable_origin(
         means['plot_x'] = means.apply(_shift, axis=1)
 
     connectors: list[pd.DataFrame] = []
+    delta_labels: list[tuple[float, float, str]] = []
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
             sample = idx_to_sample.get(idx)
-            if sample in cont_samples:
-                continue
-            connectors.append(pd.DataFrame({'X': [idx, idx], 'Y': [row[25], row[100]]}))
+            has_cont = sample in cont_samples
+            if not has_cont:
+                connectors.append(pd.DataFrame({'X': [idx, idx], 'Y': [row[25], row[100]]}))
+            delta = row[100] - row[25]
+            y_top = row[100] + (delta_offset if has_cont else 0.0)
+            delta_labels.append((idx - 0.1, y_top, f"{delta:.1f}"))
 
     cont_processed: list[pd.DataFrame] = []
     if include_cont and not cont.empty:
@@ -596,10 +617,20 @@ def plot_variable_origin(
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
+        legend_label = (
+            f"raw {int(temp)}\N{DEGREE SIGN}C"
+            if float(temp).is_integer()
+            else f"raw {temp:g}\N{DEGREE SIGN}C"
+        )
+        try:
+            w.activate()
+            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+        except Exception:
+            pass
         try:
             p.color = color
             p.symbol_shape = 2
-            p.symbol_size = max(1, int(round(RAW_MARKER_SIZE * 12)))
+            p.symbol_size = 1
             p.symbol_edge_color = color
             p.symbol_fill_color = color
             p.line_width = 0
@@ -617,6 +648,16 @@ def plot_variable_origin(
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
+        legend_label = (
+            f"mean {int(temp)}\N{DEGREE SIGN}C"
+            if float(temp).is_integer()
+            else f"mean {temp:g}\N{DEGREE SIGN}C"
+        )
+        try:
+            w.activate()
+            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+        except Exception:
+            pass
         try:
             p.color = color
             p.symbol_shape = 2
@@ -635,9 +676,12 @@ def plot_variable_origin(
         try:
             p.color = 'black'
             p.line_width = 1
+            p.legend = False
         except Exception:
             pass
 
+    cont_label = f"25-100C med {med_window} mwa {ma_window}"
+    cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
         w = op.new_sheet('w', lname=f'cont_{idx}')
         w.from_list(0, cont_df['X'].tolist())
@@ -647,13 +691,24 @@ def plot_variable_origin(
         try:
             p.color = 'black'
             p.line_width = 1
+            if cont_label_added:
+                p.legend = False
+            else:
+                try:
+                    w.activate()
+                    op.lt_exec(f'wks.col2.lname$ = "{cont_label}";')
+                except Exception:
+                    pass
+                cont_label_added = True
         except Exception:
             pass
 
     try:
         gl.rescale()
         gp.activate()
-        op.lt_exec('page.antialias=1; layer -aa 1;')
+        op.lt_exec('page.antialias=1;')
+        op.lt_exec('layer -aa 1;')
+        op.lt_exec('layer.speedmode=0;')
         op.lt_exec('legend;')
         op.lt_exec('legend.update=0;')
         op.lt_exec('lab -xb "Sample";')
@@ -661,9 +716,11 @@ def plot_variable_origin(
         op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
         op.lt_exec('layer.x.inc=1;')
         op.lt_exec('layer.x.step=1;')
+        op.lt_exec(f'layer.y.from={y_min - 0.02 * y_range};')
+        op.lt_exec(f'layer.y.to={y_max + 0.02 * y_range};')
         try:
             wlab = op.new_sheet('w', lname='labels')
-            wlab.from_list(0, samples)
+            wlab.from_list(0, display_samples)
             book_name = getattr(book, 'name', '')
             sheet_name = getattr(wlab, 'name', 'labels')
             rng = f"[{book_name}]{sheet_name}!col(1)"
@@ -671,9 +728,25 @@ def plot_variable_origin(
             op.lt_exec(f'layer.x.label.dataset$="{rng}";')
         except Exception:
             pass
-        title = f"{comp} {anneal} - {TS_LABELS[var]}"
         try:
-            gl.label('Legend').text = title.replace('"', "'")
+            op.lt_exec('label -r py_delta*;')
+        except Exception:
+            pass
+        for idx, (x_pos, y_pos, text) in enumerate(delta_labels, start=1):
+            name = f'py_delta{idx}'
+            esc = text.replace('"', "'")
+            try:
+                op.lt_exec(f'label -n {name} -a {x_pos:.6g} {y_pos:.6g} "{esc}";')
+            except Exception:
+                pass
+        title = f"{comp} {anneal} — {TS_LABELS[var]}"
+        esc_title = title.replace('"', "'")
+        try:
+            gl.label('Title').text = title
+        except Exception:
+            pass
+        try:
+            op.lt_exec(f'title -s "{esc_title}";')
         except Exception:
             pass
     except Exception:

@@ -136,13 +136,6 @@ class SettingsDialog(QtWidgets.QDialog):
         lay.addWidget(QtWidgets.QLabel("Scale Y:"), row + 1, 0)
         lay.addWidget(self.scale_y_cb, row + 1, 1)
 
-        def _toggle_scale(checked: bool) -> None:
-            self.scale_x_cb.setEnabled(checked)
-            self.scale_y_cb.setEnabled(checked)
-
-        self.read_ctrl.read_cb.toggled.connect(_toggle_scale)
-        _toggle_scale(self.read_ctrl.read_cb.isChecked())
-
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
