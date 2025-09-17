@@ -26,6 +26,7 @@ from matplotlib.backends.backend_qtagg import (
 from matplotlib.figure import Figure
 
 from plotting.utils import apply_system_theme
+from app_help import make_help_button
 
 
 class PyVISAAnnealingLogger(QtWidgets.QWidget):
@@ -143,6 +144,10 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         values_layout.addRow("Set current [mA]", self.set_value)
 
         left = QtWidgets.QVBoxLayout()
+        help_row = QtWidgets.QHBoxLayout()
+        help_row.addWidget(make_help_button("logger_pyvisa_current_annealing", self))
+        help_row.addStretch(1)
+        left.addLayout(help_row)
         left.addLayout(top)
         left.addLayout(path_row)
         left.addWidget(self.log_button)

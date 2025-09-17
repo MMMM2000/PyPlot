@@ -22,6 +22,7 @@ from plotting.stress_sensitivity import sens_gui
 from plotting.temperature_dependence import temp_dep_gui
 from plotting.temperature_sensitivity import temp_gui
 from plotting.utils import apply_system_theme, apply_theme
+from app_help import make_help_button
 
 
 PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
@@ -117,9 +118,14 @@ class MasterLauncher(QtWidgets.QWidget):
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
 
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addWidget(make_help_button("launcher", self))
+        button_row.addStretch(1)
+        button_row.addWidget(self.run_button)
+
         self.main_layout.addWidget(self.tabs)
         self.main_layout.addLayout(theme_row)
-        self.main_layout.addWidget(self.run_button)
+        self.main_layout.addLayout(button_row)
 
     def on_theme_changed(self) -> None:
         app_instance = QtWidgets.QApplication.instance()

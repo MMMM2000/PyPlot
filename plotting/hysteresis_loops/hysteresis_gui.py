@@ -18,6 +18,7 @@ if __package__ is None or __package__ == "":
         apply_readability_fonts,
         arrange_top_layout,
     )
+    from app_help import make_help_button
 else:
     from ..utils import (
         apply_system_theme,
@@ -29,6 +30,7 @@ else:
         apply_readability_fonts,
         arrange_top_layout,
     )
+    from app_help import make_help_button
 
 IMPROVE_READABILITY = True
 
@@ -152,7 +154,11 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(self.mode_combo, 0, 1)
         self.read_ctrl, read_group = create_readability_group("hysteresis_hyst", sys.modules[__name__])
         layout.addWidget(read_group, 1, 0, 1, 2)
-        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(make_help_button("plot_hysteresis_loops", self))
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.run_btn)
+        layout.addLayout(btn_row, 2, 0, 1, 2)
 
         arrange_top_layout(self, file_widget, left, self.console)
 

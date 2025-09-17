@@ -19,6 +19,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
 from plotting.utils import apply_system_theme, format_annealing_title, show_plots
+from app_help import make_help_button
 
 import numpy as np
 import matplotlib
@@ -89,6 +90,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     min(self.width() or 880, max(640, avail.width() - 80)),
                     min(self.height() or 720, max(480, avail.height() - 80)),
                 )
+        except Exception:
+            pass
+        try:
+            left_panel = getattr(self.ui, "left_scroll", None)
+            if isinstance(left_panel, QtWidgets.QScrollArea):
+                container = left_panel.widget()
+                if container is not None:
+                    layout = container.layout()
+                    if isinstance(layout, QtWidgets.QVBoxLayout):
+                        help_row = QtWidgets.QHBoxLayout()
+                        help_row.addWidget(make_help_button("logger_current_annealing", self))
+                        help_row.addStretch(1)
+                        layout.insertLayout(0, help_row)
         except Exception:
             pass
         # Remember last log directory and file separately
@@ -176,6 +190,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._process_start_time: float | None = None
         self._last_nonzero_current_time: float | None = None
         self._contact_grace_period = 5.0
+        self._last_serial_rx: float | None = None
+        self._serial_quiet_failures = 0
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -482,6 +498,10 @@ class MainWindow(QtWidgets.QMainWindow):
             #print("Prisla lajna")
             self.zamok.lock()
             self.odpoved_portu = str(self.ser_mcu.readLine(),'ascii')
+            try:
+                self._last_serial_rx = time.monotonic()
+            except Exception:
+                self._last_serial_rx = None
             # reduce console spam
             # print(self.odpoved_portu)
             if((self.modus_operandi > 0) and (self.proces_on == True)):
@@ -1260,10 +1280,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wait = False
         elapsed = 0
         step = 20
-        while not self.sample_ready and self.proces_on and elapsed < timeout_ms:
+        retries = 0
+        limit = max(step, int(timeout_ms))
+        while self.proces_on and not self.sample_ready:
             self.simple_delay(step)
+            if self.sample_ready or not self.proces_on:
+                break
             elapsed += step
-        ok = self.sample_ready
+            if elapsed >= limit:
+                recent = False
+                try:
+                    now = time.monotonic()
+                    if self._last_serial_rx is not None and (now - self._last_serial_rx) < 0.75:
+                        recent = True
+                except Exception:
+                    recent = False
+                if recent:
+                    elapsed = 0
+                    continue
+                if retries == 0:
+                    retries = 1
+                    elapsed = 0
+                    continue
+                break
+        ok = bool(self.sample_ready)
+        if not ok:
+            self._serial_quiet_failures += 1
+        else:
+            self._serial_quiet_failures = 0
         self.sample_ready = False
         return ok
 
@@ -1275,6 +1319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if self.proces_on:
             self.stop_annealing()
+        self._serial_quiet_failures = 0
 
     def handle_lineEdit_log_subor_text_changed(self):
         # Sync f_name from separate directory + file name controls

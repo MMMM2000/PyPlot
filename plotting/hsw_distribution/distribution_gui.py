@@ -22,6 +22,7 @@ if __package__ is None or __package__ == "":
         selected_backend,
     )
     from plotting.backends import wants_matplotlib, wants_origin
+    from app_help import make_help_button
 else:
     from ..utils import (
         apply_system_theme,
@@ -32,6 +33,7 @@ else:
         selected_backend,
     )
     from ..backends import wants_matplotlib, wants_origin
+    from app_help import make_help_button
 
 
 def ask_files() -> List[str]:
@@ -99,7 +101,11 @@ def ask_options() -> Dict[str, Any] | None:
     out_l.addWidget(QtWidgets.QLabel("Backend:"))
     out_l.addWidget(backend_combo)
     layout.addWidget(out_box, 2, 0, 1, 2)
-    layout.addWidget(run_btn, 3, 0, 1, 2)
+    btn_row = QtWidgets.QHBoxLayout()
+    btn_row.addWidget(make_help_button("plot_hsw_distribution", dialog))
+    btn_row.addStretch(1)
+    btn_row.addWidget(run_btn)
+    layout.addLayout(btn_row, 3, 0, 1, 2)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         return None

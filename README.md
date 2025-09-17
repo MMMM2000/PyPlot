@@ -89,6 +89,13 @@ single-row layouts so horizontal legends behave correctly.  The
 Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
+
+Every window now includes a **Help** button.  The launcher, each plotting
+dialog, every logger, and the serial emulator open a Markdown help sheet that
+explains the workflow, highlights where settings are stored, and links the UI
+controls to their expected behaviour.  When onboarding new colleagues you can
+point them to the help button for context without having to maintain a separate
+manual.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 
@@ -124,6 +131,9 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
   then applies a short start-up grace period and requires multiple zeros spread
   over a short delay before stopping, so start-up ramps and momentary dips no
   longer trip the burn-out warning
+* serial polling keeps track of the last response time and extends the wait
+  before flagging "no response" so the initial ramp commands are no longer
+  mistaken for a disconnected supply
 
 Launch from the master launcher or run
 
@@ -177,7 +187,19 @@ pyinstaller launcher.spec
 
 to create a standalone `dist/launcher` for the current platform.  The
 specification bundles the plotting configuration automatically, so no manual
-data copying is required before running the command.
+data copying is required before running the command.  When preparing a build for
+colleagues:
+
+1. Activate the virtual environment and install everything from
+   `requirements.txt` to make sure the frozen app includes the same library
+   versions you tested with.
+2. Run `pyinstaller launcher.spec` and wait for the `dist/launcher` folder to be
+   produced.  This folder contains the executable and all runtime resources.
+3. Launch `dist/launcher/launcher.exe` (or the platform equivalent) on your
+   machine to smoke-test the build before distributing it.  The help buttons in
+   each window double as an onboarding guide.
+4. Zip the entire `dist/launcher` directory when sharing the tools so recipients
+   can extract and run the launcher without installing Python.
 
 ## 6. Experiments
 
@@ -190,7 +212,15 @@ directory and are independent from the main tools.
 modules.  Configure module settings, manage the list of input files, and run the
 plotter without the window closing or prompting to save figures afterwards.
 
-## 7. Testing
+## 7. Repository maintenance
+
+* Temporary Origin HTML exports and scratch files are removed from the
+  repository so fresh clones only contain the code, configuration, and sample
+  data required to run the tools.
+* The outdated Visual Basic logger has been deleted; the modern PyQt loggers are
+  the supported workflow going forward.
+
+## 8. Testing
 
 Run the test suite after installing the requirements:
 

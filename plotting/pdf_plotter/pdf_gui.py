@@ -27,7 +27,6 @@ from ..utils import (
     get_last_output_dir,
     set_last_output_dir,
     run_with_console,
-    get_readability,
     set_readability,
     apply_readability_fonts,
     restore_backend_choice,
@@ -37,6 +36,7 @@ from ..utils import (
     store_png_dpi,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
+from app_help import make_help_button
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -311,9 +311,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Title size", self.title_fs)
         form.addRow("Label size", self.label_fs)
         form.addRow("Tick size", self.tick_fs)
-        self.read_cb = QtWidgets.QCheckBox()
-        self.read_cb.setChecked(get_readability("pdf_plotter"))
-        form.addRow("Improve readability", self.read_cb)
 
         # Save options
         self.save_cb = QtWidgets.QCheckBox()
@@ -367,7 +364,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
         self.plot_btn.clicked.connect(lambda: run_with_console(self.plot, self.console))
         self.clear_btn.clicked.connect(self.clear_plot)
-        btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn)
+        btn_box = self._hbox(
+            make_help_button("plot_pdf", self),
+            self.auto_cb,
+            self.plot_btn,
+            self.clear_btn,
+        )
 
         # Ensure the plot controls are always visible without scrolling by placing the
         # button row outside the scrollable area.
@@ -571,9 +573,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return lines_by_file
 
     def _plot_single(self, x_name: str) -> None:
-        if self.read_cb.isChecked():
-            apply_readability_fonts()
-        set_readability("pdf_plotter", self.read_cb.isChecked())
+        apply_readability_fonts()
+        set_readability("pdf_plotter", True)
         lines_by_file = self._collect_lines_by_file(x_name)
         if not lines_by_file:
             QtWidgets.QMessageBox.information(self, "No data", "No valid rows to plot.")

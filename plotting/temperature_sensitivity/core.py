@@ -715,6 +715,8 @@ def plot_variable_origin(
     gp = op.new_graph(template='scatter')
     gl = gp[0]
 
+    legend_entries: list[str] = []
+
     for temp in sorted(raw['temp'].dropna().unique()):
         sub = raw[raw['temp'] == temp]
         if sub.empty:
@@ -742,6 +744,7 @@ def plot_variable_origin(
             p.legend = legend_label
         except Exception:
             pass
+        legend_entries.append(legend_label)
 
     for temp in sorted(means['temp'].dropna().unique()):
         sub = means[means['temp'] == temp]
@@ -769,6 +772,7 @@ def plot_variable_origin(
             p.legend = legend_label
         except Exception:
             pass
+        legend_entries.append(legend_label)
 
     cont_label = f"25-100C med {med_window} mwa {ma_window}"
     cont_label_added = False
@@ -799,6 +803,7 @@ def plot_variable_origin(
                 cont_label_added = True
         except Exception:
             pass
+        legend_entries.append(cont_label if cont_label_added and idx == 1 else "")
 
     try:
         gl.rescale()
@@ -809,6 +814,11 @@ def plot_variable_origin(
         op.lt_exec('legend.update=0;')
         op.lt_exec('legend.box=0;')
         op.lt_exec('legend.just=1;')
+        try:
+            legend_text = "\n".join(legend_entries)
+            op.lt_exec(f'legend.text$="{legend_text.replace("\"", "'")}";')
+        except Exception:
+            pass
         legend_loc = str(globals().get("LEGEND_LOCATION", "inside")).lower()
         if legend_loc in {"outside_right", "outside", "outside right"}:
             op.lt_exec('legend.x=1.02; legend.y=0.5;')
