@@ -48,7 +48,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QTextEdit, QGroupBox, QHBoxLayout, QVBoxLayout,
     QCheckBox, QLineEdit, QFileDialog
 )
-from app_help import make_help_button
+from plotting.utils import ensure_app_theme, install_standard_menu
 
 from typing import TYPE_CHECKING, Optional, cast
 
@@ -348,11 +348,6 @@ class Main(QWidget):
     def _build_ui(self):
         layout = QVBoxLayout(self)
 
-        help_row = QHBoxLayout()
-        help_row.addWidget(make_help_button("emulator_serial", self))
-        help_row.addStretch(1)
-        layout.addLayout(help_row)
-
         # Pair group
         pair_box = QGroupBox("Port Helpers (macOS/Linux)")
         pb_layout = QGridLayout(pair_box)
@@ -431,6 +426,8 @@ class Main(QWidget):
         layout.addWidget(pair_box)
         layout.addWidget(emu_box)
         layout.addWidget(self.log)
+
+        install_standard_menu(self, help_topic="emulator_serial")
 
         # initial
         self.refresh_ports()
@@ -697,9 +694,6 @@ class Main(QWidget):
         return super().closeEvent(a0)
 
 
-from plotting.utils import apply_system_theme
-
-
 def main() -> QWidget | None:
     app = QApplication.instance()
     owns_app = False
@@ -709,7 +703,7 @@ def main() -> QWidget | None:
     # Match the app theme with the system
     try:
         from PyQt6 import QtWidgets as _QtW
-        apply_system_theme(cast(_QtW.QApplication, app))
+        ensure_app_theme(cast(_QtW.QApplication, app))
     except Exception:
         pass
     w = Main()

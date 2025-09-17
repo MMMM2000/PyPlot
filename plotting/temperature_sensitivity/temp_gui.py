@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 
 import pathlib
 
@@ -9,7 +9,7 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.temperature_sensitivity import core as orig
     from plotting.utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         prepare_output_dir,
         get_last_output_dir,
@@ -18,18 +18,17 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
-        release_origin,
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
+    from plotting.utils import release_origin
 else:
     from . import core as orig
     from ..utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         prepare_output_dir,
         get_last_output_dir,
@@ -38,20 +37,24 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
-        release_origin,
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
+    from ..utils import release_origin
 
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Temperature Sensitivity Settings")
+        self._owns_app = False
+        try:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+        except Exception:
+            pass
 
         self.files, file_widget = create_file_widget(
             self, key="temperature_sensitivity", on_outlier_toggle=self._handle_outlier_toggle
@@ -144,12 +147,18 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(cont_group, 1, 0, 1, 2)
         layout.addWidget(read_group, 2, 0, 1, 2)
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(make_help_button("plot_temperature_sensitivity", self))
+        btn_row.setContentsMargins(0, 12, 0, 0)
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
-        layout.addLayout(btn_row, 3, 0, 1, 2)
 
-        arrange_top_layout(self, file_widget, left, self.console)
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=btn_row,
+            help_topic="plot_temperature_sensitivity",
+        )
 
     def _handle_outlier_toggle(self, enabled: bool, files: list[str]) -> bool:
         if not enabled:
@@ -251,10 +260,11 @@ def main() -> None:
     owns = False
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-        apply_system_theme(app)
+        ensure_app_theme(app)
         owns = True
     orig.ProgressDialog = ProgressDialog
     dlg = SettingsDialog()
+    dlg._owns_app = owns
     dlg.show()
     if owns:
         app.exec()

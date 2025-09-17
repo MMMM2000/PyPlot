@@ -1,6 +1,7 @@
 from PyQt6 import QtWidgets, QtGui, QtCore
 import os
 import sys
+import weakref
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -11,6 +12,8 @@ from contextlib import contextmanager
 from typing import Callable
 import matplotlib.pyplot as plt
 import datetime
+
+from app_help import show_help
 
 
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
@@ -406,18 +409,69 @@ def create_file_widget(
         QtWidgets.QSizePolicy.Policy.Expanding,
     )
 
+    prefs = _settings()
+    dev_opts = developer_options()
+    storage_key = f"{key}_remembered_files" if key else None
+
+    def _refresh_items() -> None:
+        file_list.clear()
+        for path in files:
+            item = QtWidgets.QListWidgetItem(path)
+            if path and not Path(path).exists():
+                item.setForeground(QtGui.QColor("#c0392b"))
+                item.setToolTip("File could not be found on disk")
+            file_list.addItem(item)
+
+    def _store_files() -> None:
+        if storage_key is None:
+            return
+        if dev_opts.keep_files():
+            prefs.setValue(storage_key, list(files))
+        else:
+            prefs.remove(storage_key)
+
+    def _load_persisted_files() -> None:
+        if storage_key is None or not dev_opts.keep_files():
+            return
+        raw = prefs.value(storage_key, [])
+        if isinstance(raw, str):
+            parts = [seg for seg in raw.splitlines() if seg]
+            candidates = parts or ([raw] if raw else [])
+        elif isinstance(raw, (list, tuple, set)):
+            candidates = [str(seg) for seg in raw if seg]
+        else:
+            candidates = []
+        changed = False
+        for candidate in candidates:
+            if candidate not in files:
+                files.append(candidate)
+                changed = True
+        if changed or files:
+            _refresh_items()
+
     def add_files() -> None:
         new = select_files_or_folder(parent, ext, key=key)
+        changed = False
         for f in new:
             if f not in files:
                 files.append(f)
-        file_list.clear()
-        file_list.addItems(files)
+                changed = True
+        if changed:
+            _refresh_items()
+            _store_files()
 
     def remove_selected() -> None:
+        removed = False
         for item in file_list.selectedItems():
-            files.remove(item.text())
+            try:
+                files.remove(item.text())
+                removed = True
+            except ValueError:
+                pass
             file_list.takeItem(file_list.row(item))
+        if removed:
+            _refresh_items()
+            _store_files()
 
     def open_item(item: QtWidgets.QListWidgetItem) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
@@ -438,7 +492,6 @@ def create_file_widget(
     auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
     auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
 
-    prefs = _settings()
     auto_key = f"{key}_auto_remove_outliers" if key else None
     auto_pref = bool(_common.AUTO_REMOVE_OUTLIERS)
     if auto_key is not None:
@@ -499,7 +552,40 @@ def create_file_widget(
     layout.addLayout(btn_row)
     layout.addWidget(file_list)
 
+    _load_persisted_files()
+
+    def _toggle_keep_files(enabled: bool) -> None:
+        if storage_key is None:
+            return
+        if enabled:
+            _load_persisted_files()
+            _store_files()
+        else:
+            prefs.remove(storage_key)
+
+    dev_opts.keep_files_changed.connect(_toggle_keep_files)
+
+    def _cleanup(*_: object) -> None:
+        try:
+            dev_opts.keep_files_changed.disconnect(_toggle_keep_files)
+        except Exception:
+            pass
+
+    container.destroyed.connect(_cleanup)
+
     return files, container
+
+
+def _as_widget(item: QtWidgets.QWidget | QtWidgets.QLayout | None) -> QtWidgets.QWidget | None:
+    """Return ``item`` as a widget, wrapping layouts in a temporary widget."""
+
+    if item is None:
+        return None
+    if isinstance(item, QtWidgets.QWidget):
+        return item
+    wrapper = QtWidgets.QWidget()
+    wrapper.setLayout(item)
+    return wrapper
 
 
 def arrange_side_panel(
@@ -507,6 +593,8 @@ def arrange_side_panel(
     left: QtWidgets.QWidget,
     file_widget: QtWidgets.QWidget,
     console: QtWidgets.QPlainTextEdit,
+    *,
+    footer: QtWidgets.QWidget | QtWidgets.QLayout | None = None,
 ) -> None:
     """Place settings beside file list and console to keep dialogs compact."""
 
@@ -526,7 +614,22 @@ def arrange_side_panel(
     scroll.setSizeAdjustPolicy(
         QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
     )
-    splitter.addWidget(scroll)
+
+    footer_widget = _as_widget(footer)
+    if footer_widget is not None:
+        footer_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        container = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(scroll, 1)
+        column.addWidget(footer_widget, 0)
+        splitter.addWidget(container)
+    else:
+        splitter.addWidget(scroll)
 
     right = QtWidgets.QWidget()
     side_layout = QtWidgets.QVBoxLayout(right)
@@ -547,18 +650,23 @@ def arrange_side_panel(
     main_layout = QtWidgets.QVBoxLayout(dialog)
     main_layout.addWidget(splitter)
 
+    return splitter
+
 
 def arrange_top_layout(
     dialog: QtWidgets.QDialog,
     file_widget: QtWidgets.QWidget,
     center: QtWidgets.QWidget,
     console: QtWidgets.QPlainTextEdit,
+    *,
+    footer: QtWidgets.QWidget | QtWidgets.QLayout | None = None,
+    help_topic: str | None = None,
 ) -> None:
     """Place settings beside file list and console for a compact dialog."""
 
     # Reuse the side-panel arrangement to keep the console narrow while giving
     # the scrolling settings area ample width.
-    arrange_side_panel(dialog, center, file_widget, console)
+    splitter = arrange_side_panel(dialog, center, file_widget, console, footer=footer)
 
     # Ensure the dialog fits comfortably on screen and widgets remain visible
     # when resized. This mirrors the sizing logic of the previous top layout but
@@ -572,6 +680,345 @@ def arrange_top_layout(
         width, height = 1000, 800
     dialog.resize(width, height)
     dialog.setMinimumSize(min(width, 900), min(height, 600))
+
+    split_sizes = [int(width * 0.44), int(width * 0.56)]
+    if splitter is not None and splitter.orientation() == QtCore.Qt.Orientation.Horizontal:
+        try:
+            splitter.setSizes(split_sizes)
+        except Exception:
+            pass
+
+    install_standard_menu(
+        dialog,
+        help_topic=help_topic,
+        console=console,
+        file_widget=file_widget,
+        splitter=splitter,
+        default_split_sizes=split_sizes,
+    )
+
+
+def _ensure_menu_bar(target: QtWidgets.QWidget) -> QtWidgets.QMenuBar:
+    """Return a menu bar for ``target``, creating one if required."""
+
+    if isinstance(target, QtWidgets.QMainWindow):
+        bar = target.menuBar()
+        if bar is None:
+            bar = QtWidgets.QMenuBar(target)
+            target.setMenuBar(bar)
+        return bar
+
+    layout = target.layout()
+    if layout is None:
+        layout = QtWidgets.QVBoxLayout(target)
+        target.setLayout(layout)
+
+    bar = getattr(layout, "menuBar", lambda: None)()
+    if bar is None:
+        bar = QtWidgets.QMenuBar(target)
+        layout.setMenuBar(bar)
+    return bar
+
+
+def install_standard_menu(
+    target: QtWidgets.QWidget,
+    *,
+    help_topic: str | None = None,
+    console: QtWidgets.QWidget | None = None,
+    file_widget: QtWidgets.QWidget | None = None,
+    splitter: QtWidgets.QSplitter | None = None,
+    default_split_sizes: list[int] | tuple[int, int] | None = None,
+) -> QtWidgets.QMenuBar:
+    """Attach the shared menu bar with theme, layout, and help entries."""
+
+    menu_bar = _ensure_menu_bar(target)
+
+    # Clear any previous shared menus while keeping custom entries intact.
+    # We identify menus we manage by object names to avoid clobbering user
+    # customisations.
+    to_remove = []
+    for action in menu_bar.actions():
+        menu = action.menu()
+        if menu is not None and menu.objectName().startswith("mw_shared_"):
+            to_remove.append(action)
+    for action in to_remove:
+        menu_bar.removeAction(action)
+
+    view_menu = menu_bar.addMenu("&View")
+    view_menu.setObjectName("mw_shared_view")
+    theme_submenu = theme_manager().create_theme_menu(view_menu)
+    theme_submenu.setObjectName("mw_shared_theme")
+    view_menu.addMenu(theme_submenu)
+
+    if file_widget is not None:
+        view_menu.addSeparator()
+        files_action = view_menu.addAction("Show &File Browser")
+        files_action.setCheckable(True)
+        files_action.setChecked(file_widget.isVisible())
+        files_action.toggled.connect(file_widget.setVisible)
+
+    if console is not None:
+        view_menu.addSeparator()
+        console_action = view_menu.addAction("Show &Console")
+        console_action.setCheckable(True)
+        console_action.setChecked(console.isVisible())
+
+        def _set_console_visible(checked: bool) -> None:
+            console.setVisible(checked)
+
+        console_action.toggled.connect(_set_console_visible)
+
+        def _sync_console() -> None:
+            state = console.isVisible()
+            if console_action.isChecked() != state:
+                console_action.blockSignals(True)
+                console_action.setChecked(state)
+                console_action.blockSignals(False)
+
+        sync_filter = _VisibilitySync(console_action, _sync_console)
+        console.installEventFilter(sync_filter)
+        setattr(console, "_mw_visibility_sync", sync_filter)
+
+    if splitter is not None and default_split_sizes:
+        view_menu.addSeparator()
+
+        def _reset_layout() -> None:
+            sizes = [max(40, int(default_split_sizes[0])), max(40, int(default_split_sizes[1]))]
+            try:
+                splitter.setSizes(sizes)
+            except Exception:
+                pass
+
+        reset_action = view_menu.addAction("&Reset Layout")
+        reset_action.triggered.connect(_reset_layout)
+
+    developer_menu = developer_options().create_menu(menu_bar)
+    developer_menu.setObjectName("mw_shared_developer")
+    menu_bar.addMenu(developer_menu)
+
+    help_menu = menu_bar.addMenu("&Help")
+    help_menu.setObjectName("mw_shared_help")
+    if help_topic:
+        help_action = help_menu.addAction("View Help")
+        try:
+            help_action.setShortcut(
+                QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents)
+            )
+        except Exception:
+            pass
+
+        def _show_help() -> None:
+            show_help(help_topic, target)
+
+        help_action.triggered.connect(_show_help)
+    else:
+        help_menu.setEnabled(False)
+
+    return menu_bar
+
+
+class _VisibilitySync(QtCore.QObject):
+    """Synchronise a checkable action with a widget's visibility."""
+
+    def __init__(self, action: QtGui.QAction, sync: Callable[[], None]):
+        super().__init__(action.parent())
+        self._action = action
+        self._sync = sync
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: D401
+        if event.type() in {
+            QtCore.QEvent.Type.Show,
+            QtCore.QEvent.Type.Hide,
+            QtCore.QEvent.Type.ShowToParent,
+            QtCore.QEvent.Type.HideToParent,
+        }:
+            self._sync()
+        return False
+
+
+class _ThemeManager(QtCore.QObject):
+    """Coordinate theme changes across every window."""
+
+    theme_changed = QtCore.pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        settings = QtCore.QSettings("microwire", "ui")
+        stored = str(settings.value("theme_mode", "system") or "system").lower()
+        self._settings = settings
+        self._mode = stored if stored in {"system", "light", "dark"} else "system"
+        self._actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            apply_theme(app, self._mode)
+
+    def current_mode(self) -> str:
+        return self._mode
+
+    def apply(self, app: QtWidgets.QApplication) -> None:
+        apply_theme(app, self._mode)
+
+    def set_mode(self, mode: str) -> None:
+        mode = (mode or "system").lower()
+        if mode not in {"system", "light", "dark"}:
+            mode = "system"
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self._settings.setValue("theme_mode", self._mode)
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            apply_theme(app, self._mode)
+        self._sync_actions()
+        self.theme_changed.emit(self._mode)
+
+    def create_theme_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
+        menu = QtWidgets.QMenu("&Theme", parent)
+        group = QtGui.QActionGroup(menu)
+        group.setExclusive(True)
+        for mode, label in (("system", "System"), ("light", "Light"), ("dark", "Dark")):
+            action = group.addAction(label)
+            action.setData(mode)
+            action.setCheckable(True)
+            action.setChecked(mode == self._mode)
+
+            def _set_theme(checked: bool, value: str = mode) -> None:
+                if checked:
+                    theme_manager().set_mode(value)
+
+            action.triggered.connect(_set_theme)
+            menu.addAction(action)
+            self._actions.append(weakref.ref(action))
+        return menu
+
+    def _sync_actions(self) -> None:
+        alive: list[weakref.ReferenceType[QtGui.QAction]] = []
+        for ref in self._actions:
+            action = ref()
+            if action is None:
+                continue
+            alive.append(ref)
+            target_state = action.data() == self._mode
+            if action.isChecked() != target_state:
+                action.blockSignals(True)
+                action.setChecked(target_state)
+                action.blockSignals(False)
+        self._actions = alive
+
+
+_THEME_MANAGER: _ThemeManager | None = None
+
+
+def theme_manager() -> _ThemeManager:
+    """Return the shared :class:`_ThemeManager` singleton."""
+
+    global _THEME_MANAGER
+    if _THEME_MANAGER is None:
+        _THEME_MANAGER = _ThemeManager()
+    return _THEME_MANAGER
+
+
+class _DeveloperOptions(QtCore.QObject):
+    """Store developer conveniences shared across every window."""
+
+    keep_files_changed = QtCore.pyqtSignal(bool)
+    experiments_visibility_changed = QtCore.pyqtSignal(bool)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._settings = QtCore.QSettings("microwire", "ui")
+        self._keep_files = self._read_bool("developer_keep_files", default=False)
+        self._show_experiments = self._read_bool(
+            "developer_show_experiments", default=False
+        )
+        self._keep_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+        self._experiment_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+
+    # ------------------------------------------------------------------ helpers
+    def _read_bool(self, key: str, *, default: bool) -> bool:
+        value = self._settings.value(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return default
+
+    def _sync(self, actions: list[weakref.ReferenceType[QtGui.QAction]], state: bool) -> None:
+        alive: list[weakref.ReferenceType[QtGui.QAction]] = []
+        for ref in actions:
+            action = ref()
+            if action is None:
+                continue
+            alive.append(ref)
+            if action.isChecked() != state:
+                action.blockSignals(True)
+                action.setChecked(state)
+                action.blockSignals(False)
+        actions[:] = alive
+
+    # ------------------------------------------------------------------ exposed API
+    def keep_files(self) -> bool:
+        return self._keep_files
+
+    def show_experiments(self) -> bool:
+        return self._show_experiments
+
+    def set_keep_files(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._keep_files:
+            return
+        self._keep_files = enabled
+        self._settings.setValue("developer_keep_files", enabled)
+        self._sync(self._keep_actions, enabled)
+        self.keep_files_changed.emit(enabled)
+
+    def set_show_experiments(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._show_experiments:
+            return
+        self._show_experiments = enabled
+        self._settings.setValue("developer_show_experiments", enabled)
+        self._sync(self._experiment_actions, enabled)
+        self.experiments_visibility_changed.emit(enabled)
+
+    def create_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
+        menu = QtWidgets.QMenu("&Developer", parent)
+
+        keep_action = menu.addAction("Keep &File Selections")
+        keep_action.setObjectName("mw_keep_files")
+        keep_action.setCheckable(True)
+        keep_action.setChecked(self._keep_files)
+        keep_action.toggled.connect(self.set_keep_files)
+        self._keep_actions.append(weakref.ref(keep_action))
+
+        exp_action = menu.addAction("Show &Experiments Tab")
+        exp_action.setObjectName("mw_show_experiments")
+        exp_action.setCheckable(True)
+        exp_action.setChecked(self._show_experiments)
+        exp_action.toggled.connect(self.set_show_experiments)
+        self._experiment_actions.append(weakref.ref(exp_action))
+
+        return menu
+
+
+_DEVELOPER_OPTIONS: _DeveloperOptions | None = None
+
+
+def developer_options() -> _DeveloperOptions:
+    """Return the shared :class:`_DeveloperOptions` singleton."""
+
+    global _DEVELOPER_OPTIONS
+    if _DEVELOPER_OPTIONS is None:
+        _DEVELOPER_OPTIONS = _DeveloperOptions()
+    return _DEVELOPER_OPTIONS
+
+
+def ensure_app_theme(app: QtWidgets.QApplication) -> None:
+    """Apply the stored theme preference to ``app``."""
+
+    theme_manager().apply(app)
 
 
 class ReadabilityControls:

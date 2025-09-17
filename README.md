@@ -90,19 +90,28 @@ Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 
-Every window now includes a **Help** button.  The launcher, each plotting
-dialog, every logger, and the serial emulator open a Markdown help sheet that
-explains the workflow, highlights where settings are stored, and links the UI
-controls to their expected behaviour.  When onboarding new colleagues you can
-point them to the help button for context without having to maintain a separate
-manual.
-Origin sessions are closed automatically after plots are generated so the
-Origin application can be closed independently from the Python tools.
+Every window now includes a shared menu bar.  The **View** menu exposes theme
+controls (System/Light/Dark), toggles the file browser or console panes, and
+resets splitter sizes if the layout becomes cramped, while **Help** opens a
+Markdown guide tailored to the current tool.  When onboarding new colleagues you
+can point them to the menu entry for context without having to maintain a
+separate manual.  The main action row stays anchored beneath the settings so
+Run/Plot buttons remain visible without scrolling through long option lists.
+Origin sessions are closed automatically after plots are generated so the Origin
+application can be closed independently from the Python tools.
 
-Temperature-sensitivity plots now match between Matplotlib and Origin: sample
-ticks read `2/1`, `2/2`, … in both outputs thanks to a dedicated text dataset on
-the Origin X axis, legends share the same ordering and colour coding, symbol
-visibility follows the **Show symbols** option, and raw traces advertise `25 °C`
+The menu bar also adds a **Developer** section. Enable **Keep File Selections**
+to reopen plotting dialogs with the same files pre-selected—handy when you are
+tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose
+prototype utilities such as the PyVISA annealing logger and the liquid-glass UI
+concept. Keep the toggle off for day-to-day work to focus on production tools
+only.
+
+Temperature-sensitivity plots now match between Matplotlib and Origin: each
+sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …) so
+the workbook and figure stay in sync even when Origin insists on numeric tick
+labels. Legends share the same ordering and colour coding, symbol visibility
+follows the **Show symbols** option, and raw traces advertise `25 °C`
 instead of `25.0 °C`.  Origin exports disable speed mode, enable
 anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
 title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
@@ -141,22 +150,23 @@ Launch from the master launcher or run
 python -m data_logging.current_annealing_logger.current_annealing_logger
 ```
 
-### 3.2 PyVISA Current Annealing Logger
+### 3.2 PyVISA Current Annealing Logger (experimental)
 
-Uses PyVISA to communicate with SCPI instruments over USB, RS‑232 or TCP/IP.  It
-mirrors the serial logger’s workflow and adds the same voltage‑limit safety
-dialog and live values panel.  Select a VISA resource (e.g.
-`ASRL/ttyV1::INSTR`) and start logging.
-The ramp-down path is plotted in a contrasting colour to distinguish it from the
-current ramp-up, and the first zero sample is ignored just like in the serial
-logger.
+The PyVISA variant now lives under the launcher’s **Experiments** tab. Enable
+the tab from **Developer → Show Experiments Tab** to expose it. The GUI mirrors
+the serial logger feature-for-feature—configure peak current, step, interval,
+dwell, and loop count (including an infinite option) while the time estimate
+updates live. The voltage-limit dialog, **Reverse now** button, and contact-loss
+guard all behave like the serial tool, and the ramp-down trace is plotted in a
+contrasting colour. Select a VISA resource (e.g. `ASRL/ttyV1::INSTR`), choose
+where to log, and click **Start annealing**—the first zero sample is skipped
+automatically. The logger remembers its last log directory and file name and
+shares the same menu shortcuts for themes and layout tweaks.
 
-The PyVISA logger also remembers its last log directory and file name.
-
-Launch from the master launcher or run
+Run it directly with
 
 ```bash
-python -m data_logging.pyvisa_current_annealing_logger
+python -m experiments.pyvisa_current_annealing_logger
 ```
 
 ### 3.3 Generic Data Logger
@@ -206,11 +216,20 @@ colleagues:
 Prototype user interfaces and plotting experiments live in the `experiments`
 directory and are independent from the main tools.
 
-### Data Plotter
+### PyVISA current annealing logger
 
-`experiments/data_plotter.py` provides a small GUI wrapper around the plotting
-modules.  Configure module settings, manage the list of input files, and run the
-plotter without the window closing or prompting to save figures afterwards.
+`experiments/pyvisa_current_annealing_logger.py` mirrors the serial logger while
+talking to VISA instruments. Enable the Experiments tab from the launcher’s
+**Developer** menu to access it, or run the module directly when you want to
+exercise VISA hardware without altering the production launcher.
+
+### Liquid glass UI demo
+
+`experiments/liquid_glass_gui.py` embeds the PyVISA annealing logger inside a
+macOS 26-inspired glass workspace. Launch the classic logger from the buttons in
+the window to compare the production interface against the translucent skin, or
+open the serial logger for extra context. Use the concept to gather feedback
+before enabling a "liquid glass" appearance toggle in the main tools.
 
 ## 7. Repository maintenance
 

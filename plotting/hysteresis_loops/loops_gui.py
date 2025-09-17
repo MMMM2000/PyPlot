@@ -9,7 +9,7 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.hysteresis_loops import core
     from plotting.utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         run_with_console,
         create_readability_group,
@@ -19,11 +19,10 @@ if __package__ is None or __package__ == "":
         store_backend_choice,
         selected_backend,
     )
-    from app_help import make_help_button
 else:
     from . import core
     from ..utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         run_with_console,
         create_readability_group,
@@ -33,7 +32,6 @@ else:
         store_backend_choice,
         selected_backend,
     )
-    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -72,12 +70,18 @@ class SettingsDialog(QtWidgets.QDialog):
 
         layout.addWidget(mode_group, 0, 0, 1, 2)
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(make_help_button("plot_hysteresis_loops", self))
+        btn_row.setContentsMargins(0, 12, 0, 0)
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
-        layout.addLayout(btn_row, 1, 0, 1, 2)
 
-        arrange_top_layout(self, file_widget, left, self.console)
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=btn_row,
+            help_topic="plot_hysteresis_loops",
+        )
 
     def run(self) -> None:
         if not self.files:
@@ -97,7 +101,7 @@ def main() -> None:
     owns = False
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-        apply_system_theme(app)
+        ensure_app_theme(app)
         owns = True
     dlg = SettingsDialog()
     dlg.show()

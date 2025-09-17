@@ -630,6 +630,11 @@ def plot_variable_origin(
     display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     idx_to_sample = {idx: sample for sample, idx in sample_idx.items()}
+    display_by_idx: dict[float, str] = {}
+    for sample, label in zip(samples, display_samples):
+        idx = sample_idx[sample]
+        display_by_idx[idx] = label
+        display_by_idx[float(idx)] = label
 
     work = df.copy()
     work['sample_idx'] = work['sample'].map(sample_idx).astype(float)
@@ -752,15 +757,22 @@ def plot_variable_origin(
             continue
         temp_label = _format_temp_label(temp)
         w = op.new_sheet('w', lname=f'mean_{temp_label}')
-        w.from_list(0, sub['plot_x'].to_list())
-        w.from_list(1, sub[var].to_list())
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        labels = [display_by_idx.get(val, idx_to_sample.get(val, str(val))) for val in sub['sample_idx']]
+        w.from_list(0, labels)
+        w.from_list(1, sub['plot_x'].to_list())
+        w.from_list(2, sub[var].to_list())
+        try:
+            w.activate()
+            op.lt_exec('wks.col1.type=4; wks.col1.format=2; wks.col1.name$="Sample";')
+            op.lt_exec('wks.col2.name$="Position"; wks.col3.name$="Value";')
+        except Exception:
+            pass
+        p = gl.add_plot(w, coly=2, colx=1, type='s')
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
         legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
         try:
             w.activate()
-            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+            op.lt_exec(f'wks.col3.lname$ = "{legend_label}";')
         except Exception:
             pass
         try:
@@ -826,11 +838,18 @@ def plot_variable_origin(
             op.lt_exec('legend.x=0.18; legend.y=0.88;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
+        base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
+        label_gap = min(max(0.12 * y_range, 0.5), y_range * 0.4)
+        label_extra = min(max(0.05 * y_range, 0.3), y_range * 0.2)
+        tick_level = y_min - label_gap
+        label_bottom = tick_level - label_extra
+        axis_bottom = y_min - base_pad
+
         op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
         op.lt_exec('layer.x.inc=1;')
         op.lt_exec('layer.x.step=1;')
-        op.lt_exec(f'layer.y.from={y_min - 0.02 * y_range};')
-        op.lt_exec(f'layer.y.to={plot_top};')
+        op.lt_exec(f'layer.y.from={axis_bottom:.6g};')
+        op.lt_exec(f'layer.y.to={plot_top:.6g};')
         try:
             op.lt_exec('layer -lx 0; layer -ly 0;')
         except Exception:
@@ -841,6 +860,7 @@ def plot_variable_origin(
             op.lt_exec('layer.x.top.ticklabels=0; layer.y.right.ticklabels=0;')
         except Exception:
             pass
+        labels_applied = False
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, display_samples)
@@ -852,16 +872,76 @@ def plot_variable_origin(
                 )
             except Exception:
                 pass
-            book_name = getattr(book, 'lt_name', getattr(book, 'name', ''))
-            sheet_name = getattr(wlab, 'lt_name', getattr(wlab, 'name', 'labels'))
+            book_name = getattr(book, 'lt_name', '') or getattr(book, 'name', '')
+            sheet_name = getattr(wlab, 'lt_name', '') or getattr(wlab, 'name', 'labels')
             if book_name and sheet_name:
                 book_ref = str(book_name).replace('"', "'")
                 sheet_ref = str(sheet_name).replace('"', "'")
                 col_ref = f"col({col_short})"
                 rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
-                op.lt_exec('layer.x.label.auto=0; layer.x.label.type=2; layer.x.label.by=1;')
-                op.lt_exec(f'layer.x.label.dataset$="{rng}";')
+                cmd = "".join(
+                    [
+                        "layer.x.label.auto=0;",
+                        "layer.x.label.type=2;",
+                        "layer.x.label.by=1;",
+                        f"layer.x.label.from=1;",
+                        f"layer.x.label.to={len(display_samples)};",
+                        f"layer.x.label.count={len(display_samples)};",
+                        "layer.x.label.formula$=\"\";",
+                        f"layer.x.label.dataset$=\"{rng}\";",
+                        "layer.x.label.apply=1;",
+                    ]
+                )
+                op.lt_exec(cmd)
+                labels_applied = True
+        except Exception:
+            labels_applied = False
+        if not labels_applied:
+            try:
+                label_text = "\n".join(display_samples)
+                op.lt_exec(
+                    "layer.x.label.auto=0; layer.x.label.type=1; layer.x.label.by=1;"
+                    f"layer.x.label.from=1; layer.x.label.to={len(display_samples)};"
+                    f"layer.x.label.count={len(display_samples)};"
+                    "layer.x.label.formula$=\"\";"
+                )
+                op.lt_exec(f'layer.x.label.text$="{label_text}";')
                 op.lt_exec('layer.x.label.apply=1;')
+            except Exception:
+                pass
+
+        manual_labels_added = False
+        try:
+            op.lt_exec('label -r py_xtick*;')
+        except Exception:
+            pass
+        for idx, sample in enumerate(samples, start=1):
+            text = display_by_idx.get(sample_idx[sample], sample.replace('_', '/'))
+            esc_text = text.replace('"', "'")
+            try:
+                op.lt_exec(
+                    f'label -n py_xtick{idx} -a {float(sample_idx[sample]):.6g} {tick_level:.6g} "{esc_text}";'
+                )
+                try:
+                    op.lt_exec(f'label -n py_xtick{idx} -s 10;')
+                except Exception:
+                    pass
+            except Exception:
+                continue
+            manual_labels_added = True
+        try:
+            if manual_labels_added:
+                op.lt_exec('layer.x.label.show=0;')
+                try:
+                    op.lt_exec('layer.x.ticklabels=0;')
+                except Exception:
+                    pass
+                try:
+                    op.lt_exec(f'layer.y.from={label_bottom:.6g};')
+                except Exception:
+                    pass
+            else:
+                op.lt_exec('layer.x.label.show=1;')
         except Exception:
             pass
         try:
