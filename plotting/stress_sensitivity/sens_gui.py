@@ -19,6 +19,7 @@ if __package__ is None or __package__ == "":
         sync_readability,
         arrange_top_layout,
     )
+    from app_help import make_help_button
 else:
     from . import core as orig
     from ..utils import (
@@ -32,6 +33,7 @@ else:
         sync_readability,
         arrange_top_layout,
     )
+    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -59,8 +61,11 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.show_cb = QtWidgets.QCheckBox("Show plots"); self.show_cb.setChecked(orig.SHOW_PLOTS)
         self.save_cb = QtWidgets.QCheckBox("Save plots"); self.save_cb.setChecked(orig.SAVE_PLOTS)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-        self.backend_combo.setCurrentIndex(0)
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        orig.BACKEND = restore_backend_choice(
+            "stress_sensitivity", self.backend_combo, getattr(orig, "BACKEND", "matplotlib")
+        )
         self.out_dir_edit = QtWidgets.QLineEdit(get_last_output_dir(key="stress_sensitivity"))
         browse_btn = QtWidgets.QPushButton("Browse")
 
@@ -77,8 +82,14 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.save_cb, 1, 0)
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
-        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
-        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        self.fmt_combo = QtWidgets.QComboBox()
+        self.fmt_combo.addItems(["png", "pdf", "svg"])
+        self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox()
+        self.dpi_spin.setRange(72, 3000)
+        orig.PNG_DPI = restore_png_dpi(
+            "stress_sensitivity", self.dpi_spin, getattr(orig, "PNG_DPI", 1200)
+        )
         out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
         out_layout.addWidget(self.fmt_combo, 3, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
@@ -97,7 +108,11 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(var_group, 0, 0)
         layout.addWidget(out_group, 0, 1)
         layout.addWidget(read_group, 1, 0, 1, 2)
-        layout.addWidget(self.run_btn, 2, 0, 1, 2)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(make_help_button("plot_stress_sensitivity", self))
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.run_btn)
+        layout.addLayout(btn_row, 2, 0, 1, 2)
 
         arrange_top_layout(self, file_widget, left, self.console)
 
@@ -121,9 +136,12 @@ class SettingsDialog(QtWidgets.QDialog):
         set_last_output_dir(base, key="stress_sensitivity")
         sync_readability("stress_sensitivity", self.read_ctrl, orig)
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
-        orig.PNG_DPI = int(self.dpi_spin.value())
+        orig.PNG_DPI = store_png_dpi("stress_sensitivity", int(self.dpi_spin.value()))
         orig.INCLUDE_DEPENDENCE = False
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        backend = store_backend_choice(
+            "stress_sensitivity", selected_backend(self.backend_combo)
+        )
+        orig.BACKEND = backend
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 

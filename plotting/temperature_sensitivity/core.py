@@ -31,17 +31,18 @@ PLOT_T2 = bool(_CFG.get("PLOT_T2", True))
 PLOT_VARS = [v for v, b in [("sum", PLOT_SUM), ("dT", PLOT_DT), ("T1", PLOT_T1), ("T2", PLOT_T2)] if b]
 RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
 RAW_MARKER = "o"
-RAW_MARKER_SIZE = 0.3
+RAW_MARKER_SIZE = 1.0
 RAW_ALPHA = 1.0
 MEAN_COLORS = {25: "#00306E", 100: "#965308"}
 MEAN_MARKER = 'o'
 MEAN_MSIZE = 8
 MEAN_LW = 3
 LEGEND_MARKER_SIZE = 6
-IMPROVE_READABILITY = bool(_CFG.get("IMPROVE_READABILITY", False))
+IMPROVE_READABILITY = True
 SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
 LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
 LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
+LEGEND_LOCATION = str(_CFG.get("LEGEND_LOCATION", "outside_right")).lower()
 LEGEND_SHOW_SYMBOLS = bool(_CFG.get("LEGEND_SHOW_SYMBOLS", False))
 LEGEND_SYMBOL_SIZE = float(_CFG.get("LEGEND_SYMBOL_SIZE", 10))
 TICK_SIZE = int(_CFG.get("TICK_SIZE", 18))
@@ -62,7 +63,7 @@ if BASELINE_MODE not in {"none", "zero_25", "both"}:
     BASELINE_MODE = "zero_25" if bool(_CFG.get("ZERO_25_BASELINE", False)) else "none"
 INCLUDE_CONTINUOUS = bool(_CFG.get("INCLUDE_CONTINUOUS", True))
 MED_WINDOW = int(_CFG.get("MED_WINDOW", 5))
-MA_WINDOW = int(_CFG.get("MA_WINDOW", 20))
+MA_WINDOW = int(_CFG.get("MA_WINDOW", 200))
 MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
 OUTLIER_PROGRESS_THRESHOLD = 1000
@@ -74,6 +75,16 @@ TS_LABELS = {
     "dT": "T2-T1 (\u03BCs)",
     "sum": "T1+T2 (\u03BCs)",
 }
+
+
+def _format_temp_label(temp: float | int) -> str:
+    """Return ``temp`` formatted without unnecessary decimal places."""
+
+    try:
+        value = float(temp)
+    except Exception:
+        return str(temp)
+    return f"{int(value)}" if value.is_integer() else f"{value:g}"
 
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -344,6 +355,7 @@ def plot_variable(
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
+    display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     df['sample_idx'] = df['sample'].map(sample_idx).astype(float)
 
@@ -375,6 +387,8 @@ def plot_variable(
     y_max = max(s.max() for s in all_y)
     y_range = y_max - y_min if y_max != y_min else 1.0
     delta_offset = 0.05 * y_range
+    plot_top = y_max + 0.08 * y_range
+    title_level = y_max + 0.06 * y_range
 
     fig, ax = plt.subplots(figsize=(9, 5))
     legend_done: set[str] = set()
@@ -387,7 +401,7 @@ def plot_variable(
             marker=RAW_MARKER,
             s=RAW_MARKER_SIZE,
             alpha=RAW_ALPHA,
-            label=f'raw {temp}\N{DEGREE SIGN}C',
+            label=f'raw {_format_temp_label(temp)}\N{DEGREE SIGN}C',
         )
 
     for temp in sorted(raw['temp'].unique()):
@@ -407,7 +421,7 @@ def plot_variable(
             linestyle='None',
             c=MEAN_COLORS.get(temp, 'gray'),
             markersize=MEAN_MSIZE,
-            label=f'mean {int(temp)}\N{DEGREE SIGN}C',
+            label=f'mean {_format_temp_label(temp)}\N{DEGREE SIGN}C',
         )
 
     # Connect 25Â°C and 100Â°C means per sample and show delta
@@ -458,31 +472,132 @@ def plot_variable(
 
     ticks = [sample_idx[s] for s in samples]
     ax.set_xticks(ticks)
-    ax.set_xticklabels(samples)
+    ax.set_xticklabels(display_samples)
+
+    def _legend_kwargs_from_location(loc_value: str) -> dict[str, Any]:
+        loc = (loc_value or "inside").strip().lower()
+        if loc in {"outside_right", "outside", "outside right"}:
+            return {"loc": "center left", "bbox_to_anchor": (1.02, 0.5), "borderaxespad": 0.0}
+        if loc in {"inside", "auto", "best", ""}:
+            return {"loc": "best"}
+        return {"loc": loc}
+
+    def _colorize_legend(legend_obj: Any, adjust_sizes: bool = False) -> None:
+        if legend_obj is None:
+            return
+        handles: list[Any] = []
+        for attr in ("legendHandles", "legend_handles"):
+            found = getattr(legend_obj, attr, None)
+            if found:
+                handles = list(found)
+                break
+        for text, handle in zip(legend_obj.get_texts(), handles):
+            rawcol: ColorType | str = 'black'
+            if isinstance(handle, Line2D):
+                rawcol = handle.get_color()
+                face = handle.get_markerfacecolor()
+                if face not in (None, 'none'):
+                    rawcol = face
+                if adjust_sizes:
+                    try:
+                        handle.set_markersize(LEGEND_MARKER_SIZE)
+                    except Exception:
+                        pass
+            elif isinstance(handle, (Patch, PathCollection)):
+                rawcol = handle.get_facecolor()
+                if isinstance(handle, PathCollection) and adjust_sizes:
+                    try:
+                        handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
+                    except Exception:
+                        pass
+                if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
+                    rawcol = rawcol[0]
+            try:
+                text.set_color(to_hex(cast(ColorType, rawcol)))
+            except Exception:
+                pass
+
+    def _apply_symbol_visibility(legend_obj: Any) -> None:
+        if legend_obj is None:
+            return
+
+        show_symbols = bool(globals().get("LEGEND_SHOW_SYMBOLS", False))
+        marker_size = float(globals().get("LEGEND_SYMBOL_SIZE", 10))
+        handles: list[Any] = []
+        for attr in ("legendHandles", "legend_handles"):
+            found = getattr(legend_obj, attr, None)
+            if found:
+                handles = list(found)
+                break
+
+        for handle in handles:
+            if isinstance(handle, PathCollection):
+                try:
+                    if show_symbols:
+                        handle.set_alpha(1.0)
+                        handle.set_sizes([marker_size ** 2])
+                    else:
+                        handle.set_alpha(0.0)
+                        handle.set_sizes([0.1])
+                except Exception:
+                    pass
+            elif isinstance(handle, Patch):
+                try:
+                    handle.set_alpha(1.0 if show_symbols else 0.0)
+                except Exception:
+                    pass
+
+            if hasattr(handle, "set_markersize"):
+                try:
+                    handle.set_markersize(marker_size if show_symbols else 0.1)
+                except Exception:
+                    pass
+
+            marker_setter = getattr(handle, "set_marker", None)
+            if callable(marker_setter):
+                if show_symbols:
+                    marker_getter = getattr(handle, "get_marker", None)
+                    current = None
+                    if callable(marker_getter):
+                        try:
+                            current = marker_getter()
+                        except Exception:
+                            current = None
+                    if current in (None, "", " ", "None"):
+                        for candidate in ("o", "s", "."):
+                            try:
+                                marker_setter(candidate)
+                                break
+                            except Exception:
+                                continue
+                else:
+                    for empty in (None, "", " "):
+                        try:
+                            marker_setter(empty)
+                            break
+                        except Exception:
+                            continue
+
     ax.set_xlabel('Sample')
     ax.set_ylabel(TS_LABELS[var])
     ax.set_title(f"{comp} {anneal} — {TS_LABELS[var]}")
     ax.grid(True)
 
-    legend = ax.legend(loc='best')
-    for text, handle in zip(legend.get_texts(), legend.legend_handles):
-        if isinstance(handle, Line2D):
-            rawcol = handle.get_color()
-            if handle.get_markerfacecolor() and handle.get_markerfacecolor() != 'none':
-                rawcol = handle.get_markerfacecolor()
-            handle.set_markersize(LEGEND_MARKER_SIZE)
-        elif isinstance(handle, (Patch, PathCollection)):
-            rawcol = handle.get_facecolor()
-            if isinstance(handle, PathCollection):
-                handle.set_sizes([LEGEND_MARKER_SIZE ** 2])
-            if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
-                rawcol = rawcol[0]
-        else:
-            rawcol = 'black'
-        text.set_color(to_hex(cast(ColorType, rawcol)))
+    legend_kwargs = _legend_kwargs_from_location(str(globals().get("LEGEND_LOCATION", "inside")))
+    legend = ax.legend(**legend_kwargs)
+    _colorize_legend(legend, adjust_sizes=True)
+    _apply_symbol_visibility(legend)
 
-    fig.tight_layout()
     apply_readability(ax, globals())
+    updated = ax.get_legend()
+    _apply_symbol_visibility(updated)
+    _colorize_legend(updated)
+
+    final_loc = str(globals().get("LEGEND_LOCATION", "inside") or "inside").strip().lower()
+    if final_loc in {"outside_right", "outside", "outside right"}:
+        fig.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
+    else:
+        fig.tight_layout()
     fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
@@ -512,6 +627,7 @@ def plot_variable_origin(
     comp = df['composition'].iat[0]
     anneal = df['anneal'].iat[0]
     samples = sorted(df['sample'].unique())
+    display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     idx_to_sample = {idx: sample for sample, idx in sample_idx.items()}
 
@@ -540,6 +656,19 @@ def plot_variable_origin(
         if include_cont and not cont.empty:
             cont['Y'] = cont[var]
 
+    all_y = [raw['Y']] if not raw.empty else []
+    if include_cont and not cont.empty:
+        all_y.append(cont['Y'])
+    if all_y:
+        y_min = min(series.min() for series in all_y)
+        y_max = max(series.max() for series in all_y)
+    else:
+        y_min = y_max = 0.0
+    y_range = y_max - y_min if y_max != y_min else 1.0
+    delta_offset = 0.05 * y_range
+    plot_top = y_max + 0.08 * y_range
+    title_level = y_max + 0.06 * y_range
+
     cont_samples = set(cont['sample']) if include_cont else set()
     means['plot_x'] = means['sample_idx']
     if include_cont and cont_samples:
@@ -554,14 +683,15 @@ def plot_variable_origin(
             return row['sample_idx']
         means['plot_x'] = means.apply(_shift, axis=1)
 
-    connectors: list[pd.DataFrame] = []
+    delta_labels: list[tuple[float, float, str]] = []
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
             sample = idx_to_sample.get(idx)
-            if sample in cont_samples:
-                continue
-            connectors.append(pd.DataFrame({'X': [idx, idx], 'Y': [row[25], row[100]]}))
+            has_cont = sample in cont_samples
+            delta = row[100] - row[25]
+            y_top = row[100] + (delta_offset if has_cont else 0.0)
+            delta_labels.append((idx - 0.1, y_top, f"{delta:.1f}"))
 
     cont_processed: list[pd.DataFrame] = []
     if include_cont and not cont.empty:
@@ -585,59 +715,67 @@ def plot_variable_origin(
     gp = op.new_graph(template='scatter')
     gl = gp[0]
 
+    legend_entries: list[str] = []
+
     for temp in sorted(raw['temp'].dropna().unique()):
         sub = raw[raw['temp'] == temp]
         if sub.empty:
             continue
-        temp_label = f"{int(temp)}" if float(temp).is_integer() else f"{temp:g}"
+        temp_label = _format_temp_label(temp)
         w = op.new_sheet('w', lname=f'raw_{temp_label}')
         w.from_list(0, sub['X'].to_list())
         w.from_list(1, sub['Y'].to_list())
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
+        legend_label = f"raw {temp_label}\N{DEGREE SIGN}C"
+        try:
+            w.activate()
+            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+        except Exception:
+            pass
         try:
             p.color = color
             p.symbol_shape = 2
-            p.symbol_size = max(1, int(round(RAW_MARKER_SIZE * 12)))
+            p.symbol_size = RAW_MARKER_SIZE
             p.symbol_edge_color = color
             p.symbol_fill_color = color
             p.line_width = 0
+            p.legend = legend_label
         except Exception:
             pass
+        legend_entries.append(legend_label)
 
     for temp in sorted(means['temp'].dropna().unique()):
         sub = means[means['temp'] == temp]
         if sub.empty:
             continue
-        temp_label = f"{int(temp)}" if float(temp).is_integer() else f"{temp:g}"
+        temp_label = _format_temp_label(temp)
         w = op.new_sheet('w', lname=f'mean_{temp_label}')
         w.from_list(0, sub['plot_x'].to_list())
         w.from_list(1, sub[var].to_list())
         w.cols_axis('XY')
         p = gl.add_plot(w, coly=1, colx=0, type='s')
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
+        legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
+        try:
+            w.activate()
+            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+        except Exception:
+            pass
         try:
             p.color = color
             p.symbol_shape = 2
             p.symbol_size = MEAN_MSIZE
             p.symbol_edge_color = color
             p.symbol_fill_color = color
+            p.legend = legend_label
         except Exception:
             pass
+        legend_entries.append(legend_label)
 
-    for idx, conn in enumerate(connectors, start=1):
-        w = op.new_sheet('w', lname=f'link_{idx}')
-        w.from_list(0, conn['X'].to_list())
-        w.from_list(1, conn['Y'].to_list())
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='y')
-        try:
-            p.color = 'black'
-            p.line_width = 1
-        except Exception:
-            pass
-
+    cont_label = f"25-100C med {med_window} mwa {ma_window}"
+    cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
         w = op.new_sheet('w', lname=f'cont_{idx}')
         w.from_list(0, cont_df['X'].tolist())
@@ -647,33 +785,115 @@ def plot_variable_origin(
         try:
             p.color = 'black'
             p.line_width = 1
+            if cont_label_added:
+                try:
+                    p.legend = ''
+                except Exception:
+                    p.legend = False
+            else:
+                try:
+                    w.activate()
+                    op.lt_exec(f'wks.col2.lname$ = "{cont_label}";')
+                except Exception:
+                    pass
+                try:
+                    p.legend = cont_label
+                except Exception:
+                    pass
+                cont_label_added = True
         except Exception:
             pass
+        legend_entries.append(cont_label if cont_label_added and idx == 1 else "")
 
     try:
         gl.rescale()
         gp.activate()
-        op.lt_exec('page.antialias=1; layer -aa 1;')
+        op.lt_exec('doc -e P {page.antialias=1;}')
+        op.lt_exec('doc -e L {layer.speedmode=0; layer -s 0; layer -aa 1; layer.antialias=1;}')
         op.lt_exec('legend;')
         op.lt_exec('legend.update=0;')
+        op.lt_exec('legend.box=0;')
+        op.lt_exec('legend.just=1;')
+        try:
+            legend_text = "\n".join(legend_entries)
+            op.lt_exec(f'legend.text$="{legend_text.replace("\"", "'")}";')
+        except Exception:
+            pass
+        legend_loc = str(globals().get("LEGEND_LOCATION", "inside")).lower()
+        if legend_loc in {"outside_right", "outside", "outside right"}:
+            op.lt_exec('legend.x=1.02; legend.y=0.5;')
+        else:
+            op.lt_exec('legend.x=0.18; legend.y=0.88;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
         op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
         op.lt_exec('layer.x.inc=1;')
         op.lt_exec('layer.x.step=1;')
+        op.lt_exec(f'layer.y.from={y_min - 0.02 * y_range};')
+        op.lt_exec(f'layer.y.to={plot_top};')
         try:
-            wlab = op.new_sheet('w', lname='labels')
-            wlab.from_list(0, samples)
-            book_name = getattr(book, 'name', '')
-            sheet_name = getattr(wlab, 'name', 'labels')
-            rng = f"[{book_name}]{sheet_name}!col(1)"
-            op.lt_exec('layer.x.label.form=2;')
-            op.lt_exec(f'layer.x.label.dataset$="{rng}";')
+            op.lt_exec('layer -lx 0; layer -ly 0;')
         except Exception:
             pass
-        title = f"{comp} {anneal} - {TS_LABELS[var]}"
         try:
-            gl.label('Legend').text = title.replace('"', "'")
+            op.lt_exec('layer.x.top=0; layer.y.right=0;')
+            op.lt_exec('layer.x.top.label.show=0; layer.y.right.label.show=0;')
+            op.lt_exec('layer.x.top.ticklabels=0; layer.y.right.ticklabels=0;')
+        except Exception:
+            pass
+        try:
+            wlab = op.new_sheet('w', lname='labels')
+            wlab.from_list(0, display_samples)
+            col_short = "SampleLbl"
+            try:
+                wlab.activate()
+                op.lt_exec(
+                    f'wks.col1.type=4; wks.col1.format=2; wks.col1.name$="{col_short}";'
+                )
+            except Exception:
+                pass
+            book_name = getattr(book, 'lt_name', getattr(book, 'name', ''))
+            sheet_name = getattr(wlab, 'lt_name', getattr(wlab, 'name', 'labels'))
+            if book_name and sheet_name:
+                book_ref = str(book_name).replace('"', "'")
+                sheet_ref = str(sheet_name).replace('"', "'")
+                col_ref = f"col({col_short})"
+                rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
+                op.lt_exec('layer.x.label.auto=0; layer.x.label.type=2; layer.x.label.by=1;')
+                op.lt_exec(f'layer.x.label.dataset$="{rng}";')
+                op.lt_exec('layer.x.label.apply=1;')
+        except Exception:
+            pass
+        try:
+            op.lt_exec('label -r py_delta*;')
+        except Exception:
+            pass
+        for idx, (x_pos, y_pos, text) in enumerate(delta_labels, start=1):
+            name = f'py_delta{idx}'
+            esc = text.replace('"', "'")
+            try:
+                op.lt_exec(f'label -n {name} -a {x_pos:.6g} {y_pos:.6g} "{esc}";')
+            except Exception:
+                pass
+        title = f"{comp} {anneal} — {TS_LABELS[var]}"
+        esc_title = title.replace('"', "'")
+        try:
+            gl.label('Title').text = title
+        except Exception:
+            pass
+        try:
+            op.lt_exec(f'title -s "{esc_title}";')
+        except Exception:
+            pass
+        try:
+            op.lt_exec('label -r py_title;')
+        except Exception:
+            pass
+        title_center = (len(samples) + 1) / 2.0
+        try:
+            op.lt_exec(
+                f'label -n py_title -a {title_center:.6g} {title_level:.6g} "{esc_title}";'
+            )
         except Exception:
             pass
     except Exception:
@@ -683,8 +903,7 @@ from ..common import maybe_handle_outliers
 
 
 def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFrame | None = None):
-    if IMPROVE_READABILITY:
-        apply_readability_fonts()
+    apply_readability_fonts()
     if preprocessed_data is not None:
         data = preprocessed_data.copy(deep=True)
         print("Using results from the immediate outlier check.")

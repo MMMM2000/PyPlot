@@ -27,11 +27,16 @@ from ..utils import (
     get_last_output_dir,
     set_last_output_dir,
     run_with_console,
-    get_readability,
     set_readability,
     apply_readability_fonts,
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+    restore_png_dpi,
+    store_png_dpi,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
+from app_help import make_help_button
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -218,7 +223,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Combined", "Separate"])
         self.mode_combo.currentIndexChanged.connect(self._maybe_auto_plot)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
+        restore_backend_choice("pdf_plotter", self.backend_combo, "matplotlib")
         self.backend_combo.currentIndexChanged.connect(self._maybe_auto_plot)
         self.zero_cb = QtWidgets.QCheckBox("First point at zero")
         self.zero_cb.setChecked(True)
@@ -304,9 +311,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         form.addRow("Title size", self.title_fs)
         form.addRow("Label size", self.label_fs)
         form.addRow("Tick size", self.tick_fs)
-        self.read_cb = QtWidgets.QCheckBox()
-        self.read_cb.setChecked(get_readability("pdf_plotter"))
-        form.addRow("Improve readability", self.read_cb)
 
         # Save options
         self.save_cb = QtWidgets.QCheckBox()
@@ -321,7 +325,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         fmt_box = self._hbox(self.format_combo)
         self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 3000)
-        self.dpi_spin.setValue(1200)
+        restore_png_dpi("pdf_plotter", self.dpi_spin, 1200)
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
         self.fig_w.setValue(180.0)  # default in mm
@@ -360,7 +364,12 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
         self.plot_btn.clicked.connect(lambda: run_with_console(self.plot, self.console))
         self.clear_btn.clicked.connect(self.clear_plot)
-        btn_box = self._hbox(self.auto_cb, self.plot_btn, self.clear_btn)
+        btn_box = self._hbox(
+            make_help_button("plot_pdf", self),
+            self.auto_cb,
+            self.plot_btn,
+            self.clear_btn,
+        )
 
         # Ensure the plot controls are always visible without scrolling by placing the
         # button row outside the scrollable area.
@@ -564,9 +573,8 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         return lines_by_file
 
     def _plot_single(self, x_name: str) -> None:
-        if self.read_cb.isChecked():
-            apply_readability_fonts()
-        set_readability("pdf_plotter", self.read_cb.isChecked())
+        apply_readability_fonts()
+        set_readability("pdf_plotter", True)
         lines_by_file = self._collect_lines_by_file(x_name)
         if not lines_by_file:
             QtWidgets.QMessageBox.information(self, "No data", "No valid rows to plot.")
@@ -577,7 +585,10 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         y_label = f"{' / '.join(selected)} (arb. u.)"
         x_label = x_name
         mode = self.mode_combo.currentText()
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        store_png_dpi("pdf_plotter", int(self.dpi_spin.value()))
+        backend = store_backend_choice(
+            "pdf_plotter", selected_backend(self.backend_combo)
+        )
         if mode == "Combined":
             lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
             for path, sets in lines_by_file.items():

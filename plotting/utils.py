@@ -3,6 +3,10 @@ import os
 import sys
 from pathlib import Path
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
+from matplotlib.collections import PathCollection
+from matplotlib import colors as mcolors
 from contextlib import contextmanager
 from typing import Callable
 import matplotlib.pyplot as plt
@@ -229,6 +233,63 @@ def set_last_output_dir(path: str, *, key: str | None = None) -> None:
         s.setValue("last_output_dir", path)
 
 
+_BACKEND_CHOICES: tuple[str, ...] = ("matplotlib", "origin", "both")
+
+
+def restore_backend_choice(
+    key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
+) -> str:
+    """Set ``combo`` to the last backend stored for ``key``.
+
+    Returns the normalised backend string that was applied.
+    """
+
+    stored = str(_settings().value(f"{key}_backend", default, type=str) or default).lower()
+    if stored not in _BACKEND_CHOICES:
+        fallback = str(default or _BACKEND_CHOICES[0]).lower()
+        stored = fallback if fallback in _BACKEND_CHOICES else _BACKEND_CHOICES[0]
+    combo.setCurrentIndex(_BACKEND_CHOICES.index(stored))
+    return stored
+
+
+def store_backend_choice(key: str, backend: str) -> str:
+    """Persist ``backend`` for ``key`` and return the normalised value."""
+
+    normalised = str(backend or "").lower()
+    if normalised not in _BACKEND_CHOICES:
+        normalised = _BACKEND_CHOICES[0]
+    _settings().setValue(f"{key}_backend", normalised)
+    return normalised
+
+
+def selected_backend(combo: QtWidgets.QComboBox) -> str:
+    """Return the backend represented by ``combo``'s current index."""
+
+    idx = combo.currentIndex()
+    if 0 <= idx < len(_BACKEND_CHOICES):
+        return _BACKEND_CHOICES[idx]
+    return _BACKEND_CHOICES[0]
+
+
+def restore_png_dpi(key: str, spin: QtWidgets.QSpinBox, default: int) -> int:
+    """Set ``spin`` to the last stored PNG DPI for ``key`` and return it."""
+
+    try:
+        value = int(_settings().value(f"{key}_png_dpi", int(default), type=int))
+    except Exception:
+        value = int(default)
+    spin.setValue(value)
+    return value
+
+
+def store_png_dpi(key: str, dpi: int) -> int:
+    """Persist ``dpi`` for ``key`` and return the stored integer value."""
+
+    value = int(dpi)
+    _settings().setValue(f"{key}_png_dpi", value)
+    return value
+
+
 def select_files_or_folder(
     parent: QtWidgets.QWidget | None = None,
     ext: str = ".txt",
@@ -376,14 +437,22 @@ def create_file_widget(
     chk_out_btn.setChecked(bool(_common.CHECK_OUTLIERS))
     auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
     auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
-    auto_rm_cb.setChecked(bool(_common.AUTO_REMOVE_OUTLIERS))
-    auto_rm_cb.setEnabled(bool(_common.CHECK_OUTLIERS))
+
+    prefs = _settings()
+    auto_key = f"{key}_auto_remove_outliers" if key else None
+    auto_pref = bool(_common.AUTO_REMOVE_OUTLIERS)
+    if auto_key is not None:
+        try:
+            auto_pref = bool(prefs.value(auto_key, auto_pref, type=bool))
+        except Exception:
+            auto_pref = bool(auto_pref)
+    auto_rm_cb.setChecked(auto_pref)
+    _common.AUTO_REMOVE_OUTLIERS = bool(_common.CHECK_OUTLIERS and auto_rm_cb.isChecked())
 
     def _set_outlier_enabled(enabled: bool) -> None:
         _common.CHECK_OUTLIERS = bool(enabled)
-        auto_rm_cb.setEnabled(bool(enabled))
-        if not enabled and auto_rm_cb.isChecked():
-            auto_rm_cb.setChecked(False)
+        _common.AUTO_REMOVE_OUTLIERS = bool(enabled) and auto_rm_cb.isChecked()
+        proceed = True
         if on_outlier_toggle is not None:
             try:
                 proceed = on_outlier_toggle(bool(enabled), list(files))
@@ -394,18 +463,22 @@ def create_file_widget(
                     str(exc),
                 )
                 proceed = False
-            if proceed is False and enabled:
-                _common.CHECK_OUTLIERS = False
-                auto_rm_cb.setEnabled(False)
-                if auto_rm_cb.isChecked():
-                    auto_rm_cb.setChecked(False)
-                chk_out_btn.blockSignals(True)
-                chk_out_btn.setChecked(False)
-                chk_out_btn.blockSignals(False)
+        if proceed is False and enabled:
+            _common.CHECK_OUTLIERS = False
+            _common.AUTO_REMOVE_OUTLIERS = False
+            chk_out_btn.blockSignals(True)
+            chk_out_btn.setChecked(False)
+            chk_out_btn.blockSignals(False)
+            return
+        if auto_key is not None:
+            prefs.setValue(auto_key, auto_rm_cb.isChecked())
 
     def _set_auto_remove(enabled: bool) -> None:
-        if enabled and not chk_out_btn.isChecked():
-            chk_out_btn.setChecked(True)
+        if auto_key is not None:
+            prefs.setValue(auto_key, bool(enabled))
+        if not _common.CHECK_OUTLIERS:
+            _common.AUTO_REMOVE_OUTLIERS = False
+            return
         _common.AUTO_REMOVE_OUTLIERS = bool(enabled)
 
     chk_out_btn.toggled.connect(_set_outlier_enabled)
@@ -503,12 +576,13 @@ def arrange_top_layout(
 
 class ReadabilityControls:
     def __init__(self) -> None:
-        self.read_cb: QtWidgets.QCheckBox
         self.legend_show: QtWidgets.QCheckBox
         self.legend_size: QtWidgets.QSpinBox
         self.legend_orient: QtWidgets.QComboBox
+        self.legend_loc: QtWidgets.QComboBox
         self.legend_symbol: QtWidgets.QCheckBox
         self.legend_symbol_size: QtWidgets.QDoubleSpinBox
+        self.legend_color_match: QtWidgets.QCheckBox
         self.tick_show: QtWidgets.QCheckBox
         self.tick_size: QtWidgets.QSpinBox
         self.axis_show: QtWidgets.QCheckBox
@@ -525,8 +599,9 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     grp = QtWidgets.QGroupBox("Readability")
     lay = QtWidgets.QGridLayout(grp)
 
-    ctrl.read_cb = QtWidgets.QCheckBox("Improve readability")
-    ctrl.read_cb.setChecked(bool(s.value(f"{key}_readable", orig_module.IMPROVE_READABILITY, type=bool)))
+    setattr(orig_module, "IMPROVE_READABILITY", True)
+    if not hasattr(orig_module, "LEGEND_LOCATION"):
+        setattr(orig_module, "LEGEND_LOCATION", "inside")
 
     ctrl.legend_size = QtWidgets.QSpinBox()
     ctrl.legend_size.setRange(6, 72)
@@ -535,12 +610,43 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.legend_show.setChecked(bool(s.value(f"{key}_show_legend", getattr(orig_module, "SHOW_LEGEND", True), type=bool)))
     ctrl.legend_orient = QtWidgets.QComboBox()
     ctrl.legend_orient.addItems(["Auto", "Vertical", "Horizontal"])
-    ctrl.legend_orient.setCurrentText(s.value(f"{key}_legend_orient", getattr(orig_module, "LEGEND_ORIENTATION", "auto"), type=str).capitalize())
+    ctrl.legend_orient.setCurrentText(
+        s.value(f"{key}_legend_orient", getattr(orig_module, "LEGEND_ORIENTATION", "auto"), type=str).capitalize()
+    )
+    ctrl.legend_loc = QtWidgets.QComboBox()
+    ctrl.legend_loc.addItem("Inside", "inside")
+    ctrl.legend_loc.addItem("Outside (right)", "outside_right")
+    stored_loc = str(
+        s.value(
+            f"{key}_legend_location",
+            getattr(orig_module, "LEGEND_LOCATION", "inside"),
+            type=str,
+        )
+    ).strip().lower()
+    if stored_loc not in {"inside", "outside_right"}:
+        stored_loc = "inside"
+    idx = ctrl.legend_loc.findData(stored_loc)
+    ctrl.legend_loc.setCurrentIndex(idx if idx >= 0 else 0)
+    orig_module.LEGEND_LOCATION = stored_loc
     ctrl.legend_symbol_size = QtWidgets.QDoubleSpinBox()
     ctrl.legend_symbol_size.setRange(1.0, 50.0)
-    ctrl.legend_symbol_size.setValue(float(s.value(f"{key}_legend_symbol_size", getattr(orig_module, "LEGEND_SYMBOL_SIZE", 10), type=float)))
+    ctrl.legend_symbol_size.setValue(
+        float(s.value(f"{key}_legend_symbol_size", getattr(orig_module, "LEGEND_SYMBOL_SIZE", 10), type=float))
+    )
     ctrl.legend_symbol = QtWidgets.QCheckBox("Show symbols")
-    ctrl.legend_symbol.setChecked(bool(s.value(f"{key}_legend_symbols", getattr(orig_module, "LEGEND_SHOW_SYMBOLS", False), type=bool)))
+    ctrl.legend_symbol.setChecked(
+        bool(s.value(f"{key}_legend_symbols", getattr(orig_module, "LEGEND_SHOW_SYMBOLS", False), type=bool))
+    )
+    ctrl.legend_color_match = QtWidgets.QCheckBox("Match legend text to curve colors")
+    ctrl.legend_color_match.setChecked(
+        bool(
+            s.value(
+                f"{key}_legend_match_colors",
+                getattr(orig_module, "LEGEND_MATCH_COLORS", False),
+                type=bool,
+            )
+        )
+    )
 
     ctrl.tick_size = QtWidgets.QSpinBox()
     ctrl.tick_size.setRange(6, 72)
@@ -560,59 +666,51 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.title_show = QtWidgets.QCheckBox("Show")
     ctrl.title_show.setChecked(bool(s.value(f"{key}_show_title", getattr(orig_module, "SHOW_TITLE", True), type=bool)))
 
-    lay.addWidget(ctrl.read_cb, 0, 0, 1, 3)
-    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 1, 0)
-    lay.addWidget(ctrl.legend_size, 1, 1)
-    lay.addWidget(ctrl.legend_show, 1, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 2, 0)
-    lay.addWidget(ctrl.legend_orient, 2, 1, 1, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 3, 0)
-    lay.addWidget(ctrl.legend_symbol_size, 3, 1)
-    lay.addWidget(ctrl.legend_symbol, 3, 2)
-    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 4, 0)
-    lay.addWidget(ctrl.tick_size, 4, 1)
-    lay.addWidget(ctrl.tick_show, 4, 2)
-    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 5, 0)
-    lay.addWidget(ctrl.axis_size, 5, 1)
-    lay.addWidget(ctrl.axis_show, 5, 2)
-    lay.addWidget(QtWidgets.QLabel("Title size:"), 6, 0)
-    lay.addWidget(ctrl.title_size, 6, 1)
-    lay.addWidget(ctrl.title_show, 6, 2)
-
-    def _toggle_readable(checked: bool) -> None:
-        ctrl.legend_show.setEnabled(checked)
-        ctrl.tick_show.setEnabled(checked)
-        ctrl.axis_show.setEnabled(checked)
-        ctrl.title_show.setEnabled(checked)
-        _toggle_legend(ctrl.legend_show.isChecked())
-        _toggle_tick(ctrl.tick_show.isChecked())
-        _toggle_axis(ctrl.axis_show.isChecked())
-        _toggle_title(ctrl.title_show.isChecked())
+    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 0, 0)
+    lay.addWidget(ctrl.legend_size, 0, 1)
+    lay.addWidget(ctrl.legend_show, 0, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 1, 0)
+    lay.addWidget(ctrl.legend_orient, 1, 1, 1, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend location:"), 2, 0)
+    lay.addWidget(ctrl.legend_loc, 2, 1, 1, 2)
+    lay.addWidget(ctrl.legend_color_match, 3, 0, 1, 3)
+    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 4, 0)
+    lay.addWidget(ctrl.legend_symbol_size, 4, 1)
+    lay.addWidget(ctrl.legend_symbol, 4, 2)
+    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 5, 0)
+    lay.addWidget(ctrl.tick_size, 5, 1)
+    lay.addWidget(ctrl.tick_show, 5, 2)
+    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 6, 0)
+    lay.addWidget(ctrl.axis_size, 6, 1)
+    lay.addWidget(ctrl.axis_show, 6, 2)
+    lay.addWidget(QtWidgets.QLabel("Title size:"), 7, 0)
+    lay.addWidget(ctrl.title_size, 7, 1)
+    lay.addWidget(ctrl.title_show, 7, 2)
 
     def _toggle_legend(checked: bool) -> None:
-        enable = checked and ctrl.read_cb.isChecked()
-        ctrl.legend_size.setEnabled(enable)
-        ctrl.legend_orient.setEnabled(enable)
-        ctrl.legend_symbol.setEnabled(enable)
-        ctrl.legend_symbol_size.setEnabled(enable and ctrl.legend_symbol.isChecked())
+        ctrl.legend_size.setEnabled(checked)
+        ctrl.legend_orient.setEnabled(checked)
+        ctrl.legend_loc.setEnabled(checked)
+        ctrl.legend_symbol.setEnabled(checked)
+        ctrl.legend_symbol_size.setEnabled(checked and ctrl.legend_symbol.isChecked())
+        ctrl.legend_color_match.setEnabled(checked)
 
-    def _toggle_tick(checked: bool) -> None:
-        ctrl.tick_size.setEnabled(checked and ctrl.read_cb.isChecked())
+    def _toggle_symbol(checked: bool) -> None:
+        ctrl.legend_symbol_size.setEnabled(checked and ctrl.legend_show.isChecked())
 
-    def _toggle_axis(checked: bool) -> None:
-        ctrl.axis_size.setEnabled(checked and ctrl.read_cb.isChecked())
-
-    def _toggle_title(checked: bool) -> None:
-        ctrl.title_size.setEnabled(checked and ctrl.read_cb.isChecked())
-
-    ctrl.read_cb.toggled.connect(_toggle_readable)
     ctrl.legend_show.toggled.connect(_toggle_legend)
-    ctrl.legend_symbol.toggled.connect(lambda c: ctrl.legend_symbol_size.setEnabled(c and ctrl.legend_show.isChecked() and ctrl.read_cb.isChecked()))
-    ctrl.tick_show.toggled.connect(_toggle_tick)
-    ctrl.axis_show.toggled.connect(_toggle_axis)
-    ctrl.title_show.toggled.connect(_toggle_title)
+    ctrl.legend_symbol.toggled.connect(_toggle_symbol)
+    ctrl.tick_show.toggled.connect(lambda checked: ctrl.tick_size.setEnabled(checked))
+    ctrl.axis_show.toggled.connect(lambda checked: ctrl.axis_size.setEnabled(checked))
+    ctrl.title_show.toggled.connect(lambda checked: ctrl.title_size.setEnabled(checked))
 
-    _toggle_readable(ctrl.read_cb.isChecked())
+    _toggle_legend(ctrl.legend_show.isChecked())
+    _toggle_symbol(ctrl.legend_symbol.isChecked())
+    ctrl.legend_loc.setEnabled(ctrl.legend_show.isChecked())
+    ctrl.legend_color_match.setEnabled(ctrl.legend_show.isChecked())
+    ctrl.tick_size.setEnabled(ctrl.tick_show.isChecked())
+    ctrl.axis_size.setEnabled(ctrl.axis_show.isChecked())
+    ctrl.title_size.setEnabled(ctrl.title_show.isChecked())
 
     return ctrl, grp
 
@@ -620,12 +718,15 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
 def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     """Copy readability UI state into ``orig_module`` and persist to settings."""
 
-    orig_module.IMPROVE_READABILITY = ctrl.read_cb.isChecked()
+    orig_module.IMPROVE_READABILITY = True
     orig_module.SHOW_LEGEND = ctrl.legend_show.isChecked()
     orig_module.LEGEND_SIZE = int(ctrl.legend_size.value())
     orig_module.LEGEND_ORIENTATION = ctrl.legend_orient.currentText().lower()
+    loc_data = ctrl.legend_loc.currentData()
+    orig_module.LEGEND_LOCATION = str(loc_data).lower() if loc_data else "inside"
     orig_module.LEGEND_SHOW_SYMBOLS = ctrl.legend_symbol.isChecked()
     orig_module.LEGEND_SYMBOL_SIZE = float(ctrl.legend_symbol_size.value())
+    orig_module.LEGEND_MATCH_COLORS = ctrl.legend_color_match.isChecked()
     orig_module.SHOW_TICK_LABELS = ctrl.tick_show.isChecked()
     orig_module.TICK_SIZE = int(ctrl.tick_size.value())
     orig_module.SHOW_AXIS_LABELS = ctrl.axis_show.isChecked()
@@ -633,12 +734,13 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     orig_module.SHOW_TITLE = ctrl.title_show.isChecked()
     orig_module.TITLE_SIZE = int(ctrl.title_size.value())
     s = _settings()
-    s.setValue(f"{key}_readable", orig_module.IMPROVE_READABILITY)
     s.setValue(f"{key}_show_legend", orig_module.SHOW_LEGEND)
     s.setValue(f"{key}_legend_size", orig_module.LEGEND_SIZE)
     s.setValue(f"{key}_legend_orient", orig_module.LEGEND_ORIENTATION)
+    s.setValue(f"{key}_legend_location", orig_module.LEGEND_LOCATION)
     s.setValue(f"{key}_legend_symbols", orig_module.LEGEND_SHOW_SYMBOLS)
     s.setValue(f"{key}_legend_symbol_size", orig_module.LEGEND_SYMBOL_SIZE)
+    s.setValue(f"{key}_legend_match_colors", orig_module.LEGEND_MATCH_COLORS)
     s.setValue(f"{key}_show_ticks", orig_module.SHOW_TICK_LABELS)
     s.setValue(f"{key}_tick_size", orig_module.TICK_SIZE)
     s.setValue(f"{key}_show_axis", orig_module.SHOW_AXIS_LABELS)
@@ -649,9 +751,6 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
 
 def apply_readability(ax: plt.Axes, cfg: dict) -> None:
     """Apply common readability settings to ``ax`` using values from ``cfg``."""
-
-    if not cfg.get("IMPROVE_READABILITY", False):
-        return
 
     apply_readability_fonts(
         cfg.get("TITLE_SIZE", 22), cfg.get("TICK_SIZE", 18)
@@ -677,19 +776,141 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
 
     legend = ax.get_legend()
     if legend:
-        if cfg.get("SHOW_LEGEND", True):
-            legend.set_visible(True)
-            legend.set_fontsize(cfg.get("LEGEND_SIZE", 18))
-            orient = cfg.get("LEGEND_ORIENTATION", "auto")
-            if orient == "horizontal":
-                legend.set_ncol(len(legend.get_texts()))
-            elif orient == "vertical":
-                legend.set_ncol(1)
-            for h in legend.legend_handles:
+        if not cfg.get("SHOW_LEGEND", True):
+            legend.set_visible(False)
+            return
+
+        handles_existing: list[object] = []
+        for attr in ("legendHandles", "legend_handles"):
+            found = getattr(legend, attr, None)
+            if found:
+                handles_existing = list(found)
+                break
+        labels_existing = [text.get_text() for text in legend.get_texts()]
+        entry_count = max(len(labels_existing), len(handles_existing), 1)
+        location_raw = str(cfg.get("LEGEND_LOCATION", "inside") or "inside").strip().lower()
+        legend.remove()
+
+        legend_loc = "best"
+        bbox = None
+        if location_raw in {"outside_right", "outside", "outside right"}:
+            legend_loc = "center left"
+            bbox = (1.02, 0.5)
+        elif location_raw not in {"inside", "auto", "best", ""}:
+            legend_loc = location_raw
+
+        legend_kwargs: dict[str, object] = {"loc": legend_loc}
+        if bbox is not None:
+            legend_kwargs["bbox_to_anchor"] = bbox
+            legend_kwargs["borderaxespad"] = 0.0
+
+        orient = str(cfg.get("LEGEND_ORIENTATION", "auto") or "auto").strip().lower()
+        if orient == "horizontal":
+            legend_kwargs["ncol"] = entry_count
+        elif orient == "vertical":
+            legend_kwargs["ncol"] = 1
+
+        if handles_existing and labels_existing:
+            legend = ax.legend(handles=handles_existing, labels=labels_existing, **legend_kwargs)
+        else:
+            legend = ax.legend(**legend_kwargs)
+
+        legend.set_visible(True)
+        size = cfg.get("LEGEND_SIZE", 18)
+        for text in legend.get_texts():
+            try:
+                text.set_fontsize(size)
+            except Exception:
+                pass
+
+        handles: list[object] = []
+        for attr in ("legendHandles", "legend_handles"):
+            found = getattr(legend, attr, None)
+            if found:
+                handles = list(found)
+                break
+
+        show_symbols = bool(cfg.get("LEGEND_SHOW_SYMBOLS", False))
+        marker_size = cfg.get("LEGEND_SYMBOL_SIZE", 10)
+        match_colors = bool(cfg.get("LEGEND_MATCH_COLORS", False))
+        for handle in handles:
+            if hasattr(handle, "set_markersize"):
                 try:
-                    h.set_markersize(cfg.get("LEGEND_SYMBOL_SIZE", 10))
-                    h.set_marker("o" if cfg.get("LEGEND_SHOW_SYMBOLS", False) else "")
+                    handle.set_markersize(marker_size)
                 except Exception:
                     pass
-        else:
-            legend.set_visible(False)
+            marker_getter = getattr(handle, "get_marker", None)
+            marker_setter = getattr(handle, "set_marker", None)
+            linestyle_getter = getattr(handle, "get_linestyle", None)
+            has_line = False
+            if callable(linestyle_getter):
+                try:
+                    ls = linestyle_getter()
+                except Exception:
+                    ls = None
+                has_line = ls not in (None, "None", "", " ")
+            if isinstance(handle, PathCollection):
+                try:
+                    if show_symbols:
+                        handle.set_sizes([marker_size ** 2])
+                        handle.set_alpha(1.0)
+                    else:
+                        handle.set_sizes([0.1])
+                        handle.set_alpha(0.0)
+                except Exception:
+                    pass
+            elif isinstance(handle, Patch):
+                try:
+                    handle.set_alpha(1.0 if show_symbols else 0.0)
+                except Exception:
+                    pass
+            if callable(marker_setter):
+                if not show_symbols:
+                    try:
+                        marker_setter(None)
+                    except Exception:
+                        try:
+                            marker_setter("")
+                        except Exception:
+                            pass
+                elif not has_line and callable(marker_getter):
+                    try:
+                        current = marker_getter()
+                    except Exception:
+                        current = None
+                    if current in (None, "", " ", "None"):
+                        try:
+                            marker_setter("o")
+                        except Exception:
+                            pass
+
+        if match_colors and handles:
+            def _extract_color(handle: object) -> tuple[float, float, float, float] | None:
+                candidates: list[object] = []
+                for attr in ("get_color", "get_facecolor", "get_facecolors", "get_edgecolor"):
+                    getter = getattr(handle, attr, None)
+                    if not callable(getter):
+                        continue
+                    try:
+                        value = getter()
+                    except Exception:
+                        continue
+                    if value is None:
+                        continue
+                    candidates.append(value)
+                for value in candidates:
+                    try:
+                        rgba = mcolors.to_rgba_array(value)
+                    except Exception:
+                        continue
+                    if len(rgba):
+                        return tuple(rgba[0])
+                return None
+
+            for handle, text in zip(handles, legend.get_texts()):
+                color = _extract_color(handle)
+                if color is not None:
+                    try:
+                        text.set_color(color)
+                    except Exception:
+                        pass

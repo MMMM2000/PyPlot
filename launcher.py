@@ -4,7 +4,7 @@ import sys
 import os
 from typing import Callable, Dict
 
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
@@ -22,6 +22,7 @@ from plotting.stress_sensitivity import sens_gui
 from plotting.temperature_dependence import temp_dep_gui
 from plotting.temperature_sensitivity import temp_gui
 from plotting.utils import apply_system_theme, apply_theme
+from app_help import make_help_button
 
 
 PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
@@ -48,15 +49,33 @@ EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
 }
 
 
-class MasterLauncher(QtWidgets.QDialog):
+class MasterLauncher(QtWidgets.QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        self._closing = False
+
+        try:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+        except Exception:
+            pass
+
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            try:
+                app.setQuitOnLastWindowClosed(False)
+            except Exception:
+                pass
+            try:
+                app.lastWindowClosed.connect(self._restore_launcher)
+            except Exception:
+                pass
+
         # Keep references to launched windows so they stay open when
         # the launcher calls their ``main`` functions.
-        self._open_windows = []
+        self._open_windows: list[QtWidgets.QWidget] = []
 
         self.tabs = QtWidgets.QTabWidget()
         self.log_tab = QtWidgets.QWidget()
@@ -99,9 +118,14 @@ class MasterLauncher(QtWidgets.QDialog):
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
 
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addWidget(make_help_button("launcher", self))
+        button_row.addStretch(1)
+        button_row.addWidget(self.run_button)
+
         self.main_layout.addWidget(self.tabs)
         self.main_layout.addLayout(theme_row)
-        self.main_layout.addWidget(self.run_button)
+        self.main_layout.addLayout(button_row)
 
     def on_theme_changed(self) -> None:
         app_instance = QtWidgets.QApplication.instance()
@@ -109,6 +133,38 @@ class MasterLauncher(QtWidgets.QDialog):
         idx = self.theme_combo.currentIndex()
         mode = ["system", "light", "dark"][idx]
         apply_theme(app_instance, mode)
+
+    def _restore_launcher(self) -> None:
+        if self._closing:
+            return
+        if not self.isVisible():
+            self.show()
+            try:
+                self.raise_()
+                self.activateWindow()
+            except Exception:
+                pass
+
+    def _register_window(self, widget: QtWidgets.QWidget) -> None:
+        """Track ``widget`` so closing the launcher can warn appropriately."""
+
+        if widget in self._open_windows:
+            return
+
+        self._open_windows.append(widget)
+
+        try:
+            widget.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+        except Exception:
+            pass
+
+        def _remove(_: object = None, w: QtWidgets.QWidget = widget) -> None:
+            try:
+                self._open_windows.remove(w)
+            except ValueError:
+                pass
+
+        widget.destroyed.connect(_remove)
 
     def run_selected(self) -> None:
         if self.tabs.currentWidget() is self.log_tab:
@@ -138,7 +194,6 @@ class MasterLauncher(QtWidgets.QDialog):
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
-        app_instance.setQuitOnLastWindowClosed(False)
 
         existing_windows = set(app_instance.topLevelWidgets())
 
@@ -147,8 +202,7 @@ class MasterLauncher(QtWidgets.QDialog):
         try:
             result = func()
             if isinstance(result, QtWidgets.QWidget):
-                self._open_windows.append(result)
-                result.destroyed.connect(lambda: self._open_windows.remove(result))
+                self._register_window(result)
         except SystemExit as exc:
             code = exc.code
             if code not in (None, 0):
@@ -157,8 +211,11 @@ class MasterLauncher(QtWidgets.QDialog):
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"{type(exc).__name__}: {exc}"
             )
-        finally:
-            app_instance.setQuitOnLastWindowClosed(True)
+
+        try:
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
 
         new_windows = [
             w for w in app_instance.topLevelWidgets() if w not in existing_windows
@@ -171,6 +228,14 @@ class MasterLauncher(QtWidgets.QDialog):
                 w.activateWindow()
             except RuntimeError:
                 pass
+            if isinstance(w, QtWidgets.QWidget):
+                self._register_window(w)
+
+        for w in app_instance.topLevelWidgets():
+            if w is self:
+                continue
+            if isinstance(w, QtWidgets.QWidget):
+                self._register_window(w)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         open_windows = [w for w in list(self._open_windows) if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
@@ -183,6 +248,7 @@ class MasterLauncher(QtWidgets.QDialog):
                 QtWidgets.QMessageBox.StandardButton.No,
             )
             if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                self._closing = False
                 event.ignore()
                 return
             for w in list(open_windows):
@@ -190,7 +256,11 @@ class MasterLauncher(QtWidgets.QDialog):
                     w.close()
                 except Exception:
                     pass
+        self._closing = True
         event.accept()
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            QtCore.QTimer.singleShot(0, app.quit)
 
 
 def main() -> None:
@@ -203,6 +273,7 @@ def main() -> None:
         os.environ.pop("QT_QPA_PLATFORM", None)
 
     app = QtWidgets.QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)
     apply_system_theme(app)
     dlg = MasterLauncher()
     dlg.show()

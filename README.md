@@ -48,7 +48,9 @@ Run the launcher to access all utilities in a single window:
 python -m launcher
 ```
 
-Closing the launcher warns about other open windows and will close them.
+Closing the launcher warns about other open windows and will close them.  Plot
+settings dialogs can now be closed independently without shutting down the
+launcher, so you can move between tools without relaunching the hub.
 
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
@@ -61,23 +63,52 @@ terminal never needs to span the full window width.  The file list wraps long
 paths to new lines, and file dialogs remember the last directories used—
 maintaining separate input and output locations.  If no history exists, they
 fall back to the repository’s `sample_data` folder for inputs and the user’s
-`Downloads` folder for outputs.  When saving, an optional
-**Create subfolder** checkbox stores figures under `<script name> data
+`Downloads` folder for outputs.  When saving, an optional **Create subfolder** checkbox stores figures under `<script name> data
 YYYY-MM-DD` for easier organisation.  Export options include a choice of PNG,
-PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  The
-current annealing plotter also omits the initial 0 mA data point so figures
-start with the first real sample.  Plotting dialogs keep their windows open
-after running and display settings, file list and console side by side within
-a single resizable window.
+PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  Each
+plotting dialog remembers its most recent backend selection and PNG DPI
+independently, so Matplotlib/Origin toggles and export resolution reopen the way
+you left them.  The current annealing plotter also omits the initial 0 mA data
+point so figures start with the first real sample.  Plotting dialogs keep their
+windows open after running and display settings, file list and console side by
+side within a single resizable window.
+
+Outlier detection remains opt-in.  Toggling **Remove automatically** no longer
+forces the outlier check to start immediately, and the preference is remembered
+per plotting script so each tool can keep its own automatic-removal default.
 
 Each plotting dialog now provides a full **Readability** section with controls
 to toggle titles, axis labels, tick labels, and legends, adjust their font
-sizes, choose legend orientation, and show or hide legend symbols.  All
-readability preferences are remembered between runs.  The Maxion plotter adds
+sizes, choose legend orientation, pick whether the legend lives inside the
+axes or just outside the figure, show or hide legend symbols, and optionally
+match legend text colours to the curves they describe.  The master "Improve
+readability" toggle has been removed, so the adjustments are always active and
+take effect immediately.  All readability preferences are remembered between
+runs, and the legend orientation selector now flips between single-column and
+single-row layouts so horizontal legends behave correctly.  The
+Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
+
+Every window now includes a **Help** button.  The launcher, each plotting
+dialog, every logger, and the serial emulator open a Markdown help sheet that
+explains the workflow, highlights where settings are stored, and links the UI
+controls to their expected behaviour.  When onboarding new colleagues you can
+point them to the help button for context without having to maintain a separate
+manual.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
+
+Temperature-sensitivity plots now match between Matplotlib and Origin: sample
+ticks read `2/1`, `2/2`, … in both outputs thanks to a dedicated text dataset on
+the Origin X axis, legends share the same ordering and colour coding, symbol
+visibility follows the **Show symbols** option, and raw traces advertise `25 °C`
+instead of `25.0 °C`.  Origin exports disable speed mode, enable
+anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
+title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
+annotations at the same locations, while the Matplotlib legend sits outside the
+axes to avoid covering data points.  The default moving-average window now
+spans 200 samples for smoother continuous traces straight out of the box.
 
 ## 3. Loggers
 
@@ -96,6 +127,13 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
 * ignores the initial zero sample when logging and plotting
+* contact-loss detection waits until the logger has measured a non-zero current,
+  then applies a short start-up grace period and requires multiple zeros spread
+  over a short delay before stopping, so start-up ramps and momentary dips no
+  longer trip the burn-out warning
+* serial polling keeps track of the last response time and extends the wait
+  before flagging "no response" so the initial ramp commands are no longer
+  mistaken for a disconnected supply
 
 Launch from the master launcher or run
 
@@ -147,7 +185,21 @@ PyInstaller specifications are provided.  After installing the requirements run
 pyinstaller launcher.spec
 ```
 
-to create a standalone `dist/launcher` for the current platform.
+to create a standalone `dist/launcher` for the current platform.  The
+specification bundles the plotting configuration automatically, so no manual
+data copying is required before running the command.  When preparing a build for
+colleagues:
+
+1. Activate the virtual environment and install everything from
+   `requirements.txt` to make sure the frozen app includes the same library
+   versions you tested with.
+2. Run `pyinstaller launcher.spec` and wait for the `dist/launcher` folder to be
+   produced.  This folder contains the executable and all runtime resources.
+3. Launch `dist/launcher/launcher.exe` (or the platform equivalent) on your
+   machine to smoke-test the build before distributing it.  The help buttons in
+   each window double as an onboarding guide.
+4. Zip the entire `dist/launcher` directory when sharing the tools so recipients
+   can extract and run the launcher without installing Python.
 
 ## 6. Experiments
 
@@ -160,7 +212,15 @@ directory and are independent from the main tools.
 modules.  Configure module settings, manage the list of input files, and run the
 plotter without the window closing or prompting to save figures afterwards.
 
-## 7. Testing
+## 7. Repository maintenance
+
+* Temporary Origin HTML exports and scratch files are removed from the
+  repository so fresh clones only contain the code, configuration, and sample
+  data required to run the tools.
+* The outdated Visual Basic logger has been deleted; the modern PyQt loggers are
+  the supported workflow going forward.
+
+## 8. Testing
 
 Run the test suite after installing the requirements:
 

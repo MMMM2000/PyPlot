@@ -15,7 +15,11 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
     )
+    from app_help import make_help_button
 else:
     from . import core
     from ..utils import (
@@ -25,7 +29,11 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
     )
+    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -43,7 +51,11 @@ class SettingsDialog(QtWidgets.QDialog):
 
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Combined", "Separate", "Stacked"])
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        core.BACKEND = restore_backend_choice(
+            "hysteresis_loops", self.backend_combo, getattr(core, "BACKEND", "matplotlib")
+        )
 
         mode_group = QtWidgets.QGroupBox("Options")
         mode_layout = QtWidgets.QGridLayout(mode_group)
@@ -59,7 +71,11 @@ class SettingsDialog(QtWidgets.QDialog):
         self.run_btn.clicked.connect(self.run)
 
         layout.addWidget(mode_group, 0, 0, 1, 2)
-        layout.addWidget(self.run_btn, 1, 0, 1, 2)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(make_help_button("plot_hysteresis_loops", self))
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.run_btn)
+        layout.addLayout(btn_row, 1, 0, 1, 2)
 
         arrange_top_layout(self, file_widget, left, self.console)
 
@@ -68,7 +84,10 @@ class SettingsDialog(QtWidgets.QDialog):
             QtWidgets.QMessageBox.warning(self, "No files", "Select files first.")
             return
         mode = self.mode_combo.currentText()
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        backend = store_backend_choice(
+            "hysteresis_loops", selected_backend(self.backend_combo)
+        )
+        core.BACKEND = backend
         sync_readability("hysteresis_loops", self.read_ctrl, core)
         run_with_console(lambda: core.plot_loops(self.files, mode=mode, show=True, backend=backend), self.console)
 

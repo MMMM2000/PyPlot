@@ -18,7 +18,13 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
+    from app_help import make_help_button
 else:
     from . import core as orig
     from ..utils import (
@@ -31,7 +37,13 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
+        restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
     )
+    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -65,12 +77,21 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout = QtWidgets.QGridLayout(out_group)
         out_layout.addWidget(self.show_cb, 0, 0)
         out_layout.addWidget(self.save_cb, 1, 0)
-        self.backend_combo = QtWidgets.QComboBox(); self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-        self.backend_combo.setCurrentIndex(0)
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        orig.BACKEND = restore_backend_choice(
+            "maxion_continuous", self.backend_combo, getattr(orig, "BACKEND", "matplotlib")
+        )
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
-        self.fmt_combo = QtWidgets.QComboBox(); self.fmt_combo.addItems(["png", "pdf", "svg"]); self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
-        self.dpi_spin = QtWidgets.QSpinBox(); self.dpi_spin.setRange(72, 3000); self.dpi_spin.setValue(int(orig.PNG_DPI))
+        self.fmt_combo = QtWidgets.QComboBox()
+        self.fmt_combo.addItems(["png", "pdf", "svg"])
+        self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
+        self.dpi_spin = QtWidgets.QSpinBox()
+        self.dpi_spin.setRange(72, 3000)
+        orig.PNG_DPI = restore_png_dpi(
+            "maxion_continuous", self.dpi_spin, getattr(orig, "PNG_DPI", 1200)
+        )
         out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
         out_layout.addWidget(self.fmt_combo, 3, 1)
         out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
@@ -136,13 +157,6 @@ class SettingsDialog(QtWidgets.QDialog):
         lay.addWidget(QtWidgets.QLabel("Scale Y:"), row + 1, 0)
         lay.addWidget(self.scale_y_cb, row + 1, 1)
 
-        def _toggle_scale(checked: bool) -> None:
-            self.scale_x_cb.setEnabled(checked)
-            self.scale_y_cb.setEnabled(checked)
-
-        self.read_ctrl.read_cb.toggled.connect(_toggle_scale)
-        _toggle_scale(self.read_ctrl.read_cb.isChecked())
-
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)
 
@@ -152,7 +166,11 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(style_group)
         layout.addWidget(read_group)
         layout.addStretch()
-        layout.addWidget(self.run_btn)
+        btn_row = QtWidgets.QHBoxLayout()
+        btn_row.addWidget(make_help_button("plot_maxion", self))
+        btn_row.addStretch(1)
+        btn_row.addWidget(self.run_btn)
+        layout.addLayout(btn_row)
 
         arrange_top_layout(self, file_widget, left, self.console)
 
@@ -172,7 +190,7 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.CENTER_MEDIAN_Y = self.center_cb.isChecked()
         orig.CENTER_MEDIAN_SOURCE = self.center_source_combo.currentText().lower()
         orig.SAVE_FORMAT = self.fmt_combo.currentText()
-        orig.PNG_DPI = int(self.dpi_spin.value())
+        orig.PNG_DPI = store_png_dpi("maxion_continuous", int(self.dpi_spin.value()))
         sync_readability("maxion_continuous", self.read_ctrl, orig)
         orig.SCALE_X_1E4 = self.scale_x_cb.isChecked()
         orig.SCALE_Y_1E3 = self.scale_y_cb.isChecked()
@@ -180,7 +198,10 @@ class SettingsDialog(QtWidgets.QDialog):
         self.settings.setValue("scale_y", orig.SCALE_Y_1E3)
         self.settings.setValue("center_median_y", orig.CENTER_MEDIAN_Y)
         self.settings.setValue("center_source", orig.CENTER_MEDIAN_SOURCE)
-        backend = ["matplotlib", "origin", "both"][self.backend_combo.currentIndex()]
+        backend = store_backend_choice(
+            "maxion_continuous", selected_backend(self.backend_combo)
+        )
+        orig.BACKEND = backend
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
 
 

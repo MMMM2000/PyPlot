@@ -19,6 +19,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
 from plotting.utils import apply_system_theme, format_annealing_title, show_plots
+from app_help import make_help_button
 
 import numpy as np
 import matplotlib
@@ -89,6 +90,19 @@ class MainWindow(QtWidgets.QMainWindow):
                     min(self.width() or 880, max(640, avail.width() - 80)),
                     min(self.height() or 720, max(480, avail.height() - 80)),
                 )
+        except Exception:
+            pass
+        try:
+            left_panel = getattr(self.ui, "left_scroll", None)
+            if isinstance(left_panel, QtWidgets.QScrollArea):
+                container = left_panel.widget()
+                if container is not None:
+                    layout = container.layout()
+                    if isinstance(layout, QtWidgets.QVBoxLayout):
+                        help_row = QtWidgets.QHBoxLayout()
+                        help_row.addWidget(make_help_button("logger_current_annealing", self))
+                        help_row.addStretch(1)
+                        layout.insertLayout(0, help_row)
         except Exception:
             pass
         # Remember last log directory and file separately
@@ -170,6 +184,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finish_time: float | None = None
         self.step_idx = 0
         self.total_steps = 0
+        self._contact_lost = False
+        self._zero_current_count = 0
+        self._nonzero_current_seen = False
+        self._process_start_time: float | None = None
+        self._last_nonzero_current_time: float | None = None
+        self._contact_grace_period = 5.0
+        self._last_serial_rx: float | None = None
+        self._serial_quiet_failures = 0
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -476,6 +498,10 @@ class MainWindow(QtWidgets.QMainWindow):
             #print("Prisla lajna")
             self.zamok.lock()
             self.odpoved_portu = str(self.ser_mcu.readLine(),'ascii')
+            try:
+                self._last_serial_rx = time.monotonic()
+            except Exception:
+                self._last_serial_rx = None
             # reduce console spam
             # print(self.odpoved_portu)
             if((self.modus_operandi > 0) and (self.proces_on == True)):
@@ -494,12 +520,45 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ValueError:
                         self.zamok.unlock()
                         return
-                    try:
-                        if abs(self.current_current_read) < 1e-12:
-                            raise ZeroDivisionError
-                        self.current_resistance = self.current_voltage/self.current_current_read
-                    except ZeroDivisionError:
-                        if not hasattr(self, '_contact_lost') or not self._contact_lost:
+                    if abs(self.current_current_read) < 1e-12:
+                        try:
+                            now = time.monotonic()
+                        except Exception:
+                            now = None
+                        self._zero_current_count += 1
+                        # Treat a zero reading as a valid response so callers
+                        # waiting on ``sample_ready`` do not interpret the
+                        # timeout as a communication failure.
+                        self.sample_ready = True
+                        if not self._nonzero_current_seen:
+                            # Ignore sustained zero readings until we have
+                            # confirmed the setup is capable of sourcing
+                            # current at least once. This prevents false
+                            # alarms immediately after a process starts when
+                            # the supply has not ramped yet.
+                            self._last_nonzero_current_time = None
+                            self.zamok.unlock()
+                            return
+                        zero_limit = 6
+                        zero_delay = 2.0
+                        if (
+                            now is not None
+                            and self._process_start_time is not None
+                            and (now - self._process_start_time) < self._contact_grace_period
+                        ):
+                            self.zamok.unlock()
+                            return
+                        if (
+                            now is not None
+                            and self._last_nonzero_current_time is not None
+                            and (now - self._last_nonzero_current_time) < zero_delay
+                        ):
+                            self.zamok.unlock()
+                            return
+                        if self._zero_current_count < zero_limit:
+                            self.zamok.unlock()
+                            return
+                        if not self._contact_lost:
                             self._contact_lost = True
                             QtWidgets.QMessageBox.warning(
                                 self,
@@ -508,6 +567,18 @@ class MainWindow(QtWidgets.QMainWindow):
                             )
                             if self.proces_on:
                                 self.handle_pushButton_spusti_proces_clicked()
+                        self.zamok.unlock()
+                        return
+                    self._zero_current_count = 0
+                    self._contact_lost = False
+                    self._nonzero_current_seen = True
+                    try:
+                        self._last_nonzero_current_time = time.monotonic()
+                    except Exception:
+                        self._last_nonzero_current_time = None
+                    try:
+                        self.current_resistance = self.current_voltage / self.current_current_read
+                    except ZeroDivisionError:
                         self.zamok.unlock()
                         return
                     #na tomto mieste zapiseme data do suboru
@@ -793,6 +864,14 @@ class MainWindow(QtWidgets.QMainWindow):
             self.proces_on = True
             self.sekundy = 0
             self._max_voltage_dialog = False
+            self._contact_lost = False
+            self._zero_current_count = 0
+            try:
+                self._process_start_time = time.monotonic()
+            except Exception:
+                self._process_start_time = None
+            self._nonzero_current_seen = False
+            self._last_nonzero_current_time = None
             self.ui.frame_modus_operandi.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -813,6 +892,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Prepare output file with overwrite prompt
                 if not self.prepare_output_file():
                     self.proces_on = False
+                    self._process_start_time = None
                     self.ui.pushButton_spusti_proces.setText("Start annealing process")
                     return
                 if hasattr(self.ui, 'progressBar_process'):
@@ -934,6 +1014,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.proces_on = False
         self.wait = False  # break any pending delays
         self.force_stop_at_zero = False
+        self._contact_lost = False
+        self._zero_current_count = 0
+        self._nonzero_current_seen = False
+        self._process_start_time = None
+        self._last_nonzero_current_time = None
         try:
             self.timer_command.stop()
             self.timer_prud.stop()
@@ -1195,10 +1280,34 @@ class MainWindow(QtWidgets.QMainWindow):
         self.wait = False
         elapsed = 0
         step = 20
-        while not self.sample_ready and self.proces_on and elapsed < timeout_ms:
+        retries = 0
+        limit = max(step, int(timeout_ms))
+        while self.proces_on and not self.sample_ready:
             self.simple_delay(step)
+            if self.sample_ready or not self.proces_on:
+                break
             elapsed += step
-        ok = self.sample_ready
+            if elapsed >= limit:
+                recent = False
+                try:
+                    now = time.monotonic()
+                    if self._last_serial_rx is not None and (now - self._last_serial_rx) < 0.75:
+                        recent = True
+                except Exception:
+                    recent = False
+                if recent:
+                    elapsed = 0
+                    continue
+                if retries == 0:
+                    retries = 1
+                    elapsed = 0
+                    continue
+                break
+        ok = bool(self.sample_ready)
+        if not ok:
+            self._serial_quiet_failures += 1
+        else:
+            self._serial_quiet_failures = 0
         self.sample_ready = False
         return ok
 
@@ -1210,6 +1319,7 @@ class MainWindow(QtWidgets.QMainWindow):
         )
         if self.proces_on:
             self.stop_annealing()
+        self._serial_quiet_failures = 0
 
     def handle_lineEdit_log_subor_text_changed(self):
         # Sync f_name from separate directory + file name controls

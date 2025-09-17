@@ -48,6 +48,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QTextEdit, QGroupBox, QHBoxLayout, QVBoxLayout,
     QCheckBox, QLineEdit, QFileDialog
 )
+from app_help import make_help_button
 
 from typing import TYPE_CHECKING, Optional, cast
 
@@ -345,7 +346,12 @@ class Main(QWidget):
 
     # UI layout
     def _build_ui(self):
-        layout = QGridLayout(self)
+        layout = QVBoxLayout(self)
+
+        help_row = QHBoxLayout()
+        help_row.addWidget(make_help_button("emulator_serial", self))
+        help_row.addStretch(1)
+        layout.addLayout(help_row)
 
         # Pair group
         pair_box = QGroupBox("Port Helpers (macOS/Linux)")
@@ -422,9 +428,9 @@ class Main(QWidget):
         # Log
         self.log = QTextEdit(); self.log.setReadOnly(True)
 
-        layout.addWidget(pair_box, 0, 0)
-        layout.addWidget(emu_box,  1, 0)
-        layout.addWidget(self.log, 2, 0)
+        layout.addWidget(pair_box)
+        layout.addWidget(emu_box)
+        layout.addWidget(self.log)
 
         # initial
         self.refresh_ports()
