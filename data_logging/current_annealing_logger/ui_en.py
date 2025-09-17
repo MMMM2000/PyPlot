@@ -6,6 +6,7 @@ are preserved for compatibility with the existing logic.
 """
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from typing import Optional
 try:
     # Reuse InfoLineEdit from data logger for inline info and validation
     from data_logging.data_logger.file_name_builder import InfoLineEdit
@@ -14,6 +15,13 @@ except Exception:
 
 
 class Ui_MainWindow(object):
+    def __init__(self) -> None:
+        self.left_scroll: Optional[QtWidgets.QScrollArea] = None
+        self.plot_container: Optional[QtWidgets.QFrame] = None
+        self.label_live_voltage: Optional[QtWidgets.QLabel] = None
+        self.label_set_current: Optional[QtWidgets.QLabel] = None
+        self.lcdNumber_aktualny_prud_mA: Optional[QtWidgets.QLabel] = None
+
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("CurrentAnnealingMainWindow")
         MainWindow.resize(880, 720)

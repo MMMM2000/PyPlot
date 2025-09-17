@@ -25,14 +25,13 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 try:
-    from matplotlib.backends.backend_qt5agg import (
-        FigureCanvasQTAgg as FigureCanvas,
-        NavigationToolbar2QT as NavigationToolbar,
-    )
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+    from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
 except Exception:
-    FigureCanvas = None
-    NavigationToolbar = None
+    FigureCanvas = None  # type: ignore[assignment]
+    NavigationToolbar = None  # type: ignore[assignment]
 
 
 fig_size = plt.rcParams["figure.figsize"]
@@ -79,6 +78,13 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        self.fig: Figure | None = None
+        self.canvas: FigureCanvas | None = None
+        self.toolbar: NavigationToolbar | None = None
+        self.ax1: Axes | None = None
+        self.ax2: Axes | None = None
+        self.line1: Line2D | None = None
+        self.line2: Line2D | None = None
         # Window title and size cap for laptop screens
         self.setWindowTitle("Current Annealing Logger")
         try:
@@ -484,7 +490,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if(self.ser_mcu.canReadLine()):
             #print("Prisla lajna")
             self.zamok.lock()
-            self.odpoved_portu = str(self.ser_mcu.readLine(),'ascii')
+            raw_bytes = bytes(self.ser_mcu.readLine())
+            self.odpoved_portu = raw_bytes.decode('ascii', errors='ignore')
             try:
                 self._last_serial_rx = time.monotonic()
             except Exception:
@@ -570,15 +577,20 @@ class MainWindow(QtWidgets.QMainWindow):
                         return
                     #na tomto mieste zapiseme data do suboru
                     if not self.first_sample:
-                        if(not self.f_out):
+                        if not self.f_out and self.f_name:
                             try:
                                 from os import makedirs
                                 from os.path import dirname
-                                makedirs(dirname(self.f_name), exist_ok=True)
+                                dir_name = dirname(self.f_name)
+                                if dir_name:
+                                    makedirs(dir_name, exist_ok=True)
                             except Exception:
                                 pass
-                            self.f_out = open(self.f_name, "a")
-                        if(self.f_out):
+                            try:
+                                self.f_out = open(self.f_name, "a", encoding="utf-8")
+                            except Exception:
+                                self.f_out = None
+                        if self.f_out:
                             self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
                             self.f_out.write(self.line)
                             self.f_out.close()
@@ -1041,6 +1053,14 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.proces_on:
             return
 
+        if self.ax1 is None or self.ax2 is None or self.fig is None:
+            return
+
+        ax1 = self.ax1
+        ax2 = self.ax2
+        fig = self.fig
+        canvas = getattr(fig, 'canvas', None)
+
         #manual zihanie
         if self.modus_operandi == 1:
             # print("Prikaz manualneho zihania cislo ", self.command_number)
@@ -1085,19 +1105,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.prev_value_x is not None:
                     #pridame novu vzroku do grafu
                     self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    self.ax1.add_line(self.line1)
+                    ax1.add_line(self.line1)
 
                     self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    self.ax2.add_line(self.line2)
+                    ax2.add_line(self.line2)
 
                     # Voliteľné: dynamické prispôsobenie rozsahov
-                    self.ax1.relim()
-                    self.ax1.autoscale_view()
-                    self.ax2.relim()
-                    self.ax2.autoscale_view()
+                    ax1.relim()
+                    ax1.autoscale_view()
+                    ax2.relim()
+                    ax2.autoscale_view()
 
-                    self.fig.canvas.draw()
-                    self.fig.canvas.flush_events()
+                    if canvas is not None:
+                        canvas.draw()
+                        canvas.flush_events()
 
                 self.prev_value_x = self.curr_value_x
                 self.prev_value_y = self.curr_value_y
@@ -1162,19 +1183,20 @@ class MainWindow(QtWidgets.QMainWindow):
                 if self.prev_value_x is not None:
                     #pridame novu vzroku do grafu
                     self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    self.ax1.add_line(self.line1)
+                    ax1.add_line(self.line1)
 
                     self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    self.ax2.add_line(self.line2)
+                    ax2.add_line(self.line2)
 
                     # Voliteľné: dynamické prispôsobenie rozsahov
-                    self.ax1.relim()
-                    self.ax1.autoscale_view()
-                    self.ax2.relim()
-                    self.ax2.autoscale_view()
+                    ax1.relim()
+                    ax1.autoscale_view()
+                    ax2.relim()
+                    ax2.autoscale_view()
 
-                    self.fig.canvas.draw()
-                    self.fig.canvas.flush_events()
+                    if canvas is not None:
+                        canvas.draw()
+                        canvas.flush_events()
 
                 self.prev_value_x = self.curr_value_x
                 self.prev_value_y = self.curr_value_y
