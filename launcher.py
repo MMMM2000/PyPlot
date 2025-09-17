@@ -8,7 +8,6 @@ from PyQt6 import QtWidgets, QtGui, QtCore
 
 from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
-from data_logging import pyvisa_current_annealing_logger
 from emulators import virtual_serial_emulator_gui
 from plotting import common
 from plotting.hsw_distribution import distribution_gui
@@ -21,7 +20,8 @@ from plotting.stress_dependence import stress_gui
 from plotting.stress_sensitivity import sens_gui
 from plotting.temperature_dependence import temp_dep_gui
 from plotting.temperature_sensitivity import temp_gui
-from plotting.utils import ensure_app_theme, install_standard_menu
+from plotting.utils import ensure_app_theme, install_standard_menu, developer_options
+from experiments import EXPERIMENTS
 
 
 PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
@@ -40,7 +40,6 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
 LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
     "Serial Data Logger": data_logger.main,
     "Current Annealing Logger": current_annealing_logger.main,
-    "PyVISA Current Annealing Logger": pyvisa_current_annealing_logger.main,
 }
 
 EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
@@ -54,6 +53,7 @@ class MasterLauncher(QtWidgets.QWidget):
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        self.dev_opts = developer_options()
         self._closing = False
 
         try:
@@ -83,6 +83,8 @@ class MasterLauncher(QtWidgets.QWidget):
         self.tabs.addTab(self.log_tab, "Loggers")
         self.tabs.addTab(self.plot_tab, "Plotting")
         self.tabs.addTab(self.emu_tab, "Emulators")
+        self.exp_tab = QtWidgets.QWidget()
+        self._experiments_index: int | None = None
 
         self.log_list = QtWidgets.QListWidget()
         for name in LOGGERS:
@@ -104,6 +106,17 @@ class MasterLauncher(QtWidgets.QWidget):
         self.emu_list.setCurrentRow(0)
         emu_layout = QtWidgets.QVBoxLayout(self.emu_tab)
         emu_layout.addWidget(self.emu_list)
+
+        self.exp_list = QtWidgets.QListWidget()
+        for name in EXPERIMENTS:
+            self.exp_list.addItem(name)
+        if self.exp_list.count():
+            self.exp_list.setCurrentRow(0)
+        exp_layout = QtWidgets.QVBoxLayout(self.exp_tab)
+        exp_layout.addWidget(self.exp_list)
+        if self.dev_opts.show_experiments() and self.exp_list.count():
+            self._experiments_index = self.tabs.addTab(self.exp_tab, "Experiments")
+        self.dev_opts.experiments_visibility_changed.connect(self._sync_experiments_tab)
 
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
@@ -153,6 +166,19 @@ class MasterLauncher(QtWidgets.QWidget):
 
         widget.destroyed.connect(_remove)
 
+    def _sync_experiments_tab(self, enabled: bool) -> None:
+        has_items = self.exp_list.count() > 0
+        index = self.tabs.indexOf(self.exp_tab)
+        if enabled and has_items:
+            if index == -1:
+                self._experiments_index = self.tabs.addTab(
+                    self.exp_tab, "Experiments"
+                )
+        else:
+            if index != -1:
+                self.tabs.removeTab(index)
+            self._experiments_index = None
+
     def run_selected(self) -> None:
         if self.tabs.currentWidget() is self.log_tab:
             item = self.log_list.currentItem()
@@ -170,12 +196,22 @@ class MasterLauncher(QtWidgets.QWidget):
             func = PLOTTERS[item.text()]
             common.CHECK_OUTLIERS = False
             common.AUTO_REMOVE_OUTLIERS = False
-        else:
+        elif self.tabs.currentWidget() is self.emu_tab:
             item = self.emu_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select an emulator")
                 return
             func = EMULATORS[item.text()]
+            common.CHECK_OUTLIERS = False
+            common.AUTO_REMOVE_OUTLIERS = False
+        else:
+            item = self.exp_list.currentItem()
+            if item is None:
+                QtWidgets.QMessageBox.information(
+                    self, "No selection", "Enable and pick an experiment to launch"
+                )
+                return
+            func = EXPERIMENTS[item.text()]
             common.CHECK_OUTLIERS = False
             common.AUTO_REMOVE_OUTLIERS = False
 

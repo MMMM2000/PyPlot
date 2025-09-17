@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sys
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 
 import pathlib
 
@@ -51,6 +51,10 @@ class SettingsDialog(QtWidgets.QDialog):
         super().__init__()
         self.setWindowTitle("Temperature Sensitivity Settings")
         self._owns_app = False
+        try:
+            self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
+        except Exception:
+            pass
 
         self.files, file_widget = create_file_widget(
             self, key="temperature_sensitivity", on_outlier_toggle=self._handle_outlier_toggle
@@ -225,9 +229,17 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.common.AUTO_REMOVE_OUTLIERS = False
         self._preprocessed_data = None
         self._preprocessed_snapshot = None
-        if getattr(self, "_owns_app", False):
+        owns = bool(getattr(self, "_owns_app", False))
+        if owns:
             release_origin()
         super().closeEvent(event)
+        if owns and event.isAccepted():
+            app = QtWidgets.QApplication.instance()
+            if isinstance(app, QtWidgets.QApplication):
+                try:
+                    app.quit()
+                except Exception:
+                    pass
 
 class ProgressDialog:
     def __init__(self, total: int):

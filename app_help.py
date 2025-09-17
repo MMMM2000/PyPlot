@@ -11,27 +11,46 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Microwire tools",
         "body": dedent(
             """
-            ### Window layout basics
-            * The file list on the left keeps track of every dataset you load. Double-click
-              an entry to open it in your operating system. Use **View → Show File Browser**
-              if you want to hide or reveal the list temporarily.
-            * The right-hand panel holds the script-specific options. A console beneath the
-              list records status messages; toggle it from **View → Show Console** when you
-              need more space.
-            * The footer pins the primary action button so **Run** never scrolls off-screen.
+            ### Orientation
+            * Launch the **Master Launcher** (``python -m launcher``) to reach every plotting
+              script, logger, emulator, and experiment. Each tool opens in its own window so
+              you can keep several utilities side by side.
+            * Every dialog shares the same layout: a file browser down the left, settings on
+              the right, a console for status messages, and the main action button anchored at
+              the bottom so **Run/Plot** never hides behind a scrollbar.
+            * Double-click any file in the list to open it in your platform’s file explorer.
+              Drag the splitter or hide panes from **View → Show File Browser/Console** when
+              you need more room for options.
+
+            ### Developer options
+            * **Developer → Keep File Selections** persists the files you added in each
+              plotting dialog. Reopen the window later and the same datasets are already
+              queued—ideal when iterating on configuration tweaks.
+            * **Developer → Show Experiments Tab** toggles an extra launcher tab containing
+              prototypes (PyVISA logger, data-plotter sandbox, liquid-glass UI demo). Leave it
+              disabled for production work to keep the interface focused on vetted tools.
 
             ### Menu bar highlights
-            * **View → Theme** switches between the system appearance, a light palette, or a
-              dark palette. The choice applies immediately to every open tool.
-            * **View → Reset Layout** restores the default splitter sizes if the panes are
-              resized awkwardly.
-            * **Help → View Help** opens this guide for the current dialog. Additional
-              entries in the Help menu link to documentation or keyboard shortcuts when
-              available.
+            * **View → Theme** flips between system, light, and dark palettes globally. The
+              choice applies immediately to every open window.
+            * **View → Reset Layout** restores the default splitter sizes if you collapse a
+              pane too far.
+            * **Help → View Help** opens the topic-specific manual you are reading now. Every
+              tool includes usage notes, data format requirements, and troubleshooting tips.
 
-            Preferences—readability, export directories, backend selections, theme
-            overrides—are remembered per tool. The README includes step-by-step setup
-            instructions, packaging notes, and troubleshooting advice.
+            ### Workflow checklist
+            1. Pick or load files using **Add Files/Folders**. With the developer retention
+               toggle enabled, previous selections will already be listed.
+            2. Adjust settings in the right-hand column. Readability controls, export
+               directories, and backend choices are remembered automatically per tool.
+            3. Review the console for warnings (missing files, outliers, device contact loss)
+               while the action is running. You can clear it between runs if desired.
+            4. Use the menu bar to revisit documentation, switch theme, or turn on experimental
+               features without closing the dialog.
+
+            Detailed installation, hardware wiring, and packaging instructions live in the
+            project README. Use this in-app manual once the environment is ready and you want
+            to focus on day-to-day operation.
             """
         ).strip(),
     },
@@ -40,16 +59,19 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "body": dedent(
             """
             ### Using the launcher
-            * Pick a tab to choose between loggers, plotting scripts, or emulators.  The
-              list on each tab highlights the currently selected tool.
-            * Click **Run** to open the highlighted utility.  The launcher stays alive
-              while other windows are open, so you can return here without relaunching the
-              application.
-            * Use the menu bar to drive appearance and housekeeping: **View → Theme** toggles
-              light/dark/system palettes, while **File → Exit** quits the launcher if you
-              are finished.
-            * Closing the launcher warns you about any additional windows that would be
-              closed at the same time.
+            1. Pick a tab to browse available tools. **Loggers** covers production data
+               acquisition, **Plotting** lists the figure generators, **Emulators** hosts the
+               serial bridge, and the optional **Experiments** tab exposes prototypes.
+            2. Highlight a utility in the list and click **Run**. The launcher keeps running
+               while the selected window opens so you can return here without relaunching the
+               program. New windows are tracked automatically and the launcher warns you if
+               closing it would also close child dialogs.
+            3. Use **Developer → Show Experiments Tab** to reveal or hide the prototype list and
+               **Developer → Keep File Selections** if you want plotting dialogs to reopen with
+               the same input files pre-selected.
+            4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
+               console, and reset splitter sizes when needed. **File → Exit** quits the launcher
+               after confirming there are no unsaved child windows.
             """
         ).strip(),
     },
@@ -57,34 +79,42 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Temperature sensitivity plotter",
         "body": dedent(
             """
-            ### Getting started
-            1. Click **Add Files/Folders** to load exported `.txt` traces. Group your files by
-               composition and annealing step; the plotter separates variables automatically.
-            2. Tick which curves to include (T1, T2, their sum, or T2–T1). Each selection is
-               remembered the next time you open the tool.
-            3. Choose a baseline mode. *None* plots absolute values, *Zero 25 °C* subtracts
-               the 25 °C mean per sample, and *Both* generates one plot with each treatment.
-            4. Pick the backend (Matplotlib, Origin, or both) and the export directory. PNG
-               renders honour the stored DPI value; PDF/SVG use vector output. Enable
-               **Create subfolder** if you want a dated directory per run.
-            5. Configure moving-average windows for continuous data. The default 200-sample
-               window smooths the trace without hiding the trend.
+            ### Prepare your data
+            * Organise each trace folder by composition and annealing step. Filenames should
+              follow the existing convention (`<composition> <sample> <anneal> <temp>C.txt`) so
+              the parser can group wires correctly.
+            * Use **Add Files/Folders** to ingest every trace for the batch. With the developer
+              *Keep File Selections* toggle active the list will persist between sessions.
 
-            ### Tips
-            * Sample ticks show `2/1`, `2/2`, … on both Matplotlib and Origin exports. If
-              Origin cannot bind to the label dataset the dialog falls back to fixed text.
-            * Use the **Readability** panel to reposition legends, adjust font sizes, and
-              colour match legend entries to their curves.
-            * The menu bar offers shortcuts: **View → Theme** to adjust the palette, **View →
-              Show Console** to hide status messages while reviewing settings, and **View →
-              Reset Layout** to restore the default pane sizes.
+            ### Configure the run
+            1. Choose which curves to plot (T1, T2, T1+T2, T2−T1). Your choices are remembered
+               individually, so each return trip keeps the previous mix of variables.
+            2. Select the baseline treatment: *None* for raw values, *Zero 25 °C* to subtract the
+               25 °C mean per sample, or *Both* to produce two plots per variable.
+            3. Pick Matplotlib, Origin, or both as the backend. Set the export directory, format,
+               and PNG DPI. **Create subfolder** drops results into `<script> data YYYY-MM-DD`.
+            4. Adjust moving-average windows for continuous sweeps. A five-sample median followed
+               by a 200-sample moving average keeps contact loss visible while calming noise.
+            5. Tidy titles, legends, fonts, and tick labels from the **Readability** pane before
+               running—the plot updates respect all of these switches.
 
-            ### Origin-specific behaviour
-            * Exports disable speed mode, enable anti-aliasing, and reuse the Matplotlib
-              title. Raw scatter markers shrink to size 1 for parity with the Matplotlib
-              figure.
-            * 100 °C–25 °C delta labels float above each sample. Continuous data is plotted as
-              a smoothed overlay offset near the relevant sample so it remains distinguishable.
+            ### Running and reviewing output
+            * Press **Run** once files and settings look right. The console records progress and
+              any outlier removals. Toggle the outlier check from the file list if you want the
+              tool to suggest exclusions before plotting.
+            * Matplotlib windows appear immediately (if **Show plots** is enabled) and are saved
+              alongside their Origin counterparts. Axes, legends, and colours match across both
+              backends.
+            * Origin exports bind the X axis to a dedicated label dataset so ticks read `2/1`,
+              `2/2`, … in the workbook and on the graph. Continuous overlays are offset slightly
+              around each microwire to avoid obscuring the mean markers, and Δ(100 °C−25 °C)
+              annotations sit just above the 100 °C point for each sample.
+
+            ### Troubleshooting
+            * If a sample is missing from the Origin plot, confirm its filename follows the
+              expected pattern and that the wire appears in both 25 °C and 100 °C groups.
+            * When using the developer file retention toggle, prune the list with **Remove
+              Selected** to avoid accidentally reusing stale traces.
             """
         ).strip(),
     },
@@ -92,13 +122,21 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Temperature dependence plotter",
         "body": dedent(
             """
-            * Combine multiple measurements taken at different temperatures.  The tool
-              overlays the mean hysteresis shift per microwire and highlights the
-              difference between 25 °C and 100 °C.
-            * Enable **Include continuous data** to plot smoothed background traces.  Use
-              the moving-average controls to tame noisy runs.
-            * Legends, axis labels, and titles follow the same readability controls used by
-              other plotters.
+            ### Workflow
+            1. Load processed temperature-dependence logs via **Add Files/Folders**. Group files
+               by composition so the tool can overlay the correct microwires.
+            2. Choose which statistics to emphasise (mean, delta, continuous traces) and adjust
+               the smoothing windows for continuous data as needed.
+            3. Configure export settings exactly as in the sensitivity plotter—backend, output
+               folder, format, and DPI are all remembered per tool.
+            4. Use the **Readability** panel to position the legend, scale fonts, or hide axes
+               before plotting.
+
+            ### Tips
+            * Enabling continuous data provides context for mean markers. Try a median window of
+              five samples followed by a longer moving average for stable overlays.
+            * Toggle the developer file-retention option when iterating on the same dataset over
+              multiple sessions.
             """
         ).strip(),
     },
@@ -106,11 +144,21 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Current annealing plotter",
         "body": dedent(
             """
-            * Add one or more logged annealing sessions (plain three-column text files).
-            * Choose the backend and output directory; PNG exports respect the stored DPI.
-            * The plotter skips the initial zero-current sample so curves begin with the
+            ### Steps
+            1. Add one or more logged annealing sessions (three-column text files produced by
+               the serial or PyVISA loggers).
+            2. Decide whether to plot resistance against current, sample index, or both. Each
+               figure includes per-loop colouring so up/down ramps are easy to distinguish.
+            3. Select the backend and export directory. PNG exports obey the stored DPI while
+               PDF/SVG remain vector-based.
+            4. Use readability options to toggle legends, axis labels, or tick marks before
+               generating the plot.
+
+            ### Notes
+            * The initial zero-current sample is skipped automatically so curves start at the
               first real measurement.
-            * Use the readability controls to expose only the legend or axes you need.
+            * When plotting multiple sessions the legend reflects the logfile names, making it
+              easy to compare runs from different days.
             """
         ).strip(),
     },
@@ -118,10 +166,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Hysteresis loops",
         "body": dedent(
             """
-            * Select pre-processed hysteresis loop files.  Each plot overlays the forward
-              and reverse sweep with optional fits.
-            * The **Readability** panel manages legend placement, fonts, and axis labels.
-            * Toggle curve visibility directly in the data table before plotting.
+            ### Usage
+            1. Select pre-processed hysteresis loop files (one per microwire). Each plot overlays
+               the forward and reverse sweeps and can include optional fits if present in the
+               dataset.
+            2. Tweak axis ranges, legend placement, and font sizes from the **Readability** pane.
+            3. Use the data table to hide or reveal individual curves before plotting, keeping the
+               output focused on the comparisons you need.
             """
         ).strip(),
     },
@@ -129,10 +180,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "HSW distribution",
         "body": dedent(
             """
-            * Load switching-field CSV exports.  The dialog bins events by microwire and
-              displays histograms with optional Gaussian fits.
-            * You can overlay multiple groups to compare treatments.  Legends sit outside
-              the axes by default to keep the bars visible.
+            ### Steps
+            1. Load switching-field CSV exports for the wires you want to compare.
+            2. Configure bin widths, enable or disable Gaussian fits, and decide whether to show
+               cumulative fractions.
+            3. Overlay multiple groups to compare treatments—the legend is positioned outside the
+               axes by default to keep bars clear, but you can reposition it from the readability
+               settings.
             """
         ).strip(),
     },
@@ -140,10 +194,12 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "HSW load comparison",
         "body": dedent(
             """
-            * Compare switching-field distributions across different mechanical loads.
-            * Enable or disable averages, standard deviations, and cumulative fractions via
-              the checkboxes above the file list.
-            * Use the readability controls to reflow legends when adding many load levels.
+            ### Workflow
+            1. Drop in switching-field datasets recorded at different mechanical loads.
+            2. Enable or disable averages, standard deviations, and cumulative fractions with the
+               checkboxes above the list.
+            3. Reflow the legend or resize fonts from the readability pane when overlaying many
+               load levels so the figure stays legible.
             """
         ).strip(),
     },
@@ -151,10 +207,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Maxion continuous measurements",
         "body": dedent(
             """
-            * Plot long-running Maxion measurements with optional axis scaling (×10³/×10⁴)
-              and median centring.
-            * Continuous traces can be combined with their statistical summaries, and
-              legend text can inherit the trace colours when needed.
+            ### How to use
+            1. Load long-running Maxion measurement logs.
+            2. Choose whether to scale the axis (×10³/×10⁴) or centre the data on the median to
+               emphasise drift.
+            3. Combine continuous traces with statistical summaries if you want both context and
+               compact overlays.
+            4. Enable “Colour legend text” to match legend entries to their traces.
             """
         ).strip(),
     },
@@ -162,11 +221,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "PDF plotter",
         "body": dedent(
             """
-            * Import a delimited text file and choose columns to plot against each other.
-            * Configure line/marker styling, enable grids, and decide whether the output
-              should be inverted for dark backgrounds.
-            * Legends, axis labels, and tick fonts are adjustable; exports can be saved as
-              PNG, PDF, or SVG using the chosen figure size and DPI.
+            ### Steps
+            1. Import a delimited text file (comma- or tab-separated). Choose the X and Y columns
+               to plot; multiple Y selections produce multiple curves.
+            2. Configure line/marker styling, enable grid lines, and decide whether to invert the
+               colours for dark backgrounds.
+            3. Adjust titles, legends, and tick fonts before exporting. Figures save as PNG, PDF,
+               or SVG using the specified size and DPI.
             """
         ).strip(),
     },
@@ -174,10 +235,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Stress dependence",
         "body": dedent(
             """
-            * Compare magnetisation versus stress for multiple wires.  The tool plots raw
-              measurements, polynomial fits, and optional error bars.
-            * Stress ranges can be cropped, and datasets grouped, before plotting.
-            * Apply readability tweaks to keep dense legends or tick labels legible.
+            ### Workflow
+            1. Load magnetisation-versus-stress datasets for each microwire.
+            2. Choose whether to plot raw measurements, polynomial fits, and/or error bars.
+            3. Crop stress ranges or group datasets before plotting to focus on the regions of
+               interest.
+            4. Use readability options to maintain legible legends and tick labels when comparing
+               many wires at once.
             """
         ).strip(),
     },
@@ -185,9 +249,13 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Stress sensitivity",
         "body": dedent(
             """
-            * Visualise how sensitivity changes with applied stress.  Measurements from
-              different wires can be overlaid with their fitted trends.
-            * Enable logarithmic axes when needed and tune marker styles prior to export.
+            ### Steps
+            1. Add processed stress-sensitivity measurements. Each dataset can include fitted
+               trends as well as raw values.
+            2. Enable logarithmic axes if the spread is large, and configure marker styles before
+               exporting.
+            3. Overlay multiple wires to compare behaviour; the readability pane keeps the figure
+               tidy even with numerous overlays.
             """
         ).strip(),
     },
@@ -195,24 +263,28 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Serial current annealing logger",
         "body": dedent(
             """
-            * Choose the serial port (or use the discovery combo box) and click **Connect**.
-              The logger remembers the last directory and file name separately so repeated
-              runs require fewer clicks.
-            * Configure the ramp: set the maximum current, dwell time at the peak, current
-              step, loop count, and whether automatic reversal is allowed.  Infinite looping
-              locks the loop counter and displays ∞ in the time estimate.
-            * **Start annealing process** runs the scripted ramp.  The logger measures
-              voltage and current continuously, plots resistance in real time, and stores
-              samples to the chosen log file.
-            * Contact-loss detection waits until the supply has delivered a non-zero
-              current, adds a short grace period, and requires several consecutive zero
-              readings before stopping.  Hitting 30 V opens a dialog so you can hold,
-              reverse, or abort safely.
-            * Use **Reverse now** for an immediate ramp down and **Stop** to terminate the
-              process while saving the collected data.
-            * The menu bar mirrors the PyVISA version: switch appearance from **View → Theme**,
-              collapse the console via **View → Show Console**, and revisit these notes from
-              **Help → View Help**.
+            ### Connect and prepare
+            1. Select the serial port manually or discover it using the drop-down next to
+               **Connect**. The logger remembers the most recently used port, log directory, and
+               file name to minimise setup time.
+            2. Configure the current ramp: maximum current, step size, interval between steps,
+               dwell time at the peak, number of loops, and whether automatic reversal to zero is
+               allowed. Choosing ∞ for the loop count locks the control and displays the total time
+               as infinity.
+
+            ### Running the process
+            * Click **Start annealing process** to begin. Voltage and current readings are sampled
+              continuously, resistance plots update live, and every sample is written to the chosen
+              logfile.
+            * Contact-loss detection waits for the first non-zero current, applies a short grace
+              period, and then requires several consecutive zero readings before halting. If the
+              supply reaches 30 V a dialog lets you hold, reverse, or abort the ramp safely.
+            * Use **Reverse now** to begin the downward ramp immediately or **Stop** to terminate
+              the process and flush the log to disk.
+
+            ### Notes
+            * The shared menu bar provides theme controls, console visibility toggles, and this
+              help entry for quick reference.
             """
         ).strip(),
     },
@@ -220,37 +292,35 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "PyVISA current annealing logger",
         "body": dedent(
             """
-            ### Connecting to your supply
-            * Click **Refresh** to scan for VISA resources. The list includes local serial
-              bridges (e.g. `ASRL…`) and LAN/USB instruments reported by NI-VISA/pyvisa.
-            * Select the instrument and press **Connect**. The current log directory and file
-              name are remembered between sessions—adjust them before starting a run.
+            ### Connect to the instrument
+            * Open the logger from the launcher’s **Experiments** tab (enable it from the
+              **Developer** menu). The window mirrors the serial logger but communicates via
+              VISA.
+            1. Click **Refresh** to enumerate VISA resources. Devices discovered by NI-VISA or
+               ``pyvisa-py`` appear alongside serial bridges (`ASRL…`).
+            2. Pick the instrument, adjust the log directory and filename if required, and press
+               **Connect**. The dialog remembers the previous selections between sessions.
 
-            ### Configuring the ramp
-            * **Max**, **Step**, and **Interval** define the up/down ramp. The live estimate
-              below the controls updates automatically so you know how long the run will
-              take for the selected number of loops.
-            * **Dwell** keeps the current at the peak for the specified number of seconds
-              before the ramp reverses or stops. Set the **Loops** spin box to `∞` for a
-              continuous anneal or choose an exact count.
-            * Enable **Reverse to zero after max** to bring the current back to zero after
-              each loop. Use **Reverse current now** if you need to begin the downward ramp
-              immediately.
+            ### Configure the annealing sequence
+            * Set **Max**, **Step**, and **Interval** to describe the ramp. The live time estimate
+              updates immediately when you adjust any parameter or loop count.
+            * Specify the **Dwell** time at the peak and choose how many loops to execute. Set the
+              loop count to `∞` for continuous operation. Toggle **Reverse to zero after max** to
+              force a return to zero between loops.
 
-            ### During acquisition
-            * Press **Start annealing** to begin; the logger writes timestamped voltage,
-              current, and resistance values to the chosen file and updates the resistance
-              plots in real time.
-            * If the instrument reports zero current after delivering a non-zero value the
-              logger assumes contact loss, stops the ramp, and notifies you. Hitting 30 V
-              presents options to hold, reverse, or abort.
-            * Use **Stop annealing** to finish the sequence cleanly. Logging can be toggled
-              independently via **Start Log/Stop Log**.
+            ### Run and monitor
+            * Press **Start annealing** to begin the scripted ramp. Voltage, current, and
+              resistance are logged with timestamps, and resistance traces update live.
+            * **Reverse current now** initiates an immediate ramp-down. **Stop annealing** ends the
+              process gracefully while keeping the data file intact.
+            * Contact-loss detection mirrors the serial logger: it requires sustained zero current
+              readings before aborting and prompts you when the supply reaches 30 V.
 
-            ### Menu shortcuts
-            * **View → Theme** controls the palette; **View → Show Console** collapses the
-              message pane when you want a taller plot. **Help → View Help** opens this
-              walkthrough.
+            ### Extras
+            * The standalone **Start Log/Stop Log** buttons let you capture instrument telemetry
+              without running a ramp.
+            * Appearance and layout controls live under the **View** menu, and this manual is
+              always available from **Help → View Help**.
             """
         ).strip(),
     },
@@ -279,6 +349,22 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               parsing.
             * Use the menu bar to toggle the theme or to revisit these instructions from the
               **Help** menu.
+            """
+        ).strip(),
+    },
+    "experiment_liquid_glass": {
+        "title": "Liquid glass UI demo",
+        "body": dedent(
+            """
+            * This prototype shows how a liquid-glass aesthetic could frame microwire tooling:
+              layered gradients, frosted cards, luminous pills, and a translucent control row.
+            * Use the buttons on each card to imagine navigation targets (start a live run,
+              open the data library, experiment with UI accents). They are placeholders for
+              future wiring into real workflows.
+            * Adjust the window size to see how cards and the timeline react—the layout stays
+              fluid so the design can scale from tablets to large monitors.
+            * Change appearance from the **View** menu to preview the concept in light and dark
+              palettes. The help menu links back here with the implementation notes.
             """
         ).strip(),
     },

@@ -630,6 +630,11 @@ def plot_variable_origin(
     display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     idx_to_sample = {idx: sample for sample, idx in sample_idx.items()}
+    display_by_idx: dict[float, str] = {}
+    for sample, label in zip(samples, display_samples):
+        idx = sample_idx[sample]
+        display_by_idx[idx] = label
+        display_by_idx[float(idx)] = label
 
     work = df.copy()
     work['sample_idx'] = work['sample'].map(sample_idx).astype(float)
@@ -752,15 +757,22 @@ def plot_variable_origin(
             continue
         temp_label = _format_temp_label(temp)
         w = op.new_sheet('w', lname=f'mean_{temp_label}')
-        w.from_list(0, sub['plot_x'].to_list())
-        w.from_list(1, sub[var].to_list())
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        labels = [display_by_idx.get(val, idx_to_sample.get(val, str(val))) for val in sub['sample_idx']]
+        w.from_list(0, labels)
+        w.from_list(1, sub['plot_x'].to_list())
+        w.from_list(2, sub[var].to_list())
+        try:
+            w.activate()
+            op.lt_exec('wks.col1.type=4; wks.col1.format=2; wks.col1.name$="Sample";')
+            op.lt_exec('wks.col2.name$="Position"; wks.col3.name$="Value";')
+        except Exception:
+            pass
+        p = gl.add_plot(w, coly=2, colx=1, type='s')
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
         legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
         try:
             w.activate()
-            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+            op.lt_exec(f'wks.col3.lname$ = "{legend_label}";')
         except Exception:
             pass
         try:
@@ -865,6 +877,10 @@ def plot_variable_origin(
                         "layer.x.label.auto=0;",
                         "layer.x.label.type=2;",
                         "layer.x.label.by=1;",
+                        f"layer.x.label.from=1;",
+                        f"layer.x.label.to={len(display_samples)};",
+                        f"layer.x.label.count={len(display_samples)};",
+                        "layer.x.label.formula$=\"\";",
                         f"layer.x.label.dataset$=\"{rng}\";",
                         "layer.x.label.apply=1;",
                     ]
@@ -876,7 +892,12 @@ def plot_variable_origin(
         if not labels_applied:
             try:
                 label_text = "\n".join(display_samples)
-                op.lt_exec('layer.x.label.auto=0; layer.x.label.type=1; layer.x.label.by=1;')
+                op.lt_exec(
+                    "layer.x.label.auto=0; layer.x.label.type=1; layer.x.label.by=1;"
+                    f"layer.x.label.from=1; layer.x.label.to={len(display_samples)};"
+                    f"layer.x.label.count={len(display_samples)};"
+                    "layer.x.label.formula$=\"\";"
+                )
                 op.lt_exec(f'layer.x.label.text$="{label_text}";')
                 op.lt_exec('layer.x.label.apply=1;')
             except Exception:

@@ -409,18 +409,69 @@ def create_file_widget(
         QtWidgets.QSizePolicy.Policy.Expanding,
     )
 
+    prefs = _settings()
+    dev_opts = developer_options()
+    storage_key = f"{key}_remembered_files" if key else None
+
+    def _refresh_items() -> None:
+        file_list.clear()
+        for path in files:
+            item = QtWidgets.QListWidgetItem(path)
+            if path and not Path(path).exists():
+                item.setForeground(QtGui.QColor("#c0392b"))
+                item.setToolTip("File could not be found on disk")
+            file_list.addItem(item)
+
+    def _store_files() -> None:
+        if storage_key is None:
+            return
+        if dev_opts.keep_files():
+            prefs.setValue(storage_key, list(files))
+        else:
+            prefs.remove(storage_key)
+
+    def _load_persisted_files() -> None:
+        if storage_key is None or not dev_opts.keep_files():
+            return
+        raw = prefs.value(storage_key, [])
+        if isinstance(raw, str):
+            parts = [seg for seg in raw.splitlines() if seg]
+            candidates = parts or ([raw] if raw else [])
+        elif isinstance(raw, (list, tuple, set)):
+            candidates = [str(seg) for seg in raw if seg]
+        else:
+            candidates = []
+        changed = False
+        for candidate in candidates:
+            if candidate not in files:
+                files.append(candidate)
+                changed = True
+        if changed or files:
+            _refresh_items()
+
     def add_files() -> None:
         new = select_files_or_folder(parent, ext, key=key)
+        changed = False
         for f in new:
             if f not in files:
                 files.append(f)
-        file_list.clear()
-        file_list.addItems(files)
+                changed = True
+        if changed:
+            _refresh_items()
+            _store_files()
 
     def remove_selected() -> None:
+        removed = False
         for item in file_list.selectedItems():
-            files.remove(item.text())
+            try:
+                files.remove(item.text())
+                removed = True
+            except ValueError:
+                pass
             file_list.takeItem(file_list.row(item))
+        if removed:
+            _refresh_items()
+            _store_files()
 
     def open_item(item: QtWidgets.QListWidgetItem) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
@@ -441,7 +492,6 @@ def create_file_widget(
     auto_rm_cb = QtWidgets.QCheckBox("Remove automatically")
     auto_rm_cb.setToolTip("Skip confirmation when removing outliers")
 
-    prefs = _settings()
     auto_key = f"{key}_auto_remove_outliers" if key else None
     auto_pref = bool(_common.AUTO_REMOVE_OUTLIERS)
     if auto_key is not None:
@@ -501,6 +551,27 @@ def create_file_widget(
     btn_row.addStretch()
     layout.addLayout(btn_row)
     layout.addWidget(file_list)
+
+    _load_persisted_files()
+
+    def _toggle_keep_files(enabled: bool) -> None:
+        if storage_key is None:
+            return
+        if enabled:
+            _load_persisted_files()
+            _store_files()
+        else:
+            prefs.remove(storage_key)
+
+    dev_opts.keep_files_changed.connect(_toggle_keep_files)
+
+    def _cleanup(*_: object) -> None:
+        try:
+            dev_opts.keep_files_changed.disconnect(_toggle_keep_files)
+        except Exception:
+            pass
+
+    container.destroyed.connect(_cleanup)
 
     return files, container
 
@@ -721,6 +792,10 @@ def install_standard_menu(
         reset_action = view_menu.addAction("&Reset Layout")
         reset_action.triggered.connect(_reset_layout)
 
+    developer_menu = developer_options().create_menu(menu_bar)
+    developer_menu.setObjectName("mw_shared_developer")
+    menu_bar.addMenu(developer_menu)
+
     help_menu = menu_bar.addMenu("&Help")
     help_menu.setObjectName("mw_shared_help")
     if help_topic:
@@ -841,6 +916,103 @@ def theme_manager() -> _ThemeManager:
     if _THEME_MANAGER is None:
         _THEME_MANAGER = _ThemeManager()
     return _THEME_MANAGER
+
+
+class _DeveloperOptions(QtCore.QObject):
+    """Store developer conveniences shared across every window."""
+
+    keep_files_changed = QtCore.pyqtSignal(bool)
+    experiments_visibility_changed = QtCore.pyqtSignal(bool)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._settings = QtCore.QSettings("microwire", "ui")
+        self._keep_files = self._read_bool("developer_keep_files", default=False)
+        self._show_experiments = self._read_bool(
+            "developer_show_experiments", default=False
+        )
+        self._keep_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+        self._experiment_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+
+    # ------------------------------------------------------------------ helpers
+    def _read_bool(self, key: str, *, default: bool) -> bool:
+        value = self._settings.value(key, default)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return default
+
+    def _sync(self, actions: list[weakref.ReferenceType[QtGui.QAction]], state: bool) -> None:
+        alive: list[weakref.ReferenceType[QtGui.QAction]] = []
+        for ref in actions:
+            action = ref()
+            if action is None:
+                continue
+            alive.append(ref)
+            if action.isChecked() != state:
+                action.blockSignals(True)
+                action.setChecked(state)
+                action.blockSignals(False)
+        actions[:] = alive
+
+    # ------------------------------------------------------------------ exposed API
+    def keep_files(self) -> bool:
+        return self._keep_files
+
+    def show_experiments(self) -> bool:
+        return self._show_experiments
+
+    def set_keep_files(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._keep_files:
+            return
+        self._keep_files = enabled
+        self._settings.setValue("developer_keep_files", enabled)
+        self._sync(self._keep_actions, enabled)
+        self.keep_files_changed.emit(enabled)
+
+    def set_show_experiments(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._show_experiments:
+            return
+        self._show_experiments = enabled
+        self._settings.setValue("developer_show_experiments", enabled)
+        self._sync(self._experiment_actions, enabled)
+        self.experiments_visibility_changed.emit(enabled)
+
+    def create_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
+        menu = QtWidgets.QMenu("&Developer", parent)
+
+        keep_action = menu.addAction("Keep &File Selections")
+        keep_action.setObjectName("mw_keep_files")
+        keep_action.setCheckable(True)
+        keep_action.setChecked(self._keep_files)
+        keep_action.toggled.connect(self.set_keep_files)
+        self._keep_actions.append(weakref.ref(keep_action))
+
+        exp_action = menu.addAction("Show &Experiments Tab")
+        exp_action.setObjectName("mw_show_experiments")
+        exp_action.setCheckable(True)
+        exp_action.setChecked(self._show_experiments)
+        exp_action.toggled.connect(self.set_show_experiments)
+        self._experiment_actions.append(weakref.ref(exp_action))
+
+        return menu
+
+
+_DEVELOPER_OPTIONS: _DeveloperOptions | None = None
+
+
+def developer_options() -> _DeveloperOptions:
+    """Return the shared :class:`_DeveloperOptions` singleton."""
+
+    global _DEVELOPER_OPTIONS
+    if _DEVELOPER_OPTIONS is None:
+        _DEVELOPER_OPTIONS = _DeveloperOptions()
+    return _DEVELOPER_OPTIONS
 
 
 def ensure_app_theme(app: QtWidgets.QApplication) -> None:
