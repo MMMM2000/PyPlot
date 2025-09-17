@@ -108,14 +108,15 @@ concept. Keep the toggle off for day-to-day work to focus on production tools
 only.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: each
-sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …) so
-the workbook and figure stay in sync even when Origin insists on numeric tick
-labels. Legends share the same ordering and colour coding, symbol visibility
-follows the **Show symbols** option, and raw traces advertise `25 °C`
-instead of `25.0 °C`.  Origin exports disable speed mode, enable
-anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
-title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
-annotations at the same locations, while the Matplotlib legend sits outside the
+sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …)
+and the labels track the 25 °C mean positions so the workbook and figure stay
+in sync even when continuous traces nudge markers sideways. Legends share the
+same ordering and colour coding, symbol visibility follows the **Show symbols**
+option, and raw traces advertise `25 °C` instead of `25.0 °C`.  Origin
+exports disable speed mode, enable anti-aliasing, shrink raw scatter markers to
+size 1, reuse the Matplotlib graph title while centring it along the top edge,
+drop the vertical connector bars, and stamp the Δ(100 °C−25 °C) annotations
+directly above the 100 °C means, while the Matplotlib legend sits outside the
 axes to avoid covering data points.  The default moving-average window now
 spans 200 samples for smoother continuous traces straight out of the box, and
 the Origin backend applies these tweaks through the Python API so axis labels

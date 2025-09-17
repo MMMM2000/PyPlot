@@ -388,7 +388,7 @@ def plot_variable(
     y_range = y_max - y_min if y_max != y_min else 1.0
     delta_offset = 0.05 * y_range
     plot_top = y_max + 0.08 * y_range
-    title_level = y_max + 0.06 * y_range
+    title_level = plot_top - 0.02 * y_range
 
     fig, ax = plt.subplots(figsize=(9, 5))
     legend_done: set[str] = set()
@@ -688,6 +688,18 @@ def plot_variable_origin(
             return row['sample_idx']
         means['plot_x'] = means.apply(_shift, axis=1)
 
+    mean_positions: dict[tuple[float, float], float] = {}
+    if not means.empty:
+        mean_positions = {
+            (float(row.sample_idx), float(row.temp)): float(row.plot_x)
+            for row in means.itertuples()
+        }
+
+    sample_label_positions: dict[str, float] = {
+        sample: mean_positions.get((float(sample_idx[sample]), 25.0), float(sample_idx[sample]))
+        for sample in samples
+    }
+
     delta_labels: list[tuple[float, float, str]] = []
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
@@ -696,7 +708,8 @@ def plot_variable_origin(
             has_cont = sample in cont_samples
             delta = row[100] - row[25]
             y_top = row[100] + (delta_offset if has_cont else 0.0)
-            delta_labels.append((idx - 0.1, y_top, f"{delta:.1f}"))
+            x_pos = mean_positions.get((float(idx), 100.0), float(idx))
+            delta_labels.append((x_pos, y_top, f"{delta:.1f}"))
 
     cont_processed: list[pd.DataFrame] = []
     if include_cont and not cont.empty:
@@ -951,8 +964,9 @@ def plot_variable_origin(
             pass
         for idx, sample in enumerate(samples, start=1):
             text = display_by_idx.get(sample_idx[sample], sample.replace('_', '/'))
+            x_pos = sample_label_positions.get(sample, float(sample_idx[sample]))
             try:
-                label = gl.add_label(text, float(sample_idx[sample]), tick_level)
+                label = gl.add_label(text, float(x_pos), tick_level)
             except Exception:
                 label = None
             if label is None:
@@ -960,6 +974,10 @@ def plot_variable_origin(
             try:
                 label.name = f'py_xtick{idx}'
                 label.set_int('attach', 0)
+                try:
+                    label.set_int('horzalign', 1)
+                except Exception:
+                    pass
             except Exception:
                 pass
             manual_labels_added = True
@@ -984,6 +1002,10 @@ def plot_variable_origin(
         try:
             label.name = f'py_delta{idx}'
             label.set_int('attach', 0)
+            try:
+                label.set_int('horzalign', 1)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -1010,6 +1032,14 @@ def plot_variable_origin(
         try:
             manual_title.name = 'py_title'
             manual_title.set_int('attach', 0)
+            try:
+                manual_title.set_int('horzalign', 1)
+            except Exception:
+                pass
+            try:
+                manual_title.set_int('vertalign', 2)
+            except Exception:
+                pass
         except Exception:
             pass
 

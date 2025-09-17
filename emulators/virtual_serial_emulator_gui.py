@@ -38,7 +38,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Protocol, cast
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QTextCursor
@@ -50,16 +50,20 @@ from PyQt6.QtWidgets import (
 )
 from plotting.utils import ensure_app_theme, install_standard_menu
 
-from typing import TYPE_CHECKING, Optional, cast
+class SerialLike(Protocol):
+    def close(self) -> None: ...
+
+    def readline(self, size: int = ...) -> bytes: ...
+
+    def write(self, data: bytes | bytearray) -> int: ...
+
 
 try:
-    import serial  # type: ignore
-    from serial.serialutil import SerialBase as _SerialBase  # type: ignore[attr-defined]
+    import serial as _serial  # type: ignore
 except Exception:  # pragma: no cover - environment without pyserial
-    serial = None  # type: ignore[assignment]
-    class _SerialBase:  # type: ignore[no-redef]
-        """Fallback serial base type for type checking."""
-        pass
+    _serial = None
+
+serial = cast(Any, _serial)
 
 ROOT = Path.cwd()
 TTY0 = ROOT / "ttyV0"
@@ -85,7 +89,7 @@ class BaseEmuThread(threading.Thread):
         self.baud = baud
         self.log = log
         self._stop = threading.Event()
-        self.ser: Optional[_SerialBase] = None
+        self.ser: Optional[SerialLike] = None
 
     def stop(self) -> None:
         self._stop.set()
@@ -119,7 +123,7 @@ class BaseEmuThread(threading.Thread):
         # First attempt (possibly normalized to /dev/cu.* on macOS)
         primary = self._maybe_prefer_cu(self.port)
         try:
-            self.ser = serial.serial_for_url(primary, baudrate=self.baud, timeout=timeout)  # type: ignore[union-attr]
+            self.ser = cast(SerialLike, serial.serial_for_url(primary, baudrate=self.baud, timeout=timeout))  # type: ignore[attr-defined]
             if primary != self.port:
                 self.port = primary
             log_append(self.log, f"[INFO] Opened {self.port} @ {self.baud} baud")
@@ -129,7 +133,7 @@ class BaseEmuThread(threading.Thread):
         # Fallback: lower baudrates commonly supported by PTYs
         for b in (115200, 9600):
             try:
-                self.ser = serial.serial_for_url(primary, baudrate=b, timeout=timeout)  # type: ignore[union-attr]
+                self.ser = cast(SerialLike, serial.serial_for_url(primary, baudrate=b, timeout=timeout))  # type: ignore[attr-defined]
                 self.baud = b
                 if primary != self.port:
                     self.port = primary
@@ -195,7 +199,10 @@ class DataLoggerEmuThread(BaseEmuThread):
         next_send = time.perf_counter()
         while not self._stop.is_set():
             try:
-                raw = self.ser.readline() if self.ser else b""
+                if self.ser is not None:
+                    raw = self.ser.readline()
+                else:
+                    raw = b""
             except Exception:
                 raw = b""
             if raw:
@@ -259,7 +266,7 @@ class DataLoggerEmuThread(BaseEmuThread):
                 line = self.lines[self.idx % len(self.lines)] + "\n"
                 self.idx += 1
                 try:
-                    if self.ser:
+                    if self.ser is not None:
                         self.ser.write(line.encode())
                 except Exception as e:
                     log_append(self.log, f"[ERR ] write failed: {e}")
@@ -302,7 +309,10 @@ class AnnealingEmuThread(BaseEmuThread):
             return
         while not self._stop.is_set():
             try:
-                raw = self.ser.readline() if self.ser else b""
+                if self.ser is not None:
+                    raw = self.ser.readline()
+                else:
+                    raw = b""
             except Exception:
                 raw = b""
             if not raw:
@@ -342,6 +352,8 @@ class Main(QWidget):
         self.resize(880, 600)
         self.socat_proc: Optional[subprocess.Popen] = None
         self.emu: Optional[threading.Thread] = None
+        self.btn_preset_pair0: Optional[QPushButton] = None
+        self.btn_preset_pair1: Optional[QPushButton] = None
         self._build_ui()
 
     # UI layout
