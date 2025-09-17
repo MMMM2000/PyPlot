@@ -650,16 +650,24 @@ class Main(QWidget):
 
     def _update_pair_buttons_enabled(self) -> None:
         # Buttons were removed; keep method for backward calls
-        if hasattr(self, 'btn_preset_pair0') and hasattr(self, 'btn_preset_pair1'):
-            sysname = platform.system()
-            ok_platform = sysname in {"Darwin", "Linux"}
-            have0 = TTY0.exists() or Path("/dev/cu.ttyV0").exists()
-            have1 = TTY1.exists() or Path("/dev/cu.ttyV1").exists()
-            enabled0 = ok_platform and have0
-            enabled1 = ok_platform and have1
+        btn0 = self.btn_preset_pair0
+        btn1 = self.btn_preset_pair1
+        if btn0 is None and btn1 is None:
+            return
+        sysname = platform.system()
+        ok_platform = sysname in {"Darwin", "Linux"}
+        have0 = TTY0.exists() or Path("/dev/cu.ttyV0").exists()
+        have1 = TTY1.exists() or Path("/dev/cu.ttyV1").exists()
+        enabled0 = ok_platform and have0
+        enabled1 = ok_platform and have1
+        if btn0 is not None:
             try:
-                self.btn_preset_pair0.setEnabled(enabled0)
-                self.btn_preset_pair1.setEnabled(enabled1)
+                btn0.setEnabled(enabled0)
+            except Exception:
+                pass
+        if btn1 is not None:
+            try:
+                btn1.setEnabled(enabled1)
             except Exception:
                 pass
 

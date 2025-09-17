@@ -18,6 +18,7 @@ import sys
 import time
 import math
 from pathlib import Path
+from typing import Protocol, TextIO, cast
 
 from PyQt6 import QtCore, QtWidgets, QtGui
 import pyvisa
@@ -29,6 +30,16 @@ from matplotlib.figure import Figure
 from plotting.utils import ensure_app_theme, install_standard_menu, theme_manager
 
 
+class VisaInstrument(Protocol):
+    timeout: float | int
+
+    def close(self) -> None: ...
+
+    def write(self, command: str) -> object: ...
+
+    def query(self, command: str) -> str: ...
+
+
 class PyVISAAnnealingLogger(QtWidgets.QWidget):
     """GUI that performs current annealing and logging using PyVISA."""
 
@@ -37,8 +48,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.setWindowTitle("PyVISA Current Annealing Logger")
 
         self.rm = pyvisa.ResourceManager()
-        self.inst: pyvisa.resources.Resource | None = None
-        self.logfile: Path | None = None
+        self.inst: VisaInstrument | None = None
+        self.logfile: TextIO | None = None
         self.settings = QtCore.QSettings("microwire", "pyvisa_annealing")
 
         # ------------------------------------------------------------------ widgets
@@ -97,7 +108,8 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         for lbl in (self.voltage_value, self.current_value, self.set_value):
             lbl.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
             lbl.setMinimumWidth(60)
-        self.output_view = QtWidgets.QPlainTextEdit(readOnly=True)
+        self.output_view = QtWidgets.QPlainTextEdit()
+        self.output_view.setReadOnly(True)
 
         # live plots using matplotlib (Resistance vs current and sample count)
         self.fig = Figure()
@@ -263,7 +275,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
 
     def update_plot_colors(self) -> None:
         app = QtWidgets.QApplication.instance()
-        if app is None:
+        if app is None or not isinstance(app, QtWidgets.QApplication):
             return
         palette = app.palette()
         scheme = app.styleHints().colorScheme()
@@ -287,7 +299,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.update_plot_colors()
 
     # -------------------------------------------------------------------- slots
-    def disconnect(self) -> None:
+    def disconnect_instrument(self) -> None:
         """Close the instrument and reset UI state."""
         if self.process_timer.isActive():
             self.stop_process()
@@ -312,7 +324,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
 
     def handle_connect(self) -> None:
         if self.inst is not None:
-            self.disconnect()
+            self.disconnect_instrument()
             return
 
         resource = self.resource_combo.currentText().strip()
@@ -320,13 +332,16 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "No resource", "Select a VISA resource")
             return
         try:
-            self.inst = self.rm.open_resource(resource)
+            opened = self.rm.open_resource(resource)
+            self.inst = cast(VisaInstrument, opened)
             self.inst.timeout = 1000  # shorten blocking operations
             if resource.upper().startswith("ASRL"):
-                try:
-                    self.inst.baud_rate = 115200
-                except Exception:
-                    pass
+                inst = self.inst
+                if inst is not None:
+                    try:
+                        setattr(inst, "baud_rate", 115200)
+                    except Exception:
+                        pass
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self, "Error", str(exc))
             self.inst = None
@@ -595,8 +610,9 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             self.stop_process()
 
     # -------------------------------------------------------------------- Qt
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI
-        self.disconnect()
+    def closeEvent(self, a0: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI
+        event = a0
+        self.disconnect_instrument()
         super().closeEvent(event)
 
 
@@ -605,6 +621,7 @@ def main() -> QtWidgets.QWidget:  # pragma: no cover - manual use
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
+    assert isinstance(app, QtWidgets.QApplication)
     ensure_app_theme(app)
     win = PyVISAAnnealingLogger()
     win.showMaximized()

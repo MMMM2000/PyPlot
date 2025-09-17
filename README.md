@@ -50,7 +50,10 @@ python -m launcher
 
 Closing the launcher warns about other open windows and will close them.  Plot
 settings dialogs can now be closed independently without shutting down the
-launcher, so you can move between tools without relaunching the hub.
+launcher, so you can move between tools without relaunching the hub.  Origin
+control is released immediately after each run, so closing the Temperature
+Sensitivity settings while Origin remains open no longer tears down the
+launcher window.
 
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and

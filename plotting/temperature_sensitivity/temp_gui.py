@@ -218,10 +218,16 @@ class SettingsDialog(QtWidgets.QDialog):
         preloaded = None
         if self._preprocessed_data is not None and self._preprocessed_snapshot == snapshot:
             preloaded = self._preprocessed_data.copy(deep=True)
-        run_with_console(
-            lambda: orig.main(self.files, backend=backend, preprocessed_data=preloaded),
-            self.console,
-        )
+        backend_key = backend.lower()
+
+        def _task() -> None:
+            orig.main(self.files, backend=backend, preprocessed_data=preloaded)
+
+        try:
+            run_with_console(_task, self.console)
+        finally:
+            if backend_key in {"origin", "both"}:
+                release_origin()
 
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
@@ -229,7 +235,6 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.common.AUTO_REMOVE_OUTLIERS = False
         self._preprocessed_data = None
         self._preprocessed_snapshot = None
-        release_origin()
         super().closeEvent(event)
 
 class ProgressDialog:

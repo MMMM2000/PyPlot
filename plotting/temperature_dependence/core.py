@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, cast
 import re
 
 from PyQt6 import QtWidgets
@@ -231,29 +231,29 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
         gl = gp[0]
 
         if PLOT_MODE in ("raw", "both") and not raw_cont.empty:
-            w_cont = op.new_sheet('w', lname="raw_cont")
+            w_cont = cast(Any, op.new_sheet('w', lname="raw_cont"))
             w_cont.from_df(raw_cont)
             w_cont.cols_axis('XY')
-            p_cont = gl.add_plot(w_cont, coly=1, colx=0, type='s')
+            p_cont = cast(Any, gl.add_plot(w_cont, coly=1, colx=0, type='s'))
             try:
                 p_cont.color = OVERALL_COLOR
                 p_cont.symbol_shape = 2  # circle
             except Exception:
                 pass
         if PLOT_MODE in ("raw", "both") and not raw_disc.empty:
-            w_disc = op.new_sheet('w', lname="raw_disc")
+            w_disc = cast(Any, op.new_sheet('w', lname="raw_disc"))
             w_disc.from_df(raw_disc)
             w_disc.cols_axis('XY')
-            p_disc = gl.add_plot(w_disc, coly=1, colx=0, type='s')
+            p_disc = cast(Any, gl.add_plot(w_disc, coly=1, colx=0, type='s'))
             try:
                 p_disc.color = RAW_COLORS.get(25, '#45A1D6')
             except Exception:
                 pass
         if PLOT_MODE in ("processed", "both") and not proc.empty:
-            w_proc = op.new_sheet('w', lname="processed")
+            w_proc = cast(Any, op.new_sheet('w', lname="processed"))
             w_proc.from_df(proc)
             w_proc.cols_axis('XY')
-            p_proc = gl.add_plot(w_proc, coly=1, colx=0, type='y')
+            p_proc = cast(Any, gl.add_plot(w_proc, coly=1, colx=0, type='y'))
             try:
                 p_proc.color = PROC_COLOR
                 p_proc.line_width = PROC_LW

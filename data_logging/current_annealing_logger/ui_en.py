@@ -20,7 +20,8 @@ class Ui_MainWindow(object):
         self.plot_container: Optional[QtWidgets.QFrame] = None
         self.label_live_voltage: Optional[QtWidgets.QLabel] = None
         self.label_set_current: Optional[QtWidgets.QLabel] = None
-        self.lcdNumber_aktualny_prud_mA: Optional[QtWidgets.QLabel] = None
+        self.lcdNumber_aktualny_prud_mA: Optional[QtWidgets.QLCDNumber] = None
+        self.lcdNumber_aktualny_odpor: Optional[QtWidgets.QLCDNumber] = None
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("CurrentAnnealingMainWindow")
@@ -347,25 +348,27 @@ class Ui_MainWindow(object):
         # Live values group
         self.groupBox_aktualne_hodnoty = QtWidgets.QGroupBox("Live values")
         lv = QtWidgets.QGridLayout(self.groupBox_aktualne_hodnoty)
-        self.lcdNumber_aktualny_prud_mA = QtWidgets.QLCDNumber()
-        self.lcdNumber_aktualny_prud_mA.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
-        self.lcdNumber_aktualny_prud_mA.setDigitCount(6)
-        self.lcdNumber_aktualny_prud_mA.setSizePolicy(
+        lcd_current = QtWidgets.QLCDNumber()
+        lcd_current.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
+        lcd_current.setDigitCount(6)
+        lcd_current.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.label_mA = QtWidgets.QLabel("mA")
-        self.lcdNumber_aktualny_odpor = QtWidgets.QLCDNumber()
-        self.lcdNumber_aktualny_odpor.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
-        self.lcdNumber_aktualny_odpor.setDigitCount(6)
-        self.lcdNumber_aktualny_odpor.setSizePolicy(
+        lcd_resistance = QtWidgets.QLCDNumber()
+        lcd_resistance.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
+        lcd_resistance.setDigitCount(6)
+        lcd_resistance.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        self.lcdNumber_aktualny_prud_mA = lcd_current
+        self.lcdNumber_aktualny_odpor = lcd_resistance
         self.label_Ohm = QtWidgets.QLabel("Ohm")
-        lv.addWidget(self.lcdNumber_aktualny_prud_mA, 0, 0)
+        lv.addWidget(lcd_current, 0, 0)
         lv.addWidget(self.label_mA, 0, 1)
-        lv.addWidget(self.lcdNumber_aktualny_odpor, 0, 2)
+        lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
         grid.addWidget(self.groupBox_aktualne_hodnoty, 8, 0, 1, 3)
 
