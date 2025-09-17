@@ -13,6 +13,8 @@ import time
 import math
 from pathlib import Path
 from collections import deque
+from typing import Any, Deque, Optional, TextIO, cast
+
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
@@ -25,13 +27,22 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib.figure import Figure
-from matplotlib.axes import Axes
+
 try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+except Exception:
+    try:
+        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+    except Exception:  # pragma: no cover - backend optional
+        FigureCanvas = None  # type: ignore[assignment]
+
+try:
     from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
 except Exception:
-    FigureCanvas = None  # type: ignore[assignment]
-    NavigationToolbar = None  # type: ignore[assignment]
+    try:
+        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+    except Exception:  # pragma: no cover - backend optional
+        NavigationToolbar = None  # type: ignore[assignment]
 
 
 fig_size = plt.rcParams["figure.figsize"]
@@ -76,15 +87,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
-        self.ui = Ui_MainWindow()
+        self.ui = cast(Any, Ui_MainWindow())
         self.ui.setupUi(self)
-        self.fig: Figure | None = None
-        self.canvas: FigureCanvas | None = None
-        self.toolbar: NavigationToolbar | None = None
-        self.ax1: Axes | None = None
-        self.ax2: Axes | None = None
-        self.line1: Line2D | None = None
-        self.line2: Line2D | None = None
         # Window title and size cap for laptop screens
         self.setWindowTitle("Current Annealing Logger")
         try:
@@ -144,25 +148,25 @@ class MainWindow(QtWidgets.QMainWindow):
         self.timer_command.stop();
         self.timer_command.timeout.connect(self.handle_send_new_command)
         
-        self.f_name = None
-        self.f_out = None
+        self.f_name: str | None = None
+        self.f_out: TextIO | None = None
         self.pocet_vzoriek = 1000
         self.vzorka_N = 0
         self.zaznam_on = False
         self.napatie = True
-        
+
         self.percento_pokles_R = 10
         self.doba_staly_prud = 1
         self.hodnota_staly_prud = 10
         self.modus_operandi = 0 #0 - VCp, 1- manual, 2 - automat
         self.proces_on = False
-        
+
         self.current_current_set = 0.001
-        self.current_current_read = 0
+        self.current_current_read = 0.0
         self.current_increment = 0.001
-        self.temp_resistance_maximum = 0
-        self.current_voltage = 0
-        self.current_resistance = 0
+        self.temp_resistance_maximum = 0.0
+        self.current_voltage = 0.0
+        self.current_resistance = 0.0
         self.open_threshold = 30
         self.max_voltage = 30.0
         self._max_voltage_dialog = False
@@ -172,7 +176,7 @@ class MainWindow(QtWidgets.QMainWindow):
         # Debug + progress/time tracking
         self.DEBUG = False
         self.sample_rate: float | None = None
-        self._rate_window: deque[float] = deque(maxlen=200)
+        self._rate_window: Deque[float] = deque(maxlen=200)
         self.last_sample_time: float | None = None
         self._finish_time: float | None = None
         self.step_idx = 0
@@ -185,6 +189,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contact_grace_period = 5.0
         self._last_serial_rx: float | None = None
         self._serial_quiet_failures = 0
+
+        self.prev_value_x: float | None = None
+        self.prev_value_y: float | None = None
+        self.curr_value_x: float = 0.0
+        self.curr_value_y: float = 0.0
         
         # print("Číslo portu: COM" + str(self.cislo_portu))
         # print("Baudrate: " + str(self.baudrate))
@@ -312,11 +321,11 @@ class MainWindow(QtWidgets.QMainWindow):
         
         #premenne na kreslenie grafu z dat
         self.prev_value_x = None
-        self.curr_value_x = 0
+        self.curr_value_x = 0.0
         self.prev_value_y = None
-        self.curr_value_y = 0
+        self.curr_value_y = 0.0
         self.first_sample = True
-        
+
         self.fig = None
         self.ax1 = None
         self.ax2 = None
@@ -343,22 +352,37 @@ class MainWindow(QtWidgets.QMainWindow):
         # Show initial placeholder plot on the right
         try:
             self.init_graph_window()
-            if getattr(self, 'ax1', None) is not None:
-                self.ax1.text(
-                    0.5, 0.5, 'No data yet', transform=self.ax1.transAxes,
-                    ha='center', va='center', fontsize=14, fontweight='bold',
+            ax1 = getattr(self, 'ax1', None)
+            if ax1 is not None:
+                ax1.text(
+                    0.5,
+                    0.5,
+                    'No data yet',
+                    transform=ax1.transAxes,
+                    ha='center',
+                    va='center',
+                    fontsize=14,
+                    fontweight='bold',
                     color=self.palette().color(QtGui.QPalette.ColorRole.Text),
                     bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
                 )
-            if getattr(self, 'ax2', None) is not None:
-                self.ax2.text(
-                    0.5, 0.5, 'No data yet', transform=self.ax2.transAxes,
-                    ha='center', va='center', fontsize=14, fontweight='bold',
+            ax2 = getattr(self, 'ax2', None)
+            if ax2 is not None:
+                ax2.text(
+                    0.5,
+                    0.5,
+                    'No data yet',
+                    transform=ax2.transAxes,
+                    ha='center',
+                    va='center',
+                    fontsize=14,
+                    fontweight='bold',
                     color=self.palette().color(QtGui.QPalette.ColorRole.Text),
                     bbox=dict(facecolor='k', alpha=0.35, edgecolor='none', pad=3),
                 )
-            if getattr(self, 'canvas', None) is not None:
-                self.canvas.draw()
+            canvas = getattr(self, 'canvas', None)
+            if canvas is not None:
+                canvas.draw()
         except Exception:
             pass
         try:
@@ -373,6 +397,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(*args)
             except Exception:
                 pass
+
+    def _display_ui_value(self, attr: str, text: str) -> None:
+        widget = getattr(self.ui, attr, None)
+        if widget is None:
+            return
+        target = cast(Any, widget)
+        display_fn = getattr(target, 'display', None)
+        if callable(display_fn):
+            display_fn(text)
+            return
+        setter = getattr(target, 'setText', None)
+        if callable(setter):
+            setter(text)
 
     def _set_port_controls_enabled(self, enabled: bool) -> None:
         for name in ('spinBox_cislo_portu', 'comboBox_baudrate', 'comboBox_port', 'pushButton_refresh_ports'):
@@ -487,11 +524,14 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
 
     def handle_ser_mcu_readyRead(self):
-        if(self.ser_mcu.canReadLine()):
+        if self.ser_mcu.canReadLine():
             #print("Prisla lajna")
             self.zamok.lock()
-            raw_bytes = bytes(self.ser_mcu.readLine())
-            self.odpoved_portu = raw_bytes.decode('ascii', errors='ignore')
+            try:
+                raw_line = self.ser_mcu.readLine()
+                self.odpoved_portu = bytes(raw_line).decode('ascii', errors='ignore')
+            except Exception:
+                self.odpoved_portu = str(self.ser_mcu.readLine())
             try:
                 self._last_serial_rx = time.monotonic()
             except Exception:
@@ -502,8 +542,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 if(self.napatie == True):
                     try:
                         self.current_voltage = float(self.odpoved_portu.strip())
-                        if hasattr(self.ui, 'label_live_voltage'):
-                            self.ui.label_live_voltage.display(f"{self.current_voltage:.2f}")
+                        label_live_voltage = getattr(self.ui, 'label_live_voltage', None)
+                        if label_live_voltage is not None:
+                            cast(Any, label_live_voltage).display(f"{self.current_voltage:.2f}")
                     except ValueError:
                         # Ignore non-numeric responses (e.g., from config commands)
                         self.zamok.unlock()
@@ -576,23 +617,19 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.zamok.unlock()
                         return
                     #na tomto mieste zapiseme data do suboru
-                    if not self.first_sample:
-                        if not self.f_out and self.f_name:
+                    if not self.first_sample and self.f_name:
+                        if not self.f_out:
                             try:
-                                from os import makedirs
-                                from os.path import dirname
-                                dir_name = dirname(self.f_name)
-                                if dir_name:
-                                    makedirs(dir_name, exist_ok=True)
+                                Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
                             except Exception:
                                 pass
                             try:
                                 self.f_out = open(self.f_name, "a", encoding="utf-8")
-                            except Exception:
+                            except OSError:
                                 self.f_out = None
                         if self.f_out:
-                            self.line = str(self.current_current_read) + "\t" + str(self.current_voltage) +"\t" + str(self.current_resistance) + "\n"
-                            self.f_out.write(self.line)
+                            line = f"{self.current_current_read}\t{self.current_voltage}\t{self.current_resistance}\n"
+                            self.f_out.write(line)
                             self.f_out.close()
                             self.f_out = None
 
@@ -901,13 +938,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
-                self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
+                self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
-                self.ui.lcdNumber_aktualny_prud_mA.display("0")
-                if hasattr(self.ui, 'label_live_voltage'):
-                    self.ui.label_live_voltage.display("0")
+                self._display_ui_value('lcdNumber_aktualny_prud_mA', "0")
+                self._display_ui_value('label_live_voltage', "0")
                 self.ui.lcdNumber_uplynute_sekundy.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percento_from_hold.setText("0")
@@ -931,13 +967,12 @@ class MainWindow(QtWidgets.QMainWindow):
                     return
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
-                self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
+                self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
-                self.ui.lcdNumber_aktualny_prud_mA.display("0")
-                if hasattr(self.ui, 'label_live_voltage'):
-                    self.ui.label_live_voltage.display("0")
+                self._display_ui_value('lcdNumber_aktualny_prud_mA', "0")
+                self._display_ui_value('label_live_voltage', "0")
                 # reverse + loop configuration
                 self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
                 self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
@@ -1046,20 +1081,12 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
         self.ui.frame_modus_operandi.setEnabled(True)
-        self.ui.label_set_current.display("0")
+        self._display_ui_value('label_set_current', "0")
         self._max_voltage_dialog = False
         
     def handle_send_new_command(self):
         if not self.proces_on:
             return
-
-        if self.ax1 is None or self.ax2 is None or self.fig is None:
-            return
-
-        ax1 = self.ax1
-        ax2 = self.ax2
-        fig = self.fig
-        canvas = getattr(fig, 'canvas', None)
 
         #manual zihanie
         if self.modus_operandi == 1:
@@ -1089,11 +1116,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.warn_no_response_and_abort()
                 return
                 
-            self.curr_value_x = self.current_current_read*1000
+            self.curr_value_x = self.current_current_read * 1000.0
             self.curr_value_y = self.current_resistance
-            self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
-            if hasattr(self.ui, 'label_live_voltage'):
-                self.ui.label_live_voltage.display("{:.2f}".format(self.current_voltage))
+            self._display_ui_value('lcdNumber_aktualny_prud_mA', f"{self.curr_value_x:.1f}")
+            self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
             if self.first_sample:
@@ -1101,24 +1127,42 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.prev_value_x = None
                 self.prev_value_y = None
             else:
-                self.vzorka_N +=1
-                if self.prev_value_x is not None:
-                    #pridame novu vzroku do grafu
-                    self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    ax1.add_line(self.line1)
+                self.vzorka_N += 1
+                if self.prev_value_x is not None and self.prev_value_y is not None:
+                    ax1 = getattr(self, 'ax1', None)
+                    ax2 = getattr(self, 'ax2', None)
+                    if ax1 is not None and ax2 is not None:
+                        prev_x = float(self.prev_value_x)
+                        prev_y = float(self.prev_value_y)
+                        curr_x = float(self.curr_value_x)
+                        curr_y = float(self.curr_value_y)
+                        self.line1 = Line2D(
+                            [prev_x, curr_x],
+                            [prev_y, curr_y],
+                            color=self.ciara_color,
+                            marker=self.ciara_marker,
+                            linestyle=self.ciara_linestyle,
+                        )
+                        ax1.add_line(self.line1)
 
-                    self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    ax2.add_line(self.line2)
+                        self.line2 = Line2D(
+                            [self.vzorka_N - 1, self.vzorka_N],
+                            [prev_y, curr_y],
+                            color=self.ciara_color,
+                            marker=self.ciara_marker,
+                            linestyle=self.ciara_linestyle,
+                        )
+                        ax2.add_line(self.line2)
 
-                    # Voliteľné: dynamické prispôsobenie rozsahov
-                    ax1.relim()
-                    ax1.autoscale_view()
-                    ax2.relim()
-                    ax2.autoscale_view()
+                        for axis in (ax1, ax2):
+                            axis.relim()
+                            axis.autoscale_view()
 
-                    if canvas is not None:
-                        canvas.draw()
-                        canvas.flush_events()
+                        fig = getattr(self, 'fig', None)
+                        canvas = getattr(fig, 'canvas', None) if fig is not None else None
+                        if canvas is not None:
+                            canvas.draw()
+                            canvas.flush_events()
 
                 self.prev_value_x = self.curr_value_x
                 self.prev_value_y = self.curr_value_y
@@ -1126,7 +1170,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             #iteracia prudu
             self.current_current_set += self.current_increment
-            self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
+            self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             #vypnutie ako pri tlacidle
             if(self.current_current_set < 0.001):
@@ -1167,11 +1211,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.warn_no_response_and_abort()
                 return
                 
-            self.curr_value_x = self.current_current_read*1000
+            self.curr_value_x = self.current_current_read * 1000.0
             self.curr_value_y = self.current_resistance
-            self.ui.lcdNumber_aktualny_prud_mA.display("{:.1f}".format(self.curr_value_x))
-            if hasattr(self.ui, 'label_live_voltage'):
-                self.ui.label_live_voltage.display("{:.2f}".format(self.current_voltage))
+            self._display_ui_value('lcdNumber_aktualny_prud_mA', f"{self.curr_value_x:.1f}")
+            self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
             if self.first_sample:
@@ -1179,24 +1222,42 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.prev_value_x = None
                 self.prev_value_y = None
             else:
-                self.vzorka_N +=1
-                if self.prev_value_x is not None:
-                    #pridame novu vzroku do grafu
-                    self.line1 = Line2D([self.prev_value_x, self.curr_value_x], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    ax1.add_line(self.line1)
+                self.vzorka_N += 1
+                if self.prev_value_x is not None and self.prev_value_y is not None:
+                    ax1 = getattr(self, 'ax1', None)
+                    ax2 = getattr(self, 'ax2', None)
+                    if ax1 is not None and ax2 is not None:
+                        prev_x = float(self.prev_value_x)
+                        prev_y = float(self.prev_value_y)
+                        curr_x = float(self.curr_value_x)
+                        curr_y = float(self.curr_value_y)
+                        self.line1 = Line2D(
+                            [prev_x, curr_x],
+                            [prev_y, curr_y],
+                            color=self.ciara_color,
+                            marker=self.ciara_marker,
+                            linestyle=self.ciara_linestyle,
+                        )
+                        ax1.add_line(self.line1)
 
-                    self.line2 = Line2D([self.vzorka_N-1, self.vzorka_N], [self.prev_value_y, self.curr_value_y], color=self.ciara_color, marker=self.ciara_marker, linestyle=self.ciara_linestyle)
-                    ax2.add_line(self.line2)
+                        self.line2 = Line2D(
+                            [self.vzorka_N - 1, self.vzorka_N],
+                            [prev_y, curr_y],
+                            color=self.ciara_color,
+                            marker=self.ciara_marker,
+                            linestyle=self.ciara_linestyle,
+                        )
+                        ax2.add_line(self.line2)
 
-                    # Voliteľné: dynamické prispôsobenie rozsahov
-                    ax1.relim()
-                    ax1.autoscale_view()
-                    ax2.relim()
-                    ax2.autoscale_view()
+                        for axis in (ax1, ax2):
+                            axis.relim()
+                            axis.autoscale_view()
 
-                    if canvas is not None:
-                        canvas.draw()
-                        canvas.flush_events()
+                        fig = getattr(self, 'fig', None)
+                        canvas = getattr(fig, 'canvas', None) if fig is not None else None
+                        if canvas is not None:
+                            canvas.draw()
+                            canvas.flush_events()
 
                 self.prev_value_x = self.curr_value_x
                 self.prev_value_y = self.curr_value_y
@@ -1216,7 +1277,7 @@ class MainWindow(QtWidgets.QMainWindow):
             
             #iteracia prudu
             self.current_current_set += self.current_increment
-            self.ui.label_set_current.display("{:.1f}".format(self.current_current_set*1000))
+            self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             # end of hold: either reverse (if enabled) or stop
             if(self.prud_timer_on and (self.sekundy >= self.doba_staly_prud)):
@@ -1406,39 +1467,44 @@ class MainWindow(QtWidgets.QMainWindow):
                 layout.setSpacing(0)
             while layout.count():
                 item = layout.takeAt(0)
-                w = item.widget()
-                if w is not None:
-                    w.deleteLater()
+                if item is None:
+                    continue
+                widget = item.widget()
+                if widget is not None:
+                    widget.deleteLater()
 
             # Align matplotlib colors with Qt palette for a native look
-            try:
-                app = QtWidgets.QApplication.instance()
-                scheme = app.styleHints().colorScheme()
-                palette = app.palette()
-                win = palette.color(QtGui.QPalette.ColorRole.Window)
-                base = palette.color(QtGui.QPalette.ColorRole.Base)
-                text = palette.color(QtGui.QPalette.ColorRole.Text)
-                win_rgb = (win.redF(), win.greenF(), win.blueF())
-                base_rgb = (base.redF(), base.greenF(), base.blueF())
-                text_rgb = (text.redF(), text.greenF(), text.blueF())
-            except Exception:
-                scheme = QtCore.Qt.ColorScheme.Light
-                win_rgb = (1, 1, 1)
-                base_rgb = (1, 1, 1)
-                text_rgb = (0, 0, 0)
+            scheme = QtCore.Qt.ColorScheme.Light
+            win_rgb = (1.0, 1.0, 1.0)
+            base_rgb = (1.0, 1.0, 1.0)
+            text_rgb = (0.0, 0.0, 0.0)
+            app = QtWidgets.QApplication.instance()
+            if isinstance(app, QtWidgets.QApplication):
+                try:
+                    scheme = app.styleHints().colorScheme()
+                    palette = app.palette()
+                    win = palette.color(QtGui.QPalette.ColorRole.Window)
+                    base = palette.color(QtGui.QPalette.ColorRole.Base)
+                    text = palette.color(QtGui.QPalette.ColorRole.Text)
+                    win_rgb = (win.redF(), win.greenF(), win.blueF())
+                    base_rgb = (base.redF(), base.greenF(), base.blueF())
+                    text_rgb = (text.redF(), text.greenF(), text.blueF())
+                except Exception:
+                    pass
 
             self.fig = Figure(facecolor=win_rgb, constrained_layout=True)
             self.canvas = FigureCanvas(self.fig) if FigureCanvas is not None else None
+            title_source = self.f_name or ""
             try:
-                _title = format_annealing_title(Path(self.f_name).stem)
+                _title = format_annealing_title(Path(title_source).stem if title_source else "")
             except Exception:
-                _title = format_annealing_title(self.f_name)
+                _title = format_annealing_title(title_source)
             self.fig.suptitle(_title, color=text_rgb)
             if NavigationToolbar is not None and self.canvas is not None:
                 self.toolbar = NavigationToolbar(self.canvas, container)
                 layout.addWidget(self.toolbar)
             if self.canvas is not None:
-                layout.addWidget(self.canvas, stretch=1)
+                layout.addWidget(self.canvas, 1)
 
             self.ax1 = self.fig.add_subplot(211)
             self.ax1.set_facecolor(base_rgb)
@@ -1668,13 +1734,13 @@ class MainWindow(QtWidgets.QMainWindow):
             if self.ui.comboBox_port.count() > 0:
                 self.port_name = self.ui.comboBox_port.currentData()
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self.ser_mcu.isOpen():
             self.handle_pushButton_pripojPort_clicked()
             # self.ser_mcu.close()
             # print("Sériový port zatvorený")
 
-        event.accept()
+        super().closeEvent(event)
 
     # --- Overlay helpers
     def _setup_connect_overlay(self) -> None:
@@ -1715,16 +1781,19 @@ class MainWindow(QtWidgets.QMainWindow):
             ov.setGeometry(scroll.viewport().rect())
 
     def _show_connect_overlay(self, show: bool) -> None:
-        if getattr(self, '_overlay', None) is not None:
-            try:
-                self._overlay.setVisible(bool(show))
-            except Exception:
-                pass
+        overlay = getattr(self, '_overlay', None)
+        if overlay is None:
+            return
+        try:
+            overlay.setVisible(bool(show))
+        except Exception:
+            pass
 
     def resizeEvent(self, ev: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         super().resizeEvent(ev)
         scroll = getattr(self.ui, 'left_scroll', None)
-        if getattr(self, '_overlay', None) is not None and scroll is not None:
+        overlay = getattr(self, '_overlay', None)
+        if overlay is not None and scroll is not None:
             try:
                 self._position_connect_overlay()
             except Exception:
@@ -1738,17 +1807,19 @@ def main() -> QtWidgets.QWidget:
     app = QtWidgets.QApplication.instance()
     owns_app = False
     if app is None:
-        app = QtWidgets.QApplication(sys.argv)
+        qt_app = QtWidgets.QApplication(sys.argv)
         owns_app = True
+    else:
+        qt_app = cast(QtWidgets.QApplication, app)
 
-    ensure_app_theme(app)
+    ensure_app_theme(qt_app)
 
     window = MainWindow()
     window.showMaximized()
     WINDOWS.append(window)
 
     if owns_app:
-        sys.exit(app.exec())
+        sys.exit(qt_app.exec())
     return window
 
 
