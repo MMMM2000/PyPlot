@@ -17,14 +17,13 @@ if __package__ is None or __package__ == "":
         run_with_console,
         create_readability_group,
         sync_readability,
-        arrange_side_panel,
+        arrange_top_layout,
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
 else:
     from . import core as orig
     from ..utils import (
@@ -36,14 +35,13 @@ else:
         run_with_console,
         create_readability_group,
         sync_readability,
-        arrange_side_panel,
+        arrange_top_layout,
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -108,12 +106,18 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(out_group)
         layout.addWidget(read_group)
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(make_help_button("plot_current_annealing", self))
+        btn_row.setContentsMargins(0, 12, 0, 0)
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
-        layout.addLayout(btn_row)
 
-        arrange_side_panel(self, left, file_widget, self.console)
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=btn_row,
+            help_topic="plot_current_annealing",
+        )
 
     def run(self) -> None:
         if not self.files:

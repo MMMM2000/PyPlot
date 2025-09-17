@@ -12,6 +12,8 @@ from typing import Callable
 import matplotlib.pyplot as plt
 import datetime
 
+from app_help import show_help
+
 
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
@@ -502,11 +504,25 @@ def create_file_widget(
     return files, container
 
 
+def _as_widget(item: QtWidgets.QWidget | QtWidgets.QLayout | None) -> QtWidgets.QWidget | None:
+    """Return ``item`` as a widget, wrapping layouts in a temporary widget."""
+
+    if item is None:
+        return None
+    if isinstance(item, QtWidgets.QWidget):
+        return item
+    wrapper = QtWidgets.QWidget()
+    wrapper.setLayout(item)
+    return wrapper
+
+
 def arrange_side_panel(
     dialog: QtWidgets.QDialog,
     left: QtWidgets.QWidget,
     file_widget: QtWidgets.QWidget,
     console: QtWidgets.QPlainTextEdit,
+    *,
+    footer: QtWidgets.QWidget | QtWidgets.QLayout | None = None,
 ) -> None:
     """Place settings beside file list and console to keep dialogs compact."""
 
@@ -526,7 +542,22 @@ def arrange_side_panel(
     scroll.setSizeAdjustPolicy(
         QtWidgets.QAbstractScrollArea.SizeAdjustPolicy.AdjustToContents
     )
-    splitter.addWidget(scroll)
+
+    footer_widget = _as_widget(footer)
+    if footer_widget is not None:
+        footer_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        container = QtWidgets.QWidget()
+        column = QtWidgets.QVBoxLayout(container)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(scroll, 1)
+        column.addWidget(footer_widget, 0)
+        splitter.addWidget(container)
+    else:
+        splitter.addWidget(scroll)
 
     right = QtWidgets.QWidget()
     side_layout = QtWidgets.QVBoxLayout(right)
@@ -553,12 +584,15 @@ def arrange_top_layout(
     file_widget: QtWidgets.QWidget,
     center: QtWidgets.QWidget,
     console: QtWidgets.QPlainTextEdit,
+    *,
+    footer: QtWidgets.QWidget | QtWidgets.QLayout | None = None,
+    help_topic: str | None = None,
 ) -> None:
     """Place settings beside file list and console for a compact dialog."""
 
     # Reuse the side-panel arrangement to keep the console narrow while giving
     # the scrolling settings area ample width.
-    arrange_side_panel(dialog, center, file_widget, console)
+    arrange_side_panel(dialog, center, file_widget, console, footer=footer)
 
     # Ensure the dialog fits comfortably on screen and widgets remain visible
     # when resized. This mirrors the sizing logic of the previous top layout but
@@ -572,6 +606,21 @@ def arrange_top_layout(
         width, height = 1000, 800
     dialog.resize(width, height)
     dialog.setMinimumSize(min(width, 900), min(height, 600))
+
+    if help_topic:
+        menu_bar = QtWidgets.QMenuBar(dialog)
+        help_menu = menu_bar.addMenu("&Help")
+        action = help_menu.addAction("View Help")
+        try:
+            action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
+        except Exception:
+            pass
+
+        def _show_help() -> None:
+            show_help(help_topic, dialog)
+
+        action.triggered.connect(_show_help)
+        dialog.layout().setMenuBar(menu_bar)
 
 
 class ReadabilityControls:

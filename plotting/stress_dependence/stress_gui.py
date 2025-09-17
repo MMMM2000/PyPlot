@@ -26,7 +26,6 @@ if __package__ is None or __package__ == "":
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
 else:
     from . import core as orig
     from ..utils import (
@@ -45,7 +44,6 @@ else:
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -145,12 +143,18 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(out_group, 1, 1)
         layout.addWidget(read_group, 2, 0, 1, 2)
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(make_help_button("plot_stress_dependence", self))
+        btn_row.setContentsMargins(0, 12, 0, 0)
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
-        layout.addLayout(btn_row, 3, 0, 1, 2)
 
-        arrange_top_layout(self, file_widget, left, self.console)
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=btn_row,
+            help_topic="plot_stress_dependence",
+        )
 
     def run(self) -> None:
         if not self.files:

@@ -36,7 +36,7 @@ from ..utils import (
     store_png_dpi,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
-from app_help import make_help_button
+from app_help import show_help
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -180,6 +180,15 @@ class PdfPlotterWindow(QtWidgets.QWidget):
 
         # Make the settings UI scrollable
         outer = QtWidgets.QVBoxLayout(self)
+        menu_bar = QtWidgets.QMenuBar(self)
+        help_menu = menu_bar.addMenu("&Help")
+        help_action = help_menu.addAction("View Help")
+        try:
+            help_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
+        except Exception:
+            pass
+        help_action.triggered.connect(lambda: show_help("plot_pdf", self))
+        outer.setMenuBar(menu_bar)
         scroll = QtWidgets.QScrollArea(self)
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
@@ -364,12 +373,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
         self.plot_btn.clicked.connect(lambda: run_with_console(self.plot, self.console))
         self.clear_btn.clicked.connect(self.clear_plot)
-        btn_box = self._hbox(
-            make_help_button("plot_pdf", self),
-            self.auto_cb,
-            self.plot_btn,
-            self.clear_btn,
-        )
+        btn_box = QtWidgets.QWidget()
+        btn_layout = QtWidgets.QHBoxLayout(btn_box)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+        btn_layout.addWidget(self.auto_cb)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(self.plot_btn)
+        btn_layout.addWidget(self.clear_btn)
 
         # Ensure the plot controls are always visible without scrolling by placing the
         # button row outside the scrollable area.

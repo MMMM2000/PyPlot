@@ -90,12 +90,13 @@ Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 
-Every window now includes a **Help** button.  The launcher, each plotting
+Every window now includes a **Help** menu.  The launcher, each plotting
 dialog, every logger, and the serial emulator open a Markdown help sheet that
 explains the workflow, highlights where settings are stored, and links the UI
 controls to their expected behaviour.  When onboarding new colleagues you can
-point them to the help button for context without having to maintain a separate
-manual.
+point them to the menu entry for context without having to maintain a separate
+manual.  The main action row stays anchored beneath the settings so Run/Plot
+buttons remain visible without scrolling through long option lists.
 Origin sessions are closed automatically after plots are generated so the
 Origin application can be closed independently from the Python tools.
 

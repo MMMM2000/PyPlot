@@ -18,14 +18,13 @@ if __package__ is None or __package__ == "":
         create_readability_group,
         sync_readability,
         arrange_top_layout,
-        release_origin,
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
+    from plotting.utils import release_origin
 else:
     from . import core as orig
     from ..utils import (
@@ -38,20 +37,20 @@ else:
         create_readability_group,
         sync_readability,
         arrange_top_layout,
-        release_origin,
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
     )
-    from app_help import make_help_button
+    from ..utils import release_origin
 
 
 class SettingsDialog(QtWidgets.QDialog):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Temperature Sensitivity Settings")
+        self._owns_app = False
 
         self.files, file_widget = create_file_widget(
             self, key="temperature_sensitivity", on_outlier_toggle=self._handle_outlier_toggle
@@ -144,12 +143,18 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(cont_group, 1, 0, 1, 2)
         layout.addWidget(read_group, 2, 0, 1, 2)
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(make_help_button("plot_temperature_sensitivity", self))
+        btn_row.setContentsMargins(0, 12, 0, 0)
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
-        layout.addLayout(btn_row, 3, 0, 1, 2)
 
-        arrange_top_layout(self, file_widget, left, self.console)
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=btn_row,
+            help_topic="plot_temperature_sensitivity",
+        )
 
     def _handle_outlier_toggle(self, enabled: bool, files: list[str]) -> bool:
         if not enabled:
@@ -220,7 +225,8 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.common.AUTO_REMOVE_OUTLIERS = False
         self._preprocessed_data = None
         self._preprocessed_snapshot = None
-        release_origin()
+        if getattr(self, "_owns_app", False):
+            release_origin()
         super().closeEvent(event)
 
 class ProgressDialog:
@@ -255,6 +261,7 @@ def main() -> None:
         owns = True
     orig.ProgressDialog = ProgressDialog
     dlg = SettingsDialog()
+    dlg._owns_app = owns
     dlg.show()
     if owns:
         app.exec()

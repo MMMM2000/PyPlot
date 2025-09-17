@@ -4,7 +4,7 @@ import os
 import pathlib
 from typing import List, Dict, Any
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtWidgets, QtGui
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -22,7 +22,7 @@ if __package__ is None or __package__ == "":
         selected_backend,
     )
     from plotting.backends import wants_matplotlib, wants_origin
-    from app_help import make_help_button
+    from app_help import show_help
 else:
     from ..utils import (
         apply_system_theme,
@@ -33,7 +33,7 @@ else:
         selected_backend,
     )
     from ..backends import wants_matplotlib, wants_origin
-    from app_help import make_help_button
+    from app_help import show_help
 
 
 def ask_files() -> List[str]:
@@ -47,6 +47,16 @@ def ask_options() -> Dict[str, Any] | None:
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle("Hsw Distribution Settings")
     layout = QtWidgets.QGridLayout(dialog)
+
+    menu_bar = QtWidgets.QMenuBar(dialog)
+    help_menu = menu_bar.addMenu("&Help")
+    help_action = help_menu.addAction("View Help")
+    try:
+        help_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
+    except Exception:
+        pass
+    help_action.triggered.connect(lambda: show_help("plot_hsw_distribution", dialog))
+    layout.setMenuBar(menu_bar)
 
     raw_cb = QtWidgets.QCheckBox("Raw TT/HH vs Index"); raw_cb.setChecked(True)
     trim_cb = QtWidgets.QCheckBox("Show trimmed data"); trim_cb.setChecked(True)
@@ -102,7 +112,7 @@ def ask_options() -> Dict[str, Any] | None:
     out_l.addWidget(backend_combo)
     layout.addWidget(out_box, 2, 0, 1, 2)
     btn_row = QtWidgets.QHBoxLayout()
-    btn_row.addWidget(make_help_button("plot_hsw_distribution", dialog))
+    btn_row.setContentsMargins(0, 12, 0, 0)
     btn_row.addStretch(1)
     btn_row.addWidget(run_btn)
     layout.addLayout(btn_row, 3, 0, 1, 2)

@@ -841,6 +841,7 @@ def plot_variable_origin(
             op.lt_exec('layer.x.top.ticklabels=0; layer.y.right.ticklabels=0;')
         except Exception:
             pass
+        labels_applied = False
         try:
             wlab = op.new_sheet('w', lname='labels')
             wlab.from_list(0, display_samples)
@@ -852,18 +853,33 @@ def plot_variable_origin(
                 )
             except Exception:
                 pass
-            book_name = getattr(book, 'lt_name', getattr(book, 'name', ''))
-            sheet_name = getattr(wlab, 'lt_name', getattr(wlab, 'name', 'labels'))
+            book_name = getattr(book, 'lt_name', '') or getattr(book, 'name', '')
+            sheet_name = getattr(wlab, 'lt_name', '') or getattr(wlab, 'name', 'labels')
             if book_name and sheet_name:
                 book_ref = str(book_name).replace('"', "'")
                 sheet_ref = str(sheet_name).replace('"', "'")
                 col_ref = f"col({col_short})"
                 rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
-                op.lt_exec('layer.x.label.auto=0; layer.x.label.type=2; layer.x.label.by=1;')
-                op.lt_exec(f'layer.x.label.dataset$="{rng}";')
-                op.lt_exec('layer.x.label.apply=1;')
+                cmd = (
+                    "layer.x.label.auto=0;"
+                    "layer.x.label.type=2;"
+                    "layer.x.label.by=1;"
+                    "layer.x.label.option=1;"
+                    f"layer.x.label.dataset$=\"{rng}\";"
+                    "layer.x.label.apply=1;"
+                )
+                op.lt_exec(cmd)
+                labels_applied = True
         except Exception:
-            pass
+            labels_applied = False
+        if not labels_applied:
+            try:
+                label_text = "\r\n".join(display_samples)
+                op.lt_exec('layer.x.label.auto=0; layer.x.label.type=1; layer.x.label.by=1;')
+                op.lt_exec(f'layer.x.label.text$="{label_text}";')
+                op.lt_exec('layer.x.label.apply=1;')
+            except Exception:
+                pass
         try:
             op.lt_exec('label -r py_delta*;')
         except Exception:

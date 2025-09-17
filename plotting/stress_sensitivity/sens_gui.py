@@ -19,7 +19,6 @@ if __package__ is None or __package__ == "":
         sync_readability,
         arrange_top_layout,
     )
-    from app_help import make_help_button
 else:
     from . import core as orig
     from ..utils import (
@@ -33,7 +32,6 @@ else:
         sync_readability,
         arrange_top_layout,
     )
-    from app_help import make_help_button
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -109,12 +107,18 @@ class SettingsDialog(QtWidgets.QDialog):
         layout.addWidget(out_group, 0, 1)
         layout.addWidget(read_group, 1, 0, 1, 2)
         btn_row = QtWidgets.QHBoxLayout()
-        btn_row.addWidget(make_help_button("plot_stress_sensitivity", self))
+        btn_row.setContentsMargins(0, 12, 0, 0)
         btn_row.addStretch(1)
         btn_row.addWidget(self.run_btn)
-        layout.addLayout(btn_row, 2, 0, 1, 2)
 
-        arrange_top_layout(self, file_widget, left, self.console)
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=btn_row,
+            help_topic="plot_stress_sensitivity",
+        )
 
     def run(self) -> None:
         if not self.files:
