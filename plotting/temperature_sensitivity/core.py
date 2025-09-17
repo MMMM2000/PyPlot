@@ -735,8 +735,7 @@ def plot_variable_origin(
         color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
         legend_label = f"raw {temp_label}\N{DEGREE SIGN}C"
         try:
-            w.activate()
-            op.lt_exec(f'wks.col2.lname$ = "{legend_label}";')
+            w.set_label(1, legend_label)
         except Exception:
             pass
         try:
@@ -762,17 +761,16 @@ def plot_variable_origin(
         w.from_list(1, sub['plot_x'].to_list())
         w.from_list(2, sub[var].to_list())
         try:
-            w.activate()
-            op.lt_exec('wks.col1.type=4; wks.col1.format=2; wks.col1.name$="Sample";')
-            op.lt_exec('wks.col2.name$="Position"; wks.col3.name$="Value";')
+            w.set_label(0, "Sample")
+            w.set_label(1, "Position")
+            w.set_label(2, "Value")
         except Exception:
             pass
         p = gl.add_plot(w, coly=2, colx=1, type='s')
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
         legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
         try:
-            w.activate()
-            op.lt_exec(f'wks.col3.lname$ = "{legend_label}";')
+            w.set_label(2, legend_label)
         except Exception:
             pass
         try:
@@ -804,8 +802,7 @@ def plot_variable_origin(
                     p.legend = False
             else:
                 try:
-                    w.activate()
-                    op.lt_exec(f'wks.col2.lname$ = "{cont_label}";')
+                    w.set_label(1, cont_label)
                 except Exception:
                     pass
                 try:
@@ -819,165 +816,202 @@ def plot_variable_origin(
 
     try:
         gl.rescale()
+    except Exception:
+        pass
+
+    try:
         gp.activate()
-        op.lt_exec('doc -e P {page.antialias=1;}')
-        op.lt_exec('doc -e L {layer.speedmode=0; layer -s 0; layer -aa 1; layer.antialias=1;}')
-        op.lt_exec('legend;')
-        op.lt_exec('legend.update=0;')
-        op.lt_exec('legend.box=0;')
-        op.lt_exec('legend.just=1;')
-        try:
-            legend_text = "\n".join(legend_entries)
-            op.lt_exec(f'legend.text$="{legend_text.replace("\"", "'")}";')
-        except Exception:
-            pass
-        legend_loc = str(globals().get("LEGEND_LOCATION", "inside")).lower()
-        if legend_loc in {"outside_right", "outside", "outside right"}:
-            op.lt_exec('legend.x=1.02; legend.y=0.5;')
-        else:
-            op.lt_exec('legend.x=0.18; legend.y=0.88;')
-        op.lt_exec('lab -xb "Sample";')
-        op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
-        base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
-        label_gap = min(max(0.12 * y_range, 0.5), y_range * 0.4)
-        label_extra = min(max(0.05 * y_range, 0.3), y_range * 0.2)
-        tick_level = y_min - label_gap
-        label_bottom = tick_level - label_extra
-        axis_bottom = y_min - base_pad
+    except Exception:
+        pass
 
-        op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
-        op.lt_exec('layer.x.inc=1;')
-        op.lt_exec('layer.x.step=1;')
-        op.lt_exec(f'layer.y.from={axis_bottom:.6g};')
-        op.lt_exec(f'layer.y.to={plot_top:.6g};')
+    try:
+        x_axis = gl.axis('x')
+    except Exception:
+        x_axis = None
+    try:
+        y_axis = gl.axis('y')
+    except Exception:
+        y_axis = None
+
+    base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
+    label_gap = min(max(0.12 * y_range, 0.5), y_range * 0.4)
+    label_extra = min(max(0.05 * y_range, 0.3), y_range * 0.2)
+    tick_level = y_min - label_gap
+    label_bottom = tick_level - label_extra
+    axis_bottom = y_min - base_pad
+
+    try:
+        if x_axis is not None:
+            x_axis.set_limits(0.5, len(samples) + 0.5, 1.0)
+    except Exception:
+        pass
+    try:
+        if y_axis is not None:
+            y_axis.set_limits(axis_bottom, plot_top)
+    except Exception:
+        pass
+
+    try:
+        if x_axis is not None:
+            x_axis.title = "Sample"
+    except Exception:
+        pass
+    try:
+        if y_axis is not None:
+            y_axis.title = TS_LABELS[var]
+    except Exception:
+        pass
+
+    try:
+        gl.set_int('legend.update', 0)
+        gl.set_int('legend.box', 0)
+        gl.set_int('legend.just', 1)
+    except Exception:
+        pass
+
+    legend_text = "\\n".join([entry for entry in legend_entries if entry])
+    try:
+        legend = gl.label('Legend')
+    except Exception:
+        legend = None
+    if legend is not None:
         try:
-            op.lt_exec('layer -lx 0; layer -ly 0;')
+            legend.text = legend_text
         except Exception:
             pass
         try:
-            op.lt_exec('layer.x.top=0; layer.y.right=0;')
-            op.lt_exec('layer.x.top.label.show=0; layer.y.right.label.show=0;')
-            op.lt_exec('layer.x.top.ticklabels=0; layer.y.right.ticklabels=0;')
+            legend_loc = str(globals().get("LEGEND_LOCATION", "inside")).lower()
+            if legend_loc in {"outside_right", "outside", "outside right"}:
+                legend.set_float('x1', 1.02)
+                legend.set_float('y1', 0.5)
+            else:
+                legend.set_float('x1', 0.18)
+                legend.set_float('y1', 0.88)
         except Exception:
             pass
-        labels_applied = False
+
+    try:
+        gl.set_int('x.top', 0)
+        gl.set_int('y.right', 0)
+        gl.set_int('x.top.label.show', 0)
+        gl.set_int('y.right.label.show', 0)
+        gl.set_int('x.top.ticklabels', 0)
+        gl.set_int('y.right.ticklabels', 0)
+    except Exception:
+        pass
+
+    labels_applied = False
+    try:
+        wlab = op.new_sheet('w', lname='labels')
+        wlab.from_list(0, display_samples)
+        col_short = "SampleLbl"
         try:
-            wlab = op.new_sheet('w', lname='labels')
-            wlab.from_list(0, display_samples)
-            col_short = "SampleLbl"
+            wlab.activate()
+            wlab.set_label(0, col_short, type='L')
+        except Exception:
+            pass
+        book_name = getattr(book, 'lt_name', '') or getattr(book, 'name', '')
+        sheet_name = getattr(wlab, 'lt_name', '') or getattr(wlab, 'name', 'labels')
+        if book_name and sheet_name:
+            book_ref = str(book_name).replace('"', "'")
+            sheet_ref = str(sheet_name).replace('"', "'")
+            col_ref = f"col({col_short})"
+            rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
             try:
-                wlab.activate()
-                op.lt_exec(
-                    f'wks.col1.type=4; wks.col1.format=2; wks.col1.name$="{col_short}";'
-                )
-            except Exception:
-                pass
-            book_name = getattr(book, 'lt_name', '') or getattr(book, 'name', '')
-            sheet_name = getattr(wlab, 'lt_name', '') or getattr(wlab, 'name', 'labels')
-            if book_name and sheet_name:
-                book_ref = str(book_name).replace('"', "'")
-                sheet_ref = str(sheet_name).replace('"', "'")
-                col_ref = f"col({col_short})"
-                rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
-                cmd = "".join(
-                    [
-                        "layer.x.label.auto=0;",
-                        "layer.x.label.type=2;",
-                        "layer.x.label.by=1;",
-                        f"layer.x.label.from=1;",
-                        f"layer.x.label.to={len(display_samples)};",
-                        f"layer.x.label.count={len(display_samples)};",
-                        "layer.x.label.formula$=\"\";",
-                        f"layer.x.label.dataset$=\"{rng}\";",
-                        "layer.x.label.apply=1;",
-                    ]
-                )
-                op.lt_exec(cmd)
+                gl.set_int('x.label.auto', 0)
+                gl.set_int('x.label.type', 2)
+                gl.set_int('x.label.by', 1)
+                gl.set_int('x.label.from', 1)
+                gl.set_int('x.label.to', len(display_samples))
+                gl.set_int('x.label.count', len(display_samples))
+                gl.set_str('x.label.formula$', '')
+                gl.set_str('x.label.dataset$', rng)
+                gl.set_int('x.label.apply', 1)
+                gl.set_int('x.ticklabels', 1)
                 labels_applied = True
-        except Exception:
-            labels_applied = False
-        if not labels_applied:
+            except Exception:
+                labels_applied = False
+    except Exception:
+        labels_applied = False
+
+    manual_labels_added = False
+    if not labels_applied:
+        for idx in range(1, len(samples) + 1):
             try:
-                label_text = "\n".join(display_samples)
-                op.lt_exec(
-                    "layer.x.label.auto=0; layer.x.label.type=1; layer.x.label.by=1;"
-                    f"layer.x.label.from=1; layer.x.label.to={len(display_samples)};"
-                    f"layer.x.label.count={len(display_samples)};"
-                    "layer.x.label.formula$=\"\";"
-                )
-                op.lt_exec(f'layer.x.label.text$="{label_text}";')
-                op.lt_exec('layer.x.label.apply=1;')
+                gl.remove_label(f'py_xtick{idx}')
             except Exception:
                 pass
-
-        manual_labels_added = False
         try:
-            op.lt_exec('label -r py_xtick*;')
+            gl.set_int('x.label.show', 0)
+        except Exception:
+            pass
+        try:
+            gl.set_int('x.ticklabels', 0)
         except Exception:
             pass
         for idx, sample in enumerate(samples, start=1):
             text = display_by_idx.get(sample_idx[sample], sample.replace('_', '/'))
-            esc_text = text.replace('"', "'")
             try:
-                op.lt_exec(
-                    f'label -n py_xtick{idx} -a {float(sample_idx[sample]):.6g} {tick_level:.6g} "{esc_text}";'
-                )
-                try:
-                    op.lt_exec(f'label -n py_xtick{idx} -s 10;')
-                except Exception:
-                    pass
+                label = gl.add_label(text, float(sample_idx[sample]), tick_level)
             except Exception:
+                label = None
+            if label is None:
                 continue
-            manual_labels_added = True
-        try:
-            if manual_labels_added:
-                op.lt_exec('layer.x.label.show=0;')
-                try:
-                    op.lt_exec('layer.x.ticklabels=0;')
-                except Exception:
-                    pass
-                try:
-                    op.lt_exec(f'layer.y.from={label_bottom:.6g};')
-                except Exception:
-                    pass
-            else:
-                op.lt_exec('layer.x.label.show=1;')
-        except Exception:
-            pass
-        try:
-            op.lt_exec('label -r py_delta*;')
-        except Exception:
-            pass
-        for idx, (x_pos, y_pos, text) in enumerate(delta_labels, start=1):
-            name = f'py_delta{idx}'
-            esc = text.replace('"', "'")
             try:
-                op.lt_exec(f'label -n {name} -a {x_pos:.6g} {y_pos:.6g} "{esc}";')
+                label.name = f'py_xtick{idx}'
+                label.set_int('attach', 0)
             except Exception:
                 pass
-        title = f"{comp} {anneal} — {TS_LABELS[var]}"
-        esc_title = title.replace('"', "'")
+            manual_labels_added = True
+        if manual_labels_added and y_axis is not None:
+            try:
+                y_axis.set_limits(label_bottom, plot_top)
+            except Exception:
+                pass
+
+    for idx in range(1, len(delta_labels) + 1):
         try:
-            gl.label('Title').text = title
+            gl.remove_label(f'py_delta{idx}')
         except Exception:
             pass
+    for idx, (x_pos, y_pos, text) in enumerate(delta_labels, start=1):
         try:
-            op.lt_exec(f'title -s "{esc_title}";')
+            label = gl.add_label(text, float(x_pos), float(y_pos))
+        except Exception:
+            label = None
+        if label is None:
+            continue
+        try:
+            label.name = f'py_delta{idx}'
+            label.set_int('attach', 0)
         except Exception:
             pass
+
+    title = f"{comp} {anneal} — {TS_LABELS[var]}"
+    try:
+        title_label = gl.label('Title')
+    except Exception:
+        title_label = None
+    if title_label is not None:
         try:
-            op.lt_exec('label -r py_title;')
+            title_label.text = title
         except Exception:
             pass
-        title_center = (len(samples) + 1) / 2.0
-        try:
-            op.lt_exec(
-                f'label -n py_title -a {title_center:.6g} {title_level:.6g} "{esc_title}";'
-            )
-        except Exception:
-            pass
+    try:
+        gl.remove_label('py_title')
     except Exception:
         pass
+    title_center = (len(samples) + 1) / 2.0
+    try:
+        manual_title = gl.add_label(title, title_center, title_level)
+    except Exception:
+        manual_title = None
+    if manual_title is not None:
+        try:
+            manual_title.name = 'py_title'
+            manual_title.set_int('attach', 0)
+        except Exception:
+            pass
 
 from ..common import maybe_handle_outliers
 

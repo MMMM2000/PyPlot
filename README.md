@@ -117,7 +117,9 @@ anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
 title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
 annotations at the same locations, while the Matplotlib legend sits outside the
 axes to avoid covering data points.  The default moving-average window now
-spans 200 samples for smoother continuous traces straight out of the box.
+spans 200 samples for smoother continuous traces straight out of the box, and
+the Origin backend applies these tweaks through the Python API so axis labels
+no longer rely on LabTalk scripting.
 
 ## 3. Loggers
 
