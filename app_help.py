@@ -11,27 +11,27 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Microwire tools",
         "body": dedent(
             """
-            These dialogs ship with consistent controls: the file list on the left keeps
-            track of every dataset you load, the console underneath reports progress, and
-            the right-hand panel contains the script-specific options.  Most settings are
-            remembered per tool, including readability choices, export directories, and
-            backend preferences.
+            ### Window layout basics
+            * The file list on the left keeps track of every dataset you load. Double-click
+              an entry to open it in your operating system. Use **View → Show File Browser**
+              if you want to hide or reveal the list temporarily.
+            * The right-hand panel holds the script-specific options. A console beneath the
+              list records status messages; toggle it from **View → Show Console** when you
+              need more space.
+            * The footer pins the primary action button so **Run** never scrolls off-screen.
 
-            * **Add Files/Folders** accepts individual files or entire folders.  Files are
-              deduplicated automatically and double-clicking any entry opens it in the OS.
-            * Enable **Check Outliers** to pre-process the selected files; choose **Remove
-              automatically** if you want suspicious samples discarded without a manual
-              confirmation step.  Both flags are stored separately for each plotting
-              script.
-            * The **Readability** section is always active.  Toggle the legend, titles, or
-              labels, resize fonts, and decide where the legend should sit.  Legend symbol
-              visibility, size, and colour can also be controlled here.
-            * Output directories default to your Downloads folder and can optionally be
-              organised into dated subfolders.  PNG exports honour the DPI field so
-              high-resolution assets can be produced directly.
+            ### Menu bar highlights
+            * **View → Theme** switches between the system appearance, a light palette, or a
+              dark palette. The choice applies immediately to every open tool.
+            * **View → Reset Layout** restores the default splitter sizes if the panes are
+              resized awkwardly.
+            * **Help → View Help** opens this guide for the current dialog. Additional
+              entries in the Help menu link to documentation or keyboard shortcuts when
+              available.
 
-            See the README for a complete walkthrough of installation, packaging with
-            PyInstaller, and troubleshooting tips.
+            Preferences—readability, export directories, backend selections, theme
+            overrides—are remembered per tool. The README includes step-by-step setup
+            instructions, packaging notes, and troubleshooting advice.
             """
         ).strip(),
     },
@@ -45,9 +45,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Click **Run** to open the highlighted utility.  The launcher stays alive
               while other windows are open, so you can return here without relaunching the
               application.
-            * The **Theme** combo box can force a light or dark appearance.  Leaving it on
-              *System* follows the host operating system and updates automatically when the
-              system theme changes.
+            * Use the menu bar to drive appearance and housekeeping: **View → Theme** toggles
+              light/dark/system palettes, while **File → Exit** quits the launcher if you
+              are finished.
             * Closing the launcher warns you about any additional windows that would be
               closed at the same time.
             """
@@ -57,27 +57,34 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Temperature sensitivity plotter",
         "body": dedent(
             """
-            ### Workflow
-            1. Load exported `.txt` traces.  Files can be grouped by composition and
-               annealing step; the plotter separates variables automatically.
-            2. Choose which curves to include (T1, T2, their sum, or the delta).
-            3. Select a baseline mode: *None* plots absolute values, *Zero 25°C* subtracts
-               the 25 °C mean per sample, and *Both* produces two plots per dataset.
-            4. Pick the backend (Matplotlib, Origin, or both) and an output directory.  PNG
-               exports use the stored DPI value, while PDF/SVG use vector output.
-            5. Configure the moving-average windows for continuous data.  The default MA
-               window is 200 samples to smooth live traces without hiding the trend.
+            ### Getting started
+            1. Click **Add Files/Folders** to load exported `.txt` traces. Group your files by
+               composition and annealing step; the plotter separates variables automatically.
+            2. Tick which curves to include (T1, T2, their sum, or T2–T1). Each selection is
+               remembered the next time you open the tool.
+            3. Choose a baseline mode. *None* plots absolute values, *Zero 25 °C* subtracts
+               the 25 °C mean per sample, and *Both* generates one plot with each treatment.
+            4. Pick the backend (Matplotlib, Origin, or both) and the export directory. PNG
+               renders honour the stored DPI value; PDF/SVG use vector output. Enable
+               **Create subfolder** if you want a dated directory per run.
+            5. Configure moving-average windows for continuous data. The default 200-sample
+               window smooths the trace without hiding the trend.
 
-            ### Notes
-            * Sample ticks show `2/1`, `2/2`, … on both Matplotlib and Origin outputs.
-            * Legends can be positioned inside the axes or just outside on the right.
-              Symbol visibility and legend text colours obey the readability settings.
-            * Origin exports disable speed mode, enable anti-aliasing, reuse the Matplotlib
-              title, add the 100 °C–25 °C delta labels, and shrink the raw scatter markers
-              to size 1 for parity with the Matplotlib figure.
-            * Continuous data is shown as a smoothed trace offset near each sample.  Delta
-              annotations float above the 100 °C means and stay clear of the continuous
-              overlay.
+            ### Tips
+            * Sample ticks show `2/1`, `2/2`, … on both Matplotlib and Origin exports. If
+              Origin cannot bind to the label dataset the dialog falls back to fixed text.
+            * Use the **Readability** panel to reposition legends, adjust font sizes, and
+              colour match legend entries to their curves.
+            * The menu bar offers shortcuts: **View → Theme** to adjust the palette, **View →
+              Show Console** to hide status messages while reviewing settings, and **View →
+              Reset Layout** to restore the default pane sizes.
+
+            ### Origin-specific behaviour
+            * Exports disable speed mode, enable anti-aliasing, and reuse the Matplotlib
+              title. Raw scatter markers shrink to size 1 for parity with the Matplotlib
+              figure.
+            * 100 °C–25 °C delta labels float above each sample. Continuous data is plotted as
+              a smoothed overlay offset near the relevant sample so it remains distinguishable.
             """
         ).strip(),
     },
@@ -203,6 +210,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               reverse, or abort safely.
             * Use **Reverse now** for an immediate ramp down and **Stop** to terminate the
               process while saving the collected data.
+            * The menu bar mirrors the PyVISA version: switch appearance from **View → Theme**,
+              collapse the console via **View → Show Console**, and revisit these notes from
+              **Help → View Help**.
             """
         ).strip(),
     },
@@ -210,13 +220,37 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "PyVISA current annealing logger",
         "body": dedent(
             """
-            * Select a VISA resource (USB, RS‑232, or TCP/IP) from the discovery list and
-              connect.  The logger shares the same ramp controls and safety checks as the
-              serial version.
-            * The dialog keeps track of log directories, file names, and ramp presets per
-              user.  Voltage limits trigger the same protective prompt.
-            * Ideal for remote instruments when a direct serial connection is not
-              available.
+            ### Connecting to your supply
+            * Click **Refresh** to scan for VISA resources. The list includes local serial
+              bridges (e.g. `ASRL…`) and LAN/USB instruments reported by NI-VISA/pyvisa.
+            * Select the instrument and press **Connect**. The current log directory and file
+              name are remembered between sessions—adjust them before starting a run.
+
+            ### Configuring the ramp
+            * **Max**, **Step**, and **Interval** define the up/down ramp. The live estimate
+              below the controls updates automatically so you know how long the run will
+              take for the selected number of loops.
+            * **Dwell** keeps the current at the peak for the specified number of seconds
+              before the ramp reverses or stops. Set the **Loops** spin box to `∞` for a
+              continuous anneal or choose an exact count.
+            * Enable **Reverse to zero after max** to bring the current back to zero after
+              each loop. Use **Reverse current now** if you need to begin the downward ramp
+              immediately.
+
+            ### During acquisition
+            * Press **Start annealing** to begin; the logger writes timestamped voltage,
+              current, and resistance values to the chosen file and updates the resistance
+              plots in real time.
+            * If the instrument reports zero current after delivering a non-zero value the
+              logger assumes contact loss, stops the ramp, and notifies you. Hitting 30 V
+              presents options to hold, reverse, or abort.
+            * Use **Stop annealing** to finish the sequence cleanly. Logging can be toggled
+              independently via **Start Log/Stop Log**.
+
+            ### Menu shortcuts
+            * **View → Theme** controls the palette; **View → Show Console** collapses the
+              message pane when you want a taller plot. **Help → View Help** opens this
+              walkthrough.
             """
         ).strip(),
     },
@@ -229,6 +263,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Use the inline file-name builder to assemble descriptive filenames; presets
               are stored between runs.
             * Real-time plots update as data arrives so anomalies can be spotted early.
+            * The shared menu bar exposes theme controls, layout reset, and these help notes.
             """
         ).strip(),
     },
@@ -242,6 +277,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Useful when exercising the loggers without physical hardware—feed scripted
               responses or replay recorded sessions through the emulator to validate
               parsing.
+            * Use the menu bar to toggle the theme or to revisit these instructions from the
+              **Help** menu.
             """
         ).strip(),
     },

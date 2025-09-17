@@ -860,13 +860,14 @@ def plot_variable_origin(
                 sheet_ref = str(sheet_name).replace('"', "'")
                 col_ref = f"col({col_short})"
                 rng = f"[{book_ref}]{sheet_ref}!{col_ref}"
-                cmd = (
-                    "layer.x.label.auto=0;"
-                    "layer.x.label.type=2;"
-                    "layer.x.label.by=1;"
-                    "layer.x.label.option=1;"
-                    f"layer.x.label.dataset$=\"{rng}\";"
-                    "layer.x.label.apply=1;"
+                cmd = "".join(
+                    [
+                        "layer.x.label.auto=0;",
+                        "layer.x.label.type=2;",
+                        "layer.x.label.by=1;",
+                        f"layer.x.label.dataset$=\"{rng}\";",
+                        "layer.x.label.apply=1;",
+                    ]
                 )
                 op.lt_exec(cmd)
                 labels_applied = True
@@ -874,7 +875,7 @@ def plot_variable_origin(
             labels_applied = False
         if not labels_applied:
             try:
-                label_text = "\r\n".join(display_samples)
+                label_text = "\n".join(display_samples)
                 op.lt_exec('layer.x.label.auto=0; layer.x.label.type=1; layer.x.label.by=1;')
                 op.lt_exec(f'layer.x.label.text$="{label_text}";')
                 op.lt_exec('layer.x.label.apply=1;')

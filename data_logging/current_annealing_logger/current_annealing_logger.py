@@ -18,8 +18,7 @@ from PyQt6.QtWidgets import QFileDialog
 from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
-from plotting.utils import apply_system_theme, format_annealing_title, show_plots
-from app_help import make_help_button
+from plotting.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 
 import numpy as np
 import matplotlib
@@ -92,19 +91,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         except Exception:
             pass
-        try:
-            left_panel = getattr(self.ui, "left_scroll", None)
-            if isinstance(left_panel, QtWidgets.QScrollArea):
-                container = left_panel.widget()
-                if container is not None:
-                    layout = container.layout()
-                    if isinstance(layout, QtWidgets.QVBoxLayout):
-                        help_row = QtWidgets.QHBoxLayout()
-                        help_row.addWidget(make_help_button("logger_current_annealing", self))
-                        help_row.addStretch(1)
-                        layout.insertLayout(0, help_row)
-        except Exception:
-            pass
+        install_standard_menu(self, help_topic="logger_current_annealing")
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
         if hasattr(self.ui, 'lineEdit_log_dir'):
@@ -1732,7 +1719,7 @@ def main() -> QtWidgets.QWidget:
         app = QtWidgets.QApplication(sys.argv)
         owns_app = True
 
-    apply_system_theme(app)
+    ensure_app_theme(app)
 
     window = MainWindow()
     window.showMaximized()

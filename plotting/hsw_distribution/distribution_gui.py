@@ -14,7 +14,7 @@ if __package__ is None or __package__ == "":
     # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.utils import (
-        apply_system_theme,
+        ensure_app_theme,
         select_files_or_folder,
         show_plots,
         restore_backend_choice,
@@ -25,7 +25,7 @@ if __package__ is None or __package__ == "":
     from app_help import show_help
 else:
     from ..utils import (
-        apply_system_theme,
+        ensure_app_theme,
         select_files_or_folder,
         show_plots,
         restore_backend_choice,
@@ -368,5 +368,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
+    ensure_app_theme(app)
     main()

@@ -15,8 +15,7 @@ from .logger_ui import UiMainWindow
 from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
 from .serial_port import serial_connection
 
-from plotting.utils import apply_system_theme
-from app_help import make_help_button
+from plotting.utils import ensure_app_theme, install_standard_menu
 import random
 import pandas as pd
 import numpy as np
@@ -99,17 +98,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
 
-        try:
-            panel = getattr(self.ui, "left_panel", None)
-            if isinstance(panel, QtWidgets.QWidget):
-                layout = panel.layout()
-                if isinstance(layout, QtWidgets.QVBoxLayout):
-                    help_row = QtWidgets.QHBoxLayout()
-                    help_row.addWidget(make_help_button("logger_serial_data", self))
-                    help_row.addStretch(1)
-                    layout.insertLayout(0, help_row)
-        except Exception:
-            pass
+        install_standard_menu(self, help_topic="logger_serial_data")
 
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.pushButton_browse_dir.clicked.connect(self.choose_log_dir)
@@ -1555,7 +1544,7 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
         app = QtWidgets.QApplication(sys.argv)
         owns_app = True
 
-    apply_system_theme(app)
+    ensure_app_theme(app)
 
     window = MainWindow(log_dir)
     window.showMaximized()

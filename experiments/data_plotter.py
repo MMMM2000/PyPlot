@@ -15,7 +15,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 from plotting.config import load_config
 from plotting.temperature_sensitivity.core import detect_outliers
-from plotting.utils import apply_system_theme, select_files_or_folder
+from plotting.utils import ensure_app_theme, select_files_or_folder
 
 
 def _discover_modules() -> Dict[str, Tuple[Any, str]]:
@@ -233,7 +233,7 @@ def main() -> None:
     if app is None:
         app = QtWidgets.QApplication([])
         owns_app = True
-    apply_system_theme(app)
+    ensure_app_theme(app)
     dlg = DataPlotter()
     dlg.show()
     if owns_app:

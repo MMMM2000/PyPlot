@@ -20,7 +20,7 @@ except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
 from ..utils import (
-    apply_system_theme,
+    ensure_app_theme,
     select_files_or_folder,
     save_figure,
     prepare_output_dir,
@@ -780,6 +780,6 @@ def main() -> QtWidgets.QWidget:
 
 if __name__ == "__main__":  # pragma: no cover - manual execution
     app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
+    ensure_app_theme(app)
     _w = main()
     app.exec()

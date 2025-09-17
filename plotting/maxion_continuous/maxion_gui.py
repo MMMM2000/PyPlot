@@ -9,7 +9,7 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.maxion_continuous import core as orig
     from plotting.utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         prepare_output_dir,
         get_last_output_dir,
@@ -27,7 +27,7 @@ if __package__ is None or __package__ == "":
 else:
     from . import core as orig
     from ..utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         prepare_output_dir,
         get_last_output_dir,
@@ -237,7 +237,7 @@ def main() -> None:
     owns = False
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-        apply_system_theme(app)
+        ensure_app_theme(app)
         owns = True
     orig.ProgressDialog = ProgressDialog
     dlg = SettingsDialog()

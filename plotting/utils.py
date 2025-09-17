@@ -1,6 +1,7 @@
 from PyQt6 import QtWidgets, QtGui, QtCore
 import os
 import sys
+import weakref
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -578,6 +579,8 @@ def arrange_side_panel(
     main_layout = QtWidgets.QVBoxLayout(dialog)
     main_layout.addWidget(splitter)
 
+    return splitter
+
 
 def arrange_top_layout(
     dialog: QtWidgets.QDialog,
@@ -592,7 +595,7 @@ def arrange_top_layout(
 
     # Reuse the side-panel arrangement to keep the console narrow while giving
     # the scrolling settings area ample width.
-    arrange_side_panel(dialog, center, file_widget, console, footer=footer)
+    splitter = arrange_side_panel(dialog, center, file_widget, console, footer=footer)
 
     # Ensure the dialog fits comfortably on screen and widgets remain visible
     # when resized. This mirrors the sizing logic of the previous top layout but
@@ -607,20 +610,243 @@ def arrange_top_layout(
     dialog.resize(width, height)
     dialog.setMinimumSize(min(width, 900), min(height, 600))
 
-    if help_topic:
-        menu_bar = QtWidgets.QMenuBar(dialog)
-        help_menu = menu_bar.addMenu("&Help")
-        action = help_menu.addAction("View Help")
+    split_sizes = [int(width * 0.44), int(width * 0.56)]
+    if splitter is not None and splitter.orientation() == QtCore.Qt.Orientation.Horizontal:
         try:
-            action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
+            splitter.setSizes(split_sizes)
+        except Exception:
+            pass
+
+    install_standard_menu(
+        dialog,
+        help_topic=help_topic,
+        console=console,
+        file_widget=file_widget,
+        splitter=splitter,
+        default_split_sizes=split_sizes,
+    )
+
+
+def _ensure_menu_bar(target: QtWidgets.QWidget) -> QtWidgets.QMenuBar:
+    """Return a menu bar for ``target``, creating one if required."""
+
+    if isinstance(target, QtWidgets.QMainWindow):
+        bar = target.menuBar()
+        if bar is None:
+            bar = QtWidgets.QMenuBar(target)
+            target.setMenuBar(bar)
+        return bar
+
+    layout = target.layout()
+    if layout is None:
+        layout = QtWidgets.QVBoxLayout(target)
+        target.setLayout(layout)
+
+    bar = getattr(layout, "menuBar", lambda: None)()
+    if bar is None:
+        bar = QtWidgets.QMenuBar(target)
+        layout.setMenuBar(bar)
+    return bar
+
+
+def install_standard_menu(
+    target: QtWidgets.QWidget,
+    *,
+    help_topic: str | None = None,
+    console: QtWidgets.QWidget | None = None,
+    file_widget: QtWidgets.QWidget | None = None,
+    splitter: QtWidgets.QSplitter | None = None,
+    default_split_sizes: list[int] | tuple[int, int] | None = None,
+) -> QtWidgets.QMenuBar:
+    """Attach the shared menu bar with theme, layout, and help entries."""
+
+    menu_bar = _ensure_menu_bar(target)
+
+    # Clear any previous shared menus while keeping custom entries intact.
+    # We identify menus we manage by object names to avoid clobbering user
+    # customisations.
+    to_remove = []
+    for action in menu_bar.actions():
+        menu = action.menu()
+        if menu is not None and menu.objectName().startswith("mw_shared_"):
+            to_remove.append(action)
+    for action in to_remove:
+        menu_bar.removeAction(action)
+
+    view_menu = menu_bar.addMenu("&View")
+    view_menu.setObjectName("mw_shared_view")
+    theme_submenu = theme_manager().create_theme_menu(view_menu)
+    theme_submenu.setObjectName("mw_shared_theme")
+    view_menu.addMenu(theme_submenu)
+
+    if file_widget is not None:
+        view_menu.addSeparator()
+        files_action = view_menu.addAction("Show &File Browser")
+        files_action.setCheckable(True)
+        files_action.setChecked(file_widget.isVisible())
+        files_action.toggled.connect(file_widget.setVisible)
+
+    if console is not None:
+        view_menu.addSeparator()
+        console_action = view_menu.addAction("Show &Console")
+        console_action.setCheckable(True)
+        console_action.setChecked(console.isVisible())
+
+        def _set_console_visible(checked: bool) -> None:
+            console.setVisible(checked)
+
+        console_action.toggled.connect(_set_console_visible)
+
+        def _sync_console() -> None:
+            state = console.isVisible()
+            if console_action.isChecked() != state:
+                console_action.blockSignals(True)
+                console_action.setChecked(state)
+                console_action.blockSignals(False)
+
+        sync_filter = _VisibilitySync(console_action, _sync_console)
+        console.installEventFilter(sync_filter)
+        setattr(console, "_mw_visibility_sync", sync_filter)
+
+    if splitter is not None and default_split_sizes:
+        view_menu.addSeparator()
+
+        def _reset_layout() -> None:
+            sizes = [max(40, int(default_split_sizes[0])), max(40, int(default_split_sizes[1]))]
+            try:
+                splitter.setSizes(sizes)
+            except Exception:
+                pass
+
+        reset_action = view_menu.addAction("&Reset Layout")
+        reset_action.triggered.connect(_reset_layout)
+
+    help_menu = menu_bar.addMenu("&Help")
+    help_menu.setObjectName("mw_shared_help")
+    if help_topic:
+        help_action = help_menu.addAction("View Help")
+        try:
+            help_action.setShortcut(
+                QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents)
+            )
         except Exception:
             pass
 
         def _show_help() -> None:
-            show_help(help_topic, dialog)
+            show_help(help_topic, target)
 
-        action.triggered.connect(_show_help)
-        dialog.layout().setMenuBar(menu_bar)
+        help_action.triggered.connect(_show_help)
+    else:
+        help_menu.setEnabled(False)
+
+    return menu_bar
+
+
+class _VisibilitySync(QtCore.QObject):
+    """Synchronise a checkable action with a widget's visibility."""
+
+    def __init__(self, action: QtGui.QAction, sync: Callable[[], None]):
+        super().__init__(action.parent())
+        self._action = action
+        self._sync = sync
+
+    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: D401
+        if event.type() in {
+            QtCore.QEvent.Type.Show,
+            QtCore.QEvent.Type.Hide,
+            QtCore.QEvent.Type.ShowToParent,
+            QtCore.QEvent.Type.HideToParent,
+        }:
+            self._sync()
+        return False
+
+
+class _ThemeManager(QtCore.QObject):
+    """Coordinate theme changes across every window."""
+
+    theme_changed = QtCore.pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        settings = QtCore.QSettings("microwire", "ui")
+        stored = str(settings.value("theme_mode", "system") or "system").lower()
+        self._settings = settings
+        self._mode = stored if stored in {"system", "light", "dark"} else "system"
+        self._actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            apply_theme(app, self._mode)
+
+    def current_mode(self) -> str:
+        return self._mode
+
+    def apply(self, app: QtWidgets.QApplication) -> None:
+        apply_theme(app, self._mode)
+
+    def set_mode(self, mode: str) -> None:
+        mode = (mode or "system").lower()
+        if mode not in {"system", "light", "dark"}:
+            mode = "system"
+        if mode == self._mode:
+            return
+        self._mode = mode
+        self._settings.setValue("theme_mode", self._mode)
+        app = QtWidgets.QApplication.instance()
+        if isinstance(app, QtWidgets.QApplication):
+            apply_theme(app, self._mode)
+        self._sync_actions()
+        self.theme_changed.emit(self._mode)
+
+    def create_theme_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
+        menu = QtWidgets.QMenu("&Theme", parent)
+        group = QtGui.QActionGroup(menu)
+        group.setExclusive(True)
+        for mode, label in (("system", "System"), ("light", "Light"), ("dark", "Dark")):
+            action = group.addAction(label)
+            action.setData(mode)
+            action.setCheckable(True)
+            action.setChecked(mode == self._mode)
+
+            def _set_theme(checked: bool, value: str = mode) -> None:
+                if checked:
+                    theme_manager().set_mode(value)
+
+            action.triggered.connect(_set_theme)
+            menu.addAction(action)
+            self._actions.append(weakref.ref(action))
+        return menu
+
+    def _sync_actions(self) -> None:
+        alive: list[weakref.ReferenceType[QtGui.QAction]] = []
+        for ref in self._actions:
+            action = ref()
+            if action is None:
+                continue
+            alive.append(ref)
+            target_state = action.data() == self._mode
+            if action.isChecked() != target_state:
+                action.blockSignals(True)
+                action.setChecked(target_state)
+                action.blockSignals(False)
+        self._actions = alive
+
+
+_THEME_MANAGER: _ThemeManager | None = None
+
+
+def theme_manager() -> _ThemeManager:
+    """Return the shared :class:`_ThemeManager` singleton."""
+
+    global _THEME_MANAGER
+    if _THEME_MANAGER is None:
+        _THEME_MANAGER = _ThemeManager()
+    return _THEME_MANAGER
+
+
+def ensure_app_theme(app: QtWidgets.QApplication) -> None:
+    """Apply the stored theme preference to ``app``."""
+
+    theme_manager().apply(app)
 
 
 class ReadabilityControls:

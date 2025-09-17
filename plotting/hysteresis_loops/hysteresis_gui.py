@@ -9,7 +9,7 @@ from PyQt6 import QtWidgets
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         show_plots,
         run_with_console,
@@ -20,7 +20,7 @@ if __package__ is None or __package__ == "":
     )
 else:
     from ..utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         show_plots,
         run_with_console,
@@ -187,7 +187,7 @@ def main() -> None:
     owns = False
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-        apply_system_theme(app)
+        ensure_app_theme(app)
         owns = True
     dlg = SettingsDialog()
     dlg.show()

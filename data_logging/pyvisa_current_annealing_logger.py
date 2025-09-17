@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sys
 import time
+import math
 from pathlib import Path
 
 from PyQt6 import QtCore, QtWidgets, QtGui
@@ -25,8 +26,7 @@ from matplotlib.backends.backend_qtagg import (
 )
 from matplotlib.figure import Figure
 
-from plotting.utils import apply_system_theme
-from app_help import make_help_button
+from plotting.utils import ensure_app_theme, install_standard_menu, theme_manager
 
 
 class PyVISAAnnealingLogger(QtWidgets.QWidget):
@@ -79,6 +79,16 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.interval_spin.setRange(50, 5000)
         self.interval_spin.setValue(200)
         self.interval_spin.setSuffix(" ms")
+        self.dwell_spin = QtWidgets.QDoubleSpinBox()
+        self.dwell_spin.setRange(0.0, 600.0)
+        self.dwell_spin.setDecimals(1)
+        self.dwell_spin.setSingleStep(0.5)
+        self.dwell_spin.setValue(5.0)
+        self.dwell_spin.setSuffix(" s")
+        self.loop_spin = QtWidgets.QSpinBox()
+        self.loop_spin.setRange(0, 1000)
+        self.loop_spin.setSpecialValueText("∞")
+        self.loop_spin.setValue(1)
 
         # readouts
         self.voltage_value = QtWidgets.QLabel("--")
@@ -123,14 +133,19 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         path_row.addWidget(self.dir_button)
         path_row.addWidget(self.file_edit)
 
-        config_row = QtWidgets.QHBoxLayout()
-        config_row.addWidget(QtWidgets.QLabel("Max"))
-        config_row.addWidget(self.max_spin)
-        config_row.addWidget(QtWidgets.QLabel("Step"))
-        config_row.addWidget(self.step_spin)
-        config_row.addWidget(QtWidgets.QLabel("Interval"))
-        config_row.addWidget(self.interval_spin)
-        config_row.addWidget(self.reverse_after)
+        config_row = QtWidgets.QGridLayout()
+        config_row.addWidget(QtWidgets.QLabel("Max"), 0, 0)
+        config_row.addWidget(self.max_spin, 0, 1)
+        config_row.addWidget(QtWidgets.QLabel("Step"), 0, 2)
+        config_row.addWidget(self.step_spin, 0, 3)
+        config_row.addWidget(QtWidgets.QLabel("Interval"), 0, 4)
+        config_row.addWidget(self.interval_spin, 0, 5)
+        config_row.addWidget(QtWidgets.QLabel("Dwell"), 0, 6)
+        config_row.addWidget(self.dwell_spin, 0, 7)
+        config_row.addWidget(self.reverse_after, 1, 0, 1, 4)
+        config_row.addWidget(QtWidgets.QLabel("Loops"), 1, 4)
+        config_row.addWidget(self.loop_spin, 1, 5)
+        config_row.setColumnStretch(7, 1)
 
         proc_row = QtWidgets.QHBoxLayout()
         proc_row.addWidget(self.start_button)
@@ -143,22 +158,27 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         values_layout.addRow("Current [mA]", self.current_value)
         values_layout.addRow("Set current [mA]", self.set_value)
 
-        left = QtWidgets.QVBoxLayout()
-        help_row = QtWidgets.QHBoxLayout()
-        help_row.addWidget(make_help_button("logger_pyvisa_current_annealing", self))
-        help_row.addStretch(1)
-        left.addLayout(help_row)
-        left.addLayout(top)
-        left.addLayout(path_row)
-        left.addWidget(self.log_button)
-        left.addLayout(config_row)
-        left.addLayout(proc_row)
-        left.addWidget(values_box)
-        left.addWidget(self.output_view)
+        self.estimate_label = QtWidgets.QLabel("Estimated run time: --")
 
-        layout = QtWidgets.QHBoxLayout(self)
-        layout.addLayout(left)
-        layout.addWidget(self.canvas, stretch=1)
+        left_column = QtWidgets.QVBoxLayout()
+        left_column.addLayout(top)
+        left_column.addLayout(path_row)
+        left_column.addWidget(self.log_button)
+        left_column.addLayout(config_row)
+        left_column.addWidget(self.estimate_label)
+        left_column.addLayout(proc_row)
+        left_column.addWidget(values_box)
+        left_column.addWidget(self.output_view)
+
+        content = QtWidgets.QWidget(self)
+        content_layout = QtWidgets.QHBoxLayout(content)
+        content_layout.addLayout(left_column)
+        content_layout.addWidget(self.canvas, stretch=1)
+
+        root_layout = QtWidgets.QVBoxLayout(self)
+        root_layout.addWidget(content)
+        install_standard_menu(self, help_topic="logger_pyvisa_current_annealing")
+        theme_manager().theme_changed.connect(self._apply_theme_update)
 
         # ---------------------------------------------------------------- connections
         self.refresh_button.clicked.connect(self.refresh_resources)
@@ -168,6 +188,12 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.start_button.clicked.connect(self.start_process)
         self.stop_button.clicked.connect(self.stop_process)
         self.reverse_button.clicked.connect(self.reverse_now)
+        self.max_spin.valueChanged.connect(self.update_time_estimate)
+        self.step_spin.valueChanged.connect(self.update_time_estimate)
+        self.interval_spin.valueChanged.connect(self.update_time_estimate)
+        self.dwell_spin.valueChanged.connect(self.update_time_estimate)
+        self.loop_spin.valueChanged.connect(self.update_time_estimate)
+        self.reverse_after.toggled.connect(self.update_time_estimate)
 
         # timers
         self.poll_timer = QtCore.QTimer(self)
@@ -180,12 +206,44 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.ramping_up = True
         self.max_voltage = 30.0
         self._max_voltage_dialog = False
+        self._loop_target = 1
+        self._loops_completed = 0
+        self._hold_remaining_ms = 0.0
+        self._nonzero_seen = False
+        self._zero_count = 0
+        self._zero_limit = 6
+        self._last_nonzero_time: float | None = None
+        self._contact_grace = 2.0
 
         self.refresh_resources()
+        self.update_time_estimate()
 
     # ------------------------------------------------------------------ utilities
     def log(self, msg: str) -> None:
         self.output_view.appendPlainText(msg)
+
+    def update_time_estimate(self) -> None:
+        step = max(self.step_spin.value(), 1e-6)
+        interval = max(self.interval_spin.value(), 1) / 1000.0
+        max_i = max(self.max_spin.value(), 0.0)
+        dwell = max(self.dwell_spin.value(), 0.0)
+        loops = self.loop_spin.value()
+        if max_i <= 0.0 or step <= 0.0:
+            self.estimate_label.setText("Estimated run time: --")
+            return
+        steps = math.ceil(max_i / step)
+        up_time = steps * interval
+        cycle_time = up_time + dwell
+        if self.reverse_after.isChecked():
+            cycle_time = up_time * 2 + dwell
+        if loops == 0:
+            self.estimate_label.setText("Estimated run time: ∞ (continuous)")
+        else:
+            total = cycle_time * loops
+            if total < 120:
+                self.estimate_label.setText(f"Estimated run time: {total:.1f} s")
+            else:
+                self.estimate_label.setText(f"Estimated run time: {total/60:.1f} min")
 
     def refresh_resources(self) -> None:
         try:
@@ -224,6 +282,9 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             for spine in ax.spines.values():
                 spine.set_color(text_rgb)
             ax.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
+
+    def _apply_theme_update(self, _: str) -> None:
+        self.update_plot_colors()
 
     # -------------------------------------------------------------------- slots
     def disconnect(self) -> None:
@@ -374,6 +435,28 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.ax_ri.relim(); self.ax_ri.autoscale_view()
         self.ax_rn.relim(); self.ax_rn.autoscale_view()
         self.canvas.draw_idle()
+        now = time.monotonic()
+        if abs(current) > 1e-3:
+            self._nonzero_seen = True
+            self._zero_count = 0
+            self._last_nonzero_time = now
+        elif self._nonzero_seen and self.process_timer.isActive():
+            self._zero_count += 1
+            timed_out = (
+                self._last_nonzero_time is not None
+                and (now - self._last_nonzero_time) > self._contact_grace
+            )
+            if self._zero_count >= self._zero_limit or timed_out:
+                self.log("Contact lost — stopping annealing")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Contact lost",
+                    "Current fell to zero after ramping. The process has been stopped.",
+                )
+                self.stop_process()
+                self.handle_log()
+                self._nonzero_seen = False
+                return
         if (
             self.ramping_up
             and self.process_timer.isActive()
@@ -385,6 +468,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
     # ----------------------------------------------------------- annealing logic
     def handle_voltage_limit(self) -> None:
         self._max_voltage_dialog = True
+        self._hold_remaining_ms = 0.0
         self.process_timer.stop()
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Voltage limit reached")
@@ -409,6 +493,12 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self.current_set = 0.0
         self.ramping_up = True
         self._max_voltage_dialog = False
+        self._loop_target = self.loop_spin.value()
+        self._loops_completed = 0
+        self._hold_remaining_ms = 0.0
+        self._nonzero_seen = False
+        self._zero_count = 0
+        self._last_nonzero_time = None
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self.reverse_button.setEnabled(True)
@@ -434,11 +524,16 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         self._max_voltage_dialog = False
         self.current_set = 0.0
         self.ramping_up = True
+        self._hold_remaining_ms = 0.0
+        self._nonzero_seen = False
+        self._zero_count = 0
+        self._last_nonzero_time = None
 
     def reverse_now(self) -> None:
         if self.inst is None:
             return
         self.ramping_up = False
+        self._hold_remaining_ms = 0.0
         if not self.process_timer.isActive():
             self.process_timer.start(self.interval_spin.value())
 
@@ -446,20 +541,52 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         if self.inst is None:
             self.stop_process()
             return
-        step = self.step_spin.value()
-        max_i = self.max_spin.value()
-        if self.ramping_up:
-            self.current_set += step
-            if self.current_set >= max_i:
+        if self._hold_remaining_ms > 0.0:
+            self._hold_remaining_ms = max(
+                0.0, self._hold_remaining_ms - self.interval_spin.value()
+            )
+            if self._hold_remaining_ms <= 0.0:
                 if self.reverse_after.isChecked():
                     self.ramping_up = False
                 else:
                     self.stop_process()
-        else:
-            self.current_set -= step
-            if self.current_set <= 0:
+                    return
+            try:
+                self.inst.write(f"CURR {max(self.current_set, 0):.4f}")
+                self.set_value.setText(f"{self.current_set*1000:.3f}")
+            except Exception as exc:
+                self.log(f"Write failed: {exc}")
                 self.stop_process()
-                return
+            return
+        step = self.step_spin.value()
+        max_i = self.max_spin.value()
+        if self.ramping_up:
+            self.current_set = min(max_i, self.current_set + step)
+            if self.current_set >= max_i - 1e-9:
+                dwell_ms = self.dwell_spin.value() * 1000.0
+                if self.reverse_after.isChecked():
+                    self.ramping_up = False
+                    if dwell_ms > 0:
+                        self._hold_remaining_ms = dwell_ms
+                else:
+                    if dwell_ms > 0:
+                        self._hold_remaining_ms = dwell_ms
+                    else:
+                        self.stop_process()
+                        return
+        else:
+            self.current_set = max(0.0, self.current_set - step)
+            if self.current_set <= 0.0 + 1e-9:
+                if self.reverse_after.isChecked():
+                    self._loops_completed += 1
+                    if self._loop_target != 0 and self._loops_completed >= self._loop_target:
+                        self.stop_process()
+                        return
+                    self.current_set = 0.0
+                    self.ramping_up = True
+                else:
+                    self.stop_process()
+                    return
         try:
             self.inst.write(f"CURR {max(self.current_set, 0):.4f}")
             self.set_value.setText(f"{self.current_set*1000:.3f}")
@@ -478,7 +605,7 @@ def main() -> QtWidgets.QWidget:  # pragma: no cover - manual use
     app = QtWidgets.QApplication.instance()
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-    apply_system_theme(app)
+    ensure_app_theme(app)
     win = PyVISAAnnealingLogger()
     win.showMaximized()
     return win

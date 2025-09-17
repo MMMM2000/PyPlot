@@ -9,7 +9,7 @@ if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.hysteresis_loops import core
     from plotting.utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         run_with_console,
         create_readability_group,
@@ -22,7 +22,7 @@ if __package__ is None or __package__ == "":
 else:
     from . import core
     from ..utils import (
-        apply_system_theme,
+        ensure_app_theme,
         create_file_widget,
         run_with_console,
         create_readability_group,
@@ -101,7 +101,7 @@ def main() -> None:
     owns = False
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
-        apply_system_theme(app)
+        ensure_app_theme(app)
         owns = True
     dlg = SettingsDialog()
     dlg.show()

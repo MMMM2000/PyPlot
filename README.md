@@ -90,15 +90,15 @@ Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 
-Every window now includes a **Help** menu.  The launcher, each plotting
-dialog, every logger, and the serial emulator open a Markdown help sheet that
-explains the workflow, highlights where settings are stored, and links the UI
-controls to their expected behaviour.  When onboarding new colleagues you can
-point them to the menu entry for context without having to maintain a separate
-manual.  The main action row stays anchored beneath the settings so Run/Plot
-buttons remain visible without scrolling through long option lists.
-Origin sessions are closed automatically after plots are generated so the
-Origin application can be closed independently from the Python tools.
+Every window now includes a shared menu bar.  The **View** menu exposes theme
+controls (System/Light/Dark), toggles the file browser or console panes, and
+resets splitter sizes if the layout becomes cramped, while **Help** opens a
+Markdown guide tailored to the current tool.  When onboarding new colleagues you
+can point them to the menu entry for context without having to maintain a
+separate manual.  The main action row stays anchored beneath the settings so
+Run/Plot buttons remain visible without scrolling through long option lists.
+Origin sessions are closed automatically after plots are generated so the Origin
+application can be closed independently from the Python tools.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: sample
 ticks read `2/1`, `2/2`, … in both outputs thanks to a dedicated text dataset on
@@ -145,14 +145,15 @@ python -m data_logging.current_annealing_logger.current_annealing_logger
 ### 3.2 PyVISA Current Annealing Logger
 
 Uses PyVISA to communicate with SCPI instruments over USB, RS‑232 or TCP/IP.  It
-mirrors the serial logger’s workflow and adds the same voltage‑limit safety
-dialog and live values panel.  Select a VISA resource (e.g.
-`ASRL/ttyV1::INSTR`) and start logging.
-The ramp-down path is plotted in a contrasting colour to distinguish it from the
-current ramp-up, and the first zero sample is ignored just like in the serial
-logger.
-
-The PyVISA logger also remembers its last log directory and file name.
+now mirrors the serial logger feature-for-feature: configure peak current, step,
+interval, dwell time, and loop count (including an infinite option) while the
+time estimate updates live.  The voltage-limit dialog, **Reverse now** button,
+and contact-loss guard all behave like the serial tool, and the ramp-down trace
+is plotted in a contrasting colour.  Select a VISA resource (e.g.
+`ASRL/ttyV1::INSTR`), choose where to log, and click **Start annealing**—the
+first zero sample is skipped automatically.  The logger remembers its last log
+directory and file name, and the menu bar provides the same theme and layout
+shortcuts available across the rest of the suite.
 
 Launch from the master launcher or run
 
