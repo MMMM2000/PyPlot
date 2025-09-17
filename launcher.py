@@ -130,9 +130,13 @@ class MasterLauncher(QtWidgets.QWidget):
 
         menu_bar = install_standard_menu(self, help_topic="launcher")
         file_menu = menu_bar.addMenu("&File")
+        if file_menu is None:
+            file_menu = QtWidgets.QMenu("&File", self)
+            menu_bar.addMenu(file_menu)
         exit_action = file_menu.addAction("E&xit")
-        exit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
-        exit_action.triggered.connect(self.close)
+        if exit_action is not None:
+            exit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
+            exit_action.triggered.connect(self.close)
 
     def _restore_launcher(self) -> None:
         if self._closing:

@@ -11,46 +11,53 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Microwire tools",
         "body": dedent(
             """
-            ### Orientation
-            * Launch the **Master Launcher** (``python -m launcher``) to reach every plotting
-              script, logger, emulator, and experiment. Each tool opens in its own window so
-              you can keep several utilities side by side.
-            * Every dialog shares the same layout: a file browser down the left, settings on
-              the right, a console for status messages, and the main action button anchored at
-              the bottom so **Run/Plot** never hides behind a scrollbar.
-            * Double-click any file in the list to open it in your platform’s file explorer.
-              Drag the splitter or hide panes from **View → Show File Browser/Console** when
-              you need more room for options.
+            ### Quick start for first-time users
+            1. Install the requirements (``pip install -r requirements.txt``) and launch the
+               hub with ``python -m launcher``.
+            2. Leave the launcher running. It keeps track of every child window so you can
+               open a logger, switch to a plotter, or return to the experiments without
+               restarting the program.
+            3. Whenever you open a dialog, pull down **Help → View Help** to keep this guide
+               beside you. The help viewer is specific to the tool you opened.
 
-            ### Developer options
-            * **Developer → Keep File Selections** persists the files you added in each
-              plotting dialog. Reopen the window later and the same datasets are already
-              queued—ideal when iterating on configuration tweaks.
-            * **Developer → Show Experiments Tab** toggles an extra launcher tab containing
-              prototypes (PyVISA logger, data-plotter sandbox, liquid-glass UI demo). Leave it
-              disabled for production work to keep the interface focused on vetted tools.
+            ### Understanding each window
+            * **Left column – file browser.** Add or remove datasets, drag the splitter to gain
+              room, or hide the pane entirely from **View → Show File Browser** when you just
+              want to focus on options.
+            * **Right column – configuration.** Options are grouped into collapsible sections
+              (readability, export, backends). Scroll the panel; the **Run/Plot** row is pinned
+              just below the options so it never disappears off-screen.
+            * **Console – live status.** Messages from file parsing, instrument polling, and
+              export steps appear here. Clear the console between runs to keep logs readable.
+            * **Double-click** any file in the list to open it in Explorer/Finder for quick
+              inspection.
+
+            ### Developer menu essentials
+            * **Keep File Selections** – when iterating on a dataset, enable this so the dialog
+              reopens with your previous file list intact.
+            * **Show Experiments Tab** – exposes prototypes (the PyVISA annealing logger and
+              the liquid-glass concept window). Leave the toggle off during routine work to keep
+              the launcher tidy.
 
             ### Menu bar highlights
-            * **View → Theme** flips between system, light, and dark palettes globally. The
-              choice applies immediately to every open window.
-            * **View → Reset Layout** restores the default splitter sizes if you collapse a
-              pane too far.
-            * **Help → View Help** opens the topic-specific manual you are reading now. Every
-              tool includes usage notes, data format requirements, and troubleshooting tips.
+            * **View → Theme** flips between system, light, and dark palettes across every open
+              window. Changes apply instantly, even to existing loggers.
+            * **View → Reset Layout** restores splitter positions if you shrink a pane too far.
+            * **Help → View Help** keeps this step-by-step manual at hand for whichever dialog
+              you are learning.
 
-            ### Workflow checklist
-            1. Pick or load files using **Add Files/Folders**. With the developer retention
-               toggle enabled, previous selections will already be listed.
-            2. Adjust settings in the right-hand column. Readability controls, export
-               directories, and backend choices are remembered automatically per tool.
-            3. Review the console for warnings (missing files, outliers, device contact loss)
-               while the action is running. You can clear it between runs if desired.
-            4. Use the menu bar to revisit documentation, switch theme, or turn on experimental
-               features without closing the dialog.
+            ### Typical workflow
+            1. Choose or load input files with **Add Files/Folders** (or type a VISA resource in
+               loggers).
+            2. Walk through the configuration sections from top to bottom—backend selection,
+               export directories, readability controls. Settings persist per tool.
+            3. Start the run. Watch the console for prompts (missing files, contact-loss
+               warnings, Origin export status).
+            4. Adjust the theme or enable experiments from the menu bar without closing the
+               window, then iterate on the same dataset using the retained file list.
 
-            Detailed installation, hardware wiring, and packaging instructions live in the
-            project README. Use this in-app manual once the environment is ready and you want
-            to focus on day-to-day operation.
+            Installation, hardware wiring, and packaging notes live in the project README. This
+            in-app help focuses on day-to-day operation once the environment is set up.
             """
         ).strip(),
     },
@@ -68,7 +75,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                closing it would also close child dialogs.
             3. Use **Developer → Show Experiments Tab** to reveal or hide the prototype list and
                **Developer → Keep File Selections** if you want plotting dialogs to reopen with
-               the same input files pre-selected.
+               the same input files pre-selected. The experiments currently bundle the PyVISA
+               annealing logger and the liquid-glass concept window.
             4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
                console, and reset splitter sizes when needed. **File → Exit** quits the launcher
                after confirming there are no unsaved child windows.
@@ -105,10 +113,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Matplotlib windows appear immediately (if **Show plots** is enabled) and are saved
               alongside their Origin counterparts. Axes, legends, and colours match across both
               backends.
-            * Origin exports bind the X axis to a dedicated label dataset so ticks read `2/1`,
-              `2/2`, … in the workbook and on the graph. Continuous overlays are offset slightly
-              around each microwire to avoid obscuring the mean markers, and Δ(100 °C−25 °C)
-              annotations sit just above the 100 °C point for each sample.
+            * Origin exports paint `2/1`, `2/2`, … tick labels directly onto the graph so the
+              workbook and plotted figure stay in sync even after reopening the project.
+              Continuous overlays are offset slightly around each microwire to avoid obscuring
+              the mean markers, and Δ(100 °C−25 °C) annotations sit just above the 100 °C point
+              for each sample.
 
             ### Troubleshooting
             * If a sample is missing from the Origin plot, confirm its filename follows the
@@ -356,15 +365,23 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "Liquid glass UI demo",
         "body": dedent(
             """
-            * This prototype shows how a liquid-glass aesthetic could frame microwire tooling:
-              layered gradients, frosted cards, luminous pills, and a translucent control row.
-            * Use the buttons on each card to imagine navigation targets (start a live run,
-              open the data library, experiment with UI accents). They are placeholders for
-              future wiring into real workflows.
-            * Adjust the window size to see how cards and the timeline react—the layout stays
-              fluid so the design can scale from tablets to large monitors.
-            * Change appearance from the **View** menu to preview the concept in light and dark
-              palettes. The help menu links back here with the implementation notes.
+            ### Overview
+            * The frosted panel embeds the fully functional PyVISA current annealing logger with
+              a liquid-glass skin. Every control—resource discovery, dwell planning, loop counts,
+              contact monitoring—behaves exactly like the production window.
+            * **Launch Classic PyVISA Logger** opens the standard interface so you can compare
+              the two side by side. **Open Serial Logger for Context** provides the shipping
+              serial workflow for additional reference.
+            * Use the guidance tiles below the panel for suggestions on what to evaluate (console
+              readability, plot styling, button emphasis).
+
+            ### Tips
+            * Resize the window to observe how the frosted card, logger, and info tiles adapt to
+              different displays.
+            * Switch appearance from the **View** menu to preview the concept in light and dark
+              palettes. The logger skin updates instantly.
+            * Keep this help open while exploring—the notes double as implementation reminders if
+              you decide to port parts of the design into the main tools.
             """
         ).strip(),
     },

@@ -902,6 +902,29 @@ def plot_variable_origin(
                 op.lt_exec('layer.x.label.apply=1;')
             except Exception:
                 pass
+
+        manual_labels_added = False
+        try:
+            op.lt_exec('label -r py_xtick*;')
+        except Exception:
+            pass
+        tick_level = (y_min - 0.02 * y_range) + (0.005 * y_range)
+        for idx, text in enumerate(display_samples, start=1):
+            esc_text = text.replace('"', "'")
+            try:
+                op.lt_exec(
+                    f'label -n py_xtick{idx} -a {float(idx):.6g} {tick_level:.6g} "{esc_text}";'
+                )
+            except Exception:
+                continue
+            manual_labels_added = True
+        try:
+            if manual_labels_added:
+                op.lt_exec('layer.x.label.show=0;')
+            else:
+                op.lt_exec('layer.x.label.show=1;')
+        except Exception:
+            pass
         try:
             op.lt_exec('label -r py_delta*;')
         except Exception:

@@ -103,14 +103,15 @@ application can be closed independently from the Python tools.
 The menu bar also adds a **Developer** section. Enable **Keep File Selections**
 to reopen plotting dialogs with the same files pre-selected—handy when you are
 tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose
-prototype utilities such as the PyVISA annealing logger, the plotting sandbox,
-and the liquid-glass UI concept. Keep the toggle off for day-to-day work to
-focus on production tools only.
+prototype utilities such as the PyVISA annealing logger and the liquid-glass UI
+concept. Keep the toggle off for day-to-day work to focus on production tools
+only.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: sample
-ticks read `2/1`, `2/2`, … in both outputs thanks to a dedicated text dataset on
-the Origin X axis, legends share the same ordering and colour coding, symbol
-visibility follows the **Show symbols** option, and raw traces advertise `25 °C`
+ticks are painted directly as `2/1`, `2/2`, … on the Origin graph so the
+workbook and figure stay in sync, legends share the same ordering and colour
+coding, symbol visibility follows the **Show symbols** option, and raw traces
+advertise `25 °C`
 instead of `25.0 °C`.  Origin exports disable speed mode, enable
 anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
 title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
@@ -215,12 +216,6 @@ colleagues:
 Prototype user interfaces and plotting experiments live in the `experiments`
 directory and are independent from the main tools.
 
-### Data Plotter
-
-`experiments/data_plotter.py` provides a small GUI wrapper around the plotting
-modules.  Configure module settings, manage the list of input files, and run the
-plotter without the window closing or prompting to save figures afterwards.
-
 ### PyVISA current annealing logger
 
 `experiments/pyvisa_current_annealing_logger.py` mirrors the serial logger while
@@ -230,10 +225,11 @@ exercise VISA hardware without altering the production launcher.
 
 ### Liquid glass UI demo
 
-`experiments/liquid_glass_gui.py` showcases a “liquid glass” layout concept with
-translucent cards, glowing pills, and a responsive gradient background. Use it
-as a starting point for future styling work or to gather feedback on the design
-direction before integrating visual changes into the main tools.
+`experiments/liquid_glass_gui.py` embeds the PyVISA annealing logger inside a
+macOS 26-inspired glass workspace. Launch the classic logger from the buttons in
+the window to compare the production interface against the translucent skin, or
+open the serial logger for extra context. Use the concept to gather feedback
+before enabling a "liquid glass" appearance toggle in the main tools.
 
 ## 7. Repository maintenance
 

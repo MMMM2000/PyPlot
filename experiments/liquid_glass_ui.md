@@ -4,6 +4,15 @@ Apple's iOS/macOS 26 aesthetic blends frosted translucency with vibrant accent
 colors and depth. The notes below capture ideas for translating that “liquid
 glass” style into future iterations of the microwire tools.
 
+## Demo implementation
+
+* `experiments/liquid_glass_gui.py` now wraps the PyVISA current annealing logger
+  in a frosted card so behaviour matches the production window while the chrome
+  shifts to liquid glass.
+* Buttons in the demo open the classic PyVISA and serial loggers for side-by-side
+  comparison. Use them to judge whether the translucent treatment improves
+  clarity before introducing a theme toggle to the main tools.
+
 ## Palette and Materials
 
 * **Layered translucency** – wrap primary panels in semi-opaque glass with
