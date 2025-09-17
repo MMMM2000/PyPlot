@@ -838,11 +838,18 @@ def plot_variable_origin(
             op.lt_exec('legend.x=0.18; legend.y=0.88;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{TS_LABELS[var]}";')
+        base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
+        label_gap = min(max(0.12 * y_range, 0.5), y_range * 0.4)
+        label_extra = min(max(0.05 * y_range, 0.3), y_range * 0.2)
+        tick_level = y_min - label_gap
+        label_bottom = tick_level - label_extra
+        axis_bottom = y_min - base_pad
+
         op.lt_exec(f'layer.x.from=0.5; layer.x.to={len(samples) + 0.5};')
         op.lt_exec('layer.x.inc=1;')
         op.lt_exec('layer.x.step=1;')
-        op.lt_exec(f'layer.y.from={y_min - 0.02 * y_range};')
-        op.lt_exec(f'layer.y.to={plot_top};')
+        op.lt_exec(f'layer.y.from={axis_bottom:.6g};')
+        op.lt_exec(f'layer.y.to={plot_top:.6g};')
         try:
             op.lt_exec('layer -lx 0; layer -ly 0;')
         except Exception:
@@ -908,19 +915,31 @@ def plot_variable_origin(
             op.lt_exec('label -r py_xtick*;')
         except Exception:
             pass
-        tick_level = (y_min - 0.02 * y_range) + (0.005 * y_range)
-        for idx, text in enumerate(display_samples, start=1):
+        for idx, sample in enumerate(samples, start=1):
+            text = display_by_idx.get(sample_idx[sample], sample.replace('_', '/'))
             esc_text = text.replace('"', "'")
             try:
                 op.lt_exec(
-                    f'label -n py_xtick{idx} -a {float(idx):.6g} {tick_level:.6g} "{esc_text}";'
+                    f'label -n py_xtick{idx} -a {float(sample_idx[sample]):.6g} {tick_level:.6g} "{esc_text}";'
                 )
+                try:
+                    op.lt_exec(f'label -n py_xtick{idx} -s 10;')
+                except Exception:
+                    pass
             except Exception:
                 continue
             manual_labels_added = True
         try:
             if manual_labels_added:
                 op.lt_exec('layer.x.label.show=0;')
+                try:
+                    op.lt_exec('layer.x.ticklabels=0;')
+                except Exception:
+                    pass
+                try:
+                    op.lt_exec(f'layer.y.from={label_bottom:.6g};')
+                except Exception:
+                    pass
             else:
                 op.lt_exec('layer.x.label.show=1;')
         except Exception:

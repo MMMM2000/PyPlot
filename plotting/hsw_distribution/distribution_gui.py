@@ -4,7 +4,7 @@ import os
 import pathlib
 from typing import List, Dict, Any
 
-from PyQt6 import QtWidgets, QtGui
+from PyQt6 import QtWidgets, QtGui, QtCore
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -20,9 +20,9 @@ if __package__ is None or __package__ == "":
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
+        install_standard_menu,
     )
     from plotting.backends import wants_matplotlib, wants_origin
-    from app_help import show_help
 else:
     from ..utils import (
         ensure_app_theme,
@@ -31,9 +31,9 @@ else:
         restore_backend_choice,
         store_backend_choice,
         selected_backend,
+        install_standard_menu,
     )
     from ..backends import wants_matplotlib, wants_origin
-    from app_help import show_help
 
 
 def ask_files() -> List[str]:
@@ -46,17 +46,22 @@ def ask_files() -> List[str]:
 def ask_options() -> Dict[str, Any] | None:
     dialog = QtWidgets.QDialog()
     dialog.setWindowTitle("Hsw Distribution Settings")
-    layout = QtWidgets.QGridLayout(dialog)
 
-    menu_bar = QtWidgets.QMenuBar(dialog)
-    help_menu = menu_bar.addMenu("&Help")
-    help_action = help_menu.addAction("View Help")
-    try:
-        help_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
-    except Exception:
-        pass
-    help_action.triggered.connect(lambda: show_help("plot_hsw_distribution", dialog))
-    layout.setMenuBar(menu_bar)
+    main_layout = QtWidgets.QVBoxLayout(dialog)
+    main_layout.setContentsMargins(0, 0, 0, 0)
+
+    scroll = QtWidgets.QScrollArea(dialog)
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    main_layout.addWidget(scroll, 1)
+
+    content = QtWidgets.QWidget()
+    grid = QtWidgets.QGridLayout(content)
+    grid.setContentsMargins(12, 12, 12, 12)
+    grid.setHorizontalSpacing(16)
+    grid.setVerticalSpacing(12)
+    scroll.setWidget(content)
 
     raw_cb = QtWidgets.QCheckBox("Raw TT/HH vs Index"); raw_cb.setChecked(True)
     trim_cb = QtWidgets.QCheckBox("Show trimmed data"); trim_cb.setChecked(True)
@@ -102,20 +107,27 @@ def ask_options() -> Dict[str, Any] | None:
     opts_widget = QtWidgets.QWidget()
     opts_widget.setLayout(opts_layout)
 
-    layout.addWidget(opts_widget, 0, 0)
-    layout.addWidget(bin_group, 0, 1)
-    layout.addWidget(core_group, 1, 1)
-    layout.addWidget(naming_group, 1, 0)
+    grid.addWidget(opts_widget, 0, 0)
+    grid.addWidget(bin_group, 0, 1)
+    grid.addWidget(core_group, 1, 1)
+    grid.addWidget(naming_group, 1, 0)
     out_box = QtWidgets.QGroupBox("Output")
     out_l = QtWidgets.QHBoxLayout(out_box)
     out_l.addWidget(QtWidgets.QLabel("Backend:"))
     out_l.addWidget(backend_combo)
-    layout.addWidget(out_box, 2, 0, 1, 2)
+    grid.addWidget(out_box, 2, 0, 1, 2)
+    grid.setColumnStretch(0, 1)
+    grid.setColumnStretch(1, 1)
+
     btn_row = QtWidgets.QHBoxLayout()
-    btn_row.setContentsMargins(0, 12, 0, 0)
+    btn_row.setContentsMargins(12, 6, 12, 12)
     btn_row.addStretch(1)
     btn_row.addWidget(run_btn)
-    layout.addLayout(btn_row, 3, 0, 1, 2)
+    main_layout.addLayout(btn_row)
+
+    install_standard_menu(dialog, help_topic="plot_hsw_distribution")
+    dialog.resize(720, 620)
+    dialog.setMinimumSize(640, 520)
 
     if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
         return None

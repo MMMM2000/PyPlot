@@ -107,11 +107,11 @@ prototype utilities such as the PyVISA annealing logger and the liquid-glass UI
 concept. Keep the toggle off for day-to-day work to focus on production tools
 only.
 
-Temperature-sensitivity plots now match between Matplotlib and Origin: sample
-ticks are painted directly as `2/1`, `2/2`, … on the Origin graph so the
-workbook and figure stay in sync, legends share the same ordering and colour
-coding, symbol visibility follows the **Show symbols** option, and raw traces
-advertise `25 °C`
+Temperature-sensitivity plots now match between Matplotlib and Origin: each
+sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …) so
+the workbook and figure stay in sync even when Origin insists on numeric tick
+labels. Legends share the same ordering and colour coding, symbol visibility
+follows the **Show symbols** option, and raw traces advertise `25 °C`
 instead of `25.0 °C`.  Origin exports disable speed mode, enable
 anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
 title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)

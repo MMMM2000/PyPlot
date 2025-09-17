@@ -229,17 +229,8 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.common.AUTO_REMOVE_OUTLIERS = False
         self._preprocessed_data = None
         self._preprocessed_snapshot = None
-        owns = bool(getattr(self, "_owns_app", False))
-        if owns:
-            release_origin()
+        release_origin()
         super().closeEvent(event)
-        if owns and event.isAccepted():
-            app = QtWidgets.QApplication.instance()
-            if isinstance(app, QtWidgets.QApplication):
-                try:
-                    app.quit()
-                except Exception:
-                    pass
 
 class ProgressDialog:
     def __init__(self, total: int):
