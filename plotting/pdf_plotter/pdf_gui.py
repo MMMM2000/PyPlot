@@ -5,14 +5,18 @@ import os
 import re
 import sys
 import weakref
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+try:  # Matplotlib >= 3.7 exposes NavigationToolbar2QT from backend_qt
+    from matplotlib.backends.backend_qt import NavigationToolbar2QT  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover - fallback for older Matplotlib builds
+    from matplotlib.backends.backend_qtagg import NavigationToolbar2QT  # type: ignore[attr-defined]
 
 try:  # optional dependency
     from PyPDF2 import PdfReader
@@ -103,9 +107,9 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
 class PlotWindow(QtWidgets.QMainWindow):
     """Top level window holding a Matplotlib plot."""
 
-    instances: "weakref.WeakSet[PlotWindow]" = weakref.WeakSet()
+    instances: weakref.WeakSet[PlotWindow] = weakref.WeakSet()
 
-    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: "PdfPlotterWindow" | None = None) -> None:
+    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: PdfPlotterWindow | None = None) -> None:
         super().__init__(parent)
         PlotWindow.instances.add(self)
         self.controller = controller
@@ -182,7 +186,13 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         outer = QtWidgets.QVBoxLayout(self)
         menu_bar = QtWidgets.QMenuBar(self)
         help_menu = menu_bar.addMenu("&Help")
+        if help_menu is None:
+            help_menu = QtWidgets.QMenu("&Help", self)
+            menu_bar.addMenu(help_menu)
         help_action = help_menu.addAction("View Help")
+        if help_action is None:
+            help_action = QtGui.QAction("View Help", help_menu)
+            help_menu.addAction(help_action)
         try:
             help_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
         except Exception:
@@ -696,22 +706,24 @@ class PdfPlotterWindow(QtWidgets.QWidget):
             op.set_show()
         except Exception:
             pass
-        gp = op.new_graph(template='scatter')
+        gp = cast(Any, op.new_graph(template='scatter'))
         gl = gp[0]
         for idx, (lbl, xs, ys) in enumerate(lines):
-            w = op.new_sheet('w', lname=f'data_{idx}')
+            w = cast(Any, op.new_sheet('w', lname=f'data_{idx}'))
             w.from_list(0, np.asarray(xs, dtype=float).tolist())
             w.from_list(1, np.asarray(ys, dtype=float).tolist())
             w.cols_axis('XY')
-            p = gl.add_plot(w, coly=1, colx=0, type='y')
-            try:
-                p.symbol_shape = 2
-            except Exception:
-                pass
-            try:
-                p.lname = lbl
-            except Exception:
-                pass
+            plot_obj = gl.add_plot(w, coly=1, colx=0, type='y')
+            if plot_obj is not None:
+                p_any = cast(Any, plot_obj)
+                try:
+                    p_any.symbol_shape = 2
+                except Exception:
+                    pass
+                try:
+                    p_any.lname = lbl
+                except Exception:
+                    pass
         try:
             gp.activate()
             esc_title = title.replace('"', "'")

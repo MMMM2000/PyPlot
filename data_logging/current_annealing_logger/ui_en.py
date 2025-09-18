@@ -274,6 +274,21 @@ class Ui_MainWindow(object):
         rev.addStretch(1)
         grid.addLayout(rev, 4, 0, 1, 3)
 
+        # Voltage limit behaviour
+        limit_layout = QtWidgets.QHBoxLayout()
+        limit_layout.addWidget(QtWidgets.QLabel("When the 30 V limit is hit:"))
+        self.comboBox_max_voltage_action = QtWidgets.QComboBox()
+        self.comboBox_max_voltage_action.addItem("Ask every time", "ask")
+        self.comboBox_max_voltage_action.addItem("Hold current (stop increasing)", "hold")
+        self.comboBox_max_voltage_action.addItem("Reverse to zero", "reverse")
+        self.comboBox_max_voltage_action.addItem("Stop measurement", "stop")
+        self.comboBox_max_voltage_action.setToolTip(
+            "Choose how the logger reacts when the power supply reaches its 30 V compliance limit"
+        )
+        limit_layout.addWidget(self.comboBox_max_voltage_action)
+        limit_layout.addStretch(1)
+        grid.addLayout(limit_layout, 5, 0, 1, 3)
+
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
         name_grid = QtWidgets.QGridLayout(gb_name)
