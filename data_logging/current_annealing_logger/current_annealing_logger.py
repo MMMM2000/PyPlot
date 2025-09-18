@@ -944,6 +944,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.proces_on = False
                     self._process_start_time = None
                     self.ui.pushButton_spusti_proces.setText("Start annealing process")
+                    self._restore_idle_controls()
                     return
                 if hasattr(self.ui, 'progressBar_process'):
                     self.ui.progressBar_process.setMaximum(0)
@@ -977,7 +978,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 # Prepare output file with overwrite prompt
                 if not self.prepare_output_file():
                     self.proces_on = False
+                    self._process_start_time = None
                     self.ui.pushButton_spusti_proces.setText("Start annealing process")
+                    self._restore_idle_controls()
                     return
                 self.current_increment = self.current_step_A
                 self.current_current_set = 0.001
@@ -1056,6 +1059,16 @@ class MainWindow(QtWidgets.QMainWindow):
             if child in keep:
                 continue
             child.setEnabled(enabled)
+
+    def _restore_idle_controls(self) -> None:
+        """Re-enable process controls after a start attempt is canceled."""
+
+        self._set_process_controls_enabled(True)
+        frame = getattr(self.ui, 'frame_modus_operandi', None)
+        if frame is not None:
+            frame.setEnabled(True)
+        if hasattr(self.ui, 'pushButton_reverse_now'):
+            self.ui.pushButton_reverse_now.setEnabled(False)
 
     def stop_annealing(self):
         """Abort the annealing run and power down the supply safely."""
