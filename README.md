@@ -151,6 +151,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * default **Reverse to zero after max** behaviour
 * remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
+* reapplies the saved max-current limit on launch so the first run honours the configured peak without nudging the control
 * optional infinite looping displays "∞" and locks the loop count
 * configurable response when the supply hits **30 V** (hold, reverse, stop, or ask each time)
 * live display of set current, measured current and voltage

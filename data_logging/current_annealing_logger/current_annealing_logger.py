@@ -126,6 +126,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.spinBox_hodnota_staly_prud.setValue(last_max)
         except Exception:
             pass
+        try:
+            self.hodnota_staly_prud = self.ui.spinBox_hodnota_staly_prud.value()
+        except Exception:
+            pass
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
         self.init_live_values()
