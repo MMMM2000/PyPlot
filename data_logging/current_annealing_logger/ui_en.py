@@ -381,6 +381,8 @@ class Ui_MainWindow(object):
         grid.addWidget(self.progressBar_process, 7, 0, 1, 3)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
         grid.addWidget(self.label_time_remaining, 8, 0, 1, 3)
+        self.label_time_to_limit = QtWidgets.QLabel("To 30 V: N/A")
+        grid.addWidget(self.label_time_to_limit, 9, 0, 1, 3)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
@@ -407,7 +409,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_live_values, 9, 0, 1, 3)
+        grid.addWidget(self.groupBox_live_values, 10, 0, 1, 3)
 
         # Hold resistance and percent
         hr_layout = QtWidgets.QHBoxLayout()
@@ -423,7 +425,7 @@ class Ui_MainWindow(object):
         hr_layout.addWidget(self.label_resistance_percent_from_hold)
         hr_layout.addWidget(self.label_percent_suffix)
         hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 10, 0, 1, 3)
+        grid.addLayout(hr_layout, 11, 0, 1, 3)
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")

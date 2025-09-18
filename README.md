@@ -168,6 +168,11 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * reapplies the saved max-current limit on launch so the first run honours the configured peak without nudging the control
 * optional infinite looping displays "∞" and locks the loop count
 * configurable response when the supply hits **30 V** (hold, reverse, stop, or ask each time)
+* live projection of how long remains until the supply reaches 30 V plus the
+  estimated current at that limit, shown alongside the main time estimate
+* progress and remaining-time calculations shrink automatically when the
+  30 V limit triggers an early reverse so the progress bar reflects the shorter
+  descent back to zero
 * live display of set current, measured current and voltage
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme

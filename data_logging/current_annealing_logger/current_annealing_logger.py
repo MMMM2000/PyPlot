@@ -13,7 +13,7 @@ import time
 import math
 from pathlib import Path
 from collections import deque
-from typing import Any, Deque, Optional, TextIO, cast
+from typing import Any, Deque, Optional, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
@@ -204,6 +204,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contact_grace_period = 5.0
         self._last_serial_rx: float | None = None
         self._serial_quiet_failures = 0
+        self._voltage_history: Deque[Tuple[float, float, float]] = deque(maxlen=60)
+        self._time_to_voltage_limit: float | None = None
+        self._estimated_limit_current_mA: float | None = None
 
         self.prev_value_x: float | None = None
         self.prev_value_y: float | None = None
@@ -663,9 +666,107 @@ class MainWindow(QtWidgets.QMainWindow):
     def handle_update_serial_response_label(self):
         self.ui.label_serial_response.setText(self.serial_response)
 
+    def _reset_voltage_projection(self) -> None:
+        """Clear the running 30 V projection state."""
+
+        self._voltage_history.clear()
+        self._time_to_voltage_limit = None
+        self._estimated_limit_current_mA = None
+
+    def _note_voltage_limit_reached(self) -> None:
+        """Record that the 30 V ceiling has been hit."""
+
+        self._voltage_history.clear()
+        self._time_to_voltage_limit = 0.0
+        current_mA = getattr(self, "curr_value_x", None)
+        if current_mA is None:
+            current_mA = self.current_current_set * 1000.0
+        try:
+            current_mA = float(current_mA)
+        except Exception:
+            current_mA = 0.0
+        self._estimated_limit_current_mA = max(0.0, current_mA)
+
+    def _update_voltage_projection(self, timestamp: float) -> None:
+        """Update the projection to the 30 V limit using recent samples."""
+
+        history = self._voltage_history
+        limit = float(getattr(self, "max_voltage", 30.0))
+        while history and (timestamp - history[0][0]) > 20.0:
+            history.popleft()
+        if len(history) < 2:
+            self._time_to_voltage_limit = None
+            self._estimated_limit_current_mA = None
+            return
+        start_t, start_v, start_i = history[0]
+        end_t, end_v, end_i = history[-1]
+        dt = end_t - start_t
+        dv = end_v - start_v
+        if dt <= 0 or dv <= 1e-6:
+            self._time_to_voltage_limit = None
+            self._estimated_limit_current_mA = None
+            return
+        remaining_v = limit - float(self.current_voltage)
+        if remaining_v <= 0:
+            self._note_voltage_limit_reached()
+            return
+        rate_v_per_s = dv / dt
+        time_est = remaining_v / rate_v_per_s if rate_v_per_s > 1e-6 else None
+        di = end_i - start_i
+        current_est = None
+        if di > 1e-6:
+            slope_v_per_mA = dv / di
+            if slope_v_per_mA > 1e-6:
+                current_est = end_i + remaining_v / slope_v_per_mA
+                if current_est < 0:
+                    current_est = None
+        if time_est is not None and time_est < 0:
+            time_est = 0.0
+        self._time_to_voltage_limit = time_est
+        self._estimated_limit_current_mA = current_est
+
+    def _record_voltage_progress(self) -> None:
+        if not self.process_running:
+            return
+        if not self.direction_ascending or self.current_increment <= 0:
+            return
+        try:
+            now = time.perf_counter()
+        except Exception:
+            now = None
+        if now is None:
+            return
+        try:
+            current_mA = float(self.curr_value_x)
+        except Exception:
+            current_mA = 0.0
+        self._voltage_history.append((now, float(self.current_voltage), current_mA))
+        self._update_voltage_projection(now)
+
+    def _format_voltage_limit_label(self) -> str:
+        prefix = "To 30 V"
+        if not self.process_running:
+            return f"{prefix}: N/A"
+        if self._time_to_voltage_limit == 0:
+            if self._estimated_limit_current_mA is not None:
+                return f"{prefix}: reached (≈ {self._estimated_limit_current_mA:.0f} mA)"
+            return f"{prefix}: reached"
+        if not self.direction_ascending or self.current_increment <= 0:
+            return f"{prefix}: N/A"
+        if self._time_to_voltage_limit is None:
+            return f"{prefix}: N/A"
+        secs = max(0, int(self._time_to_voltage_limit + 0.999))
+        text = self._format_secs(prefix, secs)
+        if self._estimated_limit_current_mA is not None:
+            text += f" (≈ {self._estimated_limit_current_mA:.0f} mA)"
+        return text
+
     def update_time_estimate(self):
         label = getattr(self.ui, 'label_time_remaining', None)
+        limit_label = getattr(self.ui, 'label_time_to_limit', None)
         if label is None:
+            if limit_label is not None:
+                limit_label.setText(self._format_voltage_limit_label())
             return
         # Show a planned estimate when idle; measured when running
         if not self.process_running:
@@ -674,6 +775,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 label.setText("Time remaining: ∞")
             else:
                 label.setText(self._format_secs("Time remaining", secs))
+            if limit_label is not None:
+                limit_label.setText(self._format_voltage_limit_label())
             return
         now = time.perf_counter()
         if self._finish_time is not None:
@@ -681,10 +784,14 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             if not self.sample_rate or not self.total_steps:
                 label.setText("Time remaining: N/A")
+                if limit_label is not None:
+                    limit_label.setText(self._format_voltage_limit_label())
                 return
             remaining = max(0, self.total_steps - self.step_idx)
             secs = int((remaining / self.sample_rate) + 0.999)
         label.setText(self._format_secs("Time remaining", secs))
+        if limit_label is not None:
+            limit_label.setText(self._format_voltage_limit_label())
 
     def _format_secs(self, prefix: str, secs: int) -> str:
         if secs >= 3600:
@@ -730,6 +837,8 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setText("Time remaining: N/A")
         else:
             label.setText(self._format_secs("Time remaining", secs))
+        if hasattr(self.ui, 'label_time_to_limit'):
+            self.ui.label_time_to_limit.setText("To 30 V: N/A")
 
     def update_file_name_from_preset(self):
         # Build file name based on naming preset
@@ -880,12 +989,16 @@ class MainWindow(QtWidgets.QMainWindow):
             self.hold_timer.start(1000)
             self.hold_timer_running = True
             self.ui.pushButton_hold_current.setText("Stop current now!")
+            self.direction_ascending = False
+            self._reset_voltage_projection()
         else:
             self.hold_timer.stop()
             self.current_increment = -self.current_step_A
             self.line_color="b"
             self.hold_timer_running = False
             self.ui.pushButton_hold_current.setText("Hold current now!")
+            self.direction_ascending = False
+            self._reset_voltage_projection()
 
     def handle_hold_timer_timeout(self):
         self.elapsed_seconds += 1
@@ -917,10 +1030,12 @@ class MainWindow(QtWidgets.QMainWindow):
             self.prev_value_x = None
             self.prev_value_y = None
             self.first_sample = True
+            self.direction_ascending = True
+            self._reset_voltage_projection()
             self.ui.pushButton_start_process.setText("Stop annealing process")
             if(self.operation_mode == 0):
                 pass
-                
+
             elif(self.operation_mode == 1):
                 # Prepare output file with overwrite prompt
                 if not self.prepare_output_file():
@@ -934,7 +1049,10 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.progressBar_process.setValue(0)
                 if hasattr(self.ui, 'label_time_remaining'):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
+                if hasattr(self.ui, 'label_time_to_limit'):
+                    self.ui.label_time_to_limit.setText("To 30 V: N/A")
                 self.current_increment = self.current_step_A
+                self.direction_ascending = True
                 self.current_current_set = 0.001
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
@@ -965,6 +1083,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._restore_idle_controls()
                     return
                 self.current_increment = self.current_step_A
+                self.direction_ascending = True
                 self.current_current_set = 0.001
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
@@ -994,6 +1113,8 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.ui.progressBar_process.setValue(0)
                     else:
                         self.ui.progressBar_process.setMaximum(0)
+                if hasattr(self.ui, 'label_time_to_limit'):
+                    self.ui.label_time_to_limit.setText("To 30 V: N/A")
                 self.ui.lcd_elapsed_seconds.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
@@ -1023,6 +1144,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.current_increment = -abs(self.current_step_A)
         self.line_color = "b"
         self.force_stop_at_zero = True
+        self.direction_ascending = False
+        self._reset_voltage_projection()
 
     def _set_process_controls_enabled(self, enabled: bool) -> None:
         if not hasattr(self.ui, 'groupBox_process_settings'):
@@ -1090,6 +1213,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
         self.ui.frame_operation_mode.setEnabled(True)
+        self._reset_voltage_projection()
+        if hasattr(self.ui, 'label_time_to_limit'):
+            self.ui.label_time_to_limit.setText("To 30 V: N/A")
         self._display_ui_value('label_set_current', "0")
         self._max_voltage_dialog = False
         
@@ -1274,9 +1400,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
                     self.prev_value_x = self.curr_value_x
                     self.prev_value_y = self.curr_value_y
-            
-            
-                      
+
+
+
+            if not skip_sample:
+                self._record_voltage_progress()
+
             # Trigger the hold-current routine as if the button were pressed
             if (self.current_current_set >= (self.max_current_mA/1000.0)) and (self.current_increment > 0):
                 if not self.hold_timer_running:
@@ -1287,18 +1416,22 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_resistance_at_hold_current.setText("{:.1f}".format(self.resistance_at_hold_current))
                     self.hold_timer.start(1000)
                     self.hold_timer_running = True
+                    self.direction_ascending = False
+                    self._reset_voltage_projection()
             
             # Iterate the current set point
             self.current_current_set += self.current_increment
             self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
             # end of hold: either reverse (if enabled) or stop
-            if(self.hold_timer_running and (self.elapsed_seconds >= self.hold_duration_s)):
+            if (self.hold_timer_running and (self.elapsed_seconds >= self.hold_duration_s)):
                 self.hold_timer.stop()
                 self.hold_timer_running = False
                 if getattr(self, 'reverse_enabled', False):
                     self.current_increment = -self.current_step_A
                     self.line_color = "b"
+                    self.direction_ascending = False
+                    self._reset_voltage_projection()
                 else:
                     self.handle_toggle_process_clicked()
 
@@ -1318,6 +1451,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.current_current_set = 0.001
                         self.line_color = "r"
                         self.direction_ascending = True
+                        self._reset_voltage_projection()
                         self.elapsed_seconds = 0
                     else:
                         self.handle_toggle_process_clicked()
@@ -1485,6 +1619,29 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _adjust_progress_for_reverse(self) -> None:
+        if not self.total_steps:
+            return
+        step_mA = abs(int(getattr(self, 'current_step_mA', 1) or 1))
+        if step_mA <= 0:
+            step_mA = 1
+        current_mA = getattr(self, 'curr_value_x', None)
+        if current_mA is None:
+            current_mA = self.current_current_set * 1000.0
+        try:
+            current_mA = float(current_mA)
+        except Exception:
+            current_mA = 0.0
+        remaining_steps = math.ceil(max(0.0, current_mA) / step_mA)
+        new_total = max(self.step_idx + remaining_steps, self.step_idx)
+        if new_total <= 0:
+            return
+        self.total_steps = new_total
+        if hasattr(self.ui, 'progressBar_process'):
+            self.ui.progressBar_process.setMaximum(self.total_steps)
+            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+        self._finish_time = None
+
     def _apply_max_voltage_action(self, action: str) -> None:
         if action not in MAX_VOLTAGE_ACTION_LABELS:
             action = MAX_VOLTAGE_DEFAULT_ACTION
@@ -1498,14 +1655,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.line_color = "b"
             self.force_stop_at_zero = True
             self.direction_ascending = False
+            self._note_voltage_limit_reached()
+            self._adjust_progress_for_reverse()
+            self.update_time_estimate()
             self._show_status_message("30 V reached — reversing to zero.")
         elif action == "stop":
             self._show_status_message("30 V reached — stopping measurement.")
+            self.direction_ascending = False
+            self._note_voltage_limit_reached()
+            self.update_time_estimate()
             if self.process_running:
                 self.handle_toggle_process_clicked()
         else:  # hold current
             self.current_increment = 0
             self.force_stop_at_zero = False
+            self.direction_ascending = False
+            self._note_voltage_limit_reached()
+            self.update_time_estimate()
             self._show_status_message("30 V reached — holding current.")
 
     def _show_max_voltage_prompt(self) -> None:
