@@ -146,6 +146,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * **Reverse current now** button for an immediate ramp down
 * Start/Stop and Reverse controls stay pinned beneath the settings so they remain
   visible without scrolling
+* all UI elements and internal variables now use English identifiers for easier maintenance
 * Cancelling a start when the selected log file already exists keeps the naming
   controls active so you can adjust the path before retrying
 * default **Reverse to zero after max** behaviour

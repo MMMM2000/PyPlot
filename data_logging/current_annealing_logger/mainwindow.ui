@@ -14,7 +14,7 @@
    <string>MainWindow</string>
   </property>
   <widget class="QWidget" name="centralWidget">
-   <widget class="QFrame" name="frame_zakladne_nastavenia_portu">
+   <widget class="QFrame" name="frame_serial_settings">
     <property name="geometry">
      <rect>
       <x>30</x>
@@ -29,7 +29,7 @@
     <property name="frameShadow">
      <enum>QFrame::Raised</enum>
     </property>
-    <widget class="QGroupBox" name="groupBox_zakladne_nastavenia_portu">
+    <widget class="QGroupBox" name="groupBox_serial_settings">
      <property name="geometry">
       <rect>
        <x>20</x>
@@ -39,9 +39,9 @@
       </rect>
      </property>
      <property name="title">
-      <string>Základné nastavenia portu</string>
+      <string>Serial settings</string>
      </property>
-     <widget class="QLabel" name="label_cislo_portu">
+     <widget class="QLabel" name="label_port_number">
       <property name="geometry">
        <rect>
         <x>10</x>
@@ -54,7 +54,7 @@
        <string>COM?:</string>
       </property>
      </widget>
-     <widget class="QSpinBox" name="spinBox_cislo_portu">
+     <widget class="QSpinBox" name="spinBox_port_number">
       <property name="geometry">
        <rect>
         <x>110</x>
@@ -134,7 +134,7 @@
      </widget>
     </widget>
    </widget>
-   <widget class="QPushButton" name="pushButton_pripojPort">
+   <widget class="QPushButton" name="pushButton_connect_port">
     <property name="geometry">
      <rect>
       <x>560</x>
@@ -144,10 +144,10 @@
      </rect>
     </property>
     <property name="text">
-     <string>Pripojiť sa k portu</string>
+     <string>Connect to port</string>
     </property>
    </widget>
-   <widget class="QFrame" name="frame_modus_operandi">
+   <widget class="QFrame" name="frame_operation_mode">
     <property name="geometry">
      <rect>
       <x>29</x>
@@ -162,7 +162,7 @@
     <property name="frameShadow">
      <enum>QFrame::Raised</enum>
     </property>
-    <widget class="QGroupBox" name="groupBox_modus_operandi">
+    <widget class="QGroupBox" name="groupBox_operation_mode">
      <property name="geometry">
       <rect>
        <x>20</x>
@@ -172,7 +172,7 @@
       </rect>
      </property>
      <property name="title">
-      <string>Modus operandi</string>
+      <string>Mode of operation</string>
      </property>
      <widget class="QRadioButton" name="radioButton_raw_VCP">
       <property name="geometry">
@@ -190,7 +190,7 @@
        <bool>true</bool>
       </property>
      </widget>
-     <widget class="QRadioButton" name="radioButton_manualne_zihanie">
+     <widget class="QRadioButton" name="radioButton_manual_mode">
       <property name="geometry">
        <rect>
         <x>200</x>
@@ -200,10 +200,10 @@
        </rect>
       </property>
       <property name="text">
-       <string>Manuálne žíhanie</string>
+       <string>Manual annealing</string>
       </property>
      </widget>
-     <widget class="QRadioButton" name="radioButton_automatizovane_zihanie">
+     <widget class="QRadioButton" name="radioButton_automatic_mode">
       <property name="geometry">
        <rect>
         <x>430</x>
@@ -213,12 +213,12 @@
        </rect>
       </property>
       <property name="text">
-       <string>Automatizované žíhanie</string>
+       <string>Automatic annealing</string>
       </property>
      </widget>
     </widget>
    </widget>
-   <widget class="QFrame" name="frame_nastavenia_procesu">
+   <widget class="QFrame" name="frame_process_settings">
     <property name="geometry">
      <rect>
       <x>30</x>
@@ -233,7 +233,7 @@
     <property name="frameShadow">
      <enum>QFrame::Raised</enum>
     </property>
-    <widget class="QGroupBox" name="groupBox_nastavenia_procesu">
+    <widget class="QGroupBox" name="groupBox_process_settings">
      <property name="geometry">
       <rect>
        <x>20</x>
@@ -243,9 +243,9 @@
       </rect>
      </property>
      <property name="title">
-      <string>Nastavenia</string>
+      <string>Process settings</string>
      </property>
-     <widget class="QLabel" name="label_logfile">
+     <widget class="QLabel" name="label_log_file_legacy">
       <property name="geometry">
        <rect>
         <x>10</x>
@@ -258,7 +258,7 @@
        <string>Logfile:</string>
       </property>
      </widget>
-     <widget class="QLineEdit" name="lineEdit_log_subor">
+     <widget class="QLineEdit" name="lineEdit_log_file_full">
       <property name="geometry">
        <rect>
         <x>60</x>
@@ -268,10 +268,10 @@
        </rect>
       </property>
       <property name="text">
-       <string>data/pozadie A1.txt</string>
+       <string>data/background A1.txt</string>
       </property>
      </widget>
-     <widget class="QLabel" name="label_hodnota_staly_prud">
+     <widget class="QLabel" name="label_max_current">
       <property name="geometry">
        <rect>
         <x>10</x>
@@ -281,10 +281,10 @@
        </rect>
       </property>
       <property name="text">
-       <string>Hodnota stáleho prúdu v miliampéroch:</string>
+       <string>Max current [mA]:</string>
       </property>
      </widget>
-     <widget class="QSpinBox" name="spinBox_hodnota_staly_prud">
+     <widget class="QSpinBox" name="spinBox_max_current">
       <property name="geometry">
        <rect>
         <x>320</x>
@@ -303,7 +303,7 @@
        <number>10</number>
       </property>
      </widget>
-     <widget class="QLabel" name="label_logfile_doba_staleho_prudu">
+     <widget class="QLabel" name="label_hold_duration">
       <property name="geometry">
        <rect>
         <x>10</x>
@@ -313,10 +313,10 @@
        </rect>
       </property>
       <property name="text">
-       <string>Doba stáleho prúdu v sekundách:</string>
+       <string>Hold time [s]:</string>
       </property>
      </widget>
-     <widget class="QSpinBox" name="spinBox_doba_staly_prud">
+     <widget class="QSpinBox" name="spinBox_hold_duration">
       <property name="geometry">
        <rect>
         <x>290</x>
@@ -349,7 +349,7 @@
       </property>
      </widget>
     </widget>
-    <widget class="QPushButton" name="pushButton_spusti_proces">
+    <widget class="QPushButton" name="pushButton_start_process">
      <property name="geometry">
       <rect>
        <x>230</x>
@@ -364,10 +364,10 @@
       </font>
      </property>
      <property name="text">
-      <string>Spustiť proces žíhania</string>
+      <string>Start annealing process</string>
      </property>
     </widget>
-    <widget class="QPushButton" name="pushButton_start_stop_drzania_prudu">
+    <widget class="QPushButton" name="pushButton_hold_current">
      <property name="geometry">
       <rect>
        <x>490</x>
@@ -377,10 +377,10 @@
       </rect>
      </property>
      <property name="text">
-      <string>Držať prúd teraz!</string>
+      <string>Hold current now!</string>
      </property>
     </widget>
-    <widget class="QLabel" name="label_logfile_uplynulo">
+    <widget class="QLabel" name="label_elapsed">
      <property name="geometry">
       <rect>
        <x>470</x>
@@ -390,10 +390,10 @@
       </rect>
      </property>
      <property name="text">
-      <string>Uplynulo:</string>
+      <string>Elapsed:</string>
      </property>
     </widget>
-    <widget class="QLabel" name="label_logfile_s">
+    <widget class="QLabel" name="label_seconds_unit">
      <property name="geometry">
       <rect>
        <x>630</x>
@@ -406,7 +406,7 @@
       <string>s</string>
      </property>
     </widget>
-    <widget class="QLCDNumber" name="lcdNumber_uplynute_sekundy">
+    <widget class="QLCDNumber" name="lcd_elapsed_seconds">
      <property name="geometry">
       <rect>
        <x>530</x>
@@ -430,7 +430,7 @@
 resistance</string>
      </property>
     </widget>
-    <widget class="QLabel" name="label_resistance_percento_from_hold">
+    <widget class="QLabel" name="label_resistance_percent_from_hold">
      <property name="geometry">
       <rect>
        <x>600</x>
@@ -440,10 +440,10 @@ resistance</string>
       </rect>
      </property>
      <property name="text">
-      <string>Percento</string>
+      <string>Percent</string>
      </property>
     </widget>
-    <widget class="QLabel" name="label_resistance_percento_from_hold_2">
+    <widget class="QLabel" name="label_percent_suffix">
      <property name="geometry">
       <rect>
        <x>660</x>
@@ -456,7 +456,7 @@ resistance</string>
       <string>%</string>
      </property>
     </widget>
-    <widget class="QLabel" name="label_resistance_percento_from_hold_3">
+    <widget class="QLabel" name="label_resistance_ohm_suffix">
      <property name="geometry">
       <rect>
        <x>540</x>
@@ -469,7 +469,7 @@ resistance</string>
       <string>Ohm</string>
      </property>
     </widget>
-    <widget class="QGroupBox" name="groupBox_aktualne_hodnoty">
+    <widget class="QGroupBox" name="groupBox_live_values">
      <property name="geometry">
       <rect>
        <x>440</x>
@@ -479,7 +479,7 @@ resistance</string>
       </rect>
      </property>
      <property name="title">
-      <string>Aktuálne hodnoty</string>
+      <string>Live values</string>
      </property>
      <widget class="QLabel" name="label_mA">
       <property name="geometry">
@@ -507,7 +507,7 @@ resistance</string>
        <string>Ohm</string>
       </property>
      </widget>
-     <widget class="QLCDNumber" name="lcdNumber_aktualny_prud_mA">
+     <widget class="QLCDNumber" name="lcd_current_mA">
       <property name="geometry">
        <rect>
         <x>13</x>
@@ -523,7 +523,7 @@ resistance</string>
        <double>0.000000000000000</double>
       </property>
      </widget>
-     <widget class="QLCDNumber" name="lcdNumber_aktualny_odpor">
+     <widget class="QLCDNumber" name="lcd_resistance">
       <property name="geometry">
        <rect>
         <x>133</x>
@@ -550,7 +550,7 @@ resistance</string>
     <property name="frameShadow">
      <enum>QFrame::Raised</enum>
     </property>
-    <widget class="QGroupBox" name="groupBox_prikazy_a_odpovede">
+    <widget class="QGroupBox" name="groupBox_command_response">
      <property name="geometry">
       <rect>
        <x>20</x>
@@ -560,9 +560,9 @@ resistance</string>
       </rect>
      </property>
      <property name="title">
-      <string>Príkazy a odpovede</string>
+      <string>Commands and responses</string>
      </property>
-     <widget class="QLabel" name="label_odpoved_portu">
+     <widget class="QLabel" name="label_serial_response">
       <property name="geometry">
        <rect>
         <x>20</x>
@@ -572,13 +572,13 @@ resistance</string>
        </rect>
       </property>
       <property name="text">
-       <string>Odpoveď portu</string>
+       <string>Port response</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
       </property>
      </widget>
-     <widget class="QLineEdit" name="lineEdit_prikaz_portu">
+     <widget class="QLineEdit" name="lineEdit_serial_command">
       <property name="geometry">
        <rect>
         <x>10</x>
@@ -588,7 +588,7 @@ resistance</string>
        </rect>
       </property>
      </widget>
-     <widget class="QPushButton" name="pushButton_posli_prikaz_portu">
+     <widget class="QPushButton" name="pushButton_send_serial_command">
       <property name="geometry">
        <rect>
         <x>560</x>
@@ -598,10 +598,10 @@ resistance</string>
        </rect>
       </property>
       <property name="text">
-       <string>Pošli</string>
+       <string>Send</string>
       </property>
      </widget>
-     <widget class="QLabel" name="label_prikaz_portu">
+     <widget class="QLabel" name="label_last_command">
       <property name="geometry">
        <rect>
         <x>20</x>
@@ -611,7 +611,7 @@ resistance</string>
        </rect>
       </property>
       <property name="text">
-       <string>Poslane portu</string>
+       <string>Sent command</string>
       </property>
       <property name="alignment">
        <set>Qt::AlignLeading|Qt::AlignLeft|Qt::AlignTop</set>
