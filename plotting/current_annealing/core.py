@@ -52,7 +52,51 @@ def load_file(path: str) -> pd.DataFrame:
 
 def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.plot(df["I_mA"], df["R_Ohm"], "-o", markersize=3)
+
+    currents = df["I_mA"].to_numpy()
+    resistances = df["R_Ohm"].to_numpy()
+
+    if currents.size == 0:
+        pass
+    elif currents.size == 1:
+        ax.plot(currents, resistances, marker="o", linestyle="None", color="r", markersize=3)
+    else:
+        deltas = np.diff(currents)
+        if deltas.size:
+            direction = pd.Series(np.sign(deltas))
+            direction.replace(0, np.nan, inplace=True)
+            if not direction.dropna().empty:
+                direction.ffill(inplace=True)
+                direction.bfill(inplace=True)
+            direction.fillna(1.0, inplace=True)
+            directions = direction.to_numpy()
+        else:
+            directions = np.array([], dtype=float)
+
+        if directions.size == 0:
+            segments = [(0, currents.size, 1.0)]
+        else:
+            segments: list[tuple[int, int, float]] = []
+            segment_start = 0
+            current_dir = directions[0]
+            for idx in range(1, directions.size):
+                if directions[idx] != current_dir:
+                    segments.append((segment_start, idx + 1, current_dir))
+                    segment_start = idx
+                    current_dir = directions[idx]
+            segments.append((segment_start, currents.size, current_dir))
+
+        for start, end, direction in segments:
+            color = "r" if direction >= 0 else "b"
+            ax.plot(
+                currents[start:end],
+                resistances[start:end],
+                color=color,
+                marker="o",
+                linestyle="-",
+                markersize=3,
+            )
+
     ax.set_xlabel("Current (mA)")
     ax.set_ylabel("Resistance (Ohm)")
     ax.set_title(title)

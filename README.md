@@ -55,6 +55,12 @@ control is released immediately after each run, so closing the Temperature
 Sensitivity settings while Origin remains open no longer tears down the
 launcher window.
 
+The lists on each tab open sorted by the most recently launched tool so the
+scripts you rely on are always at the top.  A new **Sort** menu lets you flip to
+alphabetical ordering in either direction at any time, and a search bar above
+the tabs filters entries across loggers, plotters, emulators and experiments as
+you type, making it easy to jump straight to the utility you need.
+
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 places **Add Files/Folders** and **Remove Selected** buttons above a wide,
@@ -72,7 +78,9 @@ PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  Each
 plotting dialog remembers its most recent backend selection and PNG DPI
 independently, so Matplotlib/Origin toggles and export resolution reopen the way
 you left them.  The current annealing plotter also omits the initial 0 mA data
-point so figures start with the first real sample.  Plotting dialogs keep their
+point so figures start with the first real sample, and ramps are coloured red
+while current increases and blue while it decreases to mirror the live logger.
+Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
 
