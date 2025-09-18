@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from PyQt6 import QtWidgets, QtCore
+from typing import cast
 
 import pathlib
 
@@ -149,11 +150,13 @@ class SettingsDialog(QtWidgets.QDialog):
             bool(self.settings.value("scale_y", orig.SCALE_Y_1E3, type=bool))
         )
         lay = read_group.layout()
-        row = lay.rowCount()
-        lay.addWidget(QtWidgets.QLabel("Scale X:"), row, 0)
-        lay.addWidget(self.scale_x_cb, row, 1)
-        lay.addWidget(QtWidgets.QLabel("Scale Y:"), row + 1, 0)
-        lay.addWidget(self.scale_y_cb, row + 1, 1)
+        if isinstance(lay, QtWidgets.QGridLayout):
+            grid = cast(QtWidgets.QGridLayout, lay)
+            row = grid.rowCount()
+            grid.addWidget(QtWidgets.QLabel("Scale X:"), row, 0)
+            grid.addWidget(self.scale_x_cb, row, 1)
+            grid.addWidget(QtWidgets.QLabel("Scale Y:"), row + 1, 0)
+            grid.addWidget(self.scale_y_cb, row + 1, 1)
 
         self.run_btn = QtWidgets.QPushButton("Run")
         self.run_btn.clicked.connect(self.run)

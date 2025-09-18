@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import List, Tuple, Any
+from typing import List, Tuple, Any, cast
 
 from PyQt6 import QtWidgets
 
@@ -174,23 +174,46 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
                 handlelength=1 if LEGEND_SHOW_SYMBOLS else 0,
                 handletextpad=0,
             )
-            for handle, text in zip(leg.legend_handles, leg.get_texts()):
-                color = (
-                    handle.get_facecolor()[0]
-                    if hasattr(handle, "get_facecolor")
-                    else handle.get_color()
-                )
-                text.set_color(color)
-                if not LEGEND_SHOW_SYMBOLS:
-                    handle.set_visible(False)
-                else:
+            legend_handles: list[Any] = [cast(Any, h) for h in leg.legend_handles]
+            for handle, text in zip(legend_handles, leg.get_texts()):
+                color = None
+                get_facecolor = getattr(handle, "get_facecolor", None)
+                if callable(get_facecolor):
+                    face = get_facecolor()
+                    if isinstance(face, (list, tuple, np.ndarray)) and len(face):
+                        color = face[0]
+                    else:
+                        color = face
+                if color is None:
+                    get_color = getattr(handle, "get_color", None)
+                    if callable(get_color):
+                        color = get_color()
+                if color is not None:
                     try:
-                        handle.set_sizes([LEGEND_SYMBOL_SIZE])
+                        text.set_color(color)
                     except Exception:
+                        pass
+                if not LEGEND_SHOW_SYMBOLS:
+                    set_visible = getattr(handle, "set_visible", None)
+                    if callable(set_visible):
                         try:
-                            handle.set_markersize(LEGEND_SYMBOL_SIZE)
+                            set_visible(False)
                         except Exception:
                             pass
+                else:
+                    set_sizes = getattr(handle, "set_sizes", None)
+                    if callable(set_sizes):
+                        try:
+                            set_sizes([LEGEND_SYMBOL_SIZE])
+                        except Exception:
+                            pass
+                    else:
+                        set_markersize = getattr(handle, "set_markersize", None)
+                        if callable(set_markersize):
+                            try:
+                                set_markersize(LEGEND_SYMBOL_SIZE)
+                            except Exception:
+                                pass
         fig.tight_layout()
         apply_readability(ax, globals())
     fname = f"head{head}_{coils}coils_CH{ch}_sum"
@@ -222,13 +245,14 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
         y_vals = y.to_numpy()
         if IMPROVE_READABILITY and SCALE_Y_1E3:
             y_vals = y_vals / 1e3
-        book = op.new_book('w', lname="Maxion (Python)")
+        op_any: Any = op
+        book: Any = op_any.new_book('w', lname="Maxion (Python)")
         book.activate()
-        gp = op.new_graph(template='scatter')
-        gl = gp[0]
+        gp: Any = op_any.new_graph(template='scatter')
+        gl: Any = gp[0]
 
         # Raw
-        w_raw = op.new_sheet('w', lname='raw')
+        w_raw: Any = op_any.new_sheet('w', lname='raw')
         w_raw.from_list(0, x_list)
         w_raw.from_list(1, y_vals.tolist())
         w_raw.cols_axis('XY')
@@ -239,28 +263,30 @@ def plot_channel_origin(y: pd.Series, head: int, coils: int, ch: int) -> None:
             proc_vals = proc.to_numpy()
             if IMPROVE_READABILITY and SCALE_Y_1E3:
                 proc_vals = proc_vals / 1e3
-            w_proc = op.new_sheet('w', lname='proc')
+            w_proc: Any = op_any.new_sheet('w', lname='proc')
             w_proc.from_list(0, x_list)
             w_proc.from_list(1, proc_vals.tolist())
             w_proc.cols_axis('XY')
-            p = gl.add_plot(w_proc, coly=1, colx=0, type='y')
-            try:
-                p.line_width = 1
-            except Exception:
-                pass
+            plot_obj: Any = gl.add_plot(w_proc, coly=1, colx=0, type='y')
+            if plot_obj is not None:
+                p: Any = plot_obj
+                try:
+                    p.line_width = 1
+                except Exception:
+                    pass
 
         try:
             gp.activate()
-            op.lt_exec('page.antialias=1;')
-            op.lt_exec('layer -aa 1;')
+            op_any.lt_exec('page.antialias=1;')
+            op_any.lt_exec('layer -aa 1;')
             x_lab = "Sample index (x10^4)" if IMPROVE_READABILITY and SCALE_X_1E4 else "Sample index"
             y_lab = "T1+T2 (arb. u., x10^3)" if IMPROVE_READABILITY and SCALE_Y_1E3 else "T1+T2 (arb. u.)"
-            op.lt_exec(f'lab -xb "{x_lab}";')
-            op.lt_exec(f'lab -yl "{y_lab}";')
+            op_any.lt_exec(f'lab -xb "{x_lab}";')
+            op_any.lt_exec(f'lab -yl "{y_lab}";')
             esc = (f"Head {head} - {coils} coils - CH{ch} T1+T2").replace('"', "'")
-            op.lt_exec(f'title -s "{esc}";')
+            op_any.lt_exec(f'title -s "{esc}";')
             if SHOW_LEGEND:
-                op.lt_exec('legend -o; legend.textcolor=1;')
+                op_any.lt_exec('legend -o; legend.textcolor=1;')
         except Exception:
             pass
 

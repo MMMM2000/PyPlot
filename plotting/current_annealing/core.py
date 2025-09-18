@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Tuple
+from typing import Any, List, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -65,38 +65,44 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
 
 def plot_one_origin(df: pd.DataFrame, title: str) -> None:
     import originpro as op  # lazy import
+    origin_any: Any = cast(Any, op)
     try:
-        op.set_show()
+        origin_any.set_show()
     except Exception:
         pass
-    w = op.new_sheet('w', lname=title[:30])
+    w: Any = origin_any.new_sheet('w', lname=title[:30])
     w.from_list(0, df["I_mA"].to_list())
     w.from_list(1, df["R_Ohm"].to_list())
     w.cols_axis('XY')
-    gp = op.new_graph(template='scatter')
-    gl = gp[0]
-    p = gl.add_plot(w, coly=1, colx=0, type='y')
-    try:
-        p.symbol_shape = 2
-        p.line_connect = 1
-    except Exception:
-        pass
+    gp: Any = origin_any.new_graph(template='scatter')
+    gl: Any = gp[0]
+    plot_obj: Any = gl.add_plot(w, coly=1, colx=0, type='y')
+    if plot_obj is not None:
+        p: Any = plot_obj
+        try:
+            p.symbol_shape = 2
+            p.line_connect = 1
+        except Exception:
+            pass
     try:
         gp.activate()
         esc = title.replace('"', "'")
-        op.lt_exec('page.antialias=1; layer -aa 1;')
-        op.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
-        # Put the title text into the legend and freeze it
-        try:
-            gl.label('Legend').text = esc
-        except Exception:
-            pass
-        op.lt_exec('legend.update=0;')
+        origin_any.lt_exec('page.antialias=1; layer -aa 1;')
+        origin_any.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
+        label_method = getattr(gl, "label", None)
+        if callable(label_method):
+            legend_label = label_method('Legend')
+            if legend_label is not None and hasattr(legend_label, "text"):
+                try:
+                    legend_label.text = esc
+                except Exception:
+                    pass
+        origin_any.lt_exec('legend.update=0;')
     except Exception:
         pass
 
     try:
-        op.exit()
+        origin_any.exit()
     except Exception:
         pass
 

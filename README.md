@@ -50,7 +50,10 @@ python -m launcher
 
 Closing the launcher warns about other open windows and will close them.  Plot
 settings dialogs can now be closed independently without shutting down the
-launcher, so you can move between tools without relaunching the hub.
+launcher, so you can move between tools without relaunching the hub.  Origin
+control is released immediately after each run, so closing the Temperature
+Sensitivity settings while Origin remains open no longer tears down the
+launcher window.
 
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
@@ -100,6 +103,17 @@ Run/Plot buttons remain visible without scrolling through long option lists.
 Origin sessions are closed automatically after plots are generated so the Origin
 application can be closed independently from the Python tools.
 
+Developer notes: the Qt overrides now accept optional `QPaintEvent`/`QCloseEvent`
+arguments to match the PyQt6 stubs, Origin helpers coerce LabTalk worksheets
+and plots to dynamic objects before assigning colours or symbols, and pandas
+series are converted to NumPy arrays before histogramming so Pylance no longer
+flags our plotting pipelines. The PyVISA annealing logger also checks that
+`styleHints()` is available before reading the system colour scheme, and the
+Maxion controls guard against layouts that omit `rowCount()`. Hysteresis and
+load-compare exporters likewise treat Origin handles dynamically, and GUI
+wrappers invoke plotting routines through small closures so helpers expecting
+`Callable[[], None]` remain satisfied even when plotters return figures.
+
 The menu bar also adds a **Developer** section. Enable **Keep File Selections**
 to reopen plotting dialogs with the same files pre-selected—handy when you are
 tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose
@@ -108,14 +122,15 @@ concept. Keep the toggle off for day-to-day work to focus on production tools
 only.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: each
-sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …) so
-the workbook and figure stay in sync even when Origin insists on numeric tick
-labels. Legends share the same ordering and colour coding, symbol visibility
-follows the **Show symbols** option, and raw traces advertise `25 °C`
-instead of `25.0 °C`.  Origin exports disable speed mode, enable
-anti-aliasing, shrink raw scatter markers to size 1, reuse the Matplotlib graph
-title, drop the vertical connector bars, and stamp the Δ(100 °C−25 °C)
-annotations at the same locations, while the Matplotlib legend sits outside the
+sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …)
+and the labels track the 25 °C mean positions so the workbook and figure stay
+in sync even when continuous traces nudge markers sideways. Legends share the
+same ordering and colour coding, symbol visibility follows the **Show symbols**
+option, and raw traces advertise `25 °C` instead of `25.0 °C`.  Origin
+exports disable speed mode, enable anti-aliasing, shrink raw scatter markers to
+size 1, reuse the Matplotlib graph title while centring it along the top edge,
+drop the vertical connector bars, and stamp the Δ(100 °C−25 °C) annotations
+directly above the 100 °C means, while the Matplotlib legend sits outside the
 axes to avoid covering data points.  The default moving-average window now
 spans 200 samples for smoother continuous traces straight out of the box, and
 the Origin backend applies these tweaks through the Python API so axis labels

@@ -93,7 +93,10 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         core.BACKEND = backend
         sync_readability("hysteresis_loops", self.read_ctrl, core)
-        run_with_console(lambda: core.plot_loops(self.files, mode=mode, show=True, backend=backend), self.console)
+        def _execute() -> None:
+            core.plot_loops(self.files, mode=mode, show=True, backend=backend)
+
+        run_with_console(_execute, self.console)
 
 
 def main() -> None:
