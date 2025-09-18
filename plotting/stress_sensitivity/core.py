@@ -487,35 +487,53 @@ def plot_samples_origin(
     raw_even = pd.concat(frames_raw_even, ignore_index=True) if frames_raw_even else pd.DataFrame(columns=['X','Y'])
 
     # Push to Origin
-    book = op.new_book('w', lname="Stress Sens (Python)")
-    book.activate()
-    gp = op.new_graph(template='scatter')
-    gl = gp[0]
+    book_obj = op.new_book('w', lname="Stress Sens (Python)")
+    book = cast(Any, book_obj)
+    if book is not None:
+        try:
+            book.activate()
+        except Exception:
+            pass
+    gp_obj = op.new_graph(template='scatter')
+    gp = cast(Any, gp_obj)
+    try:
+        gl = cast(Any, gp[0])
+    except Exception:
+        gl = None
+    if gl is None:
+        return
 
     if not raw_odd.empty:
-        w = op.new_sheet('w', lname='raw_odd')
-        w.from_df(raw_odd)
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
-        try:
-            p.color = RAW_ALT_COLORS[1]
-        except Exception:
-            pass
+        sheet = op.new_sheet('w', lname='raw_odd')
+        if sheet is not None:
+            w = cast(Any, sheet)
+            w.from_df(raw_odd)
+            w.cols_axis('XY')
+            p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
+            try:
+                p.color = RAW_ALT_COLORS[1]
+            except Exception:
+                pass
     if not raw_even.empty:
-        w = op.new_sheet('w', lname='raw_even')
-        w.from_df(raw_even)
-        w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
-        try:
-            p.color = RAW_ALT_COLORS[0]
-        except Exception:
-            pass
+        sheet = op.new_sheet('w', lname='raw_even')
+        if sheet is not None:
+            w = cast(Any, sheet)
+            w.from_df(raw_even)
+            w.cols_axis('XY')
+            p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
+            try:
+                p.color = RAW_ALT_COLORS[0]
+            except Exception:
+                pass
 
     for mean_df, color in mean_lines:
-        w = op.new_sheet('w', lname='mean')
+        sheet = op.new_sheet('w', lname='mean')
+        if sheet is None:
+            continue
+        w = cast(Any, sheet)
         w.from_df(mean_df)
         w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
         try:
             p.color = color
             p.symbol_shape = 2
@@ -523,10 +541,13 @@ def plot_samples_origin(
             pass
 
     for cont_df in cont_lines:
-        w = op.new_sheet('w', lname='cont')
+        sheet = op.new_sheet('w', lname='cont')
+        if sheet is None:
+            continue
+        w = cast(Any, sheet)
         w.from_df(cont_df)
         w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
         try:
             p.color = 'black'
         except Exception:

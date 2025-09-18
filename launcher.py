@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import os
 import time
-from typing import Callable, Dict
+from typing import Callable, Dict, cast
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 
@@ -71,6 +71,10 @@ class MasterLauncher(QtWidgets.QWidget):
                 pass
             try:
                 app.lastWindowClosed.connect(self._restore_launcher)
+            except Exception:
+                pass
+            try:
+                app.installEventFilter(self)
             except Exception:
                 pass
 
@@ -151,6 +155,7 @@ class MasterLauncher(QtWidgets.QWidget):
             self._experiments_index = self.tabs.addTab(self.exp_tab, "Experiments")
         self.dev_opts.experiments_visibility_changed.connect(self._sync_experiments_tab)
         self.search_bar.textChanged.connect(self._apply_search_filter)
+        self.tabs.currentChanged.connect(self._handle_tab_changed)
 
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
@@ -277,6 +282,43 @@ class MasterLauncher(QtWidgets.QWidget):
         if list_widget.currentRow() == -1 and list_widget.count():
             list_widget.setCurrentRow(0)
 
+    def _current_list_widget(self) -> QtWidgets.QListWidget | None:
+        current = self.tabs.currentWidget()
+        if current is self.log_tab:
+            return self.log_list
+        if current is self.plot_tab:
+            return self.plot_list
+        if current is self.emu_tab:
+            return self.emu_list
+        if current is self.exp_tab:
+            return self.exp_list
+        return None
+
+    def _ensure_selection(self, list_widget: QtWidgets.QListWidget | None) -> None:
+        if list_widget is None:
+            return
+        if list_widget.count() and list_widget.currentRow() == -1:
+            list_widget.setCurrentRow(0)
+
+    def _focus_current_list(self, select_first: bool = False) -> None:
+        list_widget = self._current_list_widget()
+        if list_widget is None:
+            return
+        if select_first and list_widget.count() and list_widget.currentRow() == -1:
+            list_widget.setCurrentRow(0)
+        self._ensure_selection(list_widget)
+        try:
+            list_widget.setFocus(QtCore.Qt.FocusReason.TabFocusReason)
+        except Exception:
+            list_widget.setFocus()
+
+    def _handle_tab_changed(self, _: int) -> None:
+        list_widget = self._current_list_widget()
+        self._ensure_selection(list_widget)
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if isinstance(focus_widget, QtWidgets.QTabBar):
+            self._focus_current_list()
+
     def _sorted_names(self, category: str) -> list[str]:
         mapping = self._registry.get(category, {})
         names = list(mapping.keys())
@@ -315,6 +357,70 @@ class MasterLauncher(QtWidgets.QWidget):
         if isinstance(data, tuple) and len(data) == 2:
             category, mode = data
             self._set_sort_mode(str(category), str(mode))
+
+    def _advance_tab(self, offset: int) -> bool:
+        count = self.tabs.count()
+        if count <= 1:
+            return False
+        current_index = self.tabs.currentIndex()
+        if current_index < 0:
+            return False
+        new_index = (current_index + offset) % count
+        if new_index == current_index:
+            return False
+        self.tabs.setCurrentIndex(new_index)
+        self._focus_current_list(select_first=True)
+        return True
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key_event = cast(QtGui.QKeyEvent, event)
+            focus_widget = QtWidgets.QApplication.focusWidget()
+            if focus_widget is not None and not self.isAncestorOf(focus_widget):
+                return super().eventFilter(obj, event)
+            if not self.isActiveWindow():
+                return super().eventFilter(obj, event)
+            key = key_event.key()
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                list_widget = self._current_list_widget()
+                self._ensure_selection(list_widget)
+                if list_widget is not None and list_widget.count():
+                    if list_widget.currentRow() == -1:
+                        list_widget.setCurrentRow(0)
+                self.run_selected()
+                event.accept()
+                return True
+            if key in (QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right):
+                if isinstance(focus_widget, QtWidgets.QLineEdit):
+                    return super().eventFilter(obj, event)
+                direction = -1 if key == QtCore.Qt.Key.Key_Left else 1
+                if self._advance_tab(direction):
+                    event.accept()
+                    return True
+            if key in (QtCore.Qt.Key.Key_Up, QtCore.Qt.Key.Key_Down):
+                list_widget = self._current_list_widget()
+                if list_widget is None or list_widget.count() == 0:
+                    return super().eventFilter(obj, event)
+                if isinstance(focus_widget, QtWidgets.QLineEdit):
+                    if key == QtCore.Qt.Key.Key_Down:
+                        self._focus_current_list(select_first=True)
+                        event.accept()
+                        return True
+                    return super().eventFilter(obj, event)
+                if focus_widget is list_widget:
+                    return super().eventFilter(obj, event)
+                current_row = list_widget.currentRow()
+                if current_row == -1:
+                    new_row = 0 if key == QtCore.Qt.Key.Key_Down else list_widget.count() - 1
+                elif key == QtCore.Qt.Key.Key_Down:
+                    new_row = min(current_row + 1, list_widget.count() - 1)
+                else:
+                    new_row = max(current_row - 1, 0)
+                list_widget.setCurrentRow(new_row)
+                self._focus_current_list()
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
 
     def run_selected(self) -> None:
         category: str | None = None
@@ -434,6 +540,10 @@ class MasterLauncher(QtWidgets.QWidget):
         event.accept()
         app = QtWidgets.QApplication.instance()
         if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
             QtCore.QTimer.singleShot(0, app.quit)
 
 

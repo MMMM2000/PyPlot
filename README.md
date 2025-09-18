@@ -61,6 +61,11 @@ alphabetical ordering in either direction at any time, and a search bar above
 the tabs filters entries across loggers, plotters, emulators and experiments as
 you type, making it easy to jump straight to the utility you need.
 
+Keyboard shortcuts make it just as quick to launch tools without reaching for
+the mouse.  Use the **Up/Down** arrow keys to move through the current list, tap
+**Left/Right** to jump between tabs, and press **Enter** from anywhere in the
+window (including the search box) to run the highlighted script immediately.
+
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
 places **Add Files/Folders** and **Remove Selected** buttons above a wide,
