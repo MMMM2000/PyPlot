@@ -148,7 +148,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
 * optional infinite looping displays "∞" and locks the loop count
-* automatic halt at **30 V** with a dialog to hold, reverse or stop
+* configurable response when the supply hits **30 V** (hold, reverse, stop, or ask each time)
 * live display of set current, measured current and voltage
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme

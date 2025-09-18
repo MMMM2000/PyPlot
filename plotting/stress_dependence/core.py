@@ -188,9 +188,13 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     means = df.groupby(['dir','load'])[var].mean().reset_index()
     first = df['load'].min()
     if BASELINE_MODE == 'first':
-        base = means.loc[(means.dir=='a') & (means.load==first), var].iloc[0]
+        base_series = cast(
+            pd.Series,
+            means.loc[(means['dir'] == 'a') & (means['load'] == first), var],
+        )
+        base = float(base_series.iloc[0]) if not base_series.empty else float('nan')
     else:
-        base = means.loc[means.dir=='a', var].min()
+        base = float(means.loc[means['dir'] == 'a', var].min())
 
     df['x_center'] = df['load'] + df['dir'].map({'a':-OFFSET,'b':+OFFSET})
     np.random.seed(0)
@@ -258,7 +262,11 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     )
 
     maxl = df['load'].max()
-    delta = means.loc[(means.dir=='a')&(means.load==maxl),'y'].iloc[0]
+    delta_series = cast(
+        pd.Series,
+        means.loc[(means['dir'] == 'a') & (means['load'] == maxl), 'y'],
+    )
+    delta = float(delta_series.iloc[0]) if not delta_series.empty else float('nan')
     ax.text(
         0.95,
         0.05,
@@ -311,9 +319,11 @@ def _origin_compute_tables(grp: pd.DataFrame, var: str):
     means = grp.groupby(["dir", "load"], as_index=False).agg({var: "mean"})
     first = float(means["load"].min())
     if BASELINE_MODE == "first":
-        base = float(
-            means.loc[(means["dir"] == "a") & (means["load"] == first), var].iloc[0]
+        base_series = cast(
+            pd.Series,
+            means.loc[(means["dir"] == "a") & (means["load"] == first), var],
         )
+        base = float(base_series.iloc[0]) if not base_series.empty else float("nan")
     else:
         base = float(means.loc[means["dir"] == "a", var].min())
 
@@ -337,8 +347,8 @@ def _origin_compute_tables(grp: pd.DataFrame, var: str):
         last_x = float(mean_a["X"].max())
         # Use raw means (no baseline) to compute actual delta
         m_a_raw = means[means["dir"] == "a"].set_index("X")
-        start_val = float(m_a_raw.loc[first_x, var])
-        end_val = float(m_a_raw.loc[last_x, var])
+        start_val = float(m_a_raw.at[first_x, var])
+        end_val = float(m_a_raw.at[last_x, var])
         delta = end_val - start_val
     else:
         delta = float("nan")
@@ -381,11 +391,14 @@ def _origin_build_graph(
     # Defer legend tweaking until after plots are added.
 
 
-    book = op.new_book('w', lname="Stress Dependence (Python)")
-    book.activate()
+    book = cast(Any, op.new_book('w', lname="Stress Dependence (Python)"))
+    try:
+        book.activate()
+    except Exception:
+        pass
 
     def push_xy(df: pd.DataFrame, lname: str, legend_label: str):
-        wks = op.new_sheet('w', lname=lname)
+        wks = cast(Any, op.new_sheet('w', lname=lname))
         wks.from_df(df)
         wks.cols_axis('XY')
         try:
@@ -400,20 +413,30 @@ def _origin_build_graph(
     w_mean_a = push_xy(mean_a, "mean_a", "mean up")
     w_mean_b = push_xy(mean_b, "mean_b", "mean down")
 
-    gp = op.new_graph(template='scatter')
+    gp = cast(Any, op.new_graph(template='scatter'))
     gl = gp[0]
     # Try to set the graph title using the OriginPython API. Some templates
     # may ignore this; a LabTalk fallback is applied later.
-    try:
-        gl.label('Title').text = title
-    except Exception:
-        pass
+    label_method = getattr(gl, 'label', None)
+    if callable(label_method):
+        try:
+            title_label = label_method('Title')
+        except Exception:
+            title_label = None
+        if title_label is not None and hasattr(title_label, 'text'):
+            try:
+                cast(Any, title_label).text = title
+            except Exception:
+                pass
     p_raw_a = gl.add_plot(w_raw_a, coly=1, colx=0, type='s')
     p_raw_b = gl.add_plot(w_raw_b, coly=1, colx=0, type='s')
     p_mean_a = gl.add_plot(w_mean_a, coly=1, colx=0, type='y')
     p_mean_b = gl.add_plot(w_mean_b, coly=1, colx=0, type='y')
     # Ensure graph window is active for subsequent LabTalk commands
-    gp.activate()
+    try:
+        gp.activate()
+    except Exception:
+        pass
 
     # Style plots via OriginPython properties; LabTalk will reapply colors later
     try:
@@ -423,15 +446,29 @@ def _origin_build_graph(
             (p_mean_a, ORIGIN_MEAN_SYMBOL_SIZE, MEAN_COLORS["a"]),
             (p_mean_b, ORIGIN_MEAN_SYMBOL_SIZE, MEAN_COLORS["b"]),
         ):
-            plot_obj.symbol_shape = 2  # circle
-            plot_obj.symbol_size = size
-            plot_obj.color = col  # line and edge
-            plot_obj.symbol_edge_color = col
-            plot_obj.symbol_fill_color = col
-        p_raw_a.line_width = 0
-        p_raw_b.line_width = 0
-        p_mean_a.line_width = ORIGIN_MEAN_LINE_WIDTH
-        p_mean_b.line_width = ORIGIN_MEAN_LINE_WIDTH
+            if plot_obj is None:
+                continue
+            plot_any = cast(Any, plot_obj)
+            try:
+                plot_any.symbol_shape = 2  # circle
+                plot_any.symbol_size = size
+                plot_any.color = col  # line and edge
+                plot_any.symbol_edge_color = col
+                plot_any.symbol_fill_color = col
+            except Exception:
+                pass
+        for plot_obj, width in (
+            (p_raw_a, 0),
+            (p_raw_b, 0),
+            (p_mean_a, ORIGIN_MEAN_LINE_WIDTH),
+            (p_mean_b, ORIGIN_MEAN_LINE_WIDTH),
+        ):
+            if plot_obj is None:
+                continue
+            try:
+                cast(Any, plot_obj).line_width = width
+            except Exception:
+                pass
     except Exception:
         pass
 

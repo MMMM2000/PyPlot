@@ -93,8 +93,9 @@ def plot_one_origin(df: pd.DataFrame, title: str) -> None:
         if callable(label_method):
             legend_label = label_method('Legend')
             if legend_label is not None and hasattr(legend_label, "text"):
+                legend_label_any = cast(Any, legend_label)
                 try:
-                    legend_label.text = esc
+                    legend_label_any.text = esc
                 except Exception:
                     pass
         origin_any.lt_exec('legend.update=0;')

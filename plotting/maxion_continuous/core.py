@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import is_color_like
 from matplotlib.figure import Figure
 from ..common import maybe_handle_outliers_series
 from ..utils import save_figure, origin_session, show_plots, apply_readability_fonts, apply_readability
@@ -176,7 +177,7 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
             )
             legend_handles: list[Any] = [cast(Any, h) for h in leg.legend_handles]
             for handle, text in zip(legend_handles, leg.get_texts()):
-                color = None
+                color: Any = None
                 get_facecolor = getattr(handle, "get_facecolor", None)
                 if callable(get_facecolor):
                     face = get_facecolor()
@@ -189,10 +190,19 @@ def plot_channel(y: pd.Series, head: int, coils: int, ch: int) -> Tuple[Figure, 
                     if callable(get_color):
                         color = get_color()
                 if color is not None:
-                    try:
-                        text.set_color(color)
-                    except Exception:
-                        pass
+                    color_value: Any = color
+                    if isinstance(color, np.ndarray):
+                        flat = color.ravel()
+                        if flat.size:
+                            limit = 4 if flat.size >= 4 else flat.size
+                            color_value = tuple(float(x) for x in flat[:limit])
+                        else:
+                            color_value = None
+                    if color_value is not None and is_color_like(color_value):
+                        try:
+                            text.set_color(color_value)
+                        except Exception:
+                            pass
                 if not LEGEND_SHOW_SYMBOLS:
                     set_visible = getattr(handle, "set_visible", None)
                     if callable(set_visible):
