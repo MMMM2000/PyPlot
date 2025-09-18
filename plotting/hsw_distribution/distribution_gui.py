@@ -2,7 +2,7 @@ from __future__ import annotations
 import sys
 import os
 import pathlib
-from typing import List, Dict, Any
+from typing import List, Dict, Any, cast
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 import numpy as np
@@ -216,8 +216,8 @@ def main() -> None:
 
         n_bins = max(2, int(cfg["core_bins"]))
         min_ct = max(1, int(cfg["core_min"]))
-        m_t, _, _ = core_mask(raw["TTn0"].values, n_bins, min_ct)
-        m_h, _, _ = core_mask(raw["HHn0"].values, n_bins, min_ct)
+        m_t, _, _ = core_mask(raw["TTn0"].to_numpy(dtype=float), n_bins, min_ct)
+        m_h, _, _ = core_mask(raw["HHn0"].to_numpy(dtype=float), n_bins, min_ct)
         mask = m_t & m_h
 
         filtered = raw.loc[mask, ["TT", "HH"]].reset_index(drop=True)
@@ -231,8 +231,8 @@ def main() -> None:
     hist: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
     for name, df in data.items():
         hist[name] = {}
-        vals_tt = df["TTn"].values
-        vals_hh = df["HHn"].values
+        vals_tt = df["TTn"].to_numpy(dtype=float)
+        vals_hh = df["HHn"].to_numpy(dtype=float)
         for col, vals in [(labels[0], vals_tt), (labels[1], vals_hh)]:
             hmin, hmax = vals.min(), vals.max()
             if cfg["bin_mode"] == "auto":
@@ -325,12 +325,13 @@ def main() -> None:
     if wants_origin(backend):
         try:
             import originpro as op
+            origin_any: Any = cast(Any, op)
             try:
-                op.set_show()
+                origin_any.set_show()
             except Exception:
                 pass
-            gp = op.new_graph(template='scatter')
-            gl0 = gp[0]
+            gp: Any = origin_any.new_graph(template='scatter')
+            gl0: Any = gp[0]
             first_layer = True
             # For each file, plot combined ln(dp/dh) curves (TT/HH) in its own layer
             for name in sorted(hist.keys()):
@@ -341,28 +342,30 @@ def main() -> None:
                     valid = h["dp"] > 0
                     x = (1 - h["centers"][valid]) ** 1.5
                     y = np.log(h["dp"][valid])
-                    w = op.new_sheet('w', lname=f'{name}_{col}')
+                    w: Any = origin_any.new_sheet('w', lname=f'{name}_{col}')
                     w.from_list(0, x.tolist())
                     w.from_list(1, y.tolist())
                     w.cols_axis('XY')
-                    p = gl.add_plot(w, coly=1, colx=0, type='y')
-                    try:
-                        p.color = color
-                        p.symbol_shape = 2
-                    except Exception:
-                        pass
+                    plot_obj: Any = gl.add_plot(w, coly=1, colx=0, type='y')
+                    if plot_obj is not None:
+                        p: Any = plot_obj
+                        try:
+                            p.color = color
+                            p.symbol_shape = 2
+                        except Exception:
+                            pass
                 try:
                     gl.rescale()
                 except Exception:
                     pass
             try:
                 gp.activate()
-                op.lt_exec('page.antialias=1; layer -aa 1;')
-                op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
+                origin_any.lt_exec('page.antialias=1; layer -aa 1;')
+                origin_any.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
             except Exception:
                 pass
             try:
-                op.exit()
+                origin_any.exit()
             except Exception:
                 pass
         except Exception as e:

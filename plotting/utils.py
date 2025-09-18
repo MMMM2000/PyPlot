@@ -9,7 +9,7 @@ from matplotlib.patches import Patch
 from matplotlib.collections import PathCollection
 from matplotlib import colors as mcolors
 from contextlib import contextmanager
-from typing import Callable
+from typing import Any, Callable, Iterator, cast
 import matplotlib.pyplot as plt
 import datetime
 
@@ -20,7 +20,7 @@ _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 
 @contextmanager
-def origin_session():
+def origin_session() -> Iterator[Any]:
     """Return an Origin session that is closed on exit."""
 
     import originpro as op  # lazy import
@@ -29,10 +29,10 @@ def origin_session():
     except Exception:
         pass
     try:
-        yield op
+        yield cast(Any, op)
     finally:
         try:
-            op.exit()
+            cast(Any, op).exit()
         except Exception:
             pass
 
@@ -45,7 +45,7 @@ def release_origin() -> None:
     except Exception:
         return
     try:
-        op.detach()
+        cast(Any, op).detach()
     except Exception:
         pass
 
@@ -352,7 +352,7 @@ class _ConsoleStream:
         pass
 
 
-def run_with_console(func: Callable[[], None], console: QtWidgets.QPlainTextEdit) -> None:
+def run_with_console(func: Callable[[], object | None], console: QtWidgets.QPlainTextEdit) -> None:
     old_out, old_err = sys.stdout, sys.stderr
     stream = _ConsoleStream(console)
     sys.stdout = sys.stderr = stream

@@ -1,10 +1,11 @@
 
 import os
 import re
-from typing import List, Tuple, Sequence
+from typing import Any, List, Tuple, Sequence
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
 from ..backends import wants_matplotlib, wants_origin
 from ..config import load_config
 from ..utils import show_plots, apply_readability_fonts, apply_readability
@@ -62,7 +63,7 @@ def _parse_meta(filename: str) -> Tuple[str, float, str]:
     return base, float('-inf'), 'as-cast'
 
 
-def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> plt.Figure:
+def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> Figure:
     """Stacked figure: as-cast on top, highest temp bottom; zero spacing."""
     # Parse for ordering
     metas = [(_parse_meta(p), p, x, y) for (p, x, y) in loaded]
@@ -89,28 +90,29 @@ def _stacked(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> plt.Figure
 
 def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
     import originpro as op  # lazy import
+    origin_any: Any = op
     # Ensure Origin UI is visible when plotting
     try:
-        op.set_show()
+        origin_any.set_show()
     except Exception:
         pass
 
     try:
-        op.exit()
+        origin_any.exit()
     except Exception:
         pass
 
-    book = op.new_book('w', lname="Hysteresis (Python)")
+    book: Any = origin_any.new_book('w', lname="Hysteresis (Python)")
     book.activate()
-    gp = op.new_graph(template='line')
-    gl = gp[0]
+    gp: Any = origin_any.new_graph(template='line')
+    gl: Any = gp[0]
 
     base_title = None
     for path, x, y in loaded:
         base, _t, label = _parse_meta(path)
         if base_title is None:
             base_title = base
-        wks = op.new_sheet('w', lname=label)
+        wks: Any = origin_any.new_sheet('w', lname=label)
         wks.from_list(0, x)
         wks.from_list(1, y)
         wks.cols_axis('XY')
@@ -118,55 +120,66 @@ def _origin_plot_combined(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) 
 
     try:
         gp.activate()
-        op.lt_exec('page.antialias=1;')
-        op.lt_exec('layer -aa 1;')
-        op.lt_exec('lab -xb "H (A/m)";')
-        op.lt_exec('lab -yl "F (Wb)";')
+        origin_any.lt_exec('page.antialias=1;')
+        origin_any.lt_exec('layer -aa 1;')
+        origin_any.lt_exec('lab -xb "H (A/m)";')
+        origin_any.lt_exec('lab -yl "F (Wb)";')
         if base_title:
             esc = base_title.replace('"', "'")
-            op.lt_exec(f'title -s "{esc}";')
-        op.lt_exec('legend;')
+            origin_any.lt_exec(f'title -s "{esc}";')
+        origin_any.lt_exec('legend;')
+    except Exception:
+        pass
+
+    try:
+        origin_any.exit()
     except Exception:
         pass
 
 
 def _origin_plot_separate(loaded: Sequence[Tuple[str, np.ndarray, np.ndarray]]) -> None:
     import originpro as op  # lazy import
+    origin_any: Any = op
     # Ensure Origin UI is visible when plotting
     try:
-        op.set_show()
+        origin_any.set_show()
     except Exception:
         pass
 
-    book = op.new_book('w', lname="Hysteresis (Python)")
+    book: Any = origin_any.new_book('w', lname="Hysteresis (Python)")
     book.activate()
     for path, x, y in loaded:
         base, _t, label = _parse_meta(path)
-        wks = op.new_sheet('w', lname=label)
+        wks: Any = origin_any.new_sheet('w', lname=label)
         wks.from_list(0, x)
         wks.from_list(1, y)
         wks.cols_axis('XY')
-        gp = op.new_graph(template='line')
-        gl = gp[0]
+        gp: Any = origin_any.new_graph(template='line')
+        gl: Any = gp[0]
         gl.add_plot(wks, coly=1, colx=0, type='y')
         try:
             gp.activate()
-            op.lt_exec('page.antialias=1;')
-            op.lt_exec('layer -aa 1;')
+            origin_any.lt_exec('page.antialias=1;')
+            origin_any.lt_exec('layer -aa 1;')
             esc = (f"{base} - {label}").replace('"', "'")
-            op.lt_exec(f'title -s "{esc}";')
-            op.lt_exec('lab -xb "H (A/m)";')
-            op.lt_exec('lab -yl "F (Wb)";')
+            origin_any.lt_exec(f'title -s "{esc}";')
+            origin_any.lt_exec('lab -xb "H (A/m)";')
+            origin_any.lt_exec('lab -yl "F (Wb)";')
         except Exception:
             pass
 
     try:
-        op.exit()
+        origin_any.exit()
     except Exception:
         pass
 
 
-def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, backend: str = BACKEND):
+def plot_loops(
+    paths: Sequence[str],
+    mode: str = "Combined",
+    show: bool = True,
+    backend: str = BACKEND,
+) -> Figure | List[Figure] | None:
     """Plot hysteresis loops.
 
     mode: "Combined" (one axes with legend), "Stacked" (zero spacing),
@@ -221,7 +234,7 @@ def plot_loops(paths: Sequence[str], mode: str = "Combined", show: bool = True, 
         return fig
 
     # Separate
-    figs: List[plt.Figure] = []
+    figs: List[Figure] = []
     for path, x, y in loaded:
         fig, ax = plt.subplots()
         ax.plot(x, y, lw=1.2)

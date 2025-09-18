@@ -278,7 +278,13 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
         if app is None or not isinstance(app, QtWidgets.QApplication):
             return
         palette = app.palette()
-        scheme = app.styleHints().colorScheme()
+        scheme = QtCore.Qt.ColorScheme.Light
+        hints = app.styleHints()
+        if hints is not None:
+            try:
+                scheme = hints.colorScheme()
+            except Exception:
+                scheme = QtCore.Qt.ColorScheme.Light
         win = palette.color(QtGui.QPalette.ColorRole.Window)
         base = palette.color(QtGui.QPalette.ColorRole.Base)
         text = palette.color(QtGui.QPalette.ColorRole.Text)
@@ -610,8 +616,7 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
             self.stop_process()
 
     # -------------------------------------------------------------------- Qt
-    def closeEvent(self, a0: QtGui.QCloseEvent) -> None:  # pragma: no cover - GUI
-        event = a0
+    def closeEvent(self, event: QtGui.QCloseEvent | None = None) -> None:  # pragma: no cover - GUI
         self.disconnect_instrument()
         super().closeEvent(event)
 

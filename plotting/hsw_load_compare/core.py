@@ -1,7 +1,7 @@
 import os
 import re
 from pathlib import Path
-from typing import Dict, List, Tuple, Any
+from typing import Dict, List, Tuple, Any, cast
 
 from PyQt6 import QtWidgets
 
@@ -34,6 +34,8 @@ TITLE_SIZE = 22
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
+
+ProgressDialog: type[object] | None = None
 
 FNAME_RE = re.compile(
     r"^(?P<comp>.+?)\s+"
@@ -180,6 +182,9 @@ def main(files: List[str], cfg: Dict[str, Any]):
     all_centers = np.concatenate([h["centers"] for hist in hist_data.values() for h in hist.values()])
     x_min, x_max = all_centers.min(), all_centers.max()
     plots: List[Tuple[Figure, str]] = []
+    fig_log: Figure | None = None
+    fig_h: Figure | None = None
+    fig_r: Figure | None = None
     if wants_matplotlib(backend):
         fig_log, ax_log = plt.subplots(nrows=nrows, ncols=1, sharex=True, figsize=(7, 2.0 * nrows), gridspec_kw={"hspace": 0})
         fig_log.subplots_adjust(hspace=0)
@@ -282,10 +287,11 @@ def main(files: List[str], cfg: Dict[str, Any]):
 
     if cfg_save and wants_matplotlib(backend):
         out_dir.mkdir(parents=True, exist_ok=True)
-        save_figure(fig_log, out_dir / "log_compare", SAVE_FORMAT, PNG_DPI)
-        if cfg["hist"]:
+        if fig_log is not None:
+            save_figure(fig_log, out_dir / "log_compare", SAVE_FORMAT, PNG_DPI)
+        if cfg["hist"] and fig_h is not None:
             save_figure(fig_h, out_dir / "hist_compare", SAVE_FORMAT, PNG_DPI)
-        if cfg["raw"]:
+        if cfg["raw"] and fig_r is not None:
             save_figure(fig_r, out_dir / "raw_compare", SAVE_FORMAT, PNG_DPI)
 
     if wants_matplotlib(backend):
@@ -298,13 +304,14 @@ def main(files: List[str], cfg: Dict[str, Any]):
     if wants_origin(backend):
         try:
             with origin_session() as op:
-                book = op.new_book('w', lname="HSW Compare (Python)")
+                op_any: Any = op
+                book: Any = op_any.new_book('w', lname="HSW Compare (Python)")
                 book.activate()
-                gp = op.new_graph(template='scatter')
-                gl0 = gp[0]
+                gp: Any = op_any.new_graph(template='scatter')
+                gl0: Any = gp[0]
                 first = True
                 for load in loads:
-                    gl = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
+                    gl: Any = gl0 if first else gp.add_layer()  # type: ignore[attr-defined]
                     first = False
                     for col, color in (("TT", "#1f77b4"), ("HH", "#ff7f0e")):
                         if not cfg[col]:
@@ -313,24 +320,26 @@ def main(files: List[str], cfg: Dict[str, Any]):
                         valid = h["dp"] > 0
                         x = (1 - h["centers"][valid]) ** 1.5
                         y = np.log(h["dp"][valid])
-                        w = op.new_sheet('w', lname=f'{col}_{load:g}')
+                        w: Any = op_any.new_sheet('w', lname=f'{col}_{load:g}')
                         w.from_list(0, x.tolist())
                         w.from_list(1, y.tolist())
                         w.cols_axis('XY')
-                        p = gl.add_plot(w, coly=1, colx=0, type='y')
-                        try:
-                            p.color = color
-                            p.symbol_shape = 2
-                        except Exception:
-                            pass
+                        plot_obj: Any = gl.add_plot(w, coly=1, colx=0, type='y')
+                        if plot_obj is not None:
+                            p: Any = plot_obj
+                            try:
+                                p.color = color
+                                p.symbol_shape = 2
+                            except Exception:
+                                pass
                     try:
                         gl.rescale()
                     except Exception:
                         pass
                 try:
                     gp.activate()
-                    op.lt_exec('page.antialias=1; layer -aa 1;')
-                    op.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
+                    op_any.lt_exec('page.antialias=1; layer -aa 1;')
+                    op_any.lt_exec('lab -xb "$\\Delta h^{3/2}$"; lab -yl "ln(dp/dh)"; legend;')
                 except Exception:
                     pass
         except Exception as e:

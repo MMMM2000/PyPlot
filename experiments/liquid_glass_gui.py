@@ -14,8 +14,7 @@ class GlassBackground(QtWidgets.QWidget):
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)
 
-    def paintEvent(self, a0: QtGui.QPaintEvent) -> None:  # pragma: no cover - painting
-        event = a0
+    def paintEvent(self, event: QtGui.QPaintEvent | None = None) -> None:  # pragma: no cover - painting
         painter = QtGui.QPainter(self)
         painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
 

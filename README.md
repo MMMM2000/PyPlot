@@ -103,6 +103,17 @@ Run/Plot buttons remain visible without scrolling through long option lists.
 Origin sessions are closed automatically after plots are generated so the Origin
 application can be closed independently from the Python tools.
 
+Developer notes: the Qt overrides now accept optional `QPaintEvent`/`QCloseEvent`
+arguments to match the PyQt6 stubs, Origin helpers coerce LabTalk worksheets
+and plots to dynamic objects before assigning colours or symbols, and pandas
+series are converted to NumPy arrays before histogramming so Pylance no longer
+flags our plotting pipelines. The PyVISA annealing logger also checks that
+`styleHints()` is available before reading the system colour scheme, and the
+Maxion controls guard against layouts that omit `rowCount()`. Hysteresis and
+load-compare exporters likewise treat Origin handles dynamically, and GUI
+wrappers invoke plotting routines through small closures so helpers expecting
+`Callable[[], None]` remain satisfied even when plotters return figures.
+
 The menu bar also adds a **Developer** section. Enable **Keep File Selections**
 to reopen plotting dialogs with the same files pre-selected—handy when you are
 tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose

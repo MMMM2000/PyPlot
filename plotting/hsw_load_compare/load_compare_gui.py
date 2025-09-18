@@ -159,7 +159,10 @@ class SettingsDialog(QtWidgets.QDialog):
         )
         orig.BACKEND = backend
         cfg["BACKEND"] = backend
-        run_with_console(lambda: orig.main(self.files, cfg), self.console)
+        def _execute() -> None:
+            orig.main(self.files, cfg)
+
+        run_with_console(_execute, self.console)
 
 
 class ProgressDialog:
