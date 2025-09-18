@@ -144,6 +144,8 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 
 * configurable current ramp with optional automatic reversal
 * **Reverse current now** button for an immediate ramp down
+* Start/Stop and Reverse controls stay pinned beneath the settings so they remain
+  visible without scrolling
 * default **Reverse to zero after max** behaviour
 * remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
@@ -152,7 +154,8 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * live display of set current, measured current and voltage
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
-* ignores the initial zero sample when logging and plotting
+* skips the initial zero sample and any sudden 0 mA readings that occur when the
+  wire burns through, so logs and plots stay smooth
 * contact-loss detection waits until the logger has measured a non-zero current,
   then applies a short start-up grace period and requires multiple zeros spread
   over a short delay before stopping, so start-up ramps and momentary dips no

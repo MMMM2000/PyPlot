@@ -39,7 +39,16 @@ class Ui_MainWindow(object):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        left_panel = QtWidgets.QWidget(self.centralWidget)
+        left_container = QtWidgets.QWidget(self.centralWidget)
+        left_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        left_container_layout = QtWidgets.QVBoxLayout(left_container)
+        left_container_layout.setContentsMargins(0, 0, 0, 0)
+        left_container_layout.setSpacing(8)
+
+        left_panel = QtWidgets.QWidget(left_container)
         # Allow the left column to shrink to viewport width without forcing
         # a horizontal scrollbar in the scroll area.
         left_panel.setSizePolicy(
@@ -49,7 +58,7 @@ class Ui_MainWindow(object):
         main_layout = QtWidgets.QVBoxLayout(left_panel)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
-        left_scroll = QtWidgets.QScrollArea(self.centralWidget)
+        left_scroll = QtWidgets.QScrollArea(left_container)
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         # Avoid horizontal scrollbar; let content wrap/stack vertically
@@ -60,7 +69,20 @@ class Ui_MainWindow(object):
         left_scroll.setWidget(left_panel)
         # Expose scroll for overlays from logic
         self.left_scroll = left_scroll
-        root.addWidget(left_scroll, stretch=0)
+        left_container_layout.addWidget(left_scroll, stretch=1)
+
+        sticky_buttons_frame = QtWidgets.QFrame(left_container)
+        sticky_buttons_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        sticky_buttons_frame.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        sticky_buttons_layout = QtWidgets.QHBoxLayout(sticky_buttons_frame)
+        sticky_buttons_layout.setContentsMargins(8, 0, 8, 0)
+        sticky_buttons_layout.setSpacing(8)
+        left_container_layout.addWidget(sticky_buttons_frame)
+
+        root.addWidget(left_container, stretch=0)
 
         # Right plot container
         self.plot_container = QtWidgets.QFrame(self.centralWidget)
@@ -352,13 +374,13 @@ class Ui_MainWindow(object):
             1,
             QtCore.Qt.AlignmentFlag.AlignRight,
         )
-        grid.addWidget(gb_name, 5, 0, 1, 3)
+        grid.addWidget(gb_name, 6, 0, 1, 3)
 
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
-        grid.addWidget(self.progressBar_process, 6, 0, 1, 3)
+        grid.addWidget(self.progressBar_process, 7, 0, 1, 3)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
-        grid.addWidget(self.label_time_remaining, 7, 0, 1, 3)
+        grid.addWidget(self.label_time_remaining, 8, 0, 1, 3)
 
         # Live values group
         self.groupBox_aktualne_hodnoty = QtWidgets.QGroupBox("Live values")
@@ -385,7 +407,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_aktualne_hodnoty, 8, 0, 1, 3)
+        grid.addWidget(self.groupBox_aktualne_hodnoty, 9, 0, 1, 3)
 
         # Hold resistance and percent
         hr_layout = QtWidgets.QHBoxLayout()
@@ -401,20 +423,28 @@ class Ui_MainWindow(object):
         hr_layout.addWidget(self.label_resistance_percento_from_hold)
         hr_layout.addWidget(self.label_resistance_percento_from_hold_2)
         hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 9, 0, 1, 3)
+        grid.addLayout(hr_layout, 10, 0, 1, 3)
 
-        # Start/Stop and reverse buttons
-        buttons = QtWidgets.QHBoxLayout()
+        # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_spusti_proces = QtWidgets.QPushButton("Start annealing process")
         bfont = QtGui.QFont()
         bfont.setPointSize(12)
         self.pushButton_spusti_proces.setFont(bfont)
+        self.pushButton_spusti_proces.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.pushButton_reverse_now = QtWidgets.QPushButton("Reverse current now")
         self.pushButton_reverse_now.setFont(bfont)
         self.pushButton_reverse_now.setEnabled(False)
-        buttons.addWidget(self.pushButton_spusti_proces)
-        buttons.addWidget(self.pushButton_reverse_now)
-        grid.addLayout(buttons, 10, 0, 1, 3)
+        self.pushButton_reverse_now.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        sticky_buttons_layout.addWidget(self.pushButton_spusti_proces)
+        sticky_buttons_layout.addWidget(self.pushButton_reverse_now)
+
+        left_container_layout.setStretch(0, 1)
 
         frame_layout_proc = QtWidgets.QVBoxLayout(self.frame_nastavenia_procesu)
         frame_layout_proc.setContentsMargins(0, 0, 0, 0)

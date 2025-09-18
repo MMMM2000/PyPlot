@@ -194,6 +194,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contact_lost = False
         self._zero_current_count = 0
         self._nonzero_current_seen = False
+        self._skip_current_sample = False
         self._process_start_time: float | None = None
         self._last_nonzero_current_time: float | None = None
         self._contact_grace_period = 5.0
@@ -566,6 +567,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.zamok.unlock()
                         return
                     if abs(self.current_current_read) < 1e-12:
+                        self._skip_current_sample = True
                         try:
                             now = time.monotonic()
                         except Exception:
@@ -614,6 +616,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                 self.handle_pushButton_spusti_proces_clicked()
                         self.zamok.unlock()
                         return
+                    self._skip_current_sample = False
                     self._zero_current_count = 0
                     self._contact_lost = False
                     self._nonzero_current_seen = True
@@ -918,6 +921,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._process_start_time = None
             self._nonzero_current_seen = False
             self._last_nonzero_current_time = None
+            self._skip_current_sample = False
             self.ui.frame_modus_operandi.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
@@ -1061,6 +1065,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._contact_lost = False
         self._zero_current_count = 0
         self._nonzero_current_seen = False
+        self._skip_current_sample = False
         self._process_start_time = None
         self._last_nonzero_current_time = None
         try:
@@ -1132,50 +1137,53 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
+            skip_sample = bool(self._skip_current_sample)
             if self.first_sample:
-                self.first_sample = False
-                self.prev_value_x = None
-                self.prev_value_y = None
+                if not skip_sample:
+                    self.first_sample = False
+                    self.prev_value_x = None
+                    self.prev_value_y = None
             else:
-                self.vzorka_N += 1
-                if self.prev_value_x is not None and self.prev_value_y is not None:
-                    ax1 = getattr(self, 'ax1', None)
-                    ax2 = getattr(self, 'ax2', None)
-                    if ax1 is not None and ax2 is not None:
-                        prev_x = float(self.prev_value_x)
-                        prev_y = float(self.prev_value_y)
-                        curr_x = float(self.curr_value_x)
-                        curr_y = float(self.curr_value_y)
-                        self.line1 = Line2D(
-                            [prev_x, curr_x],
-                            [prev_y, curr_y],
-                            color=self.ciara_color,
-                            marker=self.ciara_marker,
-                            linestyle=self.ciara_linestyle,
-                        )
-                        ax1.add_line(self.line1)
+                if not skip_sample:
+                    self.vzorka_N += 1
+                    if self.prev_value_x is not None and self.prev_value_y is not None:
+                        ax1 = getattr(self, 'ax1', None)
+                        ax2 = getattr(self, 'ax2', None)
+                        if ax1 is not None and ax2 is not None:
+                            prev_x = float(self.prev_value_x)
+                            prev_y = float(self.prev_value_y)
+                            curr_x = float(self.curr_value_x)
+                            curr_y = float(self.curr_value_y)
+                            self.line1 = Line2D(
+                                [prev_x, curr_x],
+                                [prev_y, curr_y],
+                                color=self.ciara_color,
+                                marker=self.ciara_marker,
+                                linestyle=self.ciara_linestyle,
+                            )
+                            ax1.add_line(self.line1)
 
-                        self.line2 = Line2D(
-                            [self.vzorka_N - 1, self.vzorka_N],
-                            [prev_y, curr_y],
-                            color=self.ciara_color,
-                            marker=self.ciara_marker,
-                            linestyle=self.ciara_linestyle,
-                        )
-                        ax2.add_line(self.line2)
+                            self.line2 = Line2D(
+                                [self.vzorka_N - 1, self.vzorka_N],
+                                [prev_y, curr_y],
+                                color=self.ciara_color,
+                                marker=self.ciara_marker,
+                                linestyle=self.ciara_linestyle,
+                            )
+                            ax2.add_line(self.line2)
 
-                        for axis in (ax1, ax2):
-                            axis.relim()
-                            axis.autoscale_view()
+                            for axis in (ax1, ax2):
+                                axis.relim()
+                                axis.autoscale_view()
 
-                        fig = getattr(self, 'fig', None)
-                        canvas = getattr(fig, 'canvas', None) if fig is not None else None
-                        if canvas is not None:
-                            canvas.draw()
-                            canvas.flush_events()
+                            fig = getattr(self, 'fig', None)
+                            canvas = getattr(fig, 'canvas', None) if fig is not None else None
+                            if canvas is not None:
+                                canvas.draw()
+                                canvas.flush_events()
 
-                self.prev_value_x = self.curr_value_x
-                self.prev_value_y = self.curr_value_y
+                    self.prev_value_x = self.curr_value_x
+                    self.prev_value_y = self.curr_value_y
 
 
             #iteracia prudu
@@ -1227,50 +1235,53 @@ class MainWindow(QtWidgets.QMainWindow):
             self._display_ui_value('label_live_voltage', f"{self.current_voltage:.2f}")
 
             #a striggrujeme indikaciu novej vzorky kvoli sekvencovaniu prikazov
+            skip_sample = bool(self._skip_current_sample)
             if self.first_sample:
-                self.first_sample = False
-                self.prev_value_x = None
-                self.prev_value_y = None
+                if not skip_sample:
+                    self.first_sample = False
+                    self.prev_value_x = None
+                    self.prev_value_y = None
             else:
-                self.vzorka_N += 1
-                if self.prev_value_x is not None and self.prev_value_y is not None:
-                    ax1 = getattr(self, 'ax1', None)
-                    ax2 = getattr(self, 'ax2', None)
-                    if ax1 is not None and ax2 is not None:
-                        prev_x = float(self.prev_value_x)
-                        prev_y = float(self.prev_value_y)
-                        curr_x = float(self.curr_value_x)
-                        curr_y = float(self.curr_value_y)
-                        self.line1 = Line2D(
-                            [prev_x, curr_x],
-                            [prev_y, curr_y],
-                            color=self.ciara_color,
-                            marker=self.ciara_marker,
-                            linestyle=self.ciara_linestyle,
-                        )
-                        ax1.add_line(self.line1)
+                if not skip_sample:
+                    self.vzorka_N += 1
+                    if self.prev_value_x is not None and self.prev_value_y is not None:
+                        ax1 = getattr(self, 'ax1', None)
+                        ax2 = getattr(self, 'ax2', None)
+                        if ax1 is not None and ax2 is not None:
+                            prev_x = float(self.prev_value_x)
+                            prev_y = float(self.prev_value_y)
+                            curr_x = float(self.curr_value_x)
+                            curr_y = float(self.curr_value_y)
+                            self.line1 = Line2D(
+                                [prev_x, curr_x],
+                                [prev_y, curr_y],
+                                color=self.ciara_color,
+                                marker=self.ciara_marker,
+                                linestyle=self.ciara_linestyle,
+                            )
+                            ax1.add_line(self.line1)
 
-                        self.line2 = Line2D(
-                            [self.vzorka_N - 1, self.vzorka_N],
-                            [prev_y, curr_y],
-                            color=self.ciara_color,
-                            marker=self.ciara_marker,
-                            linestyle=self.ciara_linestyle,
-                        )
-                        ax2.add_line(self.line2)
+                            self.line2 = Line2D(
+                                [self.vzorka_N - 1, self.vzorka_N],
+                                [prev_y, curr_y],
+                                color=self.ciara_color,
+                                marker=self.ciara_marker,
+                                linestyle=self.ciara_linestyle,
+                            )
+                            ax2.add_line(self.line2)
 
-                        for axis in (ax1, ax2):
-                            axis.relim()
-                            axis.autoscale_view()
+                            for axis in (ax1, ax2):
+                                axis.relim()
+                                axis.autoscale_view()
 
-                        fig = getattr(self, 'fig', None)
-                        canvas = getattr(fig, 'canvas', None) if fig is not None else None
-                        if canvas is not None:
-                            canvas.draw()
-                            canvas.flush_events()
+                            fig = getattr(self, 'fig', None)
+                            canvas = getattr(fig, 'canvas', None) if fig is not None else None
+                            if canvas is not None:
+                                canvas.draw()
+                                canvas.flush_events()
 
-                self.prev_value_x = self.curr_value_x
-                self.prev_value_y = self.curr_value_y
+                    self.prev_value_x = self.curr_value_x
+                    self.prev_value_y = self.curr_value_y
             
             
                       
