@@ -198,6 +198,7 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     plot_inc: Any = None
     plot_dec: Any = None
     legend_entries: List[Tuple[int, str]] = []
+    color_updates: List[Tuple[int, str]] = []
     plot_index = 1
     if np.isfinite(inc_vals).any():
         plot_inc = gl.add_plot(w, coly=2, colx=0, type='y')
@@ -212,16 +213,6 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
                 p_inc.symbol_shape = 2
                 p_inc.symbol_size = 4
                 p_inc.line_connect = 1
-                p_inc.color = 'red'
-                try:
-                    p_inc.line_color = 'red'
-                except Exception:
-                    pass
-                try:
-                    p_inc.symbol_edge_color = 'red'
-                    p_inc.symbol_fill_color = 'red'
-                except Exception:
-                    pass
                 try:
                     p_inc.legend = 'Increasing'
                 except Exception:
@@ -241,22 +232,13 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             else:
                 plot_index = max(plot_index, idx_val + 1)
             legend_entries.append((idx_val, 'Increasing'))
+            color_updates.append((idx_val, 'red'))
         if plot_dec is not None:
             p_dec = cast(Any, plot_dec)
             try:
                 p_dec.symbol_shape = 2
                 p_dec.symbol_size = 4
                 p_dec.line_connect = 1
-                p_dec.color = 'blue'
-                try:
-                    p_dec.line_color = 'blue'
-                except Exception:
-                    pass
-                try:
-                    p_dec.symbol_edge_color = 'blue'
-                    p_dec.symbol_fill_color = 'blue'
-                except Exception:
-                    pass
                 try:
                     p_dec.legend = 'Decreasing'
                 except Exception:
@@ -276,6 +258,7 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             else:
                 plot_index = max(plot_index, idx_val + 1)
             legend_entries.append((idx_val, 'Decreasing'))
+            color_updates.append((idx_val, 'blue'))
         if plotted_any:
             gl.rescale()
     except Exception:
@@ -290,15 +273,36 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         pass
 
     try:
+        label_method = getattr(gl, 'label', None)
+        if callable(label_method):
+            try:
+                title_label = label_method('Title')
+            except Exception:
+                title_label = None
+            if title_label is not None and hasattr(title_label, 'text'):
+                try:
+                    cast(Any, title_label).text = title
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    try:
         esc = title.replace('"', "'")
         esc_long = source_stem.replace('"', "'")
-        try:
-            origin_any.lt_exec('layer -aa 1;')
-        except Exception:
-            pass
-        origin_any.lt_exec('lab -xb "Current (mA)";')
-        origin_any.lt_exec('lab -yl "Resistance (Ohm)";')
-        origin_any.lt_exec(f'title -s "{esc}";')
+        axis_cmds = [
+            'page.antialias=1;',
+            'lab -xb "Current (mA)";',
+            'lab -yl "Resistance (Ohm)";',
+            'layer.x.gridMajor=1;',
+            'layer.y.gridMajor=1;',
+            f'title -s "{esc}";',
+        ]
+        for cmd in axis_cmds:
+            try:
+                origin_any.lt_exec(cmd)
+            except Exception:
+                pass
         if esc_long:
             origin_any.lt_exec(f'page.longname$ = "{esc_long}";')
         else:
@@ -335,6 +339,15 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
                     esc_legend = legend_text.replace('"', "'")
                     origin_any.lt_exec('legend;')
                     origin_any.lt_exec(f'legend.text$ = "{esc_legend}";')
+                except Exception:
+                    pass
+        if color_updates:
+            for idx, color_name in color_updates:
+                try:
+                    color_expr = f"color(\"{color_name}\")"
+                    origin_any.lt_exec(
+                        f"layer -i {idx}; set %C -c {color_expr}; set %C -csf {color_expr}; set %C -kf 0;"
+                    )
                 except Exception:
                     pass
     except Exception:
