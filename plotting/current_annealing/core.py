@@ -38,6 +38,9 @@ SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
 
+ORIGIN_INCREASING_COLOUR = "#d62728"
+ORIGIN_DECREASING_COLOUR = "#1f77b4"
+
 
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
@@ -195,10 +198,19 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         return
 
+    try:
+        gl.activate()
+    except Exception:
+        pass
+
+    try:
+        origin_any.lt_exec('layer -d;')
+    except Exception:
+        pass
+
     plot_inc: Any = None
     plot_dec: Any = None
     legend_entries: List[Tuple[int, str]] = []
-    color_updates: List[Tuple[int, str]] = []
     plot_index = 1
     if np.isfinite(inc_vals).any():
         plot_inc = gl.add_plot(w, coly=2, colx=0, type='y')
@@ -213,6 +225,15 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
                 p_inc.symbol_shape = 2
                 p_inc.symbol_size = 4
                 p_inc.line_connect = 1
+                try:
+                    p_inc.color = ORIGIN_INCREASING_COLOUR
+                except Exception:
+                    pass
+                try:
+                    p_inc.symbol_edge_color = ORIGIN_INCREASING_COLOUR
+                    p_inc.symbol_fill_color = ORIGIN_INCREASING_COLOUR
+                except Exception:
+                    pass
                 try:
                     p_inc.legend = 'Increasing'
                 except Exception:
@@ -232,13 +253,21 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             else:
                 plot_index = max(plot_index, idx_val + 1)
             legend_entries.append((idx_val, 'Increasing'))
-            color_updates.append((idx_val, 'red'))
         if plot_dec is not None:
             p_dec = cast(Any, plot_dec)
             try:
                 p_dec.symbol_shape = 2
                 p_dec.symbol_size = 4
                 p_dec.line_connect = 1
+                try:
+                    p_dec.color = ORIGIN_DECREASING_COLOUR
+                except Exception:
+                    pass
+                try:
+                    p_dec.symbol_edge_color = ORIGIN_DECREASING_COLOUR
+                    p_dec.symbol_fill_color = ORIGIN_DECREASING_COLOUR
+                except Exception:
+                    pass
                 try:
                     p_dec.legend = 'Decreasing'
                 except Exception:
@@ -258,7 +287,6 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             else:
                 plot_index = max(plot_index, idx_val + 1)
             legend_entries.append((idx_val, 'Decreasing'))
-            color_updates.append((idx_val, 'blue'))
         if plotted_any:
             gl.rescale()
     except Exception:
@@ -272,31 +300,53 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         pass
 
+    esc = title.replace('"', "'")
+    esc_long = source_stem.replace('"', "'")
+
     try:
-        label_method = getattr(gl, 'label', None)
-        if callable(label_method):
-            try:
-                title_label = label_method('Title')
-            except Exception:
-                title_label = None
-            if title_label is not None and hasattr(title_label, 'text'):
-                try:
-                    cast(Any, title_label).text = title
-                except Exception:
-                    pass
+        gl.set_int('title.show', 1)
+    except Exception:
+        pass
+    try:
+        gl.set_str('title.text$', esc)
     except Exception:
         pass
 
+    title_label: Any | None = None
     try:
-        esc = title.replace('"', "'")
-        esc_long = source_stem.replace('"', "'")
+        title_label = gl.label('Title')
+    except Exception:
+        title_label = None
+    if title_label is not None:
+        try:
+            title_label.text = title
+        except Exception:
+            pass
+    else:
+        try:
+            gl.remove_label('py_title')
+        except Exception:
+            pass
+        try:
+            manual_title = gl.add_label(title, 0.5, 1.03)
+        except Exception:
+            manual_title = None
+        if manual_title is not None:
+            try:
+                manual_title.name = 'py_title'
+                manual_title.set_int('attach', 0)
+                manual_title.set_int('horzalign', 1)
+                manual_title.set_int('vertalign', 0)
+            except Exception:
+                pass
+
+    try:
         axis_cmds = [
             'page.antialias=1;',
             'lab -xb "Current (mA)";',
             'lab -yl "Resistance (Ohm)";',
             'layer.x.gridMajor=1;',
             'layer.y.gridMajor=1;',
-            f'title -s "{esc}";',
         ]
         for cmd in axis_cmds:
             try:
@@ -339,15 +389,6 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
                     esc_legend = legend_text.replace('"', "'")
                     origin_any.lt_exec('legend;')
                     origin_any.lt_exec(f'legend.text$ = "{esc_legend}";')
-                except Exception:
-                    pass
-        if color_updates:
-            for idx, color_name in color_updates:
-                try:
-                    color_expr = f"color(\"{color_name}\")"
-                    origin_any.lt_exec(
-                        f"layer -i {idx}; set %C -c {color_expr}; set %C -csf {color_expr}; set %C -kf 0;"
-                    )
                 except Exception:
                     pass
     except Exception:
