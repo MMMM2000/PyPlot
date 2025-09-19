@@ -91,6 +91,8 @@ palette to the line colours, and build a compact legend with just Increasing and
 Decreasing entries.  Each workbook and graph inherits the source filename as its
 long name, the axes rescale automatically, and the graph title is stamped in
 place so the generated windows appear immediately in the Project Explorer.
+The scatter layer is created directly on the new graph so the figure opens
+alongside the worksheet instead of leaving only data tables visible.
 Origin stays open throughout multi-file exports and names each graph after the
 source file (without the `.txt` suffix), so batching datasets no longer causes
 Origin to reopen repeatedly.

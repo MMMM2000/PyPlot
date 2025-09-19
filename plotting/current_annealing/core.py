@@ -188,7 +188,6 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     gp: Any = gp_obj
     try:
         gp.activate()
-        origin_any.lt_exec('layer -s 1; layer -d;')
     except Exception:
         pass
     try:
