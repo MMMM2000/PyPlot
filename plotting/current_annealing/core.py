@@ -13,6 +13,7 @@ from ..utils import (
     apply_readability,
     apply_readability_fonts,
     format_annealing_title,
+    release_origin,
     save_figure,
     show_plots,
 )
@@ -399,17 +400,22 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     if IMPROVE_READABILITY:
         apply_readability_fonts()
     outs: List[Tuple[Figure, str]] = []
-    for path in files:
-        df = load_file(path)
-        title = format_annealing_title(Path(path).stem)
-        if wants_matplotlib(backend):
-            fig, fname = plot_one(df, title)
-            outs.append((fig, fname))
-        if wants_origin(backend):
-            try:
-                plot_one_origin(df, title, Path(path).name)
-            except Exception as e:
-                print(f"Origin plot failed for {title}: {e}")
+    use_origin = wants_origin(backend)
+    try:
+        for path in files:
+            df = load_file(path)
+            title = format_annealing_title(Path(path).stem)
+            if wants_matplotlib(backend):
+                fig, fname = plot_one(df, title)
+                outs.append((fig, fname))
+            if use_origin:
+                try:
+                    plot_one_origin(df, title, Path(path).name)
+                except Exception as e:
+                    print(f"Origin plot failed for {title}: {e}")
+    finally:
+        if use_origin:
+            release_origin()
 
     if wants_matplotlib(backend):
         if SHOW_PLOTS:

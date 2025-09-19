@@ -126,8 +126,9 @@ Markdown guide tailored to the current tool.  When onboarding new colleagues you
 can point them to the menu entry for context without having to maintain a
 separate manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
-Origin sessions are closed automatically after plots are generated so the Origin
-application can be closed independently from the Python tools.
+Origin sessions are closed automatically after plots are generated—and even if a
+run aborts—so the Origin application can be closed independently from the
+Python tools without lingering automation locks.
 
 Developer notes: the Qt overrides now accept optional `QPaintEvent`/`QCloseEvent`
 arguments to match the PyQt6 stubs, Origin helpers coerce LabTalk worksheets
