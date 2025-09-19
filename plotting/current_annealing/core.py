@@ -146,7 +146,10 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         pass
     source_stem = Path(source_name).stem or title
     workbook_name = source_stem[:30] if source_stem else title[:30]
-    w: Any = origin_any.new_sheet('w', lname=workbook_name)
+    w_sheet: Any = origin_any.new_sheet('w', lname=workbook_name)
+    if w_sheet is None:
+        return
+    w: Any = w_sheet
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
@@ -158,6 +161,13 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     w.from_list(2, inc_vals.tolist())
     w.from_list(3, dec_vals.tolist())
     w.cols_axis('XYYY')
+    try:
+        w.set_label(0, "Current (mA)")
+        w.set_label(1, "Resistance (Ohm)")
+        w.set_label(2, "Increasing")
+        w.set_label(3, "Decreasing")
+    except Exception:
+        pass
 
     try:
         w.activate()
@@ -172,11 +182,24 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         pass
 
-    gp: Any = origin_any.new_graph(template='scatter')
-    gl: Any = gp[0]
+    gp_obj: Any = origin_any.new_graph(template='scatter')
+    if gp_obj is None:
+        return
+    gp: Any = gp_obj
+    try:
+        gp.activate()
+        origin_any.lt_exec('layer -s 1; layer -d;')
+    except Exception:
+        pass
+    try:
+        gl: Any = gp[0]
+    except Exception:
+        return
 
     plot_inc: Any = None
     plot_dec: Any = None
+    legend_entries: List[Tuple[int, str]] = []
+    plot_index = 1
     if np.isfinite(inc_vals).any():
         plot_inc = gl.add_plot(w, coly=2, colx=0, type='y')
     if np.isfinite(dec_vals).any():
@@ -188,20 +211,72 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             p_inc = cast(Any, plot_inc)
             try:
                 p_inc.symbol_shape = 2
+                p_inc.symbol_size = 4
                 p_inc.line_connect = 1
                 p_inc.color = 'red'
+                try:
+                    p_inc.line_color = 'red'
+                except Exception:
+                    pass
+                try:
+                    p_inc.symbol_edge_color = 'red'
+                    p_inc.symbol_fill_color = 'red'
+                except Exception:
+                    pass
+                try:
+                    p_inc.legend = 'Increasing'
+                except Exception:
+                    pass
             except Exception:
                 pass
             plotted_any = True
+            idx_val = None
+            for attr in ('index', 'plot_index', 'lt_index'):
+                attr_val = getattr(p_inc, attr, None)
+                if isinstance(attr_val, int) and attr_val >= 1:
+                    idx_val = attr_val
+                    break
+            if idx_val is None:
+                idx_val = plot_index
+                plot_index += 1
+            else:
+                plot_index = max(plot_index, idx_val + 1)
+            legend_entries.append((idx_val, 'Increasing'))
         if plot_dec is not None:
             p_dec = cast(Any, plot_dec)
             try:
                 p_dec.symbol_shape = 2
+                p_dec.symbol_size = 4
                 p_dec.line_connect = 1
                 p_dec.color = 'blue'
+                try:
+                    p_dec.line_color = 'blue'
+                except Exception:
+                    pass
+                try:
+                    p_dec.symbol_edge_color = 'blue'
+                    p_dec.symbol_fill_color = 'blue'
+                except Exception:
+                    pass
+                try:
+                    p_dec.legend = 'Decreasing'
+                except Exception:
+                    pass
             except Exception:
                 pass
             plotted_any = True
+            idx_val = None
+            for attr in ('index', 'plot_index', 'lt_index'):
+                attr_val = getattr(p_dec, attr, None)
+                if isinstance(attr_val, int) and attr_val >= 1:
+                    idx_val = attr_val
+                    break
+            if idx_val is None:
+                idx_val = plot_index
+                plot_index += 1
+            else:
+                plot_index = max(plot_index, idx_val + 1)
+            legend_entries.append((idx_val, 'Decreasing'))
         if plotted_any:
             gl.rescale()
     except Exception:
@@ -218,16 +293,51 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     try:
         esc = title.replace('"', "'")
         esc_long = source_stem.replace('"', "'")
-        origin_any.lt_exec('page.antialias=1; layer -aa 1;')
+        try:
+            origin_any.lt_exec('layer -aa 1;')
+        except Exception:
+            pass
         origin_any.lt_exec('lab -xb "Current (mA)";')
         origin_any.lt_exec('lab -yl "Resistance (Ohm)";')
         origin_any.lt_exec(f'title -s "{esc}";')
-        if (plot_inc is not None) or (plot_dec is not None):
-            origin_any.lt_exec('legend; legend -update;')
         if esc_long:
             origin_any.lt_exec(f'page.longname$ = "{esc_long}";')
         else:
             origin_any.lt_exec(f'page.longname$ = "{esc}";')
+        if legend_entries:
+            try:
+                gl.set_int('legend.update', 0)
+            except Exception:
+                pass
+            try:
+                legend_obj = gl.label('Legend')
+            except Exception:
+                legend_obj = None
+            legend_lines = [
+                f'\\L({idx}) {text}' for idx, text in sorted(legend_entries, key=lambda item: item[0])
+            ]
+            legend_text = "\n".join(legend_lines)
+            if legend_obj is not None:
+                try:
+                    legend_obj.text = legend_text
+                except Exception:
+                    try:
+                        esc_legend = legend_text.replace('"', "'")
+                        origin_any.lt_exec(f'legend.text$ = "{esc_legend}";')
+                    except Exception:
+                        pass
+                try:
+                    legend_obj.set_float('x1', 0.78)
+                    legend_obj.set_float('y1', 0.85)
+                except Exception:
+                    pass
+            else:
+                try:
+                    esc_legend = legend_text.replace('"', "'")
+                    origin_any.lt_exec('legend;')
+                    origin_any.lt_exec(f'legend.text$ = "{esc_legend}";')
+                except Exception:
+                    pass
     except Exception:
         pass
 
