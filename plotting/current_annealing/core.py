@@ -9,7 +9,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..utils import save_figure, format_annealing_title, show_plots, apply_readability_fonts, apply_readability
+from ..utils import (
+    apply_readability,
+    apply_readability_fonts,
+    format_annealing_title,
+    save_figure,
+    show_plots,
+)
 from ..backends import wants_matplotlib, wants_origin
 
 # Defaults
@@ -50,42 +56,66 @@ def load_file(path: str) -> pd.DataFrame:
     return df[["I_mA", "R_Ohm"]]
 
 
+def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int, int, float]]]:
+    """Return per-sample directions and contiguous segments."""
+
+    count = currents.size
+    if count == 0:
+        return np.array([], dtype=float), []
+    if count == 1:
+        return np.array([1.0], dtype=float), [(0, 1, 1.0)]
+
+    deltas = np.diff(currents)
+    direction = pd.Series(np.sign(deltas), index=range(1, count))
+    direction.replace(0.0, np.nan, inplace=True)
+    direction = direction.reindex(range(count))
+    if direction.isna().all():
+        direction.fillna(1.0, inplace=True)
+    else:
+        direction.ffill(inplace=True)
+        direction.bfill(inplace=True)
+    directions = direction.to_numpy(dtype=float)
+
+    segments: List[Tuple[int, int, float]] = []
+    start = 0
+    current_dir = directions[0]
+    for idx in range(1, count):
+        if directions[idx] != current_dir:
+            segments.append((start, idx, current_dir))
+            start = idx
+            current_dir = directions[idx]
+    segments.append((start, count, current_dir))
+    return directions, segments
+
+
+def _split_directional_values(
+    values: np.ndarray, directions: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Return arrays for increasing and decreasing segments with NaNs elsewhere."""
+
+    if values.size == 0:
+        return np.array([], dtype=float), np.array([], dtype=float)
+    inc = np.full(values.shape, np.nan, dtype=float)
+    dec = np.full(values.shape, np.nan, dtype=float)
+    mask_inc = directions >= 0
+    mask_dec = directions < 0
+    inc[mask_inc] = values[mask_inc]
+    dec[mask_dec] = values[mask_dec]
+    return inc, dec
+
+
 def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     fig, ax = plt.subplots(figsize=(8, 4.5))
 
-    currents = df["I_mA"].to_numpy()
-    resistances = df["R_Ohm"].to_numpy()
+    currents = df["I_mA"].to_numpy(dtype=float)
+    resistances = df["R_Ohm"].to_numpy(dtype=float)
+    _, segments = _direction_profile(currents)
 
     if currents.size == 0:
         pass
     elif currents.size == 1:
         ax.plot(currents, resistances, marker="o", linestyle="None", color="r", markersize=3)
     else:
-        deltas = np.diff(currents)
-        if deltas.size:
-            direction = pd.Series(np.sign(deltas))
-            direction.replace(0, np.nan, inplace=True)
-            if not direction.dropna().empty:
-                direction.ffill(inplace=True)
-                direction.bfill(inplace=True)
-            direction.fillna(1.0, inplace=True)
-            directions = direction.to_numpy()
-        else:
-            directions = np.array([], dtype=float)
-
-        if directions.size == 0:
-            segments = [(0, currents.size, 1.0)]
-        else:
-            segments: list[tuple[int, int, float]] = []
-            segment_start = 0
-            current_dir = directions[0]
-            for idx in range(1, directions.size):
-                if directions[idx] != current_dir:
-                    segments.append((segment_start, idx + 1, current_dir))
-                    segment_start = idx
-                    current_dir = directions[idx]
-            segments.append((segment_start, currents.size, current_dir))
-
         for start, end, direction in segments:
             color = "r" if direction >= 0 else "b"
             ax.plot(
@@ -117,35 +147,83 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     source_stem = Path(source_name).stem or title
     workbook_name = source_stem[:30] if source_stem else title[:30]
     w: Any = origin_any.new_sheet('w', lname=workbook_name)
-    w.from_list(0, df["I_mA"].to_list())
-    w.from_list(1, df["R_Ohm"].to_list())
-    w.cols_axis('XY')
+
+    currents = df["I_mA"].to_numpy(dtype=float)
+    resistances = df["R_Ohm"].to_numpy(dtype=float)
+    directions, _ = _direction_profile(currents)
+    inc_vals, dec_vals = _split_directional_values(resistances, directions)
+
+    w.from_list(0, currents.tolist())
+    w.from_list(1, resistances.tolist())
+    w.from_list(2, inc_vals.tolist())
+    w.from_list(3, dec_vals.tolist())
+    w.cols_axis('XYYY')
+
+    try:
+        w.activate()
+        origin_any.lt_exec(
+            'wks.col1.lname$ = "Current (mA)";'
+            'wks.col2.lname$ = "Resistance";'
+            'wks.col3.lname$ = "Increasing";'
+            'wks.col4.lname$ = "Decreasing";'
+        )
+        esc_sheet = (source_stem or title).replace('"', "'")
+        origin_any.lt_exec(f'page.longname$ = "{esc_sheet}";')
+    except Exception:
+        pass
+
     gp: Any = origin_any.new_graph(template='scatter')
     gl: Any = gp[0]
-    plot_obj: Any = gl.add_plot(w, coly=1, colx=0, type='y')
-    if plot_obj is not None:
-        p: Any = plot_obj
+
+    plot_inc: Any = None
+    plot_dec: Any = None
+    if np.isfinite(inc_vals).any():
+        plot_inc = gl.add_plot(w, coly=2, colx=0, type='y')
+    if np.isfinite(dec_vals).any():
+        plot_dec = gl.add_plot(w, coly=3, colx=0, type='y')
+
+    try:
+        plotted_any = False
+        if plot_inc is not None:
+            p_inc = cast(Any, plot_inc)
+            try:
+                p_inc.symbol_shape = 2
+                p_inc.line_connect = 1
+                p_inc.color = 'red'
+            except Exception:
+                pass
+            plotted_any = True
+        if plot_dec is not None:
+            p_dec = cast(Any, plot_dec)
+            try:
+                p_dec.symbol_shape = 2
+                p_dec.line_connect = 1
+                p_dec.color = 'blue'
+            except Exception:
+                pass
+            plotted_any = True
+        if plotted_any:
+            gl.rescale()
+    except Exception:
         try:
-            p.symbol_shape = 2
-            p.line_connect = 1
+            origin_any.lt_exec('layer -a;')
         except Exception:
             pass
+
     try:
         gp.activate()
+    except Exception:
+        pass
+
+    try:
         esc = title.replace('"', "'")
         esc_long = source_stem.replace('"', "'")
         origin_any.lt_exec('page.antialias=1; layer -aa 1;')
-        origin_any.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
-        label_method = getattr(gl, "label", None)
-        if callable(label_method):
-            legend_label = label_method('Legend')
-            if legend_label is not None and hasattr(legend_label, "text"):
-                legend_label_any = cast(Any, legend_label)
-                try:
-                    legend_label_any.text = esc_long or esc
-                except Exception:
-                    pass
-        origin_any.lt_exec('legend.update=0;')
+        origin_any.lt_exec('lab -xb "Current (mA)";')
+        origin_any.lt_exec('lab -yl "Resistance (Ohm)";')
+        origin_any.lt_exec(f'title -s "{esc}";')
+        if (plot_inc is not None) or (plot_dec is not None):
+            origin_any.lt_exec('legend; legend -update;')
         if esc_long:
             origin_any.lt_exec(f'page.longname$ = "{esc_long}";')
         else:

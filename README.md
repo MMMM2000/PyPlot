@@ -86,9 +86,12 @@ independently, so Matplotlib/Origin toggles and export resolution reopen the way
 you left them.  The current annealing plotter also omits the initial 0 mA data
 point so figures start with the first real sample, and ramps are coloured red
 while current increases and blue while it decreases to mirror the live logger.
-Origin stays open throughout multi-file exports and names each graph after the
-source file (without the `.txt` suffix), so batching datasets no longer causes
-Origin to reopen repeatedly.
+Origin exports now apply the same directional colouring, refresh the legend
+automatically, rescale the axes, and stamp the graph title so worksheets and
+plots appear correctly in the Project Explorer.  Origin stays open throughout
+multi-file exports and names each graph after the source file (without the
+`.txt` suffix), so batching datasets no longer causes Origin to reopen
+repeatedly.
 Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
