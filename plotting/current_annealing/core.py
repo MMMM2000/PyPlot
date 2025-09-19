@@ -150,10 +150,33 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         pass
     source_stem = Path(source_name).stem or title
     workbook_name = source_stem[:30] if source_stem else title[:30]
-    w_sheet: Any = origin_any.new_sheet('w', lname=workbook_name)
-    if w_sheet is None:
-        return
-    w: Any = w_sheet
+
+    book_obj: Any | None
+    try:
+        book_obj = origin_any.new_book('w', lname=workbook_name)
+    except Exception:
+        book_obj = None
+
+    w: Any | None = None
+    if book_obj is not None:
+        book = cast(Any, book_obj)
+        try:
+            book.activate()
+        except Exception:
+            pass
+        try:
+            w = book[0]
+        except Exception:
+            w = None
+    if w is None:
+        w_sheet: Any | None = origin_any.new_sheet('w', lname=workbook_name)
+        if w_sheet is None:
+            return
+        w = cast(Any, w_sheet)
+    try:
+        w.activate()
+    except Exception:
+        pass
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
@@ -181,8 +204,11 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             'wks.col3.lname$ = "Increasing";'
             'wks.col4.lname$ = "Decreasing";'
         )
-        esc_sheet = (source_stem or title).replace('"', "'")
-        origin_any.lt_exec(f'page.longname$ = "{esc_sheet}";')
+    except Exception:
+        pass
+    try:
+        esc_book = (source_stem or title).replace('"', "'")
+        origin_any.lt_exec(f'page.longname$ = "{esc_book}";')
     except Exception:
         pass
 

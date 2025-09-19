@@ -89,10 +89,12 @@ while current increases and blue while it decreases to mirror the live logger.
 Origin exports now mirror the logger exactly: increasing ramps are forced to
 red and decreasing ramps to blue, with marker fill and edge colours locked to
 their lines and a compact legend showing only the Increasing and Decreasing
-entries.  Each workbook and graph inherits the source filename as its long name,
-the axes rescale automatically, and the graph title is written through the
-Origin API (with a label fallback) so the generated windows appear immediately
-in the Project Explorer with their headings already in place.
+entries.  Each input file spawns its own Origin workbook so multi-file runs keep
+every dataset visible after Python exits, each workbook and graph inherits the
+source filename as its long name, the axes rescale automatically, and the graph
+title is written through the Origin API (with a label fallback) so the generated
+windows appear immediately in the Project Explorer with their headings already
+in place.
 The scatter layer is created directly on the new graph so the figure opens
 alongside the worksheet instead of leaving only data tables visible.
 Origin stays open throughout multi-file exports and names each graph after the
