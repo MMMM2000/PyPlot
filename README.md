@@ -94,11 +94,9 @@ every dataset visible after Python exits, each workbook and graph inherits the
 source filename as its long name, the axes rescale automatically, and the graph
 title is written through the Origin API (with a label fallback) so the generated
 windows appear immediately in the Project Explorer with their headings already
-in place.  When a site lacks the `scatter` template, the exporter falls back to
-Origin's default graph template so the figure still opens before Python
-detaches.
-The scatter layer is created directly on the new graph so the figure opens
-alongside the worksheet instead of leaving only data tables visible.
+in place.  Graphs are now built through LabTalk `plotxy` calls, guaranteeing that
+Origin opens and registers the plot alongside the worksheet even when custom
+templates are unavailable.
 Origin stays open throughout multi-file exports and names each graph after the
 source file (without the `.txt` suffix), so batching datasets no longer causes
 Origin to reopen repeatedly.

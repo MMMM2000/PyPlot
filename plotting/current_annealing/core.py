@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, List, Tuple, cast
 
@@ -41,6 +42,96 @@ SHOW_TITLE = True
 
 ORIGIN_INCREASING_COLOUR = "#d62728"
 ORIGIN_DECREASING_COLOUR = "#1f77b4"
+
+
+_LT_NAME_CLEANER = re.compile(r"[^A-Za-z0-9_]")
+
+
+def _origin_short_name(obj: Any) -> str:
+    """Return the Origin short name for ``obj`` when available."""
+
+    for attr in ("GetName", "ShortName", "Name", "name"):
+        try:
+            value = getattr(obj, attr)
+        except Exception:
+            continue
+        if callable(value):
+            try:
+                value = value()
+            except Exception:
+                continue
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _sanitize_lt_name(base: str, prefix: str) -> str:
+    """Return an Origin-safe short name derived from ``base``."""
+
+    cleaned = _LT_NAME_CLEANER.sub("", base or "")
+    if not cleaned:
+        cleaned = prefix
+    if cleaned[0].isdigit():
+        cleaned = f"{prefix}{cleaned}"
+    if len(cleaned) > 13:
+        cleaned = f"{cleaned[:10]}{abs(hash(cleaned)) % 1000:03d}"
+    return cleaned[:13]
+
+
+def _resolve_origin_names(
+    origin_any: Any, workbook: Any | None, sheet: Any, hint: str
+) -> Tuple[str, str]:
+    """Ensure workbook and sheet short names exist and return them."""
+
+    book_short = ""
+    if workbook is not None:
+        book_short = _origin_short_name(workbook)
+    if not book_short:
+        desired = _sanitize_lt_name(hint, "CA")
+        try:
+            if workbook is not None and hasattr(workbook, "activate"):
+                workbook.activate()
+        except Exception:
+            pass
+        try:
+            origin_any.lt_exec(f'page.name$ = "{desired}";')
+        except Exception:
+            pass
+        if workbook is not None:
+            book_short = _origin_short_name(workbook)
+        if not book_short:
+            book_short = desired
+
+    sheet_short = _origin_short_name(sheet)
+    if not sheet_short:
+        desired = _sanitize_lt_name("Sheet1", "S")
+        try:
+            if hasattr(sheet, "activate"):
+                sheet.activate()
+        except Exception:
+            pass
+        try:
+            origin_any.lt_exec(f'wks.name$ = "{desired}";')
+        except Exception:
+            pass
+        sheet_short = _origin_short_name(sheet) or desired
+
+    return book_short, sheet_short
+
+
+def _lt_color_expr(hex_colour: str) -> str:
+    """Return a LabTalk colour literal for ``hex_colour``."""
+
+    colour = hex_colour.lstrip("#")
+    if len(colour) != 6:
+        return "color(0,0,0)"
+    try:
+        r = int(colour[0:2], 16)
+        g = int(colour[2:4], 16)
+        b = int(colour[4:6], 16)
+    except ValueError:
+        return "color(0,0,0)"
+    return f"color({r},{g},{b})"
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -143,11 +234,13 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
 
 def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     import originpro as op  # lazy import
+
     origin_any: Any = cast(Any, op)
     try:
         origin_any.set_show()
     except Exception:
         pass
+
     source_stem = Path(source_name).stem or title
     workbook_name = source_stem[:30] if source_stem else title[:30]
 
@@ -157,24 +250,33 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         book_obj = None
 
-    w: Any | None = None
+    workbook: Any | None = None
+    worksheet: Any | None = None
     if book_obj is not None:
-        book = cast(Any, book_obj)
+        workbook = cast(Any, book_obj)
         try:
-            book.activate()
+            workbook.activate()
         except Exception:
             pass
         try:
-            w = book[0]
+            worksheet = workbook[0]
         except Exception:
-            w = None
-    if w is None:
+            worksheet = None
+    if worksheet is None:
         w_sheet: Any | None = origin_any.new_sheet('w', lname=workbook_name)
         if w_sheet is None:
             return
-        w = cast(Any, w_sheet)
+        worksheet = cast(Any, w_sheet)
+        try:
+            workbook = getattr(worksheet, 'parent', None)
+        except Exception:
+            workbook = None
+
+    if worksheet is None:
+        return
+
     try:
-        w.activate()
+        worksheet.activate()
     except Exception:
         pass
 
@@ -183,21 +285,21 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     directions, _ = _direction_profile(currents)
     inc_vals, dec_vals = _split_directional_values(resistances, directions)
 
-    w.from_list(0, currents.tolist())
-    w.from_list(1, resistances.tolist())
-    w.from_list(2, inc_vals.tolist())
-    w.from_list(3, dec_vals.tolist())
-    w.cols_axis('XYYY')
+    worksheet.from_list(0, currents.tolist())
+    worksheet.from_list(1, resistances.tolist())
+    worksheet.from_list(2, inc_vals.tolist())
+    worksheet.from_list(3, dec_vals.tolist())
+    worksheet.cols_axis('XYYY')
     try:
-        w.set_label(0, "Current (mA)")
-        w.set_label(1, "Resistance (Ohm)")
-        w.set_label(2, "Increasing")
-        w.set_label(3, "Decreasing")
+        worksheet.set_label(0, "Current (mA)")
+        worksheet.set_label(1, "Resistance (Ohm)")
+        worksheet.set_label(2, "Increasing")
+        worksheet.set_label(3, "Decreasing")
     except Exception:
         pass
 
     try:
-        w.activate()
+        worksheet.activate()
         origin_any.lt_exec(
             'wks.col1.lname$ = "Current (mA)";'
             'wks.col2.lname$ = "Resistance";'
@@ -212,224 +314,117 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         pass
 
-    gp_obj: Any | None = None
-    for template in ("scatter", "line", None):
-        candidate: Any | None
-        try:
-            if template is None:
-                candidate = origin_any.new_graph()
-            else:
-                candidate = origin_any.new_graph(template=template)
-        except Exception:
-            candidate = None
-        if candidate is not None:
-            gp_obj = candidate
-            break
-    if gp_obj is None:
-        raise RuntimeError("unable to create an Origin graph window")
-    gp: Any = gp_obj
-    try:
-        gp.activate()
-    except Exception:
-        pass
-    try:
-        gl: Any = gp[0]
-    except Exception:
+    book_hint = source_stem or workbook_name or "CA"
+    book_short, sheet_short = _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
+
+    has_inc = bool(np.isfinite(inc_vals).any())
+    has_dec = bool(np.isfinite(dec_vals).any())
+    if not has_inc and not has_dec:
         return
 
+    base_ref = f"[{book_short}]{sheet_short}!"
+    inc_range = "__pyCA_inc"
+    dec_range = "__pyCA_dec"
+
     try:
-        gl.activate()
+        worksheet.activate()
     except Exception:
         pass
 
-    try:
-        origin_any.lt_exec('layer -d;')
-    except Exception:
-        pass
+    if has_inc:
+        try:
+            origin_any.lt_exec(f"range {inc_range} = {base_ref}(1,3);")
+        except Exception:
+            has_inc = False
+    if has_dec:
+        try:
+            origin_any.lt_exec(f"range {dec_range} = {base_ref}(1,4);")
+        except Exception:
+            has_dec = False
 
-    plot_inc: Any = None
-    plot_dec: Any = None
-    legend_entries: List[Tuple[int, str]] = []
-    plot_index = 1
-    if np.isfinite(inc_vals).any():
-        plot_inc = gl.add_plot(w, coly=2, colx=0, type='y')
-    if np.isfinite(dec_vals).any():
-        plot_dec = gl.add_plot(w, coly=3, colx=0, type='y')
-
-    try:
-        plotted_any = False
-        if plot_inc is not None:
-            p_inc = cast(Any, plot_inc)
+    plots: List[Tuple[str, int]] = []
+    graph_created = False
+    if has_inc:
+        try:
+            origin_any.lt_exec(f"plotxy iy:={inc_range} plot:=201;")
+            graph_created = True
+            plots.append(("inc", 1))
+        except Exception:
+            has_inc = False
+    if has_dec:
+        if graph_created:
             try:
-                p_inc.symbol_shape = 2
-                p_inc.symbol_size = 4
-                p_inc.line_connect = 1
-                try:
-                    p_inc.color = ORIGIN_INCREASING_COLOUR
-                except Exception:
-                    pass
-                try:
-                    p_inc.symbol_edge_color = ORIGIN_INCREASING_COLOUR
-                    p_inc.symbol_fill_color = ORIGIN_INCREASING_COLOUR
-                except Exception:
-                    pass
-                try:
-                    p_inc.legend = 'Increasing'
-                except Exception:
-                    pass
+                origin_any.lt_exec(f"layer -i {dec_range};")
+                plots.append(("dec", len(plots) + 1))
             except Exception:
                 pass
-            plotted_any = True
-            idx_val = None
-            for attr in ('index', 'plot_index', 'lt_index'):
-                attr_val = getattr(p_inc, attr, None)
-                if isinstance(attr_val, int) and attr_val >= 1:
-                    idx_val = attr_val
-                    break
-            if idx_val is None:
-                idx_val = plot_index
-                plot_index += 1
-            else:
-                plot_index = max(plot_index, idx_val + 1)
-            legend_entries.append((idx_val, 'Increasing'))
-        if plot_dec is not None:
-            p_dec = cast(Any, plot_dec)
+        else:
             try:
-                p_dec.symbol_shape = 2
-                p_dec.symbol_size = 4
-                p_dec.line_connect = 1
-                try:
-                    p_dec.color = ORIGIN_DECREASING_COLOUR
-                except Exception:
-                    pass
-                try:
-                    p_dec.symbol_edge_color = ORIGIN_DECREASING_COLOUR
-                    p_dec.symbol_fill_color = ORIGIN_DECREASING_COLOUR
-                except Exception:
-                    pass
-                try:
-                    p_dec.legend = 'Decreasing'
-                except Exception:
-                    pass
-            except Exception:
-                pass
-            plotted_any = True
-            idx_val = None
-            for attr in ('index', 'plot_index', 'lt_index'):
-                attr_val = getattr(p_dec, attr, None)
-                if isinstance(attr_val, int) and attr_val >= 1:
-                    idx_val = attr_val
-                    break
-            if idx_val is None:
-                idx_val = plot_index
-                plot_index += 1
-            else:
-                plot_index = max(plot_index, idx_val + 1)
-            legend_entries.append((idx_val, 'Decreasing'))
-        if plotted_any:
-            gl.rescale()
-    except Exception:
-        try:
-            origin_any.lt_exec('layer -a;')
-        except Exception:
-            pass
-
-    try:
-        gp.activate()
-    except Exception:
-        pass
-
-    esc = title.replace('"', "'")
-    esc_long = source_stem.replace('"', "'")
-
-    try:
-        gl.set_int('title.show', 1)
-    except Exception:
-        pass
-    try:
-        gl.set_str('title.text$', esc)
-    except Exception:
-        pass
-
-    title_label: Any | None = None
-    try:
-        title_label = gl.label('Title')
-    except Exception:
-        title_label = None
-    if title_label is not None:
-        try:
-            title_label.text = title
-        except Exception:
-            pass
-    else:
-        try:
-            gl.remove_label('py_title')
-        except Exception:
-            pass
-        try:
-            manual_title = gl.add_label(title, 0.5, 1.03)
-        except Exception:
-            manual_title = None
-        if manual_title is not None:
-            try:
-                manual_title.name = 'py_title'
-                manual_title.set_int('attach', 0)
-                manual_title.set_int('horzalign', 1)
-                manual_title.set_int('vertalign', 0)
+                origin_any.lt_exec(f"plotxy iy:={dec_range} plot:=201;")
+                graph_created = True
+                plots.append(("dec", 1))
             except Exception:
                 pass
 
-    try:
-        axis_cmds = [
-            'page.antialias=1;',
-            'lab -xb "Current (mA)";',
-            'lab -yl "Resistance (Ohm)";',
-            'layer.x.gridMajor=1;',
-            'layer.y.gridMajor=1;',
-        ]
-        for cmd in axis_cmds:
+    if not graph_created:
+        return
+
+    inc_colour = _lt_color_expr(ORIGIN_INCREASING_COLOUR)
+    dec_colour = _lt_color_expr(ORIGIN_DECREASING_COLOUR)
+
+    for role, idx in plots:
+        colour = inc_colour if role == "inc" else dec_colour
+        for cmd in (
+            f"set p{idx} -k 1;",
+            f"set p{idx} -w 2;",
+            f"set p{idx} -z 4;",
+            f"set p{idx} -c {colour};",
+            f"set p{idx} -cf {colour};",
+            f"set p{idx} -cl {colour};",
+        ):
             try:
                 origin_any.lt_exec(cmd)
             except Exception:
                 pass
-        if esc_long:
-            origin_any.lt_exec(f'page.longname$ = "{esc_long}";')
-        else:
-            origin_any.lt_exec(f'page.longname$ = "{esc}";')
-        if legend_entries:
-            try:
-                gl.set_int('legend.update', 0)
-            except Exception:
-                pass
-            try:
-                legend_obj = gl.label('Legend')
-            except Exception:
-                legend_obj = None
-            legend_lines = [
-                f'\\L({idx}) {text}' for idx, text in sorted(legend_entries, key=lambda item: item[0])
-            ]
-            legend_text = "\n".join(legend_lines)
-            if legend_obj is not None:
-                try:
-                    legend_obj.text = legend_text
-                except Exception:
-                    try:
-                        esc_legend = legend_text.replace('"', "'")
-                        origin_any.lt_exec(f'legend.text$ = "{esc_legend}";')
-                    except Exception:
-                        pass
-                try:
-                    legend_obj.set_float('x1', 0.78)
-                    legend_obj.set_float('y1', 0.85)
-                except Exception:
-                    pass
-            else:
-                try:
-                    esc_legend = legend_text.replace('"', "'")
-                    origin_any.lt_exec('legend;')
-                    origin_any.lt_exec(f'legend.text$ = "{esc_legend}";')
-                except Exception:
-                    pass
+
+    legend_lines: List[str] = []
+    for role, idx in plots:
+        label = "Increasing" if role == "inc" else "Decreasing"
+        legend_lines.append(rf"\L({idx}) {label}")
+    if legend_lines:
+        legend_text = "\\n".join(legend_lines)
+        try:
+            origin_any.lt_exec('legend.update=0;')
+        except Exception:
+            pass
+        try:
+            origin_any.lt_exec(f'legend.text$ = "{legend_text}";')
+        except Exception:
+            pass
+
+    esc_title = title.replace('"', "'")
+    esc_graph = source_stem.replace('"', "'") if source_stem else esc_title
+    axis_cmds = [
+        'page.antialias=1;',
+        'layer.x.showAxes=1;',
+        'layer.y.showAxes=1;',
+        'layer.x.opposite=0;',
+        'layer.y.opposite=0;',
+        'layer.x.gridMajor=1;',
+        'layer.y.gridMajor=1;',
+        'lab -xb "Current (mA)";',
+        'lab -yl "Resistance (Ohm)";',
+        f'title -s "{esc_title}";',
+        f'page.longname$ = "{esc_graph}";',
+    ]
+    for cmd in axis_cmds:
+        try:
+            origin_any.lt_exec(cmd)
+        except Exception:
+            pass
+
+    try:
+        origin_any.lt_exec('layer -a;')
     except Exception:
         pass
 
