@@ -5,13 +5,85 @@ but presents them with modern layouts and English labels. Object names
 match the English identifiers used throughout the logger logic.
 """
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from __future__ import annotations
+
+import re
 from typing import Optional
+
+from PyQt6 import QtCore, QtGui, QtWidgets
 try:
     # Reuse InfoLineEdit from data logger for inline info and validation
     from data_logging.data_logger.file_name_builder import InfoLineEdit
 except Exception:
     InfoLineEdit = QtWidgets.QLineEdit  # type: ignore[assignment]
+
+
+class SampleSpinBox(QtWidgets.QSpinBox):
+    """Spin box that preserves the alphanumeric sample prefix and suffix."""
+
+    _pattern = re.compile(r"^(.*?)(\d+)(.*)$")
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._prefix = "s"
+        self._suffix = ""
+        self.setObjectName("lineEdit_sample")
+        self.setRange(0, 999_999)
+        self.setAccelerated(True)
+        self.setKeyboardTracking(False)
+        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.lineEdit().setPlaceholderText("Sample, e.g., s1 or s2-1")
+        self.lineEdit().setToolTip("Sample identifier, e.g., s1 or s2-1")
+
+    # Qt uses ``textFromValue``/``valueFromText`` to keep the display updated.
+    def textFromValue(self, value: int) -> str:  # noqa: D401
+        return f"{self._prefix}{value}{self._suffix}"
+
+    def valueFromText(self, text: str) -> int:  # noqa: D401
+        parsed = self._parse(text)
+        if parsed is None:
+            return max(0, min(self.maximum(), self.value()))
+        prefix, value, suffix = parsed
+        self._prefix = prefix or "s"
+        self._suffix = suffix or ""
+        return max(self.minimum(), min(self.maximum(), value))
+
+    def validate(self, text: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
+        if not text:
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        if self._pattern.match(text):
+            return (QtGui.QValidator.State.Acceptable, text, pos)
+        if re.match(r"^.*?\d*$", text):
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        return (QtGui.QValidator.State.Invalid, text, pos)
+
+    # Public helpers mirroring QLineEdit for backwards compatibility
+    def text(self) -> str:  # noqa: D401
+        return super().text()
+
+    def setText(self, text: str) -> None:
+        parsed = self._parse(text)
+        if parsed is None:
+            self._prefix, value, self._suffix = "s", 1, ""
+        else:
+            prefix, value, suffix = parsed
+            self._prefix = prefix or "s"
+            self._suffix = suffix or ""
+        self.blockSignals(True)
+        self.setValue(value)
+        self.blockSignals(False)
+
+    def _parse(self, text: str) -> Optional[tuple[str, int, str]]:
+        match = self._pattern.match(text.strip())
+        if match is None:
+            return None
+        prefix, digits, suffix = match.groups()
+        try:
+            value = int(digits)
+        except ValueError:
+            return None
+        return prefix or "s", value, suffix or ""
 
 
 class Ui_MainWindow(object):
@@ -22,8 +94,6 @@ class Ui_MainWindow(object):
         self.label_set_current: Optional[QtWidgets.QLabel] = None
         self.lcd_current_mA: Optional[QtWidgets.QLCDNumber] = None
         self.lcd_resistance: Optional[QtWidgets.QLCDNumber] = None
-        self.toolButton_sample_up: Optional[QtWidgets.QToolButton] = None
-        self.toolButton_sample_down: Optional[QtWidgets.QToolButton] = None
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("CurrentAnnealingMainWindow")
@@ -151,27 +221,6 @@ class Ui_MainWindow(object):
         frame_layout_serial.addWidget(gb_serial)
 
         # ------------------------------------------------------------------
-        # Mode of operation (simple combo box)
-        # ------------------------------------------------------------------
-        self.frame_operation_mode = QtWidgets.QFrame(self.centralWidget)
-        self.frame_operation_mode.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        main_layout.addWidget(self.frame_operation_mode)
-
-        frame_layout_mode = QtWidgets.QHBoxLayout(self.frame_operation_mode)
-        frame_layout_mode.setContentsMargins(0, 0, 0, 0)
-        self.label_mode = QtWidgets.QLabel("Mode of operation:")
-        frame_layout_mode.addWidget(self.label_mode)
-        self.comboBox_mode = QtWidgets.QComboBox()
-        self.comboBox_mode.addItems([
-            "Raw VCP",
-            "Manual annealing",
-            "Automatic annealing",
-        ])
-        self.comboBox_mode.setCurrentIndex(2)
-        frame_layout_mode.addWidget(self.comboBox_mode)
-        frame_layout_mode.addStretch(1)
-
-        # ------------------------------------------------------------------
         # Process settings (frame_process_settings)
         # ------------------------------------------------------------------
         self.frame_process_settings = QtWidgets.QFrame(self.centralWidget)
@@ -238,47 +287,32 @@ class Ui_MainWindow(object):
         grid.addWidget(self.spinBox_max_current, 2, 1)
 
         # Hold time [s]
-        self.label_hold_duration = QtWidgets.QLabel("Hold time [s]:")
-        self.spinBox_hold_duration = QtWidgets.QSpinBox()
-        self.spinBox_hold_duration.setRange(1, 36000)
-        # Default hold time 1 second
-        self.spinBox_hold_duration.setValue(1)
-        self.spinBox_hold_duration.setMaximumWidth(80)
-        # Shift down by one row
-        grid.addWidget(self.label_hold_duration, 3, 0)
-        grid.addWidget(self.spinBox_hold_duration, 3, 1)
-
-        # Hold/Stop button and elapsed time
-        # Hold button + Step control in one row to save space
-        hold_and_step = QtWidgets.QHBoxLayout()
-        self.pushButton_hold_current = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_hold_current.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        self.pushButton_hold_current.setMinimumWidth(200)
-        hold_and_step.addWidget(self.pushButton_hold_current, stretch=1)
-        hold_and_step.addSpacing(12)
+        # Step [mA]
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
         self.spinBox_step_mA.setValue(1)
         self.spinBox_step_mA.setMaximumWidth(80)
-        hold_and_step.addWidget(self.label_step)
-        hold_and_step.addWidget(self.spinBox_step_mA)
-        grid.addLayout(hold_and_step, 2, 2)
+        grid.addWidget(self.label_step, 3, 0)
+        grid.addWidget(self.spinBox_step_mA, 3, 1)
 
-        self.label_elapsed = QtWidgets.QLabel("Elapsed:")
-        self.lcd_elapsed_seconds = QtWidgets.QLCDNumber()
-        self.lcd_elapsed_seconds.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
-        self.label_seconds_unit = QtWidgets.QLabel("s")
-        h = QtWidgets.QHBoxLayout()
-        h.addWidget(self.label_elapsed)
-        h.addWidget(self.lcd_elapsed_seconds)
-        h.addWidget(self.label_seconds_unit)
-        h.addStretch(1)
-        # Align with Hold time row
-        grid.addLayout(h, 3, 2)
+        # Hold time [s]
+        self.label_hold_duration = QtWidgets.QLabel("Hold time [s]:")
+        self.spinBox_hold_duration = QtWidgets.QSpinBox()
+        self.spinBox_hold_duration.setRange(1, 36000)
+        self.spinBox_hold_duration.setValue(1)
+        self.spinBox_hold_duration.setMaximumWidth(80)
+        grid.addWidget(self.label_hold_duration, 4, 0)
+        grid.addWidget(self.spinBox_hold_duration, 4, 1)
+
+        # Hold/Stop button spans the main columns to stay visible
+        self.pushButton_hold_current = QtWidgets.QPushButton("Hold current now!")
+        self.pushButton_hold_current.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.pushButton_hold_current.setMinimumWidth(220)
+        grid.addWidget(self.pushButton_hold_current, 5, 0, 1, 2)
 
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
@@ -296,7 +330,7 @@ class Ui_MainWindow(object):
         rev.addWidget(self.spinBox_loops)
         rev.addWidget(self.checkBox_infinite_loops)
         rev.addStretch(1)
-        grid.addLayout(rev, 4, 0, 1, 3)
+        grid.addLayout(rev, 6, 0, 1, 3)
 
         # Voltage limit behaviour
         limit_layout = QtWidgets.QHBoxLayout()
@@ -311,7 +345,7 @@ class Ui_MainWindow(object):
         )
         limit_layout.addWidget(self.comboBox_max_voltage_action)
         limit_layout.addStretch(1)
-        grid.addLayout(limit_layout, 5, 0, 1, 3)
+        grid.addLayout(limit_layout, 7, 0, 1, 3)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
@@ -335,13 +369,9 @@ class Ui_MainWindow(object):
             pass
         self.lineEdit_microwire.setText("1_2")
         self.lineEdit_microwire.setMinimumWidth(300)
-        self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
-        try:
-            self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
-        except Exception:
-            pass
-        self.lineEdit_sample.setText("s1")
+        self.lineEdit_sample = SampleSpinBox()
         self.lineEdit_sample.setMinimumWidth(300)
+        self.lineEdit_sample.setText("s1")
         self.label_composition = QtWidgets.QLabel("Composition:")
         name_grid.addWidget(self.label_composition, 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
@@ -353,31 +383,9 @@ class Ui_MainWindow(object):
         self.sample_row_widget = QtWidgets.QWidget()
         sample_row = QtWidgets.QHBoxLayout(self.sample_row_widget)
         sample_row.setContentsMargins(0, 0, 0, 0)
-        sample_row.setSpacing(4)
+        sample_row.setSpacing(0)
         sample_row.addWidget(self.lineEdit_sample)
         sample_row.setStretch(0, 1)
-        arrow_layout = QtWidgets.QVBoxLayout()
-        arrow_layout.setContentsMargins(0, 0, 0, 0)
-        arrow_layout.setSpacing(2)
-        self.toolButton_sample_up = QtWidgets.QToolButton()
-        self.toolButton_sample_up.setArrowType(QtCore.Qt.ArrowType.UpArrow)
-        self.toolButton_sample_up.setFixedWidth(22)
-        self.toolButton_sample_up.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        self.toolButton_sample_up.setToolTip("Increase sample number")
-        self.toolButton_sample_down = QtWidgets.QToolButton()
-        self.toolButton_sample_down.setArrowType(QtCore.Qt.ArrowType.DownArrow)
-        self.toolButton_sample_down.setFixedWidth(22)
-        self.toolButton_sample_down.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-        self.toolButton_sample_down.setToolTip("Decrease sample number")
-        arrow_layout.addWidget(self.toolButton_sample_up)
-        arrow_layout.addWidget(self.toolButton_sample_down)
-        sample_row.addLayout(arrow_layout)
         name_grid.addWidget(self.sample_row_widget, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
@@ -407,15 +415,15 @@ class Ui_MainWindow(object):
             1,
             QtCore.Qt.AlignmentFlag.AlignRight,
         )
-        grid.addWidget(gb_name, 6, 0, 1, 3)
+        grid.addWidget(gb_name, 8, 0, 1, 3)
 
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
-        grid.addWidget(self.progressBar_process, 7, 0, 1, 3)
+        grid.addWidget(self.progressBar_process, 9, 0, 1, 3)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
-        grid.addWidget(self.label_time_remaining, 8, 0, 1, 3)
+        grid.addWidget(self.label_time_remaining, 10, 0, 1, 3)
         self.label_time_to_limit = QtWidgets.QLabel("To 30 V: N/A")
-        grid.addWidget(self.label_time_to_limit, 9, 0, 1, 3)
+        grid.addWidget(self.label_time_to_limit, 11, 0, 1, 3)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
@@ -442,7 +450,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_live_values, 10, 0, 1, 3)
+        grid.addWidget(self.groupBox_live_values, 12, 0, 1, 3)
 
         # Hold resistance and percent
         hr_layout = QtWidgets.QHBoxLayout()
@@ -458,7 +466,7 @@ class Ui_MainWindow(object):
         hr_layout.addWidget(self.label_resistance_percent_from_hold)
         hr_layout.addWidget(self.label_percent_suffix)
         hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 11, 0, 1, 3)
+        grid.addLayout(hr_layout, 13, 0, 1, 3)
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")

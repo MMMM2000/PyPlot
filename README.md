@@ -166,7 +166,10 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
 * reapplies the saved max-current limit on launch so the first run honours the configured peak without nudging the control
-* the **Sample** field includes inline up/down arrow buttons and honours the keyboard arrows to bump the `s` index without retyping the name
+* the **Sample** field now behaves like a spin box with built-in up/down arrows, matching the other numeric inputs while still honouring the keyboard arrows to bump the `s` index without retyping the name
+* the **Hold current now** button spans the main settings columns so its label never collides with the **Step** control
+* mode selection lives under **Settings → Mode of operation**, keeping the primary pane focused on run parameters while the shortcuts stay available in the menu bar
+* the redundant **Elapsed** readout has been removed to avoid confusion—the hold-resistance percentage continues to track dwell progress in manual mode
 * the **Composition** and **Microwire** fields remember the five most recent entries (shared with the serial data logger) and cycle through them with the Up/Down keys
 * optional infinite looping displays "∞" and locks the loop count
 * configurable response when the supply hits **30 V** (hold, reverse, stop, or ask each time)

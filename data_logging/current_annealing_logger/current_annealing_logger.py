@@ -14,7 +14,7 @@ import math
 import re
 from pathlib import Path
 from collections import deque
-from typing import Any, Deque, Optional, TextIO, Tuple, cast
+from typing import Any, Deque, Dict, Optional, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
@@ -101,7 +101,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.setupUi(self)
         self.history_settings = QtCore.QSettings("microwire", "naming_history")
         self.name_history = LineEditHistory(self.history_settings, parent=self)
-        self._sample_pattern = re.compile(r"^(.*?)(\d+)(.*)$")
         # Window title and size cap for laptop screens
         self.setWindowTitle("Current Annealing Logger")
         try:
@@ -114,7 +113,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         except Exception:
             pass
-        install_standard_menu(self, help_topic="logger_current_annealing")
+        menu_bar = install_standard_menu(self, help_topic="logger_current_annealing")
+        self._mode_actions: Dict[int, QtGui.QAction] = {}
+        self._mode_group: Optional[QtGui.QActionGroup] = None
+        self._mode_menu: Optional[QtWidgets.QMenu] = None
+        self._init_mode_menu(menu_bar)
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
         if hasattr(self.ui, 'lineEdit_log_dir'):
@@ -177,7 +180,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resistance_drop_percent = 10
         self.hold_duration_s = 1
         self.max_current_mA = 10
-        self.operation_mode = 0  # 0 - VCP, 1 - manual, 2 - automatic
+        self.operation_mode = 2  # 0 - VCP, 1 - manual, 2 - automatic (default auto)
         self.process_running = False
 
         self.current_current_set = 0.001
@@ -234,8 +237,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.comboBox_baudrate.currentIndexChanged.connect(self.handle_comboBox_baudrate_currentIndexChanged)
         self.ui.pushButton_send_serial_command.clicked.connect(self.handle_send_serial_command_clicked)
         
-        if hasattr(self.ui, 'comboBox_mode'):
-            self.ui.comboBox_mode.currentIndexChanged.connect(self.handle_mode_changed)
         
         self.ui.spinBox_max_current.valueChanged.connect(self.handle_max_current_value_changed)
         self.ui.spinBox_hold_duration.valueChanged.connect(self.handle_hold_duration_value_changed)
@@ -271,21 +272,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
         self.name_history.register('composition', getattr(self.ui, 'lineEdit_composition', None))
         self.name_history.register('microwire', getattr(self.ui, 'lineEdit_microwire', None))
-        sample_edit = getattr(self.ui, 'lineEdit_sample', None)
-        if isinstance(sample_edit, QtWidgets.QLineEdit):
-            sample_edit.installEventFilter(self)
-        sample_up = getattr(self.ui, 'toolButton_sample_up', None)
-        if isinstance(sample_up, QtWidgets.QAbstractButton):
-            sample_up.setAutoRepeat(True)
-            sample_up.setAutoRepeatDelay(200)
-            sample_up.setAutoRepeatInterval(120)
-            sample_up.clicked.connect(lambda: self._nudge_sample(1))
-        sample_down = getattr(self.ui, 'toolButton_sample_down', None)
-        if isinstance(sample_down, QtWidgets.QAbstractButton):
-            sample_down.setAutoRepeat(True)
-            sample_down.setAutoRepeatDelay(200)
-            sample_down.setAutoRepeatInterval(120)
-            sample_down.clicked.connect(lambda: self._nudge_sample(-1))
         if hasattr(self.ui, 'pushButton_reset_preset'):
             self.ui.pushButton_reset_preset.clicked.connect(self.reset_name_preset)
         if hasattr(self.ui, 'checkBox_reverse'):
@@ -312,15 +298,13 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         # Apply initial mode selection
         try:
-            if hasattr(self.ui, 'comboBox_mode'):
-                self.handle_mode_changed(self.ui.comboBox_mode.currentIndex())
+            self.handle_mode_changed(self.operation_mode)
         except Exception:
             pass
         
         # Disable process controls by default until a port is connected
         self.ui.frame_process_settings.setEnabled(False)
         self.ui.frame_command_and_response.setEnabled(False)
-        self.ui.frame_operation_mode.setEnabled(False)
 
         # Connection overlay over the left panel until port is connected
         self._setup_connect_overlay()
@@ -449,44 +433,63 @@ class MainWindow(QtWidgets.QMainWindow):
         if callable(setter):
             setter(text)
 
-    def _nudge_sample(self, delta: int) -> None:
-        edit = getattr(self.ui, 'lineEdit_sample', None)
-        if not isinstance(edit, QtWidgets.QLineEdit):
+    def _init_mode_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        settings_menu = menu_bar.addMenu("&Settings")
+        if settings_menu is None:
             return
-        text = edit.text().strip()
-        match = self._sample_pattern.match(text) if text else None
-        if match is None:
-            prefix, number, suffix = ('s', '0', '')
-        else:
-            prefix, number, suffix = match.groups()
-            if not prefix:
-                prefix = 's'
+        settings_menu.setObjectName("mw_current_settings")
+        mode_menu = settings_menu.addMenu("Mode of operation")
+        if mode_menu is None:
+            return
+        self._mode_menu = mode_menu
+        group = QtGui.QActionGroup(settings_menu)
+        group.setExclusive(True)
+        self._mode_group = group
+        self._mode_actions.clear()
+        for mode, label in (
+            (0, "Raw VCP"),
+            (1, "Manual annealing"),
+            (2, "Automatic annealing"),
+        ):
+            action = mode_menu.addAction(label)
+            if action is None:
+                continue
+            action.setCheckable(True)
+            action.setData(mode)
+            group.addAction(action)
+            self._mode_actions[mode] = action
+        group.triggered.connect(self._handle_mode_action_triggered)
+        self._sync_mode_actions(getattr(self, 'operation_mode', 2))
+        self._update_mode_action_state()
+
+    def _handle_mode_action_triggered(self, action: QtGui.QAction) -> None:
         try:
-            value = int(number)
-        except ValueError:
-            value = 0
-        value = max(0, value + delta)
-        new_text = f"{prefix}{value}{suffix}"
-        edit.setText(new_text)
-        edit.selectAll()
+            mode = int(action.data())
+        except (TypeError, ValueError):
+            mode = 0
+        self.handle_mode_changed(mode)
+
+    def _sync_mode_actions(self, mode: int) -> None:
+        action = self._mode_actions.get(mode)
+        if action is None:
+            return
+        if not action.isChecked():
+            action.blockSignals(True)
+            action.setChecked(True)
+            action.blockSignals(False)
+
+    def _update_mode_action_state(self) -> None:
+        connected = bool(getattr(self, 'is_connected', False))
+        running = bool(getattr(self, 'process_running', False))
+        enabled = connected and not running
+        for action in self._mode_actions.values():
+            action.setEnabled(enabled)
 
     def _record_name_history(self) -> None:
         for key, attr in (('composition', 'lineEdit_composition'), ('microwire', 'lineEdit_microwire')):
             widget = getattr(self.ui, attr, None)
             if isinstance(widget, QtWidgets.QLineEdit):
                 self.name_history.remember(key, widget.text())
-
-    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
-        if event.type() == QtCore.QEvent.Type.KeyPress and isinstance(obj, QtWidgets.QLineEdit):
-            if obj is getattr(self.ui, 'lineEdit_sample', None):
-                key_event = cast(QtGui.QKeyEvent, event)
-                if key_event.key() == QtCore.Qt.Key.Key_Up:
-                    self._nudge_sample(1)
-                    return True
-                if key_event.key() == QtCore.Qt.Key.Key_Down:
-                    self._nudge_sample(-1)
-                    return True
-        return super().eventFilter(obj, event)
 
     def _set_port_controls_enabled(self, enabled: bool) -> None:
         for name in ('spinBox_port_number', 'comboBox_baudrate', 'comboBox_port', 'pushButton_refresh_ports'):
@@ -538,17 +541,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ser_mcu.readyRead.connect(self.handle_ser_mcu_readyRead)
                 self.is_connected = True
                 self.ui.pushButton_connect_port.setText('Disconnect')
-                self.ui.frame_operation_mode.setEnabled(True)
                 self._set_port_controls_enabled(False)
                 self.ui.frame_command_and_response.setEnabled(True)
                 # Respect the selected mode rather than forcing raw VCP
                 try:
-                    if hasattr(self.ui, 'comboBox_mode'):
-                        self.handle_mode_changed(self.ui.comboBox_mode.currentIndex())
-                    else:
-                        self.handle_raw_vcp_mode_selected()
+                    self.handle_mode_changed(self.operation_mode)
                 except Exception:
                     self.handle_raw_vcp_mode_selected()
+                self._update_mode_action_state()
                 self._show_connect_overlay(False)
 
         else:
@@ -567,8 +567,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self._show_connect_overlay(True)
             self.ui.frame_command_and_response.setEnabled(False)
             self.ui.frame_process_settings.setEnabled(False)
-            self.ui.frame_operation_mode.setEnabled(False)
             self._set_port_controls_enabled(True)
+            self._update_mode_action_state()
 
     def handle_port_number_value_changed(self):
         self.port_number = self.ui.spinBox_port_number.value()
@@ -1049,6 +1049,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.handle_manual_mode_selected()
         else:
             self.handle_automatic_mode_selected()
+        self._sync_mode_actions(self.operation_mode)
         
     def handle_max_current_value_changed(self):
         self.max_current_mA = self.ui.spinBox_max_current.value()
@@ -1085,11 +1086,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.elapsed_seconds += 1
         self.resistance_percent_from_hold = self.current_resistance/self.resistance_at_hold_current*100
         self.ui.label_resistance_percent_from_hold.setText("{:.1f}".format(self.resistance_percent_from_hold))
-        self.ui.lcd_elapsed_seconds.display(self.elapsed_seconds)
-    
+
     def handle_toggle_process_clicked(self):
         if not self.process_running:
             self.process_running = True
+            self._update_mode_action_state()
             self.elapsed_seconds = 0
             self._max_voltage_dialog = False
             self._contact_lost = False
@@ -1101,7 +1102,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self._nonzero_current_seen = False
             self._last_nonzero_current_time = None
             self._skip_current_sample = False
-            self.ui.frame_operation_mode.setEnabled(False)
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
@@ -1142,7 +1142,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.current_resistance = 0
                 self._display_ui_value('lcd_current_mA', "0")
                 self._display_ui_value('label_live_voltage', "0")
-                self.ui.lcd_elapsed_seconds.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
                 self.line_marker="o"
@@ -1198,7 +1197,6 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.ui.progressBar_process.setMaximum(0)
                 if hasattr(self.ui, 'label_time_to_limit'):
                     self.ui.label_time_to_limit.setText("To 30 V: N/A")
-                self.ui.lcd_elapsed_seconds.display(0)
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
                 self.line_marker="o"
@@ -1251,9 +1249,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Re-enable process controls after a start attempt is canceled."""
 
         self._set_process_controls_enabled(True)
-        frame = getattr(self.ui, 'frame_operation_mode', None)
-        if frame is not None:
-            frame.setEnabled(True)
+        self._update_mode_action_state()
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
 
@@ -1295,7 +1291,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_process_controls_enabled(True)
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
-        self.ui.frame_operation_mode.setEnabled(True)
+        self._update_mode_action_state()
         self._reset_voltage_projection()
         if hasattr(self.ui, 'label_time_to_limit'):
             self.ui.label_time_to_limit.setText("To 30 V: N/A")
