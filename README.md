@@ -94,9 +94,9 @@ every dataset visible after Python exits, each workbook and graph inherits the
 source filename as its long name, the axes rescale automatically, and the graph
 title is written through the Origin API (with a label fallback) so the generated
 windows appear immediately in the Project Explorer with their headings already
-in place.  Graphs are now built through LabTalk `plotxy` calls, guaranteeing that
-Origin opens and registers the plot alongside the worksheet even when custom
-templates are unavailable.
+in place.  Graphs are now assembled through the Origin Python API, so the plots
+register alongside their worksheets without spurious LabTalk warnings even when
+custom templates are unavailable.
 Origin stays open throughout multi-file exports and names each graph after the
 source file (without the `.txt` suffix), so batching datasets no longer causes
 Origin to reopen repeatedly.

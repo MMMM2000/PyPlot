@@ -117,23 +117,6 @@ def _resolve_origin_names(
         sheet_short = _origin_short_name(sheet) or desired
 
     return book_short, sheet_short
-
-
-def _lt_color_expr(hex_colour: str) -> str:
-    """Return a LabTalk colour literal for ``hex_colour``."""
-
-    colour = hex_colour.lstrip("#")
-    if len(colour) != 6:
-        return "color(0,0,0)"
-    try:
-        r = int(colour[0:2], 16)
-        g = int(colour[2:4], 16)
-        b = int(colour[4:6], 16)
-    except ValueError:
-        return "color(0,0,0)"
-    return f"color({r},{g},{b})"
-
-
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
@@ -289,7 +272,10 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     worksheet.from_list(1, resistances.tolist())
     worksheet.from_list(2, inc_vals.tolist())
     worksheet.from_list(3, dec_vals.tolist())
-    worksheet.cols_axis('XYYY')
+    try:
+        worksheet.cols_axis('XYYY')
+    except Exception:
+        pass
     try:
         worksheet.set_label(0, "Current (mA)")
         worksheet.set_label(1, "Resistance (Ohm)")
@@ -301,130 +287,143 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     try:
         worksheet.activate()
         origin_any.lt_exec(
-            'wks.col1.lname$ = "Current (mA)";'
-            'wks.col2.lname$ = "Resistance";'
-            'wks.col3.lname$ = "Increasing";'
-            'wks.col4.lname$ = "Decreasing";'
+            'wks.col1.lname$ = "Current (mA)";',
+            'wks.col2.lname$ = "Resistance";',
+            'wks.col3.lname$ = "Increasing";',
+            'wks.col4.lname$ = "Decreasing";',
         )
     except Exception:
         pass
+
+    esc_book = (source_stem or title).replace('"', "'")
     try:
-        esc_book = (source_stem or title).replace('"', "'")
         origin_any.lt_exec(f'page.longname$ = "{esc_book}";')
     except Exception:
         pass
 
     book_hint = source_stem or workbook_name or "CA"
-    book_short, sheet_short = _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
+    _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
 
     has_inc = bool(np.isfinite(inc_vals).any())
     has_dec = bool(np.isfinite(dec_vals).any())
     if not has_inc and not has_dec:
         return
 
-    base_ref = f"[{book_short}]{sheet_short}!"
-    inc_range = "__pyCA_inc"
-    dec_range = "__pyCA_dec"
-
+    graph_obj: Any | None
     try:
-        worksheet.activate()
+        graph_obj = origin_any.new_graph(template='scatter')
+    except Exception:
+        graph_obj = None
+    if graph_obj is None:
+        return
+
+    graph = cast(Any, graph_obj)
+    try:
+        graph.activate()
     except Exception:
         pass
 
-    if has_inc:
-        try:
-            origin_any.lt_exec(f"range {inc_range} = {base_ref}(1,3);")
-        except Exception:
-            has_inc = False
-    if has_dec:
-        try:
-            origin_any.lt_exec(f"range {dec_range} = {base_ref}(1,4);")
-        except Exception:
-            has_dec = False
-
-    plots: List[Tuple[str, int]] = []
-    graph_created = False
-    if has_inc:
-        try:
-            origin_any.lt_exec(f"plotxy iy:={inc_range} plot:=201;")
-            graph_created = True
-            plots.append(("inc", 1))
-        except Exception:
-            has_inc = False
-    if has_dec:
-        if graph_created:
-            try:
-                origin_any.lt_exec(f"layer -i {dec_range};")
-                plots.append(("dec", len(plots) + 1))
-            except Exception:
-                pass
-        else:
-            try:
-                origin_any.lt_exec(f"plotxy iy:={dec_range} plot:=201;")
-                graph_created = True
-                plots.append(("dec", 1))
-            except Exception:
-                pass
-
-    if not graph_created:
+    try:
+        layer = cast(Any, graph[0])
+    except Exception:
+        layer = None
+    if layer is None:
         return
 
-    inc_colour = _lt_color_expr(ORIGIN_INCREASING_COLOUR)
-    dec_colour = _lt_color_expr(ORIGIN_DECREASING_COLOUR)
-
-    for role, idx in plots:
-        colour = inc_colour if role == "inc" else dec_colour
-        for cmd in (
-            f"set p{idx} -k 1;",
-            f"set p{idx} -w 2;",
-            f"set p{idx} -z 4;",
-            f"set p{idx} -c {colour};",
-            f"set p{idx} -cf {colour};",
-            f"set p{idx} -cl {colour};",
-        ):
-            try:
-                origin_any.lt_exec(cmd)
-            except Exception:
-                pass
-
-    legend_lines: List[str] = []
-    for role, idx in plots:
-        label = "Increasing" if role == "inc" else "Decreasing"
-        legend_lines.append(rf"\L({idx}) {label}")
-    if legend_lines:
-        legend_text = "\\n".join(legend_lines)
+    plots: List[Tuple[str, Any]] = []
+    if has_inc:
         try:
-            origin_any.lt_exec('legend.update=0;')
+            inc_plot_obj = layer.add_plot(worksheet, coly=2, colx=0, type='y')
+        except Exception:
+            inc_plot_obj = None
+        if inc_plot_obj is not None:
+            plots.append(("Increasing", cast(Any, inc_plot_obj)))
+
+    if has_dec:
+        try:
+            dec_plot_obj = layer.add_plot(worksheet, coly=3, colx=0, type='y')
+        except Exception:
+            dec_plot_obj = None
+        if dec_plot_obj is not None:
+            plots.append(("Decreasing", cast(Any, dec_plot_obj)))
+
+    if not plots:
+        return
+
+    colour_map = {
+        "Increasing": ORIGIN_INCREASING_COLOUR,
+        "Decreasing": ORIGIN_DECREASING_COLOUR,
+    }
+
+    for label, plot_obj in plots:
+        colour = colour_map[label]
+        try:
+            plot_obj.color = colour
         except Exception:
             pass
         try:
-            origin_any.lt_exec(f'legend.text$ = "{legend_text}";')
+            plot_obj.symbol_edge_color = colour
         except Exception:
             pass
-
-    esc_title = title.replace('"', "'")
-    esc_graph = source_stem.replace('"', "'") if source_stem else esc_title
-    axis_cmds = [
-        'page.antialias=1;',
-        'layer.x.showAxes=1;',
-        'layer.y.showAxes=1;',
-        'layer.x.opposite=0;',
-        'layer.y.opposite=0;',
-        'layer.x.gridMajor=1;',
-        'layer.y.gridMajor=1;',
-        'lab -xb "Current (mA)";',
-        'lab -yl "Resistance (Ohm)";',
-        f'title -s "{esc_title}";',
-        f'page.longname$ = "{esc_graph}";',
-    ]
-    for cmd in axis_cmds:
         try:
-            origin_any.lt_exec(cmd)
+            plot_obj.symbol_fill_color = colour
+        except Exception:
+            pass
+        try:
+            plot_obj.symbol_shape = 2  # circle
+        except Exception:
+            pass
+        try:
+            plot_obj.symbol_size = 4
+        except Exception:
+            pass
+        try:
+            plot_obj.line_width = 2
+        except Exception:
+            pass
+        try:
+            plot_obj.legend = label
         except Exception:
             pass
 
     try:
-        origin_any.lt_exec('layer -a;')
+        layer.rescale()
+    except Exception:
+        pass
+
+    try:
+        title_label = layer.label('Title')
+    except Exception:
+        title_label = None
+    if title_label is not None and hasattr(title_label, 'text'):
+        try:
+            cast(Any, title_label).text = title
+        except Exception:
+            pass
+
+    try:
+        x_axis = layer.axis('x')
+    except Exception:
+        x_axis = None
+    try:
+        y_axis = layer.axis('y')
+    except Exception:
+        y_axis = None
+
+    if x_axis is not None:
+        try:
+            x_axis.title = "Current (mA)"
+        except Exception:
+            pass
+    if y_axis is not None:
+        try:
+            y_axis.title = "Resistance (Ohm)"
+        except Exception:
+            pass
+
+    esc_graph = (source_stem or title).replace('"', "'")
+    try:
+        origin_any.lt_exec(f'page.longname$ = "{esc_graph}";')
     except Exception:
         pass
 
