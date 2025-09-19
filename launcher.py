@@ -25,7 +25,10 @@ from plotting.utils import ensure_app_theme, install_standard_menu, developer_op
 from experiments import EXPERIMENTS
 
 
-PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
+LauncherFactory = Callable[..., QtWidgets.QWidget | None]
+
+
+PLOTTERS: Dict[str, LauncherFactory] = {
     "Stress Dependence": stress_gui.main,
     "Hsw Load Compare": load_compare_gui.main,
     "Maxion Continuous": maxion_gui.main,
@@ -38,12 +41,12 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
     "Hysteresis Loops": loops_gui.main,
 }
 
-LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
+LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": data_logger.main,
     "Current Annealing Logger": current_annealing_logger.main,
 }
 
-EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
+EMULATORS: Dict[str, LauncherFactory] = {
     "Universal Serial Emulator": virtual_serial_emulator_gui.main,
 }
 
@@ -115,7 +118,7 @@ class MasterLauncher(QtWidgets.QWidget):
         exp_layout = QtWidgets.QVBoxLayout(self.exp_tab)
         exp_layout.addWidget(self.exp_list)
 
-        self._registry: dict[str, Dict[str, Callable[..., QtWidgets.QWidget | None]]] = {
+        self._registry: dict[str, Dict[str, LauncherFactory]] = {
             "loggers": LOGGERS,
             "plotters": PLOTTERS,
             "emulators": EMULATORS,
@@ -237,6 +240,8 @@ class MasterLauncher(QtWidgets.QWidget):
             if submenu is None:
                 submenu = QtWidgets.QMenu(label, self)
                 parent_menu.addMenu(submenu)
+            if submenu is None:
+                continue
             group = QtGui.QActionGroup(self)
             group.setExclusive(True)
             for mode, text in (
@@ -245,6 +250,8 @@ class MasterLauncher(QtWidgets.QWidget):
                 ("name_desc", "Name (Z-A)"),
             ):
                 action = submenu.addAction(text)
+                if action is None:
+                    continue
                 action.setCheckable(True)
                 action.setData((category, mode))
                 if self._sort_modes.get(category, "last_used") == mode:

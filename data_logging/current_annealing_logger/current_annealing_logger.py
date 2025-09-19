@@ -920,9 +920,19 @@ class MainWindow(QtWidgets.QMainWindow):
             parts = [p for p in [comp_s, wire_s, sample_s, f"{max_mA}mA"] if p]
             base = " ".join(parts) if parts else "anneal_log"
             # Show only preset fields
-            for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample'):
-                if hasattr(self.ui, name):
-                    getattr(self.ui, name).setVisible(True)
+            for name in (
+                'lineEdit_composition',
+                'lineEdit_microwire',
+                'lineEdit_sample',
+                'sample_row_widget',
+            ):
+                widget = getattr(self.ui, name, None)
+                if widget is not None:
+                    widget.setVisible(True)
+            for name in ('label_composition', 'label_microwire', 'label_sample'):
+                label = getattr(self.ui, name, None)
+                if label is not None:
+                    label.setVisible(True)
             if hasattr(self.ui, 'label_custom_name'):
                 self.ui.label_custom_name.setVisible(False)
             if hasattr(self.ui, 'lineEdit_custom_name'):
@@ -931,9 +941,19 @@ class MainWindow(QtWidgets.QMainWindow):
             custom = getattr(self.ui, 'lineEdit_custom_name', None)
             base = custom.text().strip() if custom is not None and custom.text().strip() else 'anneal_log'
             # Show only custom name field
-            for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample'):
-                if hasattr(self.ui, name):
-                    getattr(self.ui, name).setVisible(False)
+            for name in (
+                'lineEdit_composition',
+                'lineEdit_microwire',
+                'lineEdit_sample',
+                'sample_row_widget',
+            ):
+                widget = getattr(self.ui, name, None)
+                if widget is not None:
+                    widget.setVisible(False)
+            for name in ('label_composition', 'label_microwire', 'label_sample'):
+                label = getattr(self.ui, name, None)
+                if label is not None:
+                    label.setVisible(False)
             if hasattr(self.ui, 'label_custom_name'):
                 self.ui.label_custom_name.setVisible(True)
             if hasattr(self.ui, 'lineEdit_custom_name'):

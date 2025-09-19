@@ -208,7 +208,7 @@ class Ui_MainWindow(object):
 
         self.label_log_file = QtWidgets.QLabel("File name:")
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(360)
+        self.lineEdit_log_file.setMinimumWidth(300)
         self.lineEdit_log_file.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
@@ -256,6 +256,7 @@ class Ui_MainWindow(object):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        self.pushButton_hold_current.setMinimumWidth(200)
         hold_and_step.addWidget(self.pushButton_hold_current, stretch=1)
         hold_and_step.addSpacing(12)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
@@ -326,27 +327,31 @@ class Ui_MainWindow(object):
         except Exception:
             pass
         self.lineEdit_composition.setText("Ni51Fe26Ga21")
-        self.lineEdit_composition.setMinimumWidth(360)
+        self.lineEdit_composition.setMinimumWidth(300)
         self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
         try:
             self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_microwire.setText("1_2")
-        self.lineEdit_microwire.setMinimumWidth(360)
+        self.lineEdit_microwire.setMinimumWidth(300)
         self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
         try:
             self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_sample.setText("s1")
-        self.lineEdit_sample.setMinimumWidth(360)
-        name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
+        self.lineEdit_sample.setMinimumWidth(300)
+        self.label_composition = QtWidgets.QLabel("Composition:")
+        name_grid.addWidget(self.label_composition, 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
-        name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
+        self.label_microwire = QtWidgets.QLabel("Microwire:")
+        name_grid.addWidget(self.label_microwire, 2, 0)
         name_grid.addWidget(self.lineEdit_microwire, 2, 1)
-        name_grid.addWidget(QtWidgets.QLabel("Sample:"), 3, 0)
-        sample_row = QtWidgets.QHBoxLayout()
+        self.label_sample = QtWidgets.QLabel("Sample:")
+        name_grid.addWidget(self.label_sample, 3, 0)
+        self.sample_row_widget = QtWidgets.QWidget()
+        sample_row = QtWidgets.QHBoxLayout(self.sample_row_widget)
         sample_row.setContentsMargins(0, 0, 0, 0)
         sample_row.setSpacing(4)
         sample_row.addWidget(self.lineEdit_sample)
@@ -356,7 +361,7 @@ class Ui_MainWindow(object):
         arrow_layout.setSpacing(2)
         self.toolButton_sample_up = QtWidgets.QToolButton()
         self.toolButton_sample_up.setArrowType(QtCore.Qt.ArrowType.UpArrow)
-        self.toolButton_sample_up.setFixedWidth(28)
+        self.toolButton_sample_up.setFixedWidth(22)
         self.toolButton_sample_up.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -364,7 +369,7 @@ class Ui_MainWindow(object):
         self.toolButton_sample_up.setToolTip("Increase sample number")
         self.toolButton_sample_down = QtWidgets.QToolButton()
         self.toolButton_sample_down.setArrowType(QtCore.Qt.ArrowType.DownArrow)
-        self.toolButton_sample_down.setFixedWidth(28)
+        self.toolButton_sample_down.setFixedWidth(22)
         self.toolButton_sample_down.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Fixed,
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -373,10 +378,10 @@ class Ui_MainWindow(object):
         arrow_layout.addWidget(self.toolButton_sample_up)
         arrow_layout.addWidget(self.toolButton_sample_down)
         sample_row.addLayout(arrow_layout)
-        name_grid.addLayout(sample_row, 3, 1)
+        name_grid.addWidget(self.sample_row_widget, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
-        self.lineEdit_custom_name.setMinimumWidth(360)
+        self.lineEdit_custom_name.setMinimumWidth(300)
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
         name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
