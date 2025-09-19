@@ -212,9 +212,21 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         pass
 
-    gp_obj: Any = origin_any.new_graph(template='scatter')
+    gp_obj: Any | None = None
+    for template in ("scatter", "line", None):
+        candidate: Any | None
+        try:
+            if template is None:
+                candidate = origin_any.new_graph()
+            else:
+                candidate = origin_any.new_graph(template=template)
+        except Exception:
+            candidate = None
+        if candidate is not None:
+            gp_obj = candidate
+            break
     if gp_obj is None:
-        return
+        raise RuntimeError("unable to create an Origin graph window")
     gp: Any = gp_obj
     try:
         gp.activate()

@@ -94,7 +94,9 @@ every dataset visible after Python exits, each workbook and graph inherits the
 source filename as its long name, the axes rescale automatically, and the graph
 title is written through the Origin API (with a label fallback) so the generated
 windows appear immediately in the Project Explorer with their headings already
-in place.
+in place.  When a site lacks the `scatter` template, the exporter falls back to
+Origin's default graph template so the figure still opens before Python
+detaches.
 The scatter layer is created directly on the new graph so the figure opens
 alongside the worksheet instead of leaving only data tables visible.
 Origin stays open throughout multi-file exports and names each graph after the
