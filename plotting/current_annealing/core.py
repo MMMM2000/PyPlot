@@ -14,8 +14,8 @@ from ..utils import (
     apply_readability,
     apply_readability_fonts,
     format_annealing_title,
-    release_origin,
     save_figure,
+    schedule_origin_release,
     show_plots,
 )
 from ..backends import wants_matplotlib, wants_origin
@@ -117,6 +117,61 @@ def _resolve_origin_names(
         sheet_short = _origin_short_name(sheet) or desired
 
     return book_short, sheet_short
+
+
+def _safe_assign(obj: Any, attr: str, value: Any) -> None:
+    try:
+        setattr(obj, attr, value)
+    except Exception:
+        pass
+
+
+def _hex_to_rgb(colour: str) -> Tuple[int, int, int] | None:
+    if not isinstance(colour, str):
+        return None
+    text = colour.strip()
+    if text.startswith("#"):
+        text = text[1:]
+    if len(text) != 6:
+        return None
+    try:
+        r = int(text[0:2], 16)
+        g = int(text[2:4], 16)
+        b = int(text[4:6], 16)
+    except ValueError:
+        return None
+    return r, g, b
+
+
+def _apply_origin_colour(origin_any: Any, plot_obj: Any, index: int, colour: str) -> None:
+    _safe_assign(plot_obj, "color", colour)
+    _safe_assign(plot_obj, "symbol_edge_color", colour)
+    _safe_assign(plot_obj, "symbol_fill_color", colour)
+
+    symbol = getattr(plot_obj, "symbol", None)
+    if symbol is not None:
+        _safe_assign(symbol, "color", colour)
+        _safe_assign(symbol, "edgecolor", colour)
+        _safe_assign(symbol, "fillcolor", colour)
+        _safe_assign(symbol, "colorAuto", False)
+        _safe_assign(symbol, "fillColorAuto", False)
+
+    rgb = _hex_to_rgb(colour)
+    if rgb is None:
+        return
+
+    r, g, b = rgb
+    lt_cmd = (
+        f"layer -i {index};"
+        f"set %C -c color({r},{g},{b});"
+        f"set %C -k color({r},{g},{b});"
+        f"set %C -cf color({r},{g},{b});"
+        f"set %C -kf color({r},{g},{b});"
+    )
+    try:
+        origin_any.lt_exec(lt_cmd)
+    except Exception:
+        pass
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
@@ -355,36 +410,13 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         "Decreasing": ORIGIN_DECREASING_COLOUR,
     }
 
-    for label, plot_obj in plots:
+    for idx, (label, plot_obj) in enumerate(plots, start=1):
         colour = colour_map[label]
-        try:
-            plot_obj.color = colour
-        except Exception:
-            pass
-        try:
-            plot_obj.symbol_edge_color = colour
-        except Exception:
-            pass
-        try:
-            plot_obj.symbol_fill_color = colour
-        except Exception:
-            pass
-        try:
-            plot_obj.symbol_shape = 2  # circle
-        except Exception:
-            pass
-        try:
-            plot_obj.symbol_size = 4
-        except Exception:
-            pass
-        try:
-            plot_obj.line_width = 2
-        except Exception:
-            pass
-        try:
-            plot_obj.legend = label
-        except Exception:
-            pass
+        _apply_origin_colour(origin_any, plot_obj, idx, colour)
+        _safe_assign(plot_obj, "symbol_shape", 2)
+        _safe_assign(plot_obj, "symbol_size", 4)
+        _safe_assign(plot_obj, "line_width", 2)
+        _safe_assign(plot_obj, "legend", label)
 
     try:
         layer.rescale()
@@ -447,7 +479,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
                     print(f"Origin plot failed for {title}: {e}")
     finally:
         if use_origin:
-            release_origin()
+            schedule_origin_release()
 
     if wants_matplotlib(backend):
         if SHOW_PLOTS:

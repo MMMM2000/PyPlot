@@ -2,6 +2,7 @@ from PyQt6 import QtWidgets, QtGui, QtCore
 import os
 import sys
 import weakref
+import atexit
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -38,17 +39,58 @@ def origin_session() -> Iterator[Any]:
             pass
 
 
+_ORIGIN_RELEASED = False
+_ORIGIN_RELEASE_REGISTERED = False
+_ORIGIN_RELEASE_SLOTS: list[Callable[[], None]] = []
+
+
 def release_origin() -> None:
     """Release control of Origin so the application can be closed."""
+
+    global _ORIGIN_RELEASED
+    if _ORIGIN_RELEASED:
+        return
 
     try:
         import originpro as op  # type: ignore
     except Exception:
         return
+
     try:
         cast(Any, op).detach()
     except Exception:
         pass
+
+    _ORIGIN_RELEASED = True
+
+
+def schedule_origin_release() -> None:
+    """Ensure Origin detaches once the application shuts down."""
+
+    global _ORIGIN_RELEASE_REGISTERED
+
+    if _ORIGIN_RELEASED or _ORIGIN_RELEASE_REGISTERED:
+        return
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        release_origin()
+        return
+
+    def _detach() -> None:
+        release_origin()
+
+    try:
+        app.aboutToQuit.connect(_detach)  # type: ignore[arg-type]
+    except Exception:
+        release_origin()
+        return
+
+    _ORIGIN_RELEASE_SLOTS.append(_detach)
+    _ORIGIN_RELEASE_REGISTERED = True
+
+
+atexit.register(release_origin)
 
 
 def format_annealing_title(base: str) -> str:

@@ -89,14 +89,21 @@ while current increases and blue while it decreases to mirror the live logger.
 Origin exports now mirror the logger exactly: increasing ramps are forced to
 red and decreasing ramps to blue, with marker fill and edge colours locked to
 their lines and a compact legend showing only the Increasing and Decreasing
-entries.  Each input file spawns its own Origin workbook so multi-file runs keep
-every dataset visible after Python exits, each workbook and graph inherits the
-source filename as its long name, the axes rescale automatically, and the graph
-title is written through the Origin API (with a label fallback) so the generated
-windows appear immediately in the Project Explorer with their headings already
-in place.  Graphs are now assembled through the Origin Python API, so the plots
-register alongside their worksheets without spurious LabTalk warnings even when
-custom templates are unavailable.
+entries.  If Origin ignores the Python symbol assignments, the exporter now
+falls back to LabTalk `set %C` commands so the marker outline and fill inherit
+the same RGB triplet as the trace, eliminating the lingering black dots seen in
+earlier runs. Each input file spawns its own Origin workbook so multi-file runs
+keep every dataset visible after Python exits, each workbook and graph inherits
+the source filename as its long name, the axes rescale automatically, and the
+graph title is written through the Origin API (with a label fallback) so the
+generated windows appear immediately in the Project Explorer with their
+headings already in place. Graphs are now assembled through the Origin Python
+API, so the plots register alongside their worksheets without spurious LabTalk
+warnings even when custom templates are unavailable. Origin connections stay
+attached while the plotting dialogs remain open—detaching is scheduled for the
+Qt application shutdown (or immediate when running headless)—so Python windows
+no longer disappear the moment an Origin export finishes, yet the Origin
+application can still be closed cleanly afterwards.
 Origin stays open throughout multi-file exports and names each graph after the
 source file (without the `.txt` suffix), so batching datasets no longer causes
 Origin to reopen repeatedly.
