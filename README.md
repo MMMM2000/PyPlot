@@ -166,6 +166,8 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
 * reapplies the saved max-current limit on launch so the first run honours the configured peak without nudging the control
+* the **Sample** field includes inline up/down arrow buttons and honours the keyboard arrows to bump the `s` index without retyping the name
+* the **Composition** and **Microwire** fields remember the five most recent entries (shared with the serial data logger) and cycle through them with the Up/Down keys
 * optional infinite looping displays "∞" and locks the loop count
 * configurable response when the supply hits **30 V** (hold, reverse, stop, or ask each time)
 * live projection of how long remains until the supply reaches 30 V plus the
@@ -215,6 +217,10 @@ python -m experiments.pyvisa_current_annealing_logger
 
 Records arbitrary measurements to structured text files with a built‑in file
 name builder.  Real‑time plots update while logging and match the system theme.
+Recent updates include:
+
+* the composition and microwire fields share the same five-entry history as the current annealing logger, so pressing Up/Down cycles through the most recent experiment names without retyping
+* history tracking persists between runs, making it easy to repeat a series of measurements with consistent naming
 
 ## 4. Virtual COM‑port emulator
 

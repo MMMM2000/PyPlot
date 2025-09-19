@@ -11,6 +11,7 @@ import sys
 import os
 import time
 import math
+import re
 from pathlib import Path
 from collections import deque
 from typing import Any, Deque, Optional, TextIO, Tuple, cast
@@ -21,6 +22,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 
 from .ui_en import Ui_MainWindow
 from plotting.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
+from data_logging.naming_history import LineEditHistory
 
 import numpy as np
 import matplotlib
@@ -97,6 +99,9 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.ui = cast(Any, Ui_MainWindow())
         self.ui.setupUi(self)
+        self.history_settings = QtCore.QSettings("microwire", "naming_history")
+        self.name_history = LineEditHistory(self.history_settings, parent=self)
+        self._sample_pattern = re.compile(r"^(.*?)(\d+)(.*)$")
         # Window title and size cap for laptop screens
         self.setWindowTitle("Current Annealing Logger")
         try:
@@ -264,6 +269,23 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample','lineEdit_custom_name'):
             if hasattr(self.ui, name):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
+        self.name_history.register('composition', getattr(self.ui, 'lineEdit_composition', None))
+        self.name_history.register('microwire', getattr(self.ui, 'lineEdit_microwire', None))
+        sample_edit = getattr(self.ui, 'lineEdit_sample', None)
+        if isinstance(sample_edit, QtWidgets.QLineEdit):
+            sample_edit.installEventFilter(self)
+        sample_up = getattr(self.ui, 'toolButton_sample_up', None)
+        if isinstance(sample_up, QtWidgets.QAbstractButton):
+            sample_up.setAutoRepeat(True)
+            sample_up.setAutoRepeatDelay(200)
+            sample_up.setAutoRepeatInterval(120)
+            sample_up.clicked.connect(lambda: self._nudge_sample(1))
+        sample_down = getattr(self.ui, 'toolButton_sample_down', None)
+        if isinstance(sample_down, QtWidgets.QAbstractButton):
+            sample_down.setAutoRepeat(True)
+            sample_down.setAutoRepeatDelay(200)
+            sample_down.setAutoRepeatInterval(120)
+            sample_down.clicked.connect(lambda: self._nudge_sample(-1))
         if hasattr(self.ui, 'pushButton_reset_preset'):
             self.ui.pushButton_reset_preset.clicked.connect(self.reset_name_preset)
         if hasattr(self.ui, 'checkBox_reverse'):
@@ -426,6 +448,45 @@ class MainWindow(QtWidgets.QMainWindow):
         setter = getattr(target, 'setText', None)
         if callable(setter):
             setter(text)
+
+    def _nudge_sample(self, delta: int) -> None:
+        edit = getattr(self.ui, 'lineEdit_sample', None)
+        if not isinstance(edit, QtWidgets.QLineEdit):
+            return
+        text = edit.text().strip()
+        match = self._sample_pattern.match(text) if text else None
+        if match is None:
+            prefix, number, suffix = ('s', '0', '')
+        else:
+            prefix, number, suffix = match.groups()
+            if not prefix:
+                prefix = 's'
+        try:
+            value = int(number)
+        except ValueError:
+            value = 0
+        value = max(0, value + delta)
+        new_text = f"{prefix}{value}{suffix}"
+        edit.setText(new_text)
+        edit.selectAll()
+
+    def _record_name_history(self) -> None:
+        for key, attr in (('composition', 'lineEdit_composition'), ('microwire', 'lineEdit_microwire')):
+            widget = getattr(self.ui, attr, None)
+            if isinstance(widget, QtWidgets.QLineEdit):
+                self.name_history.remember(key, widget.text())
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QtCore.QEvent.Type.KeyPress and isinstance(obj, QtWidgets.QLineEdit):
+            if obj is getattr(self.ui, 'lineEdit_sample', None):
+                key_event = cast(QtGui.QKeyEvent, event)
+                if key_event.key() == QtCore.Qt.Key.Key_Up:
+                    self._nudge_sample(1)
+                    return True
+                if key_event.key() == QtCore.Qt.Key.Key_Down:
+                    self._nudge_sample(-1)
+                    return True
+        return super().eventFilter(obj, event)
 
     def _set_port_controls_enabled(self, enabled: bool) -> None:
         for name in ('spinBox_port_number', 'comboBox_baudrate', 'comboBox_port', 'pushButton_refresh_ports'):
@@ -1044,6 +1105,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.pushButton_start_process.setText("Start annealing process")
                     self._restore_idle_controls()
                     return
+                self._record_name_history()
                 if hasattr(self.ui, 'progressBar_process'):
                     self.ui.progressBar_process.setMaximum(0)
                     self.ui.progressBar_process.setValue(0)
@@ -1082,6 +1144,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.pushButton_start_process.setText("Start annealing process")
                     self._restore_idle_controls()
                     return
+                self._record_name_history()
                 self.current_increment = self.current_step_A
                 self.direction_ascending = True
                 self.current_current_set = 0.001
@@ -1257,13 +1320,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Signal that a new sample arrived so command sequencing can continue
             skip_sample = bool(self._skip_current_sample)
-            if self.first_sample:
-                if not skip_sample:
+            if not skip_sample:
+                if self.first_sample:
                     self.first_sample = False
                     self.prev_value_x = None
                     self.prev_value_y = None
-            else:
-                if not skip_sample:
+                else:
                     self.sample_index += 1
                     if self.prev_value_x is not None and self.prev_value_y is not None:
                         ax1 = getattr(self, 'ax1', None)
@@ -1301,8 +1363,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 canvas.draw()
                                 canvas.flush_events()
 
-                    self.prev_value_x = self.curr_value_x
-                    self.prev_value_y = self.curr_value_y
+                self.prev_value_x = self.curr_value_x
+                self.prev_value_y = self.curr_value_y
 
 
             # Iterate the current set point
@@ -1354,13 +1416,12 @@ class MainWindow(QtWidgets.QMainWindow):
 
             # Signal that a new sample arrived so command sequencing can continue
             skip_sample = bool(self._skip_current_sample)
-            if self.first_sample:
-                if not skip_sample:
+            if not skip_sample:
+                if self.first_sample:
                     self.first_sample = False
                     self.prev_value_x = None
                     self.prev_value_y = None
-            else:
-                if not skip_sample:
+                else:
                     self.sample_index += 1
                     if self.prev_value_x is not None and self.prev_value_y is not None:
                         ax1 = getattr(self, 'ax1', None)
@@ -1398,8 +1459,8 @@ class MainWindow(QtWidgets.QMainWindow):
                                 canvas.draw()
                                 canvas.flush_events()
 
-                    self.prev_value_x = self.curr_value_x
-                    self.prev_value_y = self.curr_value_y
+                self.prev_value_x = self.curr_value_x
+                self.prev_value_y = self.curr_value_y
 
 
 

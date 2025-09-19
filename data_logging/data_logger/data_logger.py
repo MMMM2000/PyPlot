@@ -14,6 +14,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 from .logger_ui import UiMainWindow
 from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
 from .serial_port import serial_connection
+from data_logging.naming_history import LineEditHistory
 
 from plotting.utils import ensure_app_theme, install_standard_menu
 import random
@@ -100,6 +101,8 @@ class MainWindow(QtWidgets.QMainWindow):
 
         install_standard_menu(self, help_topic="logger_serial_data")
 
+        self.naming_history = LineEditHistory(QtCore.QSettings("microwire", "naming_history"), parent=self)
+
         self.ui.lineEdit_log_dir.setText(self.log_dir)
         self.ui.pushButton_browse_dir.clicked.connect(self.choose_log_dir)
         # Open directory button
@@ -162,6 +165,10 @@ class MainWindow(QtWidgets.QMainWindow):
             load_edit = self.name_builder.s_load.lineEdit()
             if load_edit is not None:
                 load_edit.returnPressed.connect(self.start_logging)
+            self.naming_history.register("composition", getattr(self.name_builder, "s_comp", None))
+            self.naming_history.register("composition", getattr(self.name_builder, "t_comp", None))
+            self.naming_history.register("microwire", getattr(self.name_builder, "s_sample", None))
+            self.naming_history.register("microwire", getattr(self.name_builder, "t_sample", None))
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
@@ -1322,6 +1329,27 @@ class MainWindow(QtWidgets.QMainWindow):
                 spine.set_color(self._plot_fg)
         self.canvas.draw_idle()
 
+    def _record_name_history(self) -> None:
+        builder = getattr(self, 'name_builder', None)
+        if builder is None:
+            return
+        mode = self._current_format()
+        if mode == 'Stress':
+            pairs = (
+                ('composition', getattr(builder, 's_comp', None)),
+                ('microwire', getattr(builder, 's_sample', None)),
+            )
+        elif mode == 'Temperature':
+            pairs = (
+                ('composition', getattr(builder, 't_comp', None)),
+                ('microwire', getattr(builder, 't_sample', None)),
+            )
+        else:
+            return
+        for key, widget in pairs:
+            if isinstance(widget, QtWidgets.QLineEdit):
+                self.naming_history.remember(key, widget.text())
+
     def start_logging(self):
         """Open the selected log file, begin logging, or toggle pause."""
         if self.logging_on:
@@ -1398,6 +1426,7 @@ class MainWindow(QtWidgets.QMainWindow):
             )
             return
 
+        self._record_name_history()
         self.sample_count = self.ui.spinBox_log_sample_count.value()
         self.sample_idx = 0
         self.logging_on = True

@@ -22,6 +22,8 @@ class Ui_MainWindow(object):
         self.label_set_current: Optional[QtWidgets.QLabel] = None
         self.lcd_current_mA: Optional[QtWidgets.QLCDNumber] = None
         self.lcd_resistance: Optional[QtWidgets.QLCDNumber] = None
+        self.toolButton_sample_up: Optional[QtWidgets.QToolButton] = None
+        self.toolButton_sample_down: Optional[QtWidgets.QToolButton] = None
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("CurrentAnnealingMainWindow")
@@ -250,13 +252,12 @@ class Ui_MainWindow(object):
         # Hold button + Step control in one row to save space
         hold_and_step = QtWidgets.QHBoxLayout()
         self.pushButton_hold_current = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_hold_current.setMaximumWidth(220)
         self.pushButton_hold_current.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        hold_and_step.addWidget(self.pushButton_hold_current)
-        hold_and_step.addStretch(1)
+        hold_and_step.addWidget(self.pushButton_hold_current, stretch=1)
+        hold_and_step.addSpacing(12)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
@@ -345,7 +346,34 @@ class Ui_MainWindow(object):
         name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
         name_grid.addWidget(self.lineEdit_microwire, 2, 1)
         name_grid.addWidget(QtWidgets.QLabel("Sample:"), 3, 0)
-        name_grid.addWidget(self.lineEdit_sample, 3, 1)
+        sample_row = QtWidgets.QHBoxLayout()
+        sample_row.setContentsMargins(0, 0, 0, 0)
+        sample_row.setSpacing(4)
+        sample_row.addWidget(self.lineEdit_sample)
+        sample_row.setStretch(0, 1)
+        arrow_layout = QtWidgets.QVBoxLayout()
+        arrow_layout.setContentsMargins(0, 0, 0, 0)
+        arrow_layout.setSpacing(2)
+        self.toolButton_sample_up = QtWidgets.QToolButton()
+        self.toolButton_sample_up.setArrowType(QtCore.Qt.ArrowType.UpArrow)
+        self.toolButton_sample_up.setFixedWidth(28)
+        self.toolButton_sample_up.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.toolButton_sample_up.setToolTip("Increase sample number")
+        self.toolButton_sample_down = QtWidgets.QToolButton()
+        self.toolButton_sample_down.setArrowType(QtCore.Qt.ArrowType.DownArrow)
+        self.toolButton_sample_down.setFixedWidth(28)
+        self.toolButton_sample_down.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        self.toolButton_sample_down.setToolTip("Decrease sample number")
+        arrow_layout.addWidget(self.toolButton_sample_up)
+        arrow_layout.addWidget(self.toolButton_sample_down)
+        sample_row.addLayout(arrow_layout)
+        name_grid.addLayout(sample_row, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
         self.lineEdit_custom_name.setMinimumWidth(360)
