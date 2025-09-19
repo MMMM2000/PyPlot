@@ -209,6 +209,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._skip_current_sample = False
         self._process_start_time: float | None = None
         self._last_nonzero_current_time: float | None = None
+        self._zero_placeholder_count = 0
+        self._zero_placeholders_active = False
+        self._zero_placeholder_line1: Line2D | None = None
+        self._zero_placeholder_line2: Line2D | None = None
         self._contact_grace_period = 5.0
         self._last_serial_rx: float | None = None
         self._serial_quiet_failures = 0
@@ -419,6 +423,88 @@ class MainWindow(QtWidgets.QMainWindow):
                 print(*args)
             except Exception:
                 pass
+
+    def _record_zero_placeholder(self) -> None:
+        """Visualise leading zero-current samples without persisting them."""
+
+        if self._nonzero_current_seen:
+            return
+        ax1 = getattr(self, 'ax1', None)
+        ax2 = getattr(self, 'ax2', None)
+        if ax1 is None or ax2 is None:
+            return
+
+        if self._zero_placeholder_line1 is None:
+            marker = Line2D([], [], linestyle='None', marker='o', color=self.line_color)
+            try:
+                marker.set_markersize(5)
+            except Exception:
+                pass
+            ax1.add_line(marker)
+            self._zero_placeholder_line1 = marker
+        if self._zero_placeholder_line2 is None:
+            marker = Line2D([], [], linestyle='None', marker='o', color=self.line_color)
+            try:
+                marker.set_markersize(5)
+            except Exception:
+                pass
+            ax2.add_line(marker)
+            self._zero_placeholder_line2 = marker
+
+        self._zero_placeholder_count += 1
+        zeros = [0.0] * self._zero_placeholder_count
+        indices = list(range(self._zero_placeholder_count))
+        if self._zero_placeholder_line1 is not None:
+            self._zero_placeholder_line1.set_data(zeros, zeros)
+        if self._zero_placeholder_line2 is not None:
+            self._zero_placeholder_line2.set_data(indices, zeros)
+
+        for axis in (ax1, ax2):
+            axis.relim()
+            axis.autoscale_view()
+
+        canvas = getattr(self, 'canvas', None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+                canvas.flush_events()
+            except Exception:
+                canvas.draw()
+        self._zero_placeholders_active = True
+
+    def _clear_zero_placeholders(self) -> None:
+        """Remove any temporary zero-current markers from the plots."""
+
+        if not self._zero_placeholders_active and self._zero_placeholder_count == 0:
+            return
+
+        for line in (self._zero_placeholder_line1, self._zero_placeholder_line2):
+            if line is None:
+                continue
+            try:
+                line.remove()
+            except Exception:
+                pass
+
+        self._zero_placeholder_line1 = None
+        self._zero_placeholder_line2 = None
+        self._zero_placeholder_count = 0
+        self._zero_placeholders_active = False
+
+        ax1 = getattr(self, 'ax1', None)
+        ax2 = getattr(self, 'ax2', None)
+        for axis in (ax1, ax2):
+            if axis is not None:
+                axis.relim()
+                axis.autoscale_view()
+
+        canvas = getattr(self, 'canvas', None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+                canvas.flush_events()
+            except Exception:
+                canvas.draw()
 
     def _display_ui_value(self, attr: str, text: str) -> None:
         widget = getattr(self.ui, attr, None)
@@ -631,6 +717,7 @@ class MainWindow(QtWidgets.QMainWindow):
                         # timeout as a communication failure.
                         self.sample_ready = True
                         if not self._nonzero_current_seen:
+                            self._record_zero_placeholder()
                             # Ignore sustained zero readings until we have
                             # confirmed the setup is capable of sourcing
                             # current at least once. This prevents false
@@ -673,6 +760,8 @@ class MainWindow(QtWidgets.QMainWindow):
                     self._zero_current_count = 0
                     self._contact_lost = False
                     self._nonzero_current_seen = True
+                    if self._zero_placeholders_active:
+                        self._clear_zero_placeholders()
                     try:
                         self._last_nonzero_current_time = time.monotonic()
                     except Exception:
@@ -1102,6 +1191,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self._nonzero_current_seen = False
             self._last_nonzero_current_time = None
             self._skip_current_sample = False
+            self._clear_zero_placeholders()
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
@@ -1264,6 +1354,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._skip_current_sample = False
         self._process_start_time = None
         self._last_nonzero_current_time = None
+        self._clear_zero_placeholders()
         try:
             self.timer_command.stop()
             self.hold_timer.stop()
@@ -1853,6 +1944,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax2.yaxis.label.set_color(text_rgb)
             self.line2 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
             self.ax2.add_line(self.line2)
+            self._zero_placeholder_line1 = None
+            self._zero_placeholder_line2 = None
+            self._zero_placeholder_count = 0
+            self._zero_placeholders_active = False
             # Let Matplotlib compute proper spacing; avoid text overlap
             if self.canvas is not None:
                 self.canvas.draw()
@@ -1871,6 +1966,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax2.grid(True)
             self.line2 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
             self.ax2.add_line(self.line2)
+            self._zero_placeholder_line1 = None
+            self._zero_placeholder_line2 = None
+            self._zero_placeholder_count = 0
+            self._zero_placeholders_active = False
             plt.ion()
             show_plots()
         

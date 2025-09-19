@@ -68,8 +68,9 @@ window (including the search box) to run the highlighted script immediately.
 
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
-places **Add Files/Folders** and **Remove Selected** buttons above a wide,
-non‑scrolling list so datasets can be refined without restarting the tool.
+places **Add Files/Folders**, **Remove Selected**, and **Remove All** buttons above
+a wide, non‑scrolling list so datasets can be refined without restarting the
+tool.
 Settings panels wrap content vertically and disable horizontal scrollbars for a
 clean, uncluttered layout. Each settings window embeds a small console and
 places it next to the file list in a side panel beside the plot options, so the
@@ -85,6 +86,9 @@ independently, so Matplotlib/Origin toggles and export resolution reopen the way
 you left them.  The current annealing plotter also omits the initial 0 mA data
 point so figures start with the first real sample, and ramps are coloured red
 while current increases and blue while it decreases to mirror the live logger.
+Origin stays open throughout multi-file exports and names each graph after the
+source file (without the `.txt` suffix), so batching datasets no longer causes
+Origin to reopen repeatedly.
 Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
@@ -168,6 +172,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * reapplies the saved max-current limit on launch so the first run honours the configured peak without nudging the control
 * the **Sample** field now behaves like a spin box with built-in up/down arrows, matching the other numeric inputs while still honouring the keyboard arrows to bump the `s` index without retyping the name
 * the **Hold current now** button spans the main settings columns so its label never collides with the **Step** control
+* the process settings grid packs the directory and file pickers alongside their action buttons and pairs the ramp controls across two rows, eliminating the wide blank column and keeping related inputs together
 * mode selection lives under **Settings → Mode of operation**, keeping the primary pane focused on run parameters while the shortcuts stay available in the menu bar
 * the redundant **Elapsed** readout has been removed to avoid confusion—the hold-resistance percentage continues to track dwell progress in manual mode
 * the **Composition** and **Microwire** fields remember the five most recent entries (shared with the serial data logger) and cycle through them with the Up/Down keys
@@ -181,8 +186,7 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 * live display of set current, measured current and voltage
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
-* skips the initial zero sample and any sudden 0 mA readings that occur when the
-  wire burns through, so logs and plots stay smooth
+* briefly shows zero-current placeholders on the live plot when the run begins so you can confirm data is arriving, then removes them as soon as real measurements start while still ignoring the later sudden 0 mA readings that signal a burnt wire
 * contact-loss detection waits until the logger has measured a non-zero current,
   then applies a short start-up grace period and requires multiple zeros spread
   over a short delay before stopping, so start-up ramps and momentary dips no

@@ -107,14 +107,16 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     return fig, fname
 
 
-def plot_one_origin(df: pd.DataFrame, title: str) -> None:
+def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     import originpro as op  # lazy import
     origin_any: Any = cast(Any, op)
     try:
         origin_any.set_show()
     except Exception:
         pass
-    w: Any = origin_any.new_sheet('w', lname=title[:30])
+    source_stem = Path(source_name).stem or title
+    workbook_name = source_stem[:30] if source_stem else title[:30]
+    w: Any = origin_any.new_sheet('w', lname=workbook_name)
     w.from_list(0, df["I_mA"].to_list())
     w.from_list(1, df["R_Ohm"].to_list())
     w.cols_axis('XY')
@@ -131,6 +133,7 @@ def plot_one_origin(df: pd.DataFrame, title: str) -> None:
     try:
         gp.activate()
         esc = title.replace('"', "'")
+        esc_long = source_stem.replace('"', "'")
         origin_any.lt_exec('page.antialias=1; layer -aa 1;')
         origin_any.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
         label_method = getattr(gl, "label", None)
@@ -139,15 +142,14 @@ def plot_one_origin(df: pd.DataFrame, title: str) -> None:
             if legend_label is not None and hasattr(legend_label, "text"):
                 legend_label_any = cast(Any, legend_label)
                 try:
-                    legend_label_any.text = esc
+                    legend_label_any.text = esc_long or esc
                 except Exception:
                     pass
         origin_any.lt_exec('legend.update=0;')
-    except Exception:
-        pass
-
-    try:
-        origin_any.exit()
+        if esc_long:
+            origin_any.lt_exec(f'page.longname$ = "{esc_long}";')
+        else:
+            origin_any.lt_exec(f'page.longname$ = "{esc}";')
     except Exception:
         pass
 
@@ -164,7 +166,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
             outs.append((fig, fname))
         if wants_origin(backend):
             try:
-                plot_one_origin(df, title)
+                plot_one_origin(df, title, Path(path).name)
             except Exception as e:
                 print(f"Origin plot failed for {title}: {e}")
 

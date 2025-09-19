@@ -483,6 +483,13 @@ def create_file_widget(
             _refresh_items()
             _store_files()
 
+    def remove_all() -> None:
+        if not files:
+            return
+        files.clear()
+        _refresh_items()
+        _store_files()
+
     def open_item(item: QtWidgets.QListWidgetItem) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
 
@@ -493,6 +500,8 @@ def create_file_widget(
     add_btn.clicked.connect(add_files)
     remove_btn = QtWidgets.QPushButton("Remove Selected")
     remove_btn.clicked.connect(remove_selected)
+    remove_all_btn = QtWidgets.QPushButton("Remove All")
+    remove_all_btn.clicked.connect(remove_all)
     # Optional outlier toggles now live with each plotting dialog
     from . import common as _common  # local import to avoid cycles at module import
     chk_out_btn = QtWidgets.QPushButton("Check Outliers")
@@ -556,6 +565,7 @@ def create_file_widget(
     btn_row = QtWidgets.QHBoxLayout()
     btn_row.addWidget(add_btn)
     btn_row.addWidget(remove_btn)
+    btn_row.addWidget(remove_all_btn)
     btn_row.addWidget(chk_out_btn)
     btn_row.addWidget(auto_rm_cb)
     btn_row.addStretch()

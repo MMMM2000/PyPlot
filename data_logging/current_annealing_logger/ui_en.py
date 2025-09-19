@@ -231,41 +231,47 @@ class Ui_MainWindow(object):
         gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_process_settings)
         self.groupBox_process_settings = gb_proc
         grid = QtWidgets.QGridLayout(gb_proc)
-        # Make the main text fields expand and keep the buttons narrow
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        # Keep labels compact while inputs stretch to fill the column
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
 
-        # Log file location (separate directory and file name)
+        # Log file location (directory + quick actions)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
-        self.lineEdit_log_dir.setMinimumWidth(360)
+        self.lineEdit_log_dir.setMinimumWidth(320)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.pushButton_open_dir = QtWidgets.QPushButton("Open")
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
-        dir_btns = QtWidgets.QHBoxLayout()
-        dir_btns.setContentsMargins(0, 0, 0, 0)
-        dir_btns.setSpacing(4)
-        dir_btns.addWidget(self.pushButton_open_dir)
-        dir_btns.addWidget(self.pushButton_browse_dir)
+        dir_row = QtWidgets.QHBoxLayout()
+        dir_row.setContentsMargins(0, 0, 0, 0)
+        dir_row.setSpacing(6)
+        dir_row.addWidget(self.lineEdit_log_dir, 1)
+        dir_row.addWidget(self.pushButton_open_dir)
+        dir_row.addWidget(self.pushButton_browse_dir)
         grid.addWidget(self.label_log_dir, 0, 0)
-        grid.addWidget(self.lineEdit_log_dir, 0, 1)
-        grid.addLayout(dir_btns, 0, 2)
+        grid.addLayout(dir_row, 0, 1)
 
+        # File name preview
         self.label_log_file = QtWidgets.QLabel("File name:")
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(300)
+        self.lineEdit_log_file.setMinimumWidth(260)
         self.lineEdit_log_file.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.label_extension = QtWidgets.QLabel(".txt")
+        file_row = QtWidgets.QHBoxLayout()
+        file_row.setContentsMargins(0, 0, 0, 0)
+        file_row.setSpacing(6)
+        file_row.addWidget(self.lineEdit_log_file, 1)
+        file_row.addWidget(self.label_extension)
         grid.addWidget(self.label_log_file, 1, 0)
-        grid.addWidget(self.lineEdit_log_file, 1, 1)
-        grid.addWidget(self.label_extension, 1, 2)
+        grid.addLayout(file_row, 1, 1)
 
         # Legacy single-path widgets kept (hidden) for compatibility with code
         self.label_log_file_legacy = QtWidgets.QLabel("Log file:")
@@ -276,34 +282,45 @@ class Ui_MainWindow(object):
         self.pushButton_select_filename = QtWidgets.QPushButton("...")
         self.pushButton_select_filename.hide()
 
-        # Hold current [mA]
+        # Ramp configuration compacted into two rows
+        ramp = QtWidgets.QGridLayout()
+        ramp.setContentsMargins(0, 0, 0, 0)
+        ramp.setHorizontalSpacing(12)
+        ramp.setVerticalSpacing(6)
         self.label_max_current = QtWidgets.QLabel("Max current [mA]:")
         self.spinBox_max_current = QtWidgets.QSpinBox()
         self.spinBox_max_current.setRange(1, 10_000)
         self.spinBox_max_current.setValue(10)
-        self.spinBox_max_current.setMaximumWidth(80)
-        # Move one row down to avoid overlap with File name
-        grid.addWidget(self.label_max_current, 2, 0)
-        grid.addWidget(self.spinBox_max_current, 2, 1)
-
-        # Hold time [s]
-        # Step [mA]
+        self.spinBox_max_current.setMaximumWidth(90)
+        ramp.addWidget(self.label_max_current, 0, 0)
+        ramp.addWidget(self.spinBox_max_current, 0, 1)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
         self.spinBox_step_mA.setValue(1)
-        self.spinBox_step_mA.setMaximumWidth(80)
-        grid.addWidget(self.label_step, 3, 0)
-        grid.addWidget(self.spinBox_step_mA, 3, 1)
-
-        # Hold time [s]
+        self.spinBox_step_mA.setMaximumWidth(90)
+        ramp.addWidget(self.label_step, 0, 2)
+        ramp.addWidget(self.spinBox_step_mA, 0, 3)
         self.label_hold_duration = QtWidgets.QLabel("Hold time [s]:")
         self.spinBox_hold_duration = QtWidgets.QSpinBox()
         self.spinBox_hold_duration.setRange(1, 36000)
         self.spinBox_hold_duration.setValue(1)
-        self.spinBox_hold_duration.setMaximumWidth(80)
-        grid.addWidget(self.label_hold_duration, 4, 0)
-        grid.addWidget(self.spinBox_hold_duration, 4, 1)
+        self.spinBox_hold_duration.setMaximumWidth(90)
+        ramp.addWidget(self.label_hold_duration, 1, 0)
+        ramp.addWidget(self.spinBox_hold_duration, 1, 1)
+        ramp.addItem(
+            QtWidgets.QSpacerItem(
+                0,
+                0,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Minimum,
+            ),
+            0,
+            4,
+            2,
+            1,
+        )
+        grid.addLayout(ramp, 2, 0, 1, 2)
 
         # Hold/Stop button spans the main columns to stay visible
         self.pushButton_hold_current = QtWidgets.QPushButton("Hold current now!")
@@ -312,7 +329,7 @@ class Ui_MainWindow(object):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.pushButton_hold_current.setMinimumWidth(220)
-        grid.addWidget(self.pushButton_hold_current, 5, 0, 1, 2)
+        grid.addWidget(self.pushButton_hold_current, 3, 0, 1, 2)
 
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
@@ -330,7 +347,7 @@ class Ui_MainWindow(object):
         rev.addWidget(self.spinBox_loops)
         rev.addWidget(self.checkBox_infinite_loops)
         rev.addStretch(1)
-        grid.addLayout(rev, 6, 0, 1, 3)
+        grid.addLayout(rev, 4, 0, 1, 2)
 
         # Voltage limit behaviour
         limit_layout = QtWidgets.QHBoxLayout()
@@ -345,7 +362,7 @@ class Ui_MainWindow(object):
         )
         limit_layout.addWidget(self.comboBox_max_voltage_action)
         limit_layout.addStretch(1)
-        grid.addLayout(limit_layout, 7, 0, 1, 3)
+        grid.addLayout(limit_layout, 5, 0, 1, 2)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
@@ -415,15 +432,15 @@ class Ui_MainWindow(object):
             1,
             QtCore.Qt.AlignmentFlag.AlignRight,
         )
-        grid.addWidget(gb_name, 8, 0, 1, 3)
+        grid.addWidget(gb_name, 6, 0, 1, 2)
 
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
-        grid.addWidget(self.progressBar_process, 9, 0, 1, 3)
+        grid.addWidget(self.progressBar_process, 7, 0, 1, 2)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
-        grid.addWidget(self.label_time_remaining, 10, 0, 1, 3)
+        grid.addWidget(self.label_time_remaining, 8, 0, 1, 2)
         self.label_time_to_limit = QtWidgets.QLabel("To 30 V: N/A")
-        grid.addWidget(self.label_time_to_limit, 11, 0, 1, 3)
+        grid.addWidget(self.label_time_to_limit, 9, 0, 1, 2)
 
         # Live values group
         self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
@@ -450,7 +467,7 @@ class Ui_MainWindow(object):
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_live_values, 12, 0, 1, 3)
+        grid.addWidget(self.groupBox_live_values, 10, 0, 1, 2)
 
         # Hold resistance and percent
         hr_layout = QtWidgets.QHBoxLayout()
@@ -466,7 +483,7 @@ class Ui_MainWindow(object):
         hr_layout.addWidget(self.label_resistance_percent_from_hold)
         hr_layout.addWidget(self.label_percent_suffix)
         hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 13, 0, 1, 3)
+        grid.addLayout(hr_layout, 11, 0, 1, 2)
 
         # Start/Stop and reverse buttons (pinned below the scroll area)
         self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")
