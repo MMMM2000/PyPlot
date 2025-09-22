@@ -2,11 +2,13 @@ from PyQt6 import QtWidgets, QtGui, QtCore
 import os
 import sys
 import weakref
+import atexit
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 from matplotlib.patches import Patch
 from matplotlib.collections import PathCollection
+from matplotlib.axes import Axes
 from matplotlib import colors as mcolors
 from contextlib import contextmanager
 from typing import Any, Callable, Iterator, cast
@@ -37,17 +39,58 @@ def origin_session() -> Iterator[Any]:
             pass
 
 
+_ORIGIN_RELEASED = False
+_ORIGIN_RELEASE_REGISTERED = False
+_ORIGIN_RELEASE_SLOTS: list[Callable[[], None]] = []
+
+
 def release_origin() -> None:
     """Release control of Origin so the application can be closed."""
+
+    global _ORIGIN_RELEASED
+    if _ORIGIN_RELEASED:
+        return
 
     try:
         import originpro as op  # type: ignore
     except Exception:
         return
+
     try:
         cast(Any, op).detach()
     except Exception:
         pass
+
+    _ORIGIN_RELEASED = True
+
+
+def schedule_origin_release() -> None:
+    """Ensure Origin detaches once the application shuts down."""
+
+    global _ORIGIN_RELEASE_REGISTERED
+
+    if _ORIGIN_RELEASED or _ORIGIN_RELEASE_REGISTERED:
+        return
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        release_origin()
+        return
+
+    def _detach() -> None:
+        release_origin()
+
+    try:
+        app.aboutToQuit.connect(_detach)  # type: ignore[arg-type]
+    except Exception:
+        release_origin()
+        return
+
+    _ORIGIN_RELEASE_SLOTS.append(_detach)
+    _ORIGIN_RELEASE_REGISTERED = True
+
+
+atexit.register(release_origin)
 
 
 def format_annealing_title(base: str) -> str:
@@ -116,27 +159,32 @@ def _apply_color_scheme(
     :meth:`QGuiApplication.styleHints`.
     """
 
+    hints = app.styleHints()
     if scheme is None:
-        scheme = app.styleHints().colorScheme()
+        scheme = (
+            hints.colorScheme()
+            if hints is not None and hasattr(hints, "colorScheme")
+            else QtCore.Qt.ColorScheme.Light
+        )
+
+    style = app.style()
+    standard_palette = (
+        style.standardPalette() if style is not None else QtGui.QPalette()
+    )
+    accent = standard_palette.color(QtGui.QPalette.ColorRole.Highlight)
 
     if sys.platform.startswith("win"):
         if scheme == QtCore.Qt.ColorScheme.Dark:
-            accent = app.style().standardPalette().color(
-                QtGui.QPalette.ColorRole.Highlight
-            )
             app.setPalette(_dark_palette(accent))
         else:
-            app.setPalette(app.style().standardPalette())
+            app.setPalette(standard_palette)
     elif sys.platform == "darwin":
         app.setPalette(QtGui.QPalette())
     else:
         if scheme == QtCore.Qt.ColorScheme.Dark:
-            accent = app.style().standardPalette().color(
-                QtGui.QPalette.ColorRole.Highlight
-            )
             app.setPalette(_dark_palette(accent))
         else:
-            app.setPalette(app.style().standardPalette())
+            app.setPalette(standard_palette)
 
 
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
@@ -151,7 +199,11 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
     be applied and updates automatically when the system appearance changes.
     """
 
-    scheme = app.styleHints().colorScheme()
+    hints = app.styleHints()
+    if hints is not None and hasattr(hints, "colorScheme"):
+        scheme = hints.colorScheme()
+    else:
+        scheme = QtCore.Qt.ColorScheme.Light
 
     if sys.platform.startswith("win"):
         style = "windowsvista" if scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
@@ -171,7 +223,7 @@ def apply_system_theme(app: QtWidgets.QApplication) -> None:
     _apply_color_scheme(app, scheme)
 
     hints = app.styleHints()
-    if hasattr(hints, "colorSchemeChanged"):
+    if hints is not None and hasattr(hints, "colorSchemeChanged"):
         def update_scheme(new_scheme: QtCore.Qt.ColorScheme) -> None:
             if sys.platform.startswith("win"):
                 style = "windowsvista" if new_scheme == QtCore.Qt.ColorScheme.Light else "Fusion"
@@ -272,6 +324,55 @@ def selected_backend(combo: QtWidgets.QComboBox) -> str:
     if 0 <= idx < len(_BACKEND_CHOICES):
         return _BACKEND_CHOICES[idx]
     return _BACKEND_CHOICES[0]
+
+
+def _combo_values(combo: QtWidgets.QComboBox) -> list[str]:
+    values: list[str] = []
+    for idx in range(combo.count()):
+        data = combo.itemData(idx, QtCore.Qt.ItemDataRole.UserRole)
+        if data is None:
+            data = combo.itemText(idx)
+        values.append(str(data))
+    return values
+
+
+def restore_combo_choice(
+    key: str,
+    name: str,
+    combo: QtWidgets.QComboBox,
+    default: str,
+) -> str:
+    """Restore a stored combo-box value identified by ``key``/``name``."""
+
+    stored = str(_settings().value(f"{key}_{name}", default, type=str) or default)
+    values = _combo_values(combo)
+    if not values:
+        return stored
+
+    stored_lower = stored.lower()
+    lowered = [value.lower() for value in values]
+    if stored_lower in lowered:
+        combo.setCurrentIndex(lowered.index(stored_lower))
+    elif default.lower() in lowered:
+        combo.setCurrentIndex(lowered.index(default.lower()))
+        stored = values[combo.currentIndex()]
+    else:
+        combo.setCurrentIndex(0)
+        stored = values[0]
+    return values[combo.currentIndex()]
+
+
+def store_combo_choice(key: str, name: str, combo: QtWidgets.QComboBox) -> str:
+    """Persist the combo-box selection identified by ``key``/``name``."""
+
+    idx = combo.currentIndex()
+    if idx < 0:
+        value = ""
+    else:
+        data = combo.itemData(idx, QtCore.Qt.ItemDataRole.UserRole)
+        value = str(data if data is not None else combo.itemText(idx))
+    _settings().setValue(f"{key}_{name}", value.lower())
+    return value.lower()
 
 
 def restore_png_dpi(key: str, spin: QtWidgets.QSpinBox, default: int) -> int:
@@ -473,6 +574,13 @@ def create_file_widget(
             _refresh_items()
             _store_files()
 
+    def remove_all() -> None:
+        if not files:
+            return
+        files.clear()
+        _refresh_items()
+        _store_files()
+
     def open_item(item: QtWidgets.QListWidgetItem) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
 
@@ -483,6 +591,8 @@ def create_file_widget(
     add_btn.clicked.connect(add_files)
     remove_btn = QtWidgets.QPushButton("Remove Selected")
     remove_btn.clicked.connect(remove_selected)
+    remove_all_btn = QtWidgets.QPushButton("Remove All")
+    remove_all_btn.clicked.connect(remove_all)
     # Optional outlier toggles now live with each plotting dialog
     from . import common as _common  # local import to avoid cycles at module import
     chk_out_btn = QtWidgets.QPushButton("Check Outliers")
@@ -546,6 +656,7 @@ def create_file_widget(
     btn_row = QtWidgets.QHBoxLayout()
     btn_row.addWidget(add_btn)
     btn_row.addWidget(remove_btn)
+    btn_row.addWidget(remove_all_btn)
     btn_row.addWidget(chk_out_btn)
     btn_row.addWidget(auto_rm_cb)
     btn_row.addStretch()
@@ -595,7 +706,7 @@ def arrange_side_panel(
     console: QtWidgets.QPlainTextEdit,
     *,
     footer: QtWidgets.QWidget | QtWidgets.QLayout | None = None,
-) -> None:
+) -> QtWidgets.QSplitter:
     """Place settings beside file list and console to keep dialogs compact."""
 
     splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -745,39 +856,44 @@ def install_standard_menu(
         menu_bar.removeAction(action)
 
     view_menu = menu_bar.addMenu("&View")
+    if view_menu is None:
+        return menu_bar
     view_menu.setObjectName("mw_shared_view")
     theme_submenu = theme_manager().create_theme_menu(view_menu)
-    theme_submenu.setObjectName("mw_shared_theme")
-    view_menu.addMenu(theme_submenu)
+    if isinstance(theme_submenu, QtWidgets.QMenu):
+        theme_submenu.setObjectName("mw_shared_theme")
+        view_menu.addMenu(theme_submenu)
 
     if file_widget is not None:
         view_menu.addSeparator()
         files_action = view_menu.addAction("Show &File Browser")
-        files_action.setCheckable(True)
-        files_action.setChecked(file_widget.isVisible())
-        files_action.toggled.connect(file_widget.setVisible)
+        if files_action is not None:
+            files_action.setCheckable(True)
+            files_action.setChecked(file_widget.isVisible())
+            files_action.toggled.connect(file_widget.setVisible)
 
     if console is not None:
         view_menu.addSeparator()
         console_action = view_menu.addAction("Show &Console")
-        console_action.setCheckable(True)
-        console_action.setChecked(console.isVisible())
+        if console_action is not None:
+            console_action.setCheckable(True)
+            console_action.setChecked(console.isVisible())
 
-        def _set_console_visible(checked: bool) -> None:
-            console.setVisible(checked)
+            def _set_console_visible(checked: bool) -> None:
+                console.setVisible(checked)
 
-        console_action.toggled.connect(_set_console_visible)
+            console_action.toggled.connect(_set_console_visible)
 
-        def _sync_console() -> None:
-            state = console.isVisible()
-            if console_action.isChecked() != state:
-                console_action.blockSignals(True)
-                console_action.setChecked(state)
-                console_action.blockSignals(False)
+            def _sync_console() -> None:
+                state = console.isVisible()
+                if console_action.isChecked() != state:
+                    console_action.blockSignals(True)
+                    console_action.setChecked(state)
+                    console_action.blockSignals(False)
 
-        sync_filter = _VisibilitySync(console_action, _sync_console)
-        console.installEventFilter(sync_filter)
-        setattr(console, "_mw_visibility_sync", sync_filter)
+            sync_filter = _VisibilitySync(console_action, _sync_console)
+            console.installEventFilter(sync_filter)
+            setattr(console, "_mw_visibility_sync", sync_filter)
 
     if splitter is not None and default_split_sizes:
         view_menu.addSeparator()
@@ -790,27 +906,31 @@ def install_standard_menu(
                 pass
 
         reset_action = view_menu.addAction("&Reset Layout")
-        reset_action.triggered.connect(_reset_layout)
+        if reset_action is not None:
+            reset_action.triggered.connect(_reset_layout)
 
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
     menu_bar.addMenu(developer_menu)
 
     help_menu = menu_bar.addMenu("&Help")
+    if help_menu is None:
+        return menu_bar
     help_menu.setObjectName("mw_shared_help")
     if help_topic:
         help_action = help_menu.addAction("View Help")
-        try:
-            help_action.setShortcut(
-                QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents)
-            )
-        except Exception:
-            pass
+        if help_action is not None:
+            try:
+                help_action.setShortcut(
+                    QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents)
+                )
+            except Exception:
+                pass
 
-        def _show_help() -> None:
-            show_help(help_topic, target)
+            def _show_help() -> None:
+                show_help(help_topic, target)
 
-        help_action.triggered.connect(_show_help)
+            help_action.triggered.connect(_show_help)
     else:
         help_menu.setEnabled(False)
 
@@ -825,8 +945,12 @@ class _VisibilitySync(QtCore.QObject):
         self._action = action
         self._sync = sync
 
-    def eventFilter(self, watched: QtCore.QObject, event: QtCore.QEvent) -> bool:  # noqa: D401
-        if event.type() in {
+    def eventFilter(
+        self,
+        a0: QtCore.QObject | None,
+        a1: QtCore.QEvent | None,
+    ) -> bool:  # noqa: D401
+        if a1 is not None and a1.type() in {
             QtCore.QEvent.Type.Show,
             QtCore.QEvent.Type.Hide,
             QtCore.QEvent.Type.ShowToParent,
@@ -878,6 +1002,8 @@ class _ThemeManager(QtCore.QObject):
         group.setExclusive(True)
         for mode, label in (("system", "System"), ("light", "Light"), ("dark", "Dark")):
             action = group.addAction(label)
+            if action is None:
+                continue
             action.setData(mode)
             action.setCheckable(True)
             action.setChecked(mode == self._mode)
@@ -987,18 +1113,20 @@ class _DeveloperOptions(QtCore.QObject):
         menu = QtWidgets.QMenu("&Developer", parent)
 
         keep_action = menu.addAction("Keep &File Selections")
-        keep_action.setObjectName("mw_keep_files")
-        keep_action.setCheckable(True)
-        keep_action.setChecked(self._keep_files)
-        keep_action.toggled.connect(self.set_keep_files)
-        self._keep_actions.append(weakref.ref(keep_action))
+        if keep_action is not None:
+            keep_action.setObjectName("mw_keep_files")
+            keep_action.setCheckable(True)
+            keep_action.setChecked(self._keep_files)
+            keep_action.toggled.connect(self.set_keep_files)
+            self._keep_actions.append(weakref.ref(keep_action))
 
         exp_action = menu.addAction("Show &Experiments Tab")
-        exp_action.setObjectName("mw_show_experiments")
-        exp_action.setCheckable(True)
-        exp_action.setChecked(self._show_experiments)
-        exp_action.toggled.connect(self.set_show_experiments)
-        self._experiment_actions.append(weakref.ref(exp_action))
+        if exp_action is not None:
+            exp_action.setObjectName("mw_show_experiments")
+            exp_action.setCheckable(True)
+            exp_action.setChecked(self._show_experiments)
+            exp_action.toggled.connect(self.set_show_experiments)
+            self._experiment_actions.append(weakref.ref(exp_action))
 
         return menu
 
@@ -1196,7 +1324,7 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     s.setValue(f"{key}_title_size", orig_module.TITLE_SIZE)
 
 
-def apply_readability(ax: plt.Axes, cfg: dict) -> None:
+def apply_readability(ax: Axes, cfg: dict) -> None:
     """Apply common readability settings to ``ax`` using values from ``cfg``."""
 
     apply_readability_fonts(
@@ -1213,13 +1341,13 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
         ax.set_xlabel("")
         ax.set_ylabel("")
     else:
-        ax.xaxis.label.set_size(cfg.get("AXIS_LABEL_SIZE", 18))
-        ax.yaxis.label.set_size(cfg.get("AXIS_LABEL_SIZE", 18))
+        ax.xaxis.label.set_fontsize(cfg.get("AXIS_LABEL_SIZE", 18))
+        ax.yaxis.label.set_fontsize(cfg.get("AXIS_LABEL_SIZE", 18))
 
     if not cfg.get("SHOW_TITLE", True):
         ax.set_title("")
     else:
-        ax.title.set_size(cfg.get("TITLE_SIZE", 22))
+        ax.title.set_fontsize(cfg.get("TITLE_SIZE", 22))
 
     legend = ax.get_legend()
     if legend:
@@ -1227,7 +1355,7 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
             legend.set_visible(False)
             return
 
-        handles_existing: list[object] = []
+        handles_existing: list[Any] = []
         for attr in ("legendHandles", "legend_handles"):
             found = getattr(legend, attr, None)
             if found:
@@ -1270,7 +1398,7 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
             except Exception:
                 pass
 
-        handles: list[object] = []
+        handles: list[Any] = []
         for attr in ("legendHandles", "legend_handles"):
             found = getattr(legend, attr, None)
             if found:
@@ -1332,8 +1460,8 @@ def apply_readability(ax: plt.Axes, cfg: dict) -> None:
                             pass
 
         if match_colors and handles:
-            def _extract_color(handle: object) -> tuple[float, float, float, float] | None:
-                candidates: list[object] = []
+            def _extract_color(handle: Any) -> tuple[float, float, float, float] | None:
+                candidates: list[Any] = []
                 for attr in ("get_color", "get_facecolor", "get_facecolors", "get_edgecolor"):
                     getter = getattr(handle, attr, None)
                     if not callable(getter):

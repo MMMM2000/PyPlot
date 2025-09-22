@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import sys
 import os
-from typing import Callable, Dict
+import time
+from typing import Callable, Dict, cast
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 
@@ -24,7 +25,10 @@ from plotting.utils import ensure_app_theme, install_standard_menu, developer_op
 from experiments import EXPERIMENTS
 
 
-PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
+LauncherFactory = Callable[..., QtWidgets.QWidget | None]
+
+
+PLOTTERS: Dict[str, LauncherFactory] = {
     "Stress Dependence": stress_gui.main,
     "Hsw Load Compare": load_compare_gui.main,
     "Maxion Continuous": maxion_gui.main,
@@ -37,12 +41,12 @@ PLOTTERS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
     "Hysteresis Loops": loops_gui.main,
 }
 
-LOGGERS: Dict[str, Callable[..., QtWidgets.QWidget]] = {
+LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": data_logger.main,
     "Current Annealing Logger": current_annealing_logger.main,
 }
 
-EMULATORS: Dict[str, Callable[..., QtWidgets.QWidget | None]] = {
+EMULATORS: Dict[str, LauncherFactory] = {
     "Universal Serial Emulator": virtual_serial_emulator_gui.main,
 }
 
@@ -53,6 +57,7 @@ class MasterLauncher(QtWidgets.QWidget):
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        self._settings = QtCore.QSettings("MicrowireData", "Launcher")
         self.dev_opts = developer_options()
         self._closing = False
 
@@ -71,10 +76,21 @@ class MasterLauncher(QtWidgets.QWidget):
                 app.lastWindowClosed.connect(self._restore_launcher)
             except Exception:
                 pass
+            try:
+                app.installEventFilter(self)
+            except Exception:
+                pass
 
         # Keep references to launched windows so they stay open when
         # the launcher calls their ``main`` functions.
         self._open_windows: list[QtWidgets.QWidget] = []
+
+        self.search_bar = QtWidgets.QLineEdit(self)
+        self.search_bar.setPlaceholderText("Search tools…")
+        try:
+            self.search_bar.setClearButtonEnabled(True)
+        except Exception:
+            pass
 
         self.tabs = QtWidgets.QTabWidget()
         self.log_tab = QtWidgets.QWidget()
@@ -87,36 +103,62 @@ class MasterLauncher(QtWidgets.QWidget):
         self._experiments_index: int | None = None
 
         self.log_list = QtWidgets.QListWidget()
-        for name in LOGGERS:
-            self.log_list.addItem(name)
-        self.log_list.setCurrentRow(0)
         log_layout = QtWidgets.QVBoxLayout(self.log_tab)
         log_layout.addWidget(self.log_list)
 
         self.plot_list = QtWidgets.QListWidget()
-        for name in PLOTTERS:
-            self.plot_list.addItem(name)
-        self.plot_list.setCurrentRow(0)
         plot_layout = QtWidgets.QVBoxLayout(self.plot_tab)
         plot_layout.addWidget(self.plot_list)
 
         self.emu_list = QtWidgets.QListWidget()
-        for name in EMULATORS:
-            self.emu_list.addItem(name)
-        self.emu_list.setCurrentRow(0)
         emu_layout = QtWidgets.QVBoxLayout(self.emu_tab)
         emu_layout.addWidget(self.emu_list)
 
         self.exp_list = QtWidgets.QListWidget()
-        for name in EXPERIMENTS:
-            self.exp_list.addItem(name)
-        if self.exp_list.count():
-            self.exp_list.setCurrentRow(0)
         exp_layout = QtWidgets.QVBoxLayout(self.exp_tab)
         exp_layout.addWidget(self.exp_list)
+
+        self._registry: dict[str, Dict[str, LauncherFactory]] = {
+            "loggers": LOGGERS,
+            "plotters": PLOTTERS,
+            "emulators": EMULATORS,
+        }
+        if EXPERIMENTS:
+            self._registry["experiments"] = EXPERIMENTS
+
+        self._category_labels = {
+            "loggers": "Loggers",
+            "plotters": "Plotting",
+            "emulators": "Emulators",
+        }
+        if "experiments" in self._registry:
+            self._category_labels["experiments"] = "Experiments"
+
+        self._list_widgets = {
+            "loggers": self.log_list,
+            "plotters": self.plot_list,
+            "emulators": self.emu_list,
+        }
+        if "experiments" in self._registry:
+            self._list_widgets["experiments"] = self.exp_list
+
+        self._sort_modes: dict[str, str] = {}
+        for category in self._list_widgets:
+            stored = self._settings.value(f"sort/{category}", "last_used")
+            if not isinstance(stored, str) or stored not in {"last_used", "name_asc", "name_desc"}:
+                stored = "last_used"
+            self._sort_modes[category] = stored
+        self._sort_groups: dict[str, QtGui.QActionGroup] = {}
+
+        self.main_layout.addWidget(self.search_bar)
+        self.main_layout.addWidget(self.tabs)
+
+        self._refresh_all_lists()
         if self.dev_opts.show_experiments() and self.exp_list.count():
             self._experiments_index = self.tabs.addTab(self.exp_tab, "Experiments")
         self.dev_opts.experiments_visibility_changed.connect(self._sync_experiments_tab)
+        self.search_bar.textChanged.connect(self._apply_search_filter)
+        self.tabs.currentChanged.connect(self._handle_tab_changed)
 
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
@@ -125,7 +167,6 @@ class MasterLauncher(QtWidgets.QWidget):
         button_row.addStretch(1)
         button_row.addWidget(self.run_button)
 
-        self.main_layout.addWidget(self.tabs)
         self.main_layout.addLayout(button_row)
 
         menu_bar = install_standard_menu(self, help_topic="launcher")
@@ -137,6 +178,12 @@ class MasterLauncher(QtWidgets.QWidget):
         if exit_action is not None:
             exit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
             exit_action.triggered.connect(self.close)
+
+        sort_menu = menu_bar.addMenu("&Sort")
+        if sort_menu is None:
+            sort_menu = QtWidgets.QMenu("&Sort", self)
+            menu_bar.addMenu(sort_menu)
+        self._install_sort_menu(sort_menu)
 
     def _restore_launcher(self) -> None:
         if self._closing:
@@ -183,41 +230,251 @@ class MasterLauncher(QtWidgets.QWidget):
                 self.tabs.removeTab(index)
             self._experiments_index = None
 
+    def _install_sort_menu(self, parent_menu: QtWidgets.QMenu) -> None:
+        for category, label in self._category_labels.items():
+            if category not in self._list_widgets:
+                continue
+            if not self._registry.get(category):
+                continue
+            submenu = parent_menu.addMenu(label)
+            if submenu is None:
+                submenu = QtWidgets.QMenu(label, self)
+                parent_menu.addMenu(submenu)
+            if submenu is None:
+                continue
+            group = QtGui.QActionGroup(self)
+            group.setExclusive(True)
+            for mode, text in (
+                ("last_used", "Last Used (Most Recent)"),
+                ("name_asc", "Name (A-Z)"),
+                ("name_desc", "Name (Z-A)"),
+            ):
+                action = submenu.addAction(text)
+                if action is None:
+                    continue
+                action.setCheckable(True)
+                action.setData((category, mode))
+                if self._sort_modes.get(category, "last_used") == mode:
+                    action.setChecked(True)
+                group.addAction(action)
+            group.triggered.connect(self._handle_sort_trigger)
+            self._sort_groups[category] = group
+
+    def _apply_search_filter(self, _: str) -> None:
+        self._refresh_all_lists()
+
+    def _refresh_all_lists(self) -> None:
+        for category, list_widget in self._list_widgets.items():
+            current_item = list_widget.currentItem()
+            selected = current_item.text() if current_item is not None else None
+            self._refresh_list(category, select_name=selected)
+
+    def _refresh_list(self, category: str, select_name: str | None = None) -> None:
+        list_widget = self._list_widgets.get(category)
+        if list_widget is None:
+            return
+        names = self._sorted_names(category)
+        search_text = self.search_bar.text().strip().casefold()
+        list_widget.blockSignals(True)
+        list_widget.clear()
+        for name in names:
+            if search_text and search_text not in name.casefold():
+                continue
+            list_widget.addItem(name)
+        list_widget.blockSignals(False)
+        if select_name:
+            matches = list_widget.findItems(select_name, QtCore.Qt.MatchFlag.MatchExactly)
+            if matches:
+                list_widget.setCurrentItem(matches[0])
+        if list_widget.currentRow() == -1 and list_widget.count():
+            list_widget.setCurrentRow(0)
+
+    def _current_list_widget(self) -> QtWidgets.QListWidget | None:
+        current = self.tabs.currentWidget()
+        if current is self.log_tab:
+            return self.log_list
+        if current is self.plot_tab:
+            return self.plot_list
+        if current is self.emu_tab:
+            return self.emu_list
+        if current is self.exp_tab:
+            return self.exp_list
+        return None
+
+    def _ensure_selection(self, list_widget: QtWidgets.QListWidget | None) -> None:
+        if list_widget is None:
+            return
+        if list_widget.count() and list_widget.currentRow() == -1:
+            list_widget.setCurrentRow(0)
+
+    def _focus_current_list(self, select_first: bool = False) -> None:
+        list_widget = self._current_list_widget()
+        if list_widget is None:
+            return
+        if select_first and list_widget.count() and list_widget.currentRow() == -1:
+            list_widget.setCurrentRow(0)
+        self._ensure_selection(list_widget)
+        try:
+            list_widget.setFocus(QtCore.Qt.FocusReason.TabFocusReason)
+        except Exception:
+            list_widget.setFocus()
+
+    def _handle_tab_changed(self, _: int) -> None:
+        list_widget = self._current_list_widget()
+        self._ensure_selection(list_widget)
+        focus_widget = QtWidgets.QApplication.focusWidget()
+        if isinstance(focus_widget, QtWidgets.QTabBar):
+            self._focus_current_list()
+
+    def _sorted_names(self, category: str) -> list[str]:
+        mapping = self._registry.get(category, {})
+        names = list(mapping.keys())
+        mode = self._sort_modes.get(category, "last_used")
+        if mode == "name_asc":
+            names.sort(key=str.casefold)
+        elif mode == "name_desc":
+            names.sort(key=str.casefold, reverse=True)
+        else:
+            names.sort(key=lambda name: (-self._last_used(category, name), name.casefold()))
+        return names
+
+    def _last_used(self, category: str, name: str) -> float:
+        value = self._settings.value(f"last_used/{category}/{name}")
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _update_last_used(self, category: str, name: str) -> None:
+        self._settings.setValue(f"last_used/{category}/{name}", time.time())
+
+    def _set_sort_mode(self, category: str, mode: str) -> None:
+        if category not in self._list_widgets:
+            return
+        if mode not in {"last_used", "name_asc", "name_desc"}:
+            return
+        current_item = self._list_widgets[category].currentItem()
+        selected = current_item.text() if current_item is not None else None
+        self._sort_modes[category] = mode
+        self._settings.setValue(f"sort/{category}", mode)
+        self._refresh_list(category, select_name=selected)
+
+    def _handle_sort_trigger(self, action: QtGui.QAction) -> None:
+        data = action.data()
+        if isinstance(data, tuple) and len(data) == 2:
+            category, mode = data
+            self._set_sort_mode(str(category), str(mode))
+
+    def _advance_tab(self, offset: int) -> bool:
+        count = self.tabs.count()
+        if count <= 1:
+            return False
+        current_index = self.tabs.currentIndex()
+        if current_index < 0:
+            return False
+        new_index = (current_index + offset) % count
+        if new_index == current_index:
+            return False
+        self.tabs.setCurrentIndex(new_index)
+        self._focus_current_list(select_first=True)
+        return True
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key_event = cast(QtGui.QKeyEvent, event)
+            focus_widget = QtWidgets.QApplication.focusWidget()
+            if focus_widget is not None and not self.isAncestorOf(focus_widget):
+                return super().eventFilter(obj, event)
+            if not self.isActiveWindow():
+                return super().eventFilter(obj, event)
+            key = key_event.key()
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                list_widget = self._current_list_widget()
+                self._ensure_selection(list_widget)
+                if list_widget is not None and list_widget.count():
+                    if list_widget.currentRow() == -1:
+                        list_widget.setCurrentRow(0)
+                self.run_selected()
+                event.accept()
+                return True
+            if key in (QtCore.Qt.Key.Key_Left, QtCore.Qt.Key.Key_Right):
+                if isinstance(focus_widget, QtWidgets.QLineEdit):
+                    return super().eventFilter(obj, event)
+                direction = -1 if key == QtCore.Qt.Key.Key_Left else 1
+                if self._advance_tab(direction):
+                    event.accept()
+                    return True
+            if key in (QtCore.Qt.Key.Key_Up, QtCore.Qt.Key.Key_Down):
+                list_widget = self._current_list_widget()
+                if list_widget is None or list_widget.count() == 0:
+                    return super().eventFilter(obj, event)
+                if isinstance(focus_widget, QtWidgets.QLineEdit):
+                    if key == QtCore.Qt.Key.Key_Down:
+                        self._focus_current_list(select_first=True)
+                        event.accept()
+                        return True
+                    return super().eventFilter(obj, event)
+                if focus_widget is list_widget:
+                    return super().eventFilter(obj, event)
+                current_row = list_widget.currentRow()
+                if current_row == -1:
+                    new_row = 0 if key == QtCore.Qt.Key.Key_Down else list_widget.count() - 1
+                elif key == QtCore.Qt.Key.Key_Down:
+                    new_row = min(current_row + 1, list_widget.count() - 1)
+                else:
+                    new_row = max(current_row - 1, 0)
+                list_widget.setCurrentRow(new_row)
+                self._focus_current_list()
+                event.accept()
+                return True
+        return super().eventFilter(obj, event)
+
     def run_selected(self) -> None:
+        category: str | None = None
+        item: QtWidgets.QListWidgetItem | None
         if self.tabs.currentWidget() is self.log_tab:
+            category = "loggers"
             item = self.log_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select a logger")
                 return
-            func = LOGGERS[item.text()]
-            common.CHECK_OUTLIERS = False
-            common.AUTO_REMOVE_OUTLIERS = False
         elif self.tabs.currentWidget() is self.plot_tab:
+            category = "plotters"
             item = self.plot_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select a plotting script")
                 return
-            func = PLOTTERS[item.text()]
-            common.CHECK_OUTLIERS = False
-            common.AUTO_REMOVE_OUTLIERS = False
         elif self.tabs.currentWidget() is self.emu_tab:
+            category = "emulators"
             item = self.emu_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select an emulator")
                 return
-            func = EMULATORS[item.text()]
-            common.CHECK_OUTLIERS = False
-            common.AUTO_REMOVE_OUTLIERS = False
-        else:
+        elif self.tabs.currentWidget() is self.exp_tab:
+            category = "experiments"
             item = self.exp_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.information(
                     self, "No selection", "Enable and pick an experiment to launch"
                 )
                 return
-            func = EXPERIMENTS[item.text()]
-            common.CHECK_OUTLIERS = False
-            common.AUTO_REMOVE_OUTLIERS = False
+        else:
+            return
+
+        assert item is not None
+        assert category is not None
+        item_text = item.text()
+        registry = self._registry.get(category, {})
+        func = registry.get(item_text)
+        if func is None:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Missing entry",
+                f"No handler registered for {item_text}",
+            )
+            return
+        common.CHECK_OUTLIERS = False
+        common.AUTO_REMOVE_OUTLIERS = False
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
@@ -264,6 +521,9 @@ class MasterLauncher(QtWidgets.QWidget):
             if isinstance(w, QtWidgets.QWidget):
                 self._register_window(w)
 
+        self._update_last_used(category, item_text)
+        self._refresh_list(category, select_name=item_text)
+
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         open_windows = [w for w in list(self._open_windows) if isinstance(w, QtWidgets.QWidget) and w.isVisible()]
         if open_windows:
@@ -287,6 +547,10 @@ class MasterLauncher(QtWidgets.QWidget):
         event.accept()
         app = QtWidgets.QApplication.instance()
         if app is not None:
+            try:
+                app.removeEventFilter(self)
+            except Exception:
+                pass
             QtCore.QTimer.singleShot(0, app.quit)
 
 

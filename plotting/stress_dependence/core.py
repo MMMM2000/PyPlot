@@ -347,9 +347,14 @@ def _origin_compute_tables(grp: pd.DataFrame, var: str):
         last_x = float(mean_a["X"].max())
         # Use raw means (no baseline) to compute actual delta
         m_a_raw = means[means["dir"] == "a"].set_index("X")
-        start_val = float(m_a_raw.at[first_x, var])
-        end_val = float(m_a_raw.at[last_x, var])
-        delta = end_val - start_val
+        start_series = m_a_raw.loc[m_a_raw.index == first_x, var]
+        end_series = m_a_raw.loc[m_a_raw.index == last_x, var]
+        if start_series.empty or end_series.empty:
+            delta = float("nan")
+        else:
+            start_val = float(start_series.iloc[0])
+            end_val = float(end_series.iloc[0])
+            delta = end_val - start_val
     else:
         delta = float("nan")
     return raw_a, raw_b, mean_a, mean_b, delta

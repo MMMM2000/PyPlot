@@ -23,6 +23,8 @@ if __package__ is None or __package__ == "":
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
+        restore_combo_choice,
+        store_combo_choice,
     )
 else:
     from . import core as orig
@@ -41,6 +43,8 @@ else:
         selected_backend,
         restore_png_dpi,
         store_png_dpi,
+        restore_combo_choice,
+        store_combo_choice,
     )
 
 
@@ -66,6 +70,22 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.BACKEND = restore_backend_choice(
             "current_annealing", self.backend_combo, getattr(orig, "BACKEND", "matplotlib")
         )
+        self.origin_mode_label = QtWidgets.QLabel("Origin style:")
+        self.origin_mode_combo = QtWidgets.QComboBox()
+        self.origin_mode_combo.addItem(
+            "Experimental (directional)", getattr(orig, "ORIGIN_MODES", ["experimental"])[0]
+        )
+        self.origin_mode_combo.addItem(
+            "Simple (single trace)", getattr(orig, "ORIGIN_MODES", ["experimental", "simple"])[-1]
+        )
+        orig.ORIGIN_MODE = restore_combo_choice(
+            "current_annealing",
+            "origin_mode",
+            self.origin_mode_combo,
+            getattr(orig, "ORIGIN_MODE", getattr(orig, "ORIGIN_MODES", ["experimental"])[0]),
+        )
+        normaliser = getattr(orig, "_normalise_origin_mode", lambda value: value)
+        orig.ORIGIN_MODE = normaliser(orig.ORIGIN_MODE)
 
         def browse() -> None:
             d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir_edit.text())
@@ -80,6 +100,8 @@ class SettingsDialog(QtWidgets.QDialog):
         out_layout.addWidget(self.save_cb, 1, 0)
         out_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
         out_layout.addWidget(self.backend_combo, 2, 1)
+        out_layout.addWidget(self.origin_mode_label, 3, 0)
+        out_layout.addWidget(self.origin_mode_combo, 3, 1)
         self.fmt_combo = QtWidgets.QComboBox()
         self.fmt_combo.addItems(["png", "pdf", "svg"])
         self.fmt_combo.setCurrentText(orig.SAVE_FORMAT)
@@ -88,15 +110,15 @@ class SettingsDialog(QtWidgets.QDialog):
         orig.PNG_DPI = restore_png_dpi(
             "current_annealing", self.dpi_spin, getattr(orig, "PNG_DPI", 1200)
         )
-        out_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
-        out_layout.addWidget(self.fmt_combo, 3, 1)
-        out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
-        out_layout.addWidget(self.dpi_spin, 4, 1)
+        out_layout.addWidget(QtWidgets.QLabel("Format:"), 4, 0)
+        out_layout.addWidget(self.fmt_combo, 4, 1)
+        out_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 5, 0)
+        out_layout.addWidget(self.dpi_spin, 5, 1)
         self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
-        out_layout.addWidget(self.subdir_cb, 5, 0, 1, 2)
-        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
-        out_layout.addWidget(self.out_dir_edit, 7, 0)
-        out_layout.addWidget(browse_btn, 7, 1)
+        out_layout.addWidget(self.subdir_cb, 6, 0, 1, 2)
+        out_layout.addWidget(QtWidgets.QLabel("Directory:"), 7, 0)
+        out_layout.addWidget(self.out_dir_edit, 8, 0)
+        out_layout.addWidget(browse_btn, 8, 1)
 
         self.read_ctrl, read_group = create_readability_group("current_annealing", orig)
 
@@ -118,6 +140,8 @@ class SettingsDialog(QtWidgets.QDialog):
             footer=btn_row,
             help_topic="plot_current_annealing",
         )
+        self.backend_combo.currentIndexChanged.connect(self._update_origin_mode_state)
+        self._update_origin_mode_state()
 
     def run(self) -> None:
         if not self.files:
@@ -137,7 +161,18 @@ class SettingsDialog(QtWidgets.QDialog):
             "current_annealing", selected_backend(self.backend_combo)
         )
         orig.BACKEND = backend
+        orig.ORIGIN_MODE = store_combo_choice(
+            "current_annealing", "origin_mode", self.origin_mode_combo
+        )
+        normaliser = getattr(orig, "_normalise_origin_mode", lambda value: value)
+        orig.ORIGIN_MODE = normaliser(orig.ORIGIN_MODE)
         run_with_console(lambda: orig.main(self.files, backend=backend), self.console)
+
+    def _update_origin_mode_state(self) -> None:
+        backend = selected_backend(self.backend_combo)
+        has_origin = backend in ("origin", "both")
+        self.origin_mode_combo.setEnabled(has_origin)
+        self.origin_mode_label.setEnabled(has_origin)
 
 
 def main() -> None:

@@ -1,7 +1,7 @@
 ﻿import os
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, cast, Callable
+from typing import List, Dict, Any, Tuple, cast, Callable, Protocol
 
 from PyQt6 import QtWidgets, QtCore
 
@@ -116,6 +116,12 @@ class ProgressDialog:
         pass
 
 
+class ProgressReporter(Protocol):
+    cancelled: bool
+
+    def update(self) -> None:
+        ...
+
 
 class _OutlierCancelled(Exception):
     """Raised when outlier detection is cancelled by the user."""
@@ -124,7 +130,7 @@ class _OutlierCancelled(Exception):
 def non_modal_question(
     title: str,
     text: str,
-    buttons: QtWidgets.QMessageBox.standardButtons = (
+    buttons: QtWidgets.QMessageBox.StandardButton = (
         QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No
     ),
 ) -> QtWidgets.QMessageBox.StandardButton:
@@ -208,7 +214,7 @@ def detect_outliers(
     column: str = "sum",
     quantile: float = 0.9,
     factor: float = 3.0,
-    progress: Callable[[int, int], None] | None = None,
+    progress: ProgressReporter | Callable[..., None] | None = None,
 ) -> pd.DataFrame:
     """Return a DataFrame of rows that are statistical outliers.
 
@@ -226,7 +232,14 @@ def detect_outliers(
 
     total = int(df[column].count())
     processed = 0
-    progress_obj = getattr(progress, "update", None) if progress is not None else None
+    reporter: ProgressReporter | None = None
+    callback: Callable[..., None] | None = None
+    if progress is not None:
+        update_attr = getattr(progress, "update", None)
+        if callable(update_attr):
+            reporter = cast(ProgressReporter, progress)
+        elif callable(progress):
+            callback = cast(Callable[..., None], progress)
 
     for fname, grp in df.groupby("filename"):
         sub = grp[[column]].dropna().reset_index()
@@ -243,28 +256,28 @@ def detect_outliers(
             rng = q_high - q_low
             if rng <= 0:
                 processed += 1
-                if progress_obj is not None:
-                    progress_obj()
-                    if getattr(progress, "cancelled", False):
+                if reporter is not None:
+                    reporter.update()
+                    if getattr(reporter, "cancelled", False):
                         raise _OutlierCancelled()
-                elif progress:
+                elif callback is not None:
                     try:
-                        progress(processed, total)
+                        callback(processed, total)
                     except TypeError:
-                        progress()
+                        callback()
                 continue
             if abs(val - med) > factor * rng:
                 out_rows.append(grp.loc[[sub["index"].iloc[idx]]])
             processed += 1
-            if progress_obj is not None:
-                progress_obj()
-                if getattr(progress, "cancelled", False):
+            if reporter is not None:
+                reporter.update()
+                if getattr(reporter, "cancelled", False):
                     raise _OutlierCancelled()
-            elif progress:
+            elif callback is not None:
                 try:
-                    progress(processed, total)
+                    callback(processed, total)
                 except TypeError:
-                    progress()
+                    callback()
 
     if out_rows:
         return pd.concat(out_rows, ignore_index=False)
@@ -316,7 +329,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
         ax.plot(grp["line"], grp["sum"], "o", ms=2, label="data")
         sub = out_df[out_df["filename"] == fname]
         ax.plot(sub["line"], sub["sum"], "ro", ms=6, label="outlier")
-        ax.set_title(fname)
+        ax.set_title(str(fname))
         ax.set_xlabel("Index")
         ax.set_ylabel("T1+T2 (\u03BCs)")
         ax.legend()
@@ -408,15 +421,22 @@ def plot_variable(
         m = means[means['temp'] == temp].copy()
         if include_cont and not cont.empty:
             offset = {-1: 0.0, 25: -MEAN_SHIFT, 100: MEAN_SHIFT}.get(int(temp), 0.0)
-            m_x = [
-                r.sample_idx + (offset if r.sample_idx in cont_samples else 0.0)
-                for r in m.itertuples()
-            ]
+            m_x = np.array(
+                [
+                    float(
+                        r.sample_idx
+                        + (offset if r.sample_idx in cont_samples else 0.0)
+                    )
+                    for r in m.itertuples()
+                ],
+                dtype=float,
+            )
         else:
-            m_x = m['sample_idx']
+            m_x = m['sample_idx'].astype(float).to_numpy()
+        y_vals = m[var].astype(float).to_numpy()
         ax.plot(
             m_x,
-            m[var],
+            y_vals,
             MEAN_MARKER,
             linestyle='None',
             c=MEAN_COLORS.get(temp, 'gray'),
@@ -428,9 +448,9 @@ def plot_variable(
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
-            x = idx
-            y25 = row[25]
-            y100 = row[100]
+            x = float(idx)
+            y25 = float(row[25])
+            y100 = float(row[100])
             has_cont = include_cont and (idx in cont_samples)
             if not has_cont:
                 ax.plot(
@@ -531,6 +551,7 @@ def plot_variable(
                 break
 
         for handle in handles:
+            handle_any = cast(Any, handle)
             if isinstance(handle, PathCollection):
                 try:
                     if show_symbols:
@@ -547,16 +568,17 @@ def plot_variable(
                 except Exception:
                     pass
 
-            if hasattr(handle, "set_markersize"):
+            marker_sizer = getattr(handle_any, "set_markersize", None)
+            if callable(marker_sizer):
                 try:
-                    handle.set_markersize(marker_size if show_symbols else 0.1)
+                    marker_sizer(marker_size if show_symbols else 0.1)
                 except Exception:
                     pass
 
-            marker_setter = getattr(handle, "set_marker", None)
+            marker_setter = getattr(handle_any, "set_marker", None)
             if callable(marker_setter):
                 if show_symbols:
-                    marker_getter = getattr(handle, "get_marker", None)
+                    marker_getter = getattr(handle_any, "get_marker", None)
                     current = None
                     if callable(marker_getter):
                         try:
@@ -730,10 +752,21 @@ def plot_variable_origin(
             x_vals = (sub['temp'] - start) * scale + x_start
             cont_processed.append(pd.DataFrame({'X': x_vals.to_numpy(), 'Y': proc.to_numpy(), 'sample': sample}))
 
-    book = op.new_book('w', lname="Temp Sens (Python)")
-    book.activate()
-    gp = op.new_graph(template='scatter')
-    gl = gp[0]
+    book_obj = op.new_book('w', lname="Temp Sens (Python)")
+    book = cast(Any, book_obj)
+    if book is not None:
+        try:
+            book.activate()
+        except Exception:
+            pass
+    gp_obj = op.new_graph(template='scatter')
+    gp = cast(Any, gp_obj)
+    try:
+        gl = cast(Any, gp[0])
+    except Exception:
+        gl = None
+    if gl is None:
+        return
 
     legend_entries: list[str] = []
 
@@ -742,11 +775,17 @@ def plot_variable_origin(
         if sub.empty:
             continue
         temp_label = _format_temp_label(temp)
-        w = op.new_sheet('w', lname=f'raw_{temp_label}')
+        sheet = op.new_sheet('w', lname=f'raw_{temp_label}')
+        if sheet is None:
+            continue
+        w = cast(Any, sheet)
         w.from_list(0, sub['X'].to_list())
         w.from_list(1, sub['Y'].to_list())
         w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='s')
+        plot_obj = gl.add_plot(w, coly=1, colx=0, type='s')
+        if plot_obj is None:
+            continue
+        p = cast(Any, plot_obj)
         color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
         legend_label = f"raw {temp_label}\N{DEGREE SIGN}C"
         try:
@@ -770,7 +809,10 @@ def plot_variable_origin(
         if sub.empty:
             continue
         temp_label = _format_temp_label(temp)
-        w = op.new_sheet('w', lname=f'mean_{temp_label}')
+        sheet = op.new_sheet('w', lname=f'mean_{temp_label}')
+        if sheet is None:
+            continue
+        w = cast(Any, sheet)
         labels = [display_by_idx.get(val, idx_to_sample.get(val, str(val))) for val in sub['sample_idx']]
         w.from_list(0, labels)
         w.from_list(1, sub['plot_x'].to_list())
@@ -781,7 +823,10 @@ def plot_variable_origin(
             w.set_label(2, "Value")
         except Exception:
             pass
-        p = gl.add_plot(w, coly=2, colx=1, type='s')
+        plot_obj = gl.add_plot(w, coly=2, colx=1, type='s')
+        if plot_obj is None:
+            continue
+        p = cast(Any, plot_obj)
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
         legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
         try:
@@ -802,11 +847,17 @@ def plot_variable_origin(
     cont_label = f"25-100C med {med_window} mwa {ma_window}"
     cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
-        w = op.new_sheet('w', lname=f'cont_{idx}')
+        sheet = op.new_sheet('w', lname=f'cont_{idx}')
+        if sheet is None:
+            continue
+        w = cast(Any, sheet)
         w.from_list(0, cont_df['X'].tolist())
         w.from_list(1, cont_df['Y'].tolist())
         w.cols_axis('XY')
-        p = gl.add_plot(w, coly=1, colx=0, type='y')
+        plot_obj = gl.add_plot(w, coly=1, colx=0, type='y')
+        if plot_obj is None:
+            continue
+        p = cast(Any, plot_obj)
         try:
             p.color = 'black'
             p.line_width = 1

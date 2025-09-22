@@ -2,16 +2,88 @@
 
 This UI mirrors the controls expected by ``current_annealing_logger.py``
 but presents them with modern layouts and English labels. Object names
-are preserved for compatibility with the existing logic.
+match the English identifiers used throughout the logger logic.
 """
 
-from PyQt6 import QtCore, QtGui, QtWidgets
+from __future__ import annotations
+
+import re
 from typing import Optional
+
+from PyQt6 import QtCore, QtGui, QtWidgets
 try:
     # Reuse InfoLineEdit from data logger for inline info and validation
     from data_logging.data_logger.file_name_builder import InfoLineEdit
 except Exception:
     InfoLineEdit = QtWidgets.QLineEdit  # type: ignore[assignment]
+
+
+class SampleSpinBox(QtWidgets.QSpinBox):
+    """Spin box that preserves the alphanumeric sample prefix and suffix."""
+
+    _pattern = re.compile(r"^(.*?)(\d+)(.*)$")
+
+    def __init__(self, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._prefix = "s"
+        self._suffix = ""
+        self.setObjectName("lineEdit_sample")
+        self.setRange(0, 999_999)
+        self.setAccelerated(True)
+        self.setKeyboardTracking(False)
+        self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.UpDownArrows)
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        self.lineEdit().setPlaceholderText("Sample, e.g., s1 or s2-1")
+        self.lineEdit().setToolTip("Sample identifier, e.g., s1 or s2-1")
+
+    # Qt uses ``textFromValue``/``valueFromText`` to keep the display updated.
+    def textFromValue(self, value: int) -> str:  # noqa: D401
+        return f"{self._prefix}{value}{self._suffix}"
+
+    def valueFromText(self, text: str) -> int:  # noqa: D401
+        parsed = self._parse(text)
+        if parsed is None:
+            return max(0, min(self.maximum(), self.value()))
+        prefix, value, suffix = parsed
+        self._prefix = prefix or "s"
+        self._suffix = suffix or ""
+        return max(self.minimum(), min(self.maximum(), value))
+
+    def validate(self, text: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
+        if not text:
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        if self._pattern.match(text):
+            return (QtGui.QValidator.State.Acceptable, text, pos)
+        if re.match(r"^.*?\d*$", text):
+            return (QtGui.QValidator.State.Intermediate, text, pos)
+        return (QtGui.QValidator.State.Invalid, text, pos)
+
+    # Public helpers mirroring QLineEdit for backwards compatibility
+    def text(self) -> str:  # noqa: D401
+        return super().text()
+
+    def setText(self, text: str) -> None:
+        parsed = self._parse(text)
+        if parsed is None:
+            self._prefix, value, self._suffix = "s", 1, ""
+        else:
+            prefix, value, suffix = parsed
+            self._prefix = prefix or "s"
+            self._suffix = suffix or ""
+        self.blockSignals(True)
+        self.setValue(value)
+        self.blockSignals(False)
+
+    def _parse(self, text: str) -> Optional[tuple[str, int, str]]:
+        match = self._pattern.match(text.strip())
+        if match is None:
+            return None
+        prefix, digits, suffix = match.groups()
+        try:
+            value = int(digits)
+        except ValueError:
+            return None
+        return prefix or "s", value, suffix or ""
 
 
 class Ui_MainWindow(object):
@@ -20,8 +92,8 @@ class Ui_MainWindow(object):
         self.plot_container: Optional[QtWidgets.QFrame] = None
         self.label_live_voltage: Optional[QtWidgets.QLabel] = None
         self.label_set_current: Optional[QtWidgets.QLabel] = None
-        self.lcdNumber_aktualny_prud_mA: Optional[QtWidgets.QLCDNumber] = None
-        self.lcdNumber_aktualny_odpor: Optional[QtWidgets.QLCDNumber] = None
+        self.lcd_current_mA: Optional[QtWidgets.QLCDNumber] = None
+        self.lcd_resistance: Optional[QtWidgets.QLCDNumber] = None
 
     def setupUi(self, MainWindow: QtWidgets.QMainWindow) -> None:
         MainWindow.setObjectName("CurrentAnnealingMainWindow")
@@ -39,7 +111,16 @@ class Ui_MainWindow(object):
         root.setContentsMargins(8, 8, 8, 8)
         root.setSpacing(8)
 
-        left_panel = QtWidgets.QWidget(self.centralWidget)
+        left_container = QtWidgets.QWidget(self.centralWidget)
+        left_container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        left_container_layout = QtWidgets.QVBoxLayout(left_container)
+        left_container_layout.setContentsMargins(0, 0, 0, 0)
+        left_container_layout.setSpacing(8)
+
+        left_panel = QtWidgets.QWidget(left_container)
         # Allow the left column to shrink to viewport width without forcing
         # a horizontal scrollbar in the scroll area.
         left_panel.setSizePolicy(
@@ -49,7 +130,7 @@ class Ui_MainWindow(object):
         main_layout = QtWidgets.QVBoxLayout(left_panel)
         main_layout.setContentsMargins(8, 8, 8, 8)
         main_layout.setSpacing(12)
-        left_scroll = QtWidgets.QScrollArea(self.centralWidget)
+        left_scroll = QtWidgets.QScrollArea(left_container)
         left_scroll.setWidgetResizable(True)
         left_scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         # Avoid horizontal scrollbar; let content wrap/stack vertically
@@ -60,7 +141,20 @@ class Ui_MainWindow(object):
         left_scroll.setWidget(left_panel)
         # Expose scroll for overlays from logic
         self.left_scroll = left_scroll
-        root.addWidget(left_scroll, stretch=0)
+        left_container_layout.addWidget(left_scroll, stretch=1)
+
+        sticky_buttons_frame = QtWidgets.QFrame(left_container)
+        sticky_buttons_frame.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        sticky_buttons_frame.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        sticky_buttons_layout = QtWidgets.QHBoxLayout(sticky_buttons_frame)
+        sticky_buttons_layout.setContentsMargins(8, 0, 8, 0)
+        sticky_buttons_layout.setSpacing(8)
+        left_container_layout.addWidget(sticky_buttons_frame)
+
+        root.addWidget(left_container, stretch=0)
 
         # Right plot container
         self.plot_container = QtWidgets.QFrame(self.centralWidget)
@@ -74,16 +168,16 @@ class Ui_MainWindow(object):
         root.addWidget(self.plot_container, stretch=1)
 
         # ------------------------------------------------------------------
-        # Serial basics (frame_zakladne_nastavenia_portu)
+        # Serial basics (frame_serial_settings)
         # ------------------------------------------------------------------
-        self.frame_zakladne_nastavenia_portu = QtWidgets.QFrame(self.centralWidget)
-        self.frame_zakladne_nastavenia_portu.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.frame_zakladne_nastavenia_portu.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-        main_layout.addWidget(self.frame_zakladne_nastavenia_portu)
+        self.frame_serial_settings = QtWidgets.QFrame(self.centralWidget)
+        self.frame_serial_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.frame_serial_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        main_layout.addWidget(self.frame_serial_settings)
 
-        gb_serial = QtWidgets.QGroupBox("Serial settings", self.frame_zakladne_nastavenia_portu)
+        gb_serial = QtWidgets.QGroupBox("Serial settings", self.frame_serial_settings)
         gb_layout = QtWidgets.QHBoxLayout(gb_serial)
-        self.groupBox_zakladne_nastavenia_portu = gb_serial
+        self.groupBox_serial_settings = gb_serial
 
         # Port selection (modernized): list available ports with names
         self.label_port = QtWidgets.QLabel("Port:")
@@ -94,12 +188,12 @@ class Ui_MainWindow(object):
         gb_layout.addWidget(self.pushButton_refresh_ports)
 
         # Legacy numeric COM spin kept for compatibility, but hidden
-        self.label_cislo_portu = QtWidgets.QLabel("COM:")
-        self.label_cislo_portu.hide()
-        self.spinBox_cislo_portu = QtWidgets.QSpinBox()
-        self.spinBox_cislo_portu.setRange(1, 127)
-        self.spinBox_cislo_portu.setValue(3)
-        self.spinBox_cislo_portu.hide()
+        self.label_port_number = QtWidgets.QLabel("COM:")
+        self.label_port_number.hide()
+        self.spinBox_port_number = QtWidgets.QSpinBox()
+        self.spinBox_port_number.setRange(1, 127)
+        self.spinBox_port_number.setValue(3)
+        self.spinBox_port_number.hide()
 
         # Baudrate combo
         self.label_baudrate = QtWidgets.QLabel("Baud:")
@@ -118,143 +212,124 @@ class Ui_MainWindow(object):
 
         gb_layout.addStretch(1)
 
-        self.pushButton_pripojPort = QtWidgets.QPushButton("Connect to port")
-        gb_layout.addWidget(self.pushButton_pripojPort)
+        self.pushButton_connect_port = QtWidgets.QPushButton("Connect to port")
+        gb_layout.addWidget(self.pushButton_connect_port)
 
         # Fit the group box into the frame
-        frame_layout_serial = QtWidgets.QVBoxLayout(self.frame_zakladne_nastavenia_portu)
+        frame_layout_serial = QtWidgets.QVBoxLayout(self.frame_serial_settings)
         frame_layout_serial.setContentsMargins(0, 0, 0, 0)
         frame_layout_serial.addWidget(gb_serial)
 
         # ------------------------------------------------------------------
-        # Mode of operation (simple combo box)
+        # Process settings (frame_process_settings)
         # ------------------------------------------------------------------
-        self.frame_modus_operandi = QtWidgets.QFrame(self.centralWidget)
-        self.frame_modus_operandi.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        main_layout.addWidget(self.frame_modus_operandi)
+        self.frame_process_settings = QtWidgets.QFrame(self.centralWidget)
+        self.frame_process_settings.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.frame_process_settings.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
+        main_layout.addWidget(self.frame_process_settings)
 
-        frame_layout_mode = QtWidgets.QHBoxLayout(self.frame_modus_operandi)
-        frame_layout_mode.setContentsMargins(0, 0, 0, 0)
-        self.label_mode = QtWidgets.QLabel("Mode of operation:")
-        frame_layout_mode.addWidget(self.label_mode)
-        self.comboBox_mode = QtWidgets.QComboBox()
-        self.comboBox_mode.addItems([
-            "Raw VCP",
-            "Manual annealing",
-            "Automatic annealing",
-        ])
-        self.comboBox_mode.setCurrentIndex(2)
-        frame_layout_mode.addWidget(self.comboBox_mode)
-        frame_layout_mode.addStretch(1)
-
-        # ------------------------------------------------------------------
-        # Process settings (frame_nastavenia_procesu)
-        # ------------------------------------------------------------------
-        self.frame_nastavenia_procesu = QtWidgets.QFrame(self.centralWidget)
-        self.frame_nastavenia_procesu.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.frame_nastavenia_procesu.setFrameShadow(QtWidgets.QFrame.Shadow.Raised)
-        main_layout.addWidget(self.frame_nastavenia_procesu)
-
-        gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_nastavenia_procesu)
-        self.groupBox_nastavenia_procesu = gb_proc
+        gb_proc = QtWidgets.QGroupBox("Process settings", self.frame_process_settings)
+        self.groupBox_process_settings = gb_proc
         grid = QtWidgets.QGridLayout(gb_proc)
-        # Make the main text fields expand and keep the buttons narrow
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+        # Keep labels compact while inputs stretch to fill the column
         grid.setColumnStretch(0, 0)
         grid.setColumnStretch(1, 1)
-        grid.setColumnStretch(2, 1)
 
-        # Log file location (separate directory and file name)
+        # Log file location (directory + quick actions)
         self.label_log_dir = QtWidgets.QLabel("Directory:")
         self.lineEdit_log_dir = QtWidgets.QLineEdit()
-        self.lineEdit_log_dir.setMinimumWidth(360)
+        self.lineEdit_log_dir.setMinimumWidth(320)
         self.lineEdit_log_dir.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.pushButton_open_dir = QtWidgets.QPushButton("Open")
         self.pushButton_browse_dir = QtWidgets.QPushButton("Browse")
-        dir_btns = QtWidgets.QHBoxLayout()
-        dir_btns.setContentsMargins(0, 0, 0, 0)
-        dir_btns.setSpacing(4)
-        dir_btns.addWidget(self.pushButton_open_dir)
-        dir_btns.addWidget(self.pushButton_browse_dir)
+        dir_row = QtWidgets.QHBoxLayout()
+        dir_row.setContentsMargins(0, 0, 0, 0)
+        dir_row.setSpacing(6)
+        dir_row.addWidget(self.lineEdit_log_dir, 1)
+        dir_row.addWidget(self.pushButton_open_dir)
+        dir_row.addWidget(self.pushButton_browse_dir)
         grid.addWidget(self.label_log_dir, 0, 0)
-        grid.addWidget(self.lineEdit_log_dir, 0, 1)
-        grid.addLayout(dir_btns, 0, 2)
+        grid.addLayout(dir_row, 0, 1)
 
+        # File name preview
         self.label_log_file = QtWidgets.QLabel("File name:")
         self.lineEdit_log_file = QtWidgets.QLineEdit()
-        self.lineEdit_log_file.setMinimumWidth(360)
+        self.lineEdit_log_file.setMinimumWidth(260)
         self.lineEdit_log_file.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.label_extension = QtWidgets.QLabel(".txt")
+        file_row = QtWidgets.QHBoxLayout()
+        file_row.setContentsMargins(0, 0, 0, 0)
+        file_row.setSpacing(6)
+        file_row.addWidget(self.lineEdit_log_file, 1)
+        file_row.addWidget(self.label_extension)
         grid.addWidget(self.label_log_file, 1, 0)
-        grid.addWidget(self.lineEdit_log_file, 1, 1)
-        grid.addWidget(self.label_extension, 1, 2)
+        grid.addLayout(file_row, 1, 1)
 
         # Legacy single-path widgets kept (hidden) for compatibility with code
-        self.label_logfile = QtWidgets.QLabel("Log file:")
-        self.label_logfile.hide()
-        self.lineEdit_log_subor = QtWidgets.QLineEdit()
-        self.lineEdit_log_subor.setPlaceholderText("data/sample.txt")
-        self.lineEdit_log_subor.hide()
+        self.label_log_file_legacy = QtWidgets.QLabel("Log file:")
+        self.label_log_file_legacy.hide()
+        self.lineEdit_log_file_full = QtWidgets.QLineEdit()
+        self.lineEdit_log_file_full.setPlaceholderText("data/sample.txt")
+        self.lineEdit_log_file_full.hide()
         self.pushButton_select_filename = QtWidgets.QPushButton("...")
         self.pushButton_select_filename.hide()
 
-        # Hold current [mA]
-        self.label_hodnota_staly_prud = QtWidgets.QLabel("Max current [mA]:")
-        self.spinBox_hodnota_staly_prud = QtWidgets.QSpinBox()
-        self.spinBox_hodnota_staly_prud.setRange(1, 10_000)
-        self.spinBox_hodnota_staly_prud.setValue(10)
-        self.spinBox_hodnota_staly_prud.setMaximumWidth(80)
-        # Move one row down to avoid overlap with File name
-        grid.addWidget(self.label_hodnota_staly_prud, 2, 0)
-        grid.addWidget(self.spinBox_hodnota_staly_prud, 2, 1)
-
-        # Hold time [s]
-        self.label_logfile_doba_staleho_prudu = QtWidgets.QLabel("Hold time [s]:")
-        self.spinBox_doba_staly_prud = QtWidgets.QSpinBox()
-        self.spinBox_doba_staly_prud.setRange(1, 36000)
-        # Default hold time 1 second
-        self.spinBox_doba_staly_prud.setValue(1)
-        self.spinBox_doba_staly_prud.setMaximumWidth(80)
-        # Shift down by one row
-        grid.addWidget(self.label_logfile_doba_staleho_prudu, 3, 0)
-        grid.addWidget(self.spinBox_doba_staly_prud, 3, 1)
-
-        # Hold/Stop button and elapsed time
-        # Hold button + Step control in one row to save space
-        hold_and_step = QtWidgets.QHBoxLayout()
-        self.pushButton_start_stop_drzania_prudu = QtWidgets.QPushButton("Hold current now!")
-        self.pushButton_start_stop_drzania_prudu.setMaximumWidth(220)
-        self.pushButton_start_stop_drzania_prudu.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        hold_and_step.addWidget(self.pushButton_start_stop_drzania_prudu)
-        hold_and_step.addStretch(1)
+        # Ramp configuration compacted into two rows
+        ramp = QtWidgets.QGridLayout()
+        ramp.setContentsMargins(0, 0, 0, 0)
+        ramp.setHorizontalSpacing(12)
+        ramp.setVerticalSpacing(6)
+        self.label_max_current = QtWidgets.QLabel("Max current [mA]:")
+        self.spinBox_max_current = QtWidgets.QSpinBox()
+        self.spinBox_max_current.setRange(1, 10_000)
+        self.spinBox_max_current.setValue(10)
+        self.spinBox_max_current.setMaximumWidth(90)
+        ramp.addWidget(self.label_max_current, 0, 0)
+        ramp.addWidget(self.spinBox_max_current, 0, 1)
         self.label_step = QtWidgets.QLabel("Step [mA]:")
         self.spinBox_step_mA = QtWidgets.QSpinBox()
         self.spinBox_step_mA.setRange(1, 10000)
         self.spinBox_step_mA.setValue(1)
-        self.spinBox_step_mA.setMaximumWidth(80)
-        hold_and_step.addWidget(self.label_step)
-        hold_and_step.addWidget(self.spinBox_step_mA)
-        grid.addLayout(hold_and_step, 2, 2)
+        self.spinBox_step_mA.setMaximumWidth(90)
+        ramp.addWidget(self.label_step, 0, 2)
+        ramp.addWidget(self.spinBox_step_mA, 0, 3)
+        self.label_hold_duration = QtWidgets.QLabel("Hold time [s]:")
+        self.spinBox_hold_duration = QtWidgets.QSpinBox()
+        self.spinBox_hold_duration.setRange(1, 36000)
+        self.spinBox_hold_duration.setValue(1)
+        self.spinBox_hold_duration.setMaximumWidth(90)
+        ramp.addWidget(self.label_hold_duration, 1, 0)
+        ramp.addWidget(self.spinBox_hold_duration, 1, 1)
+        ramp.addItem(
+            QtWidgets.QSpacerItem(
+                0,
+                0,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Minimum,
+            ),
+            0,
+            4,
+            2,
+            1,
+        )
+        grid.addLayout(ramp, 2, 0, 1, 2)
 
-        self.label_logfile_uplynulo = QtWidgets.QLabel("Elapsed:")
-        self.lcdNumber_uplynute_sekundy = QtWidgets.QLCDNumber()
-        self.lcdNumber_uplynute_sekundy.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
-        self.label_logfile_s = QtWidgets.QLabel("s")
-        h = QtWidgets.QHBoxLayout()
-        h.addWidget(self.label_logfile_uplynulo)
-        h.addWidget(self.lcdNumber_uplynute_sekundy)
-        h.addWidget(self.label_logfile_s)
-        h.addStretch(1)
-        # Align with Hold time row
-        grid.addLayout(h, 3, 2)
+        # Hold/Stop button spans the main columns to stay visible
+        self.pushButton_hold_current = QtWidgets.QPushButton("Hold current now!")
+        self.pushButton_hold_current.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.pushButton_hold_current.setMinimumWidth(220)
+        grid.addWidget(self.pushButton_hold_current, 3, 0, 1, 2)
 
         # Reverse sweep and loops controls
         rev = QtWidgets.QHBoxLayout()
@@ -272,7 +347,7 @@ class Ui_MainWindow(object):
         rev.addWidget(self.spinBox_loops)
         rev.addWidget(self.checkBox_infinite_loops)
         rev.addStretch(1)
-        grid.addLayout(rev, 4, 0, 1, 3)
+        grid.addLayout(rev, 4, 0, 1, 2)
 
         # Voltage limit behaviour
         limit_layout = QtWidgets.QHBoxLayout()
@@ -287,7 +362,7 @@ class Ui_MainWindow(object):
         )
         limit_layout.addWidget(self.comboBox_max_voltage_action)
         limit_layout.addStretch(1)
-        grid.addLayout(limit_layout, 5, 0, 1, 3)
+        grid.addLayout(limit_layout, 5, 0, 1, 2)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")
@@ -303,30 +378,35 @@ class Ui_MainWindow(object):
         except Exception:
             pass
         self.lineEdit_composition.setText("Ni51Fe26Ga21")
-        self.lineEdit_composition.setMinimumWidth(360)
+        self.lineEdit_composition.setMinimumWidth(300)
         self.lineEdit_microwire = InfoLineEdit("Microwire identifier, e.g., 1_2")
         try:
             self.lineEdit_microwire.set_validation(r"^[A-Za-z0-9_]+$", "Use only letters, numbers, or '_' ")  # type: ignore[attr-defined]
         except Exception:
             pass
         self.lineEdit_microwire.setText("1_2")
-        self.lineEdit_microwire.setMinimumWidth(360)
-        self.lineEdit_sample = InfoLineEdit("Sample, e.g., s1 or s2-1")
-        try:
-            self.lineEdit_sample.set_validation(r"^s\d+(?:-\d+)?$", "Use pattern like s1 or s2-1")  # type: ignore[attr-defined]
-        except Exception:
-            pass
+        self.lineEdit_microwire.setMinimumWidth(300)
+        self.lineEdit_sample = SampleSpinBox()
+        self.lineEdit_sample.setMinimumWidth(300)
         self.lineEdit_sample.setText("s1")
-        self.lineEdit_sample.setMinimumWidth(360)
-        name_grid.addWidget(QtWidgets.QLabel("Composition:"), 1, 0)
+        self.label_composition = QtWidgets.QLabel("Composition:")
+        name_grid.addWidget(self.label_composition, 1, 0)
         name_grid.addWidget(self.lineEdit_composition, 1, 1)
-        name_grid.addWidget(QtWidgets.QLabel("Microwire:"), 2, 0)
+        self.label_microwire = QtWidgets.QLabel("Microwire:")
+        name_grid.addWidget(self.label_microwire, 2, 0)
         name_grid.addWidget(self.lineEdit_microwire, 2, 1)
-        name_grid.addWidget(QtWidgets.QLabel("Sample:"), 3, 0)
-        name_grid.addWidget(self.lineEdit_sample, 3, 1)
+        self.label_sample = QtWidgets.QLabel("Sample:")
+        name_grid.addWidget(self.label_sample, 3, 0)
+        self.sample_row_widget = QtWidgets.QWidget()
+        sample_row = QtWidgets.QHBoxLayout(self.sample_row_widget)
+        sample_row.setContentsMargins(0, 0, 0, 0)
+        sample_row.setSpacing(0)
+        sample_row.addWidget(self.lineEdit_sample)
+        sample_row.setStretch(0, 1)
+        name_grid.addWidget(self.sample_row_widget, 3, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
-        self.lineEdit_custom_name.setMinimumWidth(360)
+        self.lineEdit_custom_name.setMinimumWidth(300)
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
         name_grid.addWidget(self.label_custom_name, 4, 0)
         name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
@@ -352,17 +432,19 @@ class Ui_MainWindow(object):
             1,
             QtCore.Qt.AlignmentFlag.AlignRight,
         )
-        grid.addWidget(gb_name, 5, 0, 1, 3)
+        grid.addWidget(gb_name, 6, 0, 1, 2)
 
         # Process progress and time remaining
         self.progressBar_process = QtWidgets.QProgressBar()
-        grid.addWidget(self.progressBar_process, 6, 0, 1, 3)
+        grid.addWidget(self.progressBar_process, 7, 0, 1, 2)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
-        grid.addWidget(self.label_time_remaining, 7, 0, 1, 3)
+        grid.addWidget(self.label_time_remaining, 8, 0, 1, 2)
+        self.label_time_to_limit = QtWidgets.QLabel("To 30 V: N/A")
+        grid.addWidget(self.label_time_to_limit, 9, 0, 1, 2)
 
         # Live values group
-        self.groupBox_aktualne_hodnoty = QtWidgets.QGroupBox("Live values")
-        lv = QtWidgets.QGridLayout(self.groupBox_aktualne_hodnoty)
+        self.groupBox_live_values = QtWidgets.QGroupBox("Live values")
+        lv = QtWidgets.QGridLayout(self.groupBox_live_values)
         lcd_current = QtWidgets.QLCDNumber()
         lcd_current.setSegmentStyle(QtWidgets.QLCDNumber.SegmentStyle.Filled)
         lcd_current.setDigitCount(6)
@@ -378,45 +460,53 @@ class Ui_MainWindow(object):
             QtWidgets.QSizePolicy.Policy.Preferred,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
-        self.lcdNumber_aktualny_prud_mA = lcd_current
-        self.lcdNumber_aktualny_odpor = lcd_resistance
+        self.lcd_current_mA = lcd_current
+        self.lcd_resistance = lcd_resistance
         self.label_Ohm = QtWidgets.QLabel("Ohm")
         lv.addWidget(lcd_current, 0, 0)
         lv.addWidget(self.label_mA, 0, 1)
         lv.addWidget(lcd_resistance, 0, 2)
         lv.addWidget(self.label_Ohm, 0, 3)
-        grid.addWidget(self.groupBox_aktualne_hodnoty, 8, 0, 1, 3)
+        grid.addWidget(self.groupBox_live_values, 10, 0, 1, 2)
 
         # Hold resistance and percent
         hr_layout = QtWidgets.QHBoxLayout()
         self.label_resistance_at_hold_current = QtWidgets.QLabel("0")
-        self.label_resistance_percento_from_hold = QtWidgets.QLabel("0")
-        self.label_resistance_percento_from_hold_3 = QtWidgets.QLabel("Ohm")
-        self.label_resistance_percento_from_hold_2 = QtWidgets.QLabel("%")
+        self.label_resistance_percent_from_hold = QtWidgets.QLabel("0")
+        self.label_resistance_ohm_suffix = QtWidgets.QLabel("Ohm")
+        self.label_percent_suffix = QtWidgets.QLabel("%")
         hr_layout.addWidget(QtWidgets.QLabel("Hold resistance:"))
         hr_layout.addWidget(self.label_resistance_at_hold_current)
-        hr_layout.addWidget(self.label_resistance_percento_from_hold_3)
+        hr_layout.addWidget(self.label_resistance_ohm_suffix)
         hr_layout.addSpacing(16)
         hr_layout.addWidget(QtWidgets.QLabel("Percent from hold:"))
-        hr_layout.addWidget(self.label_resistance_percento_from_hold)
-        hr_layout.addWidget(self.label_resistance_percento_from_hold_2)
+        hr_layout.addWidget(self.label_resistance_percent_from_hold)
+        hr_layout.addWidget(self.label_percent_suffix)
         hr_layout.addStretch(1)
-        grid.addLayout(hr_layout, 9, 0, 1, 3)
+        grid.addLayout(hr_layout, 11, 0, 1, 2)
 
-        # Start/Stop and reverse buttons
-        buttons = QtWidgets.QHBoxLayout()
-        self.pushButton_spusti_proces = QtWidgets.QPushButton("Start annealing process")
+        # Start/Stop and reverse buttons (pinned below the scroll area)
+        self.pushButton_start_process = QtWidgets.QPushButton("Start annealing process")
         bfont = QtGui.QFont()
         bfont.setPointSize(12)
-        self.pushButton_spusti_proces.setFont(bfont)
+        self.pushButton_start_process.setFont(bfont)
+        self.pushButton_start_process.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.pushButton_reverse_now = QtWidgets.QPushButton("Reverse current now")
         self.pushButton_reverse_now.setFont(bfont)
         self.pushButton_reverse_now.setEnabled(False)
-        buttons.addWidget(self.pushButton_spusti_proces)
-        buttons.addWidget(self.pushButton_reverse_now)
-        grid.addLayout(buttons, 10, 0, 1, 3)
+        self.pushButton_reverse_now.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        sticky_buttons_layout.addWidget(self.pushButton_start_process)
+        sticky_buttons_layout.addWidget(self.pushButton_reverse_now)
 
-        frame_layout_proc = QtWidgets.QVBoxLayout(self.frame_nastavenia_procesu)
+        left_container_layout.setStretch(0, 1)
+
+        frame_layout_proc = QtWidgets.QVBoxLayout(self.frame_process_settings)
         frame_layout_proc.setContentsMargins(0, 0, 0, 0)
         frame_layout_proc.addWidget(gb_proc)
 
@@ -445,18 +535,18 @@ class Ui_MainWindow(object):
         vcmd.setContentsMargins(8, 4, 8, 8)
 
         hl = QtWidgets.QHBoxLayout()
-        self.lineEdit_prikaz_portu = QtWidgets.QLineEdit()
-        self.pushButton_posli_prikaz_portu = QtWidgets.QPushButton("Send")
-        hl.addWidget(self.lineEdit_prikaz_portu, stretch=1)
-        hl.addWidget(self.pushButton_posli_prikaz_portu)
+        self.lineEdit_serial_command = QtWidgets.QLineEdit()
+        self.pushButton_send_serial_command = QtWidgets.QPushButton("Send")
+        hl.addWidget(self.lineEdit_serial_command, stretch=1)
+        hl.addWidget(self.pushButton_send_serial_command)
         vcmd.addLayout(hl)
 
-        self.label_prikaz_portu = QtWidgets.QLabel("")
-        self.label_prikaz_portu.setWordWrap(True)
-        vcmd.addWidget(self.label_prikaz_portu)
-        self.label_odpoved_portu = QtWidgets.QLabel("")
-        self.label_odpoved_portu.setWordWrap(True)
-        vcmd.addWidget(self.label_odpoved_portu)
+        self.label_last_command = QtWidgets.QLabel("")
+        self.label_last_command.setWordWrap(True)
+        vcmd.addWidget(self.label_last_command)
+        self.label_serial_response = QtWidgets.QLabel("")
+        self.label_serial_response.setWordWrap(True)
+        vcmd.addWidget(self.label_serial_response)
 
         frame_layout_cmd.addWidget(self._cmd_container)
         self._cmd_container.setVisible(False)

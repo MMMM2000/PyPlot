@@ -55,10 +55,22 @@ control is released immediately after each run, so closing the Temperature
 Sensitivity settings while Origin remains open no longer tears down the
 launcher window.
 
+The lists on each tab open sorted by the most recently launched tool so the
+scripts you rely on are always at the top.  A new **Sort** menu lets you flip to
+alphabetical ordering in either direction at any time, and a search bar above
+the tabs filters entries across loggers, plotters, emulators and experiments as
+you type, making it easy to jump straight to the utility you need.
+
+Keyboard shortcuts make it just as quick to launch tools without reaching for
+the mouse.  Use the **Up/Down** arrow keys to move through the current list, tap
+**Left/Right** to jump between tabs, and press **Enter** from anywhere in the
+window (including the search box) to run the highlighted script immediately.
+
 Plotting scripts opened from the **Plotting** tab keep their settings dialogs
 open after generating figures.  Each dialog lists the selected input files and
-places **Add Files/Folders** and **Remove Selected** buttons above a wide,
-non‑scrolling list so datasets can be refined without restarting the tool.
+places **Add Files/Folders**, **Remove Selected**, and **Remove All** buttons above
+a wide, non‑scrolling list so datasets can be refined without restarting the
+tool.
 Settings panels wrap content vertically and disable horizontal scrollbars for a
 clean, uncluttered layout. Each settings window embeds a small console and
 places it next to the file list in a side panel beside the plot options, so the
@@ -72,7 +84,34 @@ PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  Each
 plotting dialog remembers its most recent backend selection and PNG DPI
 independently, so Matplotlib/Origin toggles and export resolution reopen the way
 you left them.  The current annealing plotter also omits the initial 0 mA data
-point so figures start with the first real sample.  Plotting dialogs keep their
+point so figures start with the first real sample, trims the abrupt dip that
+appears when a wire burns through, and ramps are coloured red
+while current increases and blue while it decreases to mirror the live logger.
+A small smoothing pass filters out measurement jitter so the Matplotlib
+outputs keep their red/blue segments even when the current wiggles while
+holding at the peak. Origin exports now build the figure directly through
+Origin’s embedded Python API and expose an **Origin style** selector: the
+default **Experimental** mode mirrors the Matplotlib view by splitting the ramp
+into rising and falling passes, colouring them red and blue with matching
+markers, and trimming the legend to two entries. The **Simple** mode mirrors the
+lightweight LabTalk macro by plotting a single black line+symbol trace that
+carries the filename (without the `.txt` suffix) as both the legend entry and
+the graph long name, then hides the populated workbook so a multi-file run
+doesn’t flood the workspace with sheets. Both variants set axis labels and
+titles through the API so the generated workbooks and graphs appear immediately
+in the Project Explorer without relying on template-specific LabTalk, and the
+text sizes honour the Readability font controls for titles, axes, ticks, and the
+legend. The legend and page title now reuse the sample description with Origin
+rich-text markup—element counts become subscripts and wire presets such as
+`1_10` are rewritten as `1/10`—so the figure heading matches the legend entry
+without manual editing, while tick styling stays on the Origin side without
+triggering property warnings. Origin
+connections stay attached while the plotting dialogs remain
+open—detaching is scheduled for the Qt application shutdown (or immediate when
+running headless)—so Python windows no longer disappear the moment an Origin
+export finishes, yet the Origin application can still be closed cleanly
+afterwards.
+Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
 
@@ -100,8 +139,9 @@ Markdown guide tailored to the current tool.  When onboarding new colleagues you
 can point them to the menu entry for context without having to maintain a
 separate manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
-Origin sessions are closed automatically after plots are generated so the Origin
-application can be closed independently from the Python tools.
+Origin sessions are closed automatically after plots are generated—and even if a
+run aborts—so the Origin application can be closed independently from the
+Python tools without lingering automation locks.
 
 Developer notes: the Qt overrides now accept optional `QPaintEvent`/`QCloseEvent`
 arguments to match the PyQt6 stubs, Origin helpers coerce LabTalk worksheets
@@ -144,15 +184,32 @@ Connects to an HMP4030 power supply via a serial port.  Features include:
 
 * configurable current ramp with optional automatic reversal
 * **Reverse current now** button for an immediate ramp down
+* Start/Stop and Reverse controls stay pinned beneath the settings so they remain
+  visible without scrolling
+* all UI elements and internal variables now use English identifiers for easier maintenance
+* Cancelling a start when the selected log file already exists keeps the naming
+  controls active so you can adjust the path before retrying
 * default **Reverse to zero after max** behaviour
 * remembers the last log directory and file separately from input paths
 * remembers the last max-current setting and keeps serial controls adjustable after connection
+* reapplies the saved max-current limit on launch so the first run honours the configured peak without nudging the control
+* the **Sample** field now behaves like a spin box with built-in up/down arrows, matching the other numeric inputs while still honouring the keyboard arrows to bump the `s` index without retyping the name
+* the **Hold current now** button spans the main settings columns so its label never collides with the **Step** control
+* the process settings grid packs the directory and file pickers alongside their action buttons and pairs the ramp controls across two rows, eliminating the wide blank column and keeping related inputs together
+* mode selection lives under **Settings → Mode of operation**, keeping the primary pane focused on run parameters while the shortcuts stay available in the menu bar
+* the redundant **Elapsed** readout has been removed to avoid confusion—the hold-resistance percentage continues to track dwell progress in manual mode
+* the **Composition** and **Microwire** fields remember the five most recent entries (shared with the serial data logger) and cycle through them with the Up/Down keys
 * optional infinite looping displays "∞" and locks the loop count
 * configurable response when the supply hits **30 V** (hold, reverse, stop, or ask each time)
+* live projection of how long remains until the supply reaches 30 V plus the
+  estimated current at that limit, shown alongside the main time estimate
+* progress and remaining-time calculations shrink automatically when the
+  30 V limit triggers an early reverse so the progress bar reflects the shorter
+  descent back to zero
 * live display of set current, measured current and voltage
 * streamlined start-up sequence that begins logging immediately
 * plots of resistance vs. current and sample number that follow the system theme
-* ignores the initial zero sample when logging and plotting
+* briefly shows zero-current placeholders on the live plot when the run begins so you can confirm data is arriving, then removes them as soon as real measurements start while still ignoring the later sudden 0 mA readings that signal a burnt wire
 * contact-loss detection waits until the logger has measured a non-zero current,
   then applies a short start-up grace period and requires multiple zeros spread
   over a short delay before stopping, so start-up ramps and momentary dips no
@@ -190,6 +247,10 @@ python -m experiments.pyvisa_current_annealing_logger
 
 Records arbitrary measurements to structured text files with a built‑in file
 name builder.  Real‑time plots update while logging and match the system theme.
+Recent updates include:
+
+* the composition and microwire fields share the same five-entry history as the current annealing logger, so pressing Up/Down cycles through the most recent experiment names without retyping
+* history tracking persists between runs, making it easy to repeat a series of measurements with consistent naming
 
 ## 4. Virtual COM‑port emulator
 
