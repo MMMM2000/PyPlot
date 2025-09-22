@@ -84,7 +84,8 @@ PDF, or SVG format with a configurable DPI (PNG defaults to 1200 dpi).  Each
 plotting dialog remembers its most recent backend selection and PNG DPI
 independently, so Matplotlib/Origin toggles and export resolution reopen the way
 you left them.  The current annealing plotter also omits the initial 0 mA data
-point so figures start with the first real sample, and ramps are coloured red
+point so figures start with the first real sample, trims the abrupt dip that
+appears when a wire burns through, and ramps are coloured red
 while current increases and blue while it decreases to mirror the live logger.
 A small smoothing pass filters out measurement jitter so the Matplotlib
 outputs keep their red/blue segments even when the current wiggles while
@@ -95,10 +96,12 @@ into rising and falling passes, colouring them red and blue with matching
 markers, and trimming the legend to two entries. The **Simple** mode mirrors the
 lightweight LabTalk macro by plotting a single black line+symbol trace that
 carries the filename (without the `.txt` suffix) as both the legend entry and
-the graph long name, then minimises the populated workbook so a multi-file run
+the graph long name, then hides the populated workbook so a multi-file run
 doesn’t flood the workspace with sheets. Both variants set axis labels and
 titles through the API so the generated workbooks and graphs appear immediately
-in the Project Explorer without relying on template-specific LabTalk. Origin
+in the Project Explorer without relying on template-specific LabTalk, and the
+text sizes honour the Readability font controls for titles, axes, ticks, and the
+legend. Origin
 connections stay attached while the plotting dialogs remain
 open—detaching is scheduled for the Qt application shutdown (or immediate when
 running headless)—so Python windows no longer disappear the moment an Origin

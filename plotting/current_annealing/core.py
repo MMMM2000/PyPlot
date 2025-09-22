@@ -43,6 +43,34 @@ ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
 ORIGIN_MODE: str = ORIGIN_MODES[0]
 
 
+def _trim_burnthrough_glitch(
+    currents: np.ndarray, resistances: np.ndarray
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Drop the trailing sample if it collapses sharply as the wire burns."""
+
+    count = currents.size
+    if count < 3:
+        return currents, resistances
+
+    deltas = np.diff(currents.astype(float))
+    finite = np.abs(deltas[np.isfinite(deltas)])
+    if finite.size == 0:
+        return currents, resistances
+
+    last_drop = float(currents[-2] - currents[-1])
+    if not np.isfinite(last_drop) or last_drop <= 0:
+        return currents, resistances
+
+    typical = float(np.median(finite))
+    spread = float(np.quantile(finite, 0.75) - np.quantile(finite, 0.25)) if finite.size > 1 else 0.0
+    span = float(np.nanmax(currents) - np.nanmin(currents)) if count else 0.0
+    threshold = max(typical * 8.0, spread * 6.0 if spread > 0 else 0.0, span * 0.05, 5.0)
+
+    if last_drop > threshold:
+        return currents[:-1], resistances[:-1]
+    return currents, resistances
+
+
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
@@ -57,6 +85,15 @@ def load_file(path: str) -> pd.DataFrame:
     df["I_mA"] = df["I_A"] * 1e3
     df["R_Ohm"] = df["R_Ohm"].astype(float)
     df = df[df["I_mA"] != 0].reset_index(drop=True)
+    currents = df["I_mA"].to_numpy(dtype=float)
+    resistances = df["R_Ohm"].to_numpy(dtype=float)
+    trimmed_currents, trimmed_resistances = _trim_burnthrough_glitch(currents, resistances)
+    if trimmed_currents is not currents:
+        # NumPy may or may not return the original view; guard with a length check.
+        if trimmed_currents.shape[0] != currents.shape[0]:
+            df = df.iloc[: trimmed_currents.shape[0]].copy()
+            df["I_mA"] = trimmed_currents
+            df["R_Ohm"] = trimmed_resistances
     return df[["I_mA", "R_Ohm"]]
 
 
@@ -188,10 +225,45 @@ def _assign_long_name(target: Any | None, name: str) -> None:
                 continue
 
 
+def _set_text_size(target: Any | None, size: int) -> bool:
+    if target is None:
+        return False
+    for attr in ("font_size", "fontsize", "text_size", "height", "size", "FontSize"):
+        if hasattr(target, attr):
+            try:
+                setattr(cast(Any, target), attr, size)
+                return True
+            except Exception:
+                continue
+    setter = getattr(target, "set_size", None)
+    if callable(setter):
+        try:
+            setter(size)
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _set_visibility(target: Any | None, visible: bool) -> bool:
+    if target is None:
+        return False
+    for attr in ("visible", "Visible", "show", "Show"):
+        if hasattr(target, attr):
+            try:
+                setattr(cast(Any, target), attr, bool(visible))
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def _apply_axis_labels(layer: Any, x_label: str, y_label: str) -> None:
     axis_method = getattr(layer, "axis", None)
     if not callable(axis_method):
         return
+    show_axis = bool(globals().get("SHOW_AXIS_LABELS", True))
+    axis_size = int(globals().get("AXIS_LABEL_SIZE", 18))
     for axis_name, label_text in (("x", x_label), ("y", y_label)):
         try:
             axis_obj = axis_method(axis_name)
@@ -200,19 +272,83 @@ def _apply_axis_labels(layer: Any, x_label: str, y_label: str) -> None:
         if axis_obj is None:
             continue
         label_obj = getattr(axis_obj, "label", None)
+        text_value = label_text if show_axis else ""
         if label_obj is not None and hasattr(label_obj, "text"):
             try:
-                cast(Any, label_obj).text = label_text
+                cast(Any, label_obj).text = text_value
+                _set_visibility(label_obj, show_axis)
+                if show_axis:
+                    _set_text_size(label_obj, axis_size)
                 continue
             except Exception:
                 pass
         for attr in ("title", "text"):
             if hasattr(axis_obj, attr):
                 try:
-                    setattr(cast(Any, axis_obj), attr, label_text)
+                    setattr(cast(Any, axis_obj), attr, text_value)
                     break
                 except Exception:
                     continue
+
+        if not show_axis:
+            for attr in ("label", "Label"):
+                sub = getattr(axis_obj, attr, None)
+                if sub is not None:
+                    _set_visibility(sub, False)
+
+
+def _apply_tick_settings(layer: Any, axis_name: str, axis_obj: Any | None) -> None:
+    show_ticks = bool(globals().get("SHOW_TICK_LABELS", True))
+    tick_size = int(globals().get("TICK_SIZE", 18))
+
+    tick_obj: Any | None = None
+    for attr in ("tick_labels", "tickLabels", "ticklabel", "TickLabels"):
+        candidate = getattr(axis_obj, attr, None) if axis_obj is not None else None
+        if candidate is not None:
+            tick_obj = candidate
+            break
+
+    if tick_obj is not None:
+        _set_visibility(tick_obj, show_ticks)
+        if show_ticks:
+            _set_text_size(tick_obj, tick_size)
+
+    execs = []
+    for source in (layer, getattr(layer, "parent", None)):
+        if source is None:
+            continue
+        executor = getattr(source, "lt_exec", None)
+        if callable(executor):
+            execs.append(executor)
+
+    if not execs:
+        return
+
+    commands: List[str] = []
+    if show_ticks:
+        commands.extend(
+            [
+                f"layer.{axis_name}.ticklabels.show=1;",
+                f"layer.{axis_name}.ticklabels.font.size={tick_size};",
+                f"layer.{axis_name}.tickLabels.show=1;",
+                f"layer.{axis_name}.tickLabels.font.size={tick_size};",
+            ]
+        )
+    else:
+        commands.extend(
+            [
+                f"layer.{axis_name}.ticklabels.show=0;",
+                f"layer.{axis_name}.tickLabels.show=0;",
+            ]
+        )
+
+    for cmd in commands:
+        for executor in execs:
+            try:
+                executor(cmd)
+                break
+            except Exception:
+                continue
 
 
 def _prepare_origin_workspace(
@@ -301,21 +437,18 @@ def _prepare_origin_workspace(
     return origin_any, workbook, worksheet, graph, layer, legend_label
 
 
-def _minimise_workbook(origin_any: Any, workbook: Any | None, graph: Any | None) -> None:
+def _hide_workbook(origin_any: Any, workbook: Any | None, graph: Any | None) -> None:
     if workbook is None:
         return
 
-    candidates: List[str] = []
-    for attr in ("name", "short_name", "shortname"):
-        value = getattr(workbook, attr, None)
-        if isinstance(value, str) and value:
-            candidates.append(value)
+    activator = getattr(workbook, "activate", None)
+    if callable(activator):
+        try:
+            activator()
+        except Exception:
+            pass
 
-    commands: List[str] = []
-    for name in candidates:
-        commands.append(f"win -i {name};")
-        commands.append(f"window -i {name};")
-    commands.extend(["win -i;", "window -i;"])
+    commands = ["win -h 1;", "window -h 1;", "win -hc 1;", "window -hc 1;"]
 
     executors = [getattr(workbook, "lt_exec", None), getattr(origin_any, "lt_exec", None)]
     for cmd in commands:
@@ -332,6 +465,54 @@ def _minimise_workbook(origin_any: Any, workbook: Any | None, graph: Any | None)
                 return
             except Exception:
                 continue
+
+
+def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
+    if layer is None:
+        return
+    legend = _legend_label(layer)
+    show_legend = bool(globals().get("SHOW_LEGEND", True))
+    legend_size = int(globals().get("LEGEND_SIZE", 18))
+    if legend is not None:
+        if show_legend:
+            _set_visibility(legend, True)
+            _set_text_size(legend, legend_size)
+        else:
+            try:
+                legend.text = ""
+            except Exception:
+                pass
+            _set_visibility(legend, False)
+
+    label_method = getattr(layer, "label", None)
+    title_label: Any | None = None
+    if callable(label_method):
+        try:
+            title_label = label_method("Title")
+        except Exception:
+            title_label = None
+    show_title = bool(globals().get("SHOW_TITLE", True))
+    title_size = int(globals().get("TITLE_SIZE", 22))
+    if title_label is not None:
+        _set_visibility(title_label, show_title)
+        if show_title:
+            _set_text_size(title_label, title_size)
+
+    for axis_name in ("x", "y"):
+        axis_obj = None
+        axis_method = getattr(layer, "axis", None)
+        if callable(axis_method):
+            try:
+                axis_obj = axis_method(axis_name)
+            except Exception:
+                axis_obj = None
+        _apply_tick_settings(layer, axis_name, axis_obj)
+
+    if graph is not None and show_title:
+        try:
+            graph.activate()
+        except Exception:
+            pass
 
 
 def _plot_origin_simple(
@@ -545,7 +726,7 @@ def plot_one_origin(
     resolved_mode = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
     if resolved_mode == "simple":
         _plot_origin_simple(workbook, worksheet, graph, layer, legend_label)
-        _minimise_workbook(origin_any, workbook, graph)
+        _hide_workbook(origin_any, workbook, graph)
     else:
         _plot_origin_experimental(
             origin_any,
@@ -557,6 +738,8 @@ def plot_one_origin(
             resistances,
             legend_label,
         )
+
+    _apply_origin_readability(layer, graph)
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:
