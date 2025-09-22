@@ -40,9 +40,6 @@ SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
 
-ORIGIN_INCREASING_COLOUR = "#d62728"
-ORIGIN_DECREASING_COLOUR = "#1f77b4"
-
 
 _LT_NAME_CLEANER = re.compile(r"[^A-Za-z0-9_]")
 
@@ -126,54 +123,6 @@ def _safe_assign(obj: Any, attr: str, value: Any) -> None:
         pass
 
 
-def _hex_to_rgb(colour: str) -> Tuple[int, int, int] | None:
-    if not isinstance(colour, str):
-        return None
-    text = colour.strip()
-    if text.startswith("#"):
-        text = text[1:]
-    if len(text) != 6:
-        return None
-    try:
-        r = int(text[0:2], 16)
-        g = int(text[2:4], 16)
-        b = int(text[4:6], 16)
-    except ValueError:
-        return None
-    return r, g, b
-
-
-def _apply_origin_colour(origin_any: Any, plot_obj: Any, index: int, colour: str) -> None:
-    _safe_assign(plot_obj, "color", colour)
-    _safe_assign(plot_obj, "symbol_edge_color", colour)
-    _safe_assign(plot_obj, "symbol_fill_color", colour)
-
-    symbol = getattr(plot_obj, "symbol", None)
-    if symbol is not None:
-        _safe_assign(symbol, "color", colour)
-        _safe_assign(symbol, "edgecolor", colour)
-        _safe_assign(symbol, "fillcolor", colour)
-        _safe_assign(symbol, "colorAuto", False)
-        _safe_assign(symbol, "fillColorAuto", False)
-
-    rgb = _hex_to_rgb(colour)
-    if rgb is None:
-        return
-
-    r, g, b = rgb
-    lt_cmd = (
-        f"layer -i {index};"
-        f"set %C -c color({r},{g},{b});"
-        f"set %C -cf color({r},{g},{b});"
-        f"set %C -kf color({r},{g},{b});"
-        "set %C -k 2;"
-        "set %C -z 6;"
-        "set %C -w 2;"
-    )
-    try:
-        origin_any.lt_exec(lt_cmd)
-    except Exception:
-        pass
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
@@ -239,22 +188,6 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
             current_dir = smoothed_values[idx]
     segments.append((start, count, current_dir))
     return smoothed_values, segments
-
-
-def _split_directional_values(
-    values: np.ndarray, directions: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Return arrays for increasing and decreasing segments with NaNs elsewhere."""
-
-    if values.size == 0:
-        return np.array([], dtype=float), np.array([], dtype=float)
-    inc = np.full(values.shape, np.nan, dtype=float)
-    dec = np.full(values.shape, np.nan, dtype=float)
-    mask_inc = directions >= 0
-    mask_dec = directions < 0
-    inc[mask_inc] = values[mask_inc]
-    dec[mask_dec] = values[mask_dec]
-    return inc, dec
 
 
 def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
@@ -343,49 +276,40 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
-    directions, _ = _direction_profile(currents)
-    inc_vals, dec_vals = _split_directional_values(resistances, directions)
 
     worksheet.from_list(0, currents.tolist())
     worksheet.from_list(1, resistances.tolist())
-    worksheet.from_list(2, inc_vals.tolist())
-    worksheet.from_list(3, dec_vals.tolist())
     try:
-        worksheet.cols_axis('XYYY')
+        worksheet.cols_axis('XY')
     except Exception:
         pass
     try:
         worksheet.set_label(0, "Current (mA)")
         worksheet.set_label(1, "Resistance (Ohm)")
-        worksheet.set_label(2, "Increasing")
-        worksheet.set_label(3, "Decreasing")
     except Exception:
         pass
 
     try:
         worksheet.activate()
-        origin_any.lt_exec(
-            'wks.col1.lname$ = "Current (mA)";',
-            'wks.col2.lname$ = "Resistance";',
-            'wks.col3.lname$ = "Increasing";',
-            'wks.col4.lname$ = "Decreasing";',
-        )
     except Exception:
         pass
 
-    esc_book = (source_stem or title).replace('"', "'")
+    legend_label = source_stem or title
+    esc_legend = legend_label.replace('"', "'")
+
     try:
-        origin_any.lt_exec(f'page.longname$ = "{esc_book}";')
+        origin_any.lt_exec(
+            'wks.col1.lname$ = "Current (mA)";',
+            'wks.col1.unit$ = "mA";',
+            'wks.col2.lname$ = "Resistance";',
+            'wks.col2.unit$ = "Ohm";',
+            f'wks.col2.comment$ = "{esc_legend}";',
+        )
     except Exception:
         pass
 
     book_hint = source_stem or workbook_name or "CA"
     _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
-
-    has_inc = bool(np.isfinite(inc_vals).any())
-    has_dec = bool(np.isfinite(dec_vals).any())
-    if not has_inc and not has_dec:
-        return
 
     graph_obj: Any | None
     try:
@@ -408,38 +332,24 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     if layer is None:
         return
 
-    plots: List[Tuple[str, Any]] = []
-    if has_inc:
-        try:
-            inc_plot_obj = layer.add_plot(worksheet, coly=2, colx=0, type='y')
-        except Exception:
-            inc_plot_obj = None
-        if inc_plot_obj is not None:
-            plots.append(("Increasing", cast(Any, inc_plot_obj)))
-
-    if has_dec:
-        try:
-            dec_plot_obj = layer.add_plot(worksheet, coly=3, colx=0, type='y')
-        except Exception:
-            dec_plot_obj = None
-        if dec_plot_obj is not None:
-            plots.append(("Decreasing", cast(Any, dec_plot_obj)))
-
-    if not plots:
+    try:
+        plot_obj = layer.add_plot(worksheet, coly=1, colx=0, type='y')
+    except Exception:
+        plot_obj = None
+    if plot_obj is None:
         return
 
-    colour_map = {
-        "Increasing": ORIGIN_INCREASING_COLOUR,
-        "Decreasing": ORIGIN_DECREASING_COLOUR,
-    }
+    plot = cast(Any, plot_obj)
 
-    for idx, (label, plot_obj) in enumerate(plots, start=1):
-        colour = colour_map[label]
-        _apply_origin_colour(origin_any, plot_obj, idx, colour)
-        _safe_assign(plot_obj, "symbol_shape", 2)
-        _safe_assign(plot_obj, "symbol_size", 6)
-        _safe_assign(plot_obj, "line_width", 2)
-        _safe_assign(plot_obj, "legend", label)
+    try:
+        origin_any.lt_exec('layer -i 1;', 'set %C -d 202;', 'set %C -z 4;')
+    except Exception:
+        pass
+
+    _safe_assign(plot, "symbol_shape", 2)
+    _safe_assign(plot, "symbol_size", 6)
+    _safe_assign(plot, "line_width", 2)
+    _safe_assign(plot, "legend", legend_label)
 
     try:
         layer.rescale()
@@ -478,7 +388,12 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
 
     esc_graph = (source_stem or title).replace('"', "'")
     try:
-        origin_any.lt_exec(f'page.longname$ = "{esc_graph}";')
+        origin_any.lt_exec(
+            f'legend -s 0 "{esc_legend}";',
+            f'page.longname$ = "{esc_graph}";',
+            'layer.x.showAxes=3;',
+            'layer.y.showAxes=3;',
+        )
     except Exception:
         pass
 
