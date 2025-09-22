@@ -88,16 +88,15 @@ point so figures start with the first real sample, and ramps are coloured red
 while current increases and blue while it decreases to mirror the live logger.
 A small smoothing pass filters out measurement jitter so the Matplotlib
 outputs keep their red/blue segments even when the current wiggles while
-holding at the peak. Origin exports now hand control to a compact LabTalk
-`plotxy` script after the worksheet is populated, so each file produces a single
-line+symbol trace whose legend entry, workbook long name, and graph long name
-all mirror the worksheet name (the source filename without the `.txt` suffix).
-The helper resizes the axes, shows the outer axis frames, and minimises the
-populated workbook once its plot is created so Origin’s workspace stays tidy
-while the graphs remain visible in the Project Explorer. Because plotting now
-happens through LabTalk, the graphs register reliably even when custom
-templates are missing, while the Python side still prepares the workbook,
-column labels, and data transfer before the script runs. Origin connections stay
+holding at the peak. Origin exports now build the figure directly through
+Origin’s embedded Python API: once the worksheet is populated the exporter
+splits the ramp into rising and falling passes, streams each set of points into
+helper sheets, and attaches the two traces to a scatter layer so increasing
+segments stay red and the return path stays blue with matching markers. Workbook
+and graph long names reuse the source filename (without the `.txt` suffix), axis
+labels and titles are applied in the same pass, and the generated windows appear
+immediately in the Project Explorer without relying on template-specific
+LabTalk. Origin connections stay
 attached while the plotting dialogs remain open—detaching is scheduled for the
 Qt application shutdown (or immediate when running headless)—so Python windows
 no longer disappear the moment an Origin export finishes, yet the Origin

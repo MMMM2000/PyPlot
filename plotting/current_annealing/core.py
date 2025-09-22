@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 from typing import Any, List, Tuple, cast
 
@@ -39,81 +38,6 @@ TITLE_SIZE = 22
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
-
-
-_LT_NAME_CLEANER = re.compile(r"[^A-Za-z0-9_]")
-
-
-def _origin_short_name(obj: Any) -> str:
-    """Return the Origin short name for ``obj`` when available."""
-
-    for attr in ("GetName", "ShortName", "Name", "name"):
-        try:
-            value = getattr(obj, attr)
-        except Exception:
-            continue
-        if callable(value):
-            try:
-                value = value()
-            except Exception:
-                continue
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _sanitize_lt_name(base: str, prefix: str) -> str:
-    """Return an Origin-safe short name derived from ``base``."""
-
-    cleaned = _LT_NAME_CLEANER.sub("", base or "")
-    if not cleaned:
-        cleaned = prefix
-    if cleaned[0].isdigit():
-        cleaned = f"{prefix}{cleaned}"
-    if len(cleaned) > 13:
-        cleaned = f"{cleaned[:10]}{abs(hash(cleaned)) % 1000:03d}"
-    return cleaned[:13]
-
-
-def _resolve_origin_names(
-    origin_any: Any, workbook: Any | None, sheet: Any, hint: str
-) -> Tuple[str, str]:
-    """Ensure workbook and sheet short names exist and return them."""
-
-    book_short = ""
-    if workbook is not None:
-        book_short = _origin_short_name(workbook)
-    if not book_short:
-        desired = _sanitize_lt_name(hint, "CA")
-        try:
-            if workbook is not None and hasattr(workbook, "activate"):
-                workbook.activate()
-        except Exception:
-            pass
-        try:
-            origin_any.lt_exec(f'page.name$ = "{desired}";')
-        except Exception:
-            pass
-        if workbook is not None:
-            book_short = _origin_short_name(workbook)
-        if not book_short:
-            book_short = desired
-
-    sheet_short = _origin_short_name(sheet)
-    if not sheet_short:
-        desired = _sanitize_lt_name("Sheet1", "S")
-        try:
-            if hasattr(sheet, "activate"):
-                sheet.activate()
-        except Exception:
-            pass
-        try:
-            origin_any.lt_exec(f'wks.name$ = "{desired}";')
-        except Exception:
-            pass
-        sheet_short = _origin_short_name(sheet) or desired
-
-    return book_short, sheet_short
 
 
 def _lt_literal(text: str) -> str:
@@ -236,7 +160,9 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         pass
 
     source_stem = Path(source_name).stem or title
-    workbook_name = source_stem[:30] if source_stem else title[:30]
+    workbook_name = source_stem[:32] if source_stem else title[:32]
+    legend_label = source_stem or title
+    legend_literal = _lt_literal(legend_label)
 
     book_obj: Any | None
     try:
@@ -244,23 +170,27 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         book_obj = None
 
-    workbook: Any | None = None
+    workbook: Any | None = cast(Any, book_obj) if book_obj is not None else None
     worksheet: Any | None = None
-    if book_obj is not None:
-        workbook = cast(Any, book_obj)
+    if workbook is not None:
         try:
             workbook.activate()
         except Exception:
             pass
         try:
-            worksheet = workbook[0]
+            worksheet = cast(Any, workbook[0])
         except Exception:
             worksheet = None
+
     if worksheet is None:
-        w_sheet: Any | None = origin_any.new_sheet('w', lname=workbook_name)
-        if w_sheet is None:
+        sheet_obj: Any | None
+        try:
+            sheet_obj = origin_any.new_sheet('w', lname='Data')
+        except Exception:
+            sheet_obj = None
+        if sheet_obj is None:
             return
-        worksheet = cast(Any, w_sheet)
+        worksheet = cast(Any, sheet_obj)
         try:
             workbook = getattr(worksheet, 'parent', None)
         except Exception:
@@ -269,16 +199,15 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     if worksheet is None:
         return
 
-    try:
-        worksheet.activate()
-    except Exception:
-        pass
-
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
 
-    worksheet.from_list(0, currents.tolist())
-    worksheet.from_list(1, resistances.tolist())
+    try:
+        worksheet.from_list(0, currents.tolist())
+        worksheet.from_list(1, resistances.tolist())
+    except Exception:
+        return
+
     try:
         worksheet.cols_axis('XY')
     except Exception:
@@ -289,49 +218,173 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
     except Exception:
         pass
 
+    _, segments = _direction_profile(currents)
+    inc_x: List[float] = []
+    inc_y: List[float] = []
+    dec_x: List[float] = []
+    dec_y: List[float] = []
+
+    for start, end, direction in segments:
+        if end <= start:
+            continue
+        xs = currents[start:end].tolist()
+        ys = resistances[start:end].tolist()
+        if direction >= 0:
+            target_x, target_y = inc_x, inc_y
+        else:
+            target_x, target_y = dec_x, dec_y
+        if target_x:
+            target_x.append(float('nan'))
+            target_y.append(float('nan'))
+        target_x.extend(xs)
+        target_y.extend(ys)
+
+    graph_obj: Any | None
     try:
-        worksheet.activate()
+        graph_obj = origin_any.new_graph(template='scatter')
+    except Exception:
+        graph_obj = None
+    if graph_obj is None:
+        return
+
+    graph = cast(Any, graph_obj)
+    try:
+        graph.activate()
     except Exception:
         pass
 
-    legend_label = source_stem or title
-    legend_literal = _lt_literal(legend_label)
+    try:
+        layer = cast(Any, graph[0])
+    except Exception:
+        return
 
     try:
-        origin_any.lt_exec(
-            'wks.col1.lname$ = "Current (mA)";',
-            'wks.col1.unit$ = "mA";',
-            'wks.col2.lname$ = "Resistance";',
-            'wks.col2.unit$ = "Ohm";',
-            f"wks.col2.comment$ = {legend_literal};",
-        )
+        origin_any.lt_exec('layer -c;')
     except Exception:
         pass
 
-    book_hint = source_stem or workbook_name or "CA"
-    book_short, _ = _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
+    if workbook is not None:
+        try:
+            workbook.activate()
+        except Exception:
+            pass
 
-    graph_short = _sanitize_lt_name(book_hint, "G")
-    graph_short_literal = _lt_literal(graph_short)
+    inc_plot: Any | None = None
+    if inc_x:
+        inc_sheet_obj: Any | None
+        try:
+            inc_sheet_obj = origin_any.new_sheet('w', lname='increasing')
+        except Exception:
+            inc_sheet_obj = None
+        if inc_sheet_obj is not None:
+            inc_sheet = cast(Any, inc_sheet_obj)
+            try:
+                inc_sheet.from_list(0, inc_x)
+                inc_sheet.from_list(1, inc_y)
+            except Exception:
+                inc_sheet = None
+            if inc_sheet is not None:
+                try:
+                    inc_sheet.cols_axis('XY')
+                except Exception:
+                    pass
+                inc_plot = cast(Any, layer.add_plot(inc_sheet, coly=1, colx=0, type='y'))
+                if inc_plot is not None:
+                    try:
+                        inc_plot.color = '#ff0000'
+                        inc_plot.line_width = 1.5
+                        inc_plot.symbol_shape = 2
+                        inc_plot.symbol_size = 4
+                        inc_plot.symbol_edge_color = '#ff0000'
+                        inc_plot.symbol_fill_color = '#ff0000'
+                        inc_plot.legend = 'Increasing current'
+                    except Exception:
+                        pass
+
+    if workbook is not None:
+        try:
+            workbook.activate()
+        except Exception:
+            pass
+
+    dec_plot: Any | None = None
+    if dec_x:
+        dec_sheet_obj: Any | None
+        try:
+            dec_sheet_obj = origin_any.new_sheet('w', lname='decreasing')
+        except Exception:
+            dec_sheet_obj = None
+        if dec_sheet_obj is not None:
+            dec_sheet = cast(Any, dec_sheet_obj)
+            try:
+                dec_sheet.from_list(0, dec_x)
+                dec_sheet.from_list(1, dec_y)
+            except Exception:
+                dec_sheet = None
+            if dec_sheet is not None:
+                try:
+                    dec_sheet.cols_axis('XY')
+                except Exception:
+                    pass
+                dec_plot = cast(Any, layer.add_plot(dec_sheet, coly=1, colx=0, type='y'))
+                if dec_plot is not None:
+                    try:
+                        dec_plot.color = '#0000ff'
+                        dec_plot.line_width = 1.5
+                        dec_plot.symbol_shape = 2
+                        dec_plot.symbol_size = 4
+                        dec_plot.symbol_edge_color = '#0000ff'
+                        dec_plot.symbol_fill_color = '#0000ff'
+                        dec_plot.legend = 'Decreasing current'
+                    except Exception:
+                        pass
 
     try:
-        origin_any.lt_exec(
-            f"win -a {book_short};",
-            f"page.longname$ = {legend_literal};",
-            f"wks.longname$ = {legend_literal};",
-            f"plotxy iy:=(col(1),col(2)) plot:=202;",
-            'set %C -d 202;',
-            'set %C -z 3;',
-            f"page.name$ = {graph_short_literal};",
-            'legendupdate;',
-            f"legend -s 0 {legend_literal};",
-            'layer.x.showAxes=3;',
-            'layer.y.showAxes=3;',
-            f"page.longname$ = {legend_literal};",
-            f"win -a {book_short};",
-            'window -ch 1;',
-            f"win -a {graph_short};",
-        )
+        layer.rescale()
+    except Exception:
+        pass
+
+    try:
+        graph.activate()
+    except Exception:
+        pass
+
+    try:
+        origin_any.lt_exec('legendupdate;')
+    except Exception:
+        pass
+
+    if inc_plot is not None:
+        try:
+            origin_any.lt_exec(f'legend -s 1 {_lt_literal("Increasing current")};')
+        except Exception:
+            pass
+    if dec_plot is not None:
+        try:
+            origin_any.lt_exec(f'legend -s 2 {_lt_literal("Decreasing current")};')
+        except Exception:
+            pass
+
+    try:
+        origin_any.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
+    except Exception:
+        pass
+
+    try:
+        origin_any.lt_exec(f'title -s {legend_literal};')
+    except Exception:
+        pass
+
+    if workbook is not None:
+        try:
+            workbook.activate()
+            origin_any.lt_exec(f'page.longname$ = {legend_literal};')
+        except Exception:
+            pass
+
+    try:
+        graph.activate()
+        origin_any.lt_exec(f'page.longname$ = {legend_literal};')
     except Exception:
         pass
 
