@@ -164,9 +164,11 @@ def _apply_origin_colour(origin_any: Any, plot_obj: Any, index: int, colour: str
     lt_cmd = (
         f"layer -i {index};"
         f"set %C -c color({r},{g},{b});"
-        f"set %C -k color({r},{g},{b});"
         f"set %C -cf color({r},{g},{b});"
         f"set %C -kf color({r},{g},{b});"
+        "set %C -k 2;"
+        "set %C -z 6;"
+        "set %C -w 2;"
     )
     try:
         origin_any.lt_exec(lt_cmd)
@@ -199,26 +201,44 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
         return np.array([1.0], dtype=float), [(0, 1, 1.0)]
 
     deltas = np.diff(currents)
-    direction = pd.Series(np.sign(deltas), index=range(1, count))
-    direction.replace(0.0, np.nan, inplace=True)
-    direction = direction.reindex(range(count))
-    if direction.isna().all():
-        direction.fillna(1.0, inplace=True)
+    abs_deltas = np.abs(deltas[np.isfinite(deltas)])
+    if abs_deltas.size:
+        tolerance = max(float(np.quantile(abs_deltas, 0.25) * 0.5), 0.01)
     else:
-        direction.ffill(inplace=True)
-        direction.bfill(inplace=True)
+        tolerance = 0.01
+
+    signed = np.sign(deltas)
+    signed[np.abs(deltas) <= tolerance] = 0.0
+    direction = pd.Series(signed, index=range(1, count))
+    direction = direction.replace(0.0, np.nan).reindex(range(count))
+    if direction.isna().all():
+        direction[:] = 1.0
+    else:
+        direction = direction.ffill()
+        direction = direction.bfill()
     directions = direction.to_numpy(dtype=float)
+
+    window = min(7, max(3, count // 20))
+    smoothed = pd.Series(directions).rolling(window=window, center=True, min_periods=1).median()
+    smoothed = smoothed.ffill().bfill()
+    smoothed_values = smoothed.to_numpy(dtype=float)
+    smoothed_values = np.where(smoothed_values >= 0, 1.0, -1.0)
+
+    if not np.any(smoothed_values < 0):
+        smoothed_values[:] = 1.0
+    elif not np.any(smoothed_values > 0):
+        smoothed_values[:] = -1.0
 
     segments: List[Tuple[int, int, float]] = []
     start = 0
-    current_dir = directions[0]
+    current_dir = smoothed_values[0]
     for idx in range(1, count):
-        if directions[idx] != current_dir:
+        if smoothed_values[idx] != current_dir:
             segments.append((start, idx, current_dir))
             start = idx
-            current_dir = directions[idx]
+            current_dir = smoothed_values[idx]
     segments.append((start, count, current_dir))
-    return directions, segments
+    return smoothed_values, segments
 
 
 def _split_directional_values(
@@ -258,6 +278,9 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
                 marker="o",
                 linestyle="-",
                 markersize=3,
+                markerfacecolor=color,
+                markeredgecolor=color,
+                linewidth=1.5,
             )
 
     ax.set_xlabel("Current (mA)")
@@ -414,7 +437,7 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         colour = colour_map[label]
         _apply_origin_colour(origin_any, plot_obj, idx, colour)
         _safe_assign(plot_obj, "symbol_shape", 2)
-        _safe_assign(plot_obj, "symbol_size", 4)
+        _safe_assign(plot_obj, "symbol_size", 6)
         _safe_assign(plot_obj, "line_width", 2)
         _safe_assign(plot_obj, "legend", label)
 

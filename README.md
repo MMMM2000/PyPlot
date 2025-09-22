@@ -86,13 +86,18 @@ independently, so Matplotlib/Origin toggles and export resolution reopen the way
 you left them.  The current annealing plotter also omits the initial 0 mA data
 point so figures start with the first real sample, and ramps are coloured red
 while current increases and blue while it decreases to mirror the live logger.
-Origin exports now mirror the logger exactly: increasing ramps are forced to
-red and decreasing ramps to blue, with marker fill and edge colours locked to
-their lines and a compact legend showing only the Increasing and Decreasing
-entries.  If Origin ignores the Python symbol assignments, the exporter now
-falls back to LabTalk `set %C` commands so the marker outline and fill inherit
-the same RGB triplet as the trace, eliminating the lingering black dots seen in
-earlier runs. Each input file spawns its own Origin workbook so multi-file runs
+A small smoothing pass filters out measurement jitter so the Matplotlib and
+Origin outputs keep their red/blue segments even when the current wiggles while
+holding at the peak. Origin exports now mirror the logger exactly: increasing
+ramps are forced to red and decreasing ramps to blue, with marker fill and edge
+colours locked to their lines and a compact legend showing only the Increasing
+and Decreasing entries.  If Origin ignores the Python symbol assignments, the
+exporter now falls back to LabTalk `set %C` commands so the marker outline and
+fill inherit the same RGB triplet as the trace, eliminating the lingering black
+dots seen in earlier runs. LabTalk also re-enables the scatter symbols and sets
+their size explicitly, ensuring each point shows up as a coloured marker even
+when the default template hides them. Each input file spawns its own Origin
+workbook so multi-file runs
 keep every dataset visible after Python exits, each workbook and graph inherits
 the source filename as its long name, the axes rescale automatically, and the
 graph title is written through the Origin API (with a label fallback) so the
