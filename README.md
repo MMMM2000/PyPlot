@@ -101,7 +101,11 @@ doesn’t flood the workspace with sheets. Both variants set axis labels and
 titles through the API so the generated workbooks and graphs appear immediately
 in the Project Explorer without relying on template-specific LabTalk, and the
 text sizes honour the Readability font controls for titles, axes, ticks, and the
-legend. Origin
+legend. The legend and page title now reuse the sample description with Origin
+rich-text markup—element counts become subscripts and wire presets such as
+`1_10` are rewritten as `1/10`—so the figure heading matches the legend entry
+without manual editing, while tick styling stays on the Origin side without
+triggering property warnings. Origin
 connections stay attached while the plotting dialogs remain
 open—detaching is scheduled for the Qt application shutdown (or immediate when
 running headless)—so Python windows no longer disappear the moment an Origin

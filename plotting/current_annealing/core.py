@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from typing import Any, List, Tuple, cast
 
@@ -41,6 +42,21 @@ SHOW_TITLE = True
 
 ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
 ORIGIN_MODE: str = ORIGIN_MODES[0]
+
+
+_SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
+
+
+def _format_origin_annotation(text: str) -> str:
+    """Return Origin rich-text markup for the sample description."""
+
+    formatted = text.replace("_", "/")
+
+    def _sub(match: re.Match[str]) -> str:
+        element, digits = match.groups()
+        return f"{element}\\-({digits})"
+
+    return _SUBSCRIPT_PATTERN.sub(_sub, formatted)
 
 
 def _trim_burnthrough_glitch(
@@ -313,42 +329,12 @@ def _apply_tick_settings(layer: Any, axis_name: str, axis_obj: Any | None) -> No
         if show_ticks:
             _set_text_size(tick_obj, tick_size)
 
-    execs = []
-    for source in (layer, getattr(layer, "parent", None)):
-        if source is None:
-            continue
-        executor = getattr(source, "lt_exec", None)
-        if callable(executor):
-            execs.append(executor)
-
-    if not execs:
-        return
-
-    commands: List[str] = []
-    if show_ticks:
-        commands.extend(
-            [
-                f"layer.{axis_name}.ticklabels.show=1;",
-                f"layer.{axis_name}.ticklabels.font.size={tick_size};",
-                f"layer.{axis_name}.tickLabels.show=1;",
-                f"layer.{axis_name}.tickLabels.font.size={tick_size};",
-            ]
-        )
-    else:
-        commands.extend(
-            [
-                f"layer.{axis_name}.ticklabels.show=0;",
-                f"layer.{axis_name}.tickLabels.show=0;",
-            ]
-        )
-
-    for cmd in commands:
-        for executor in execs:
-            try:
-                executor(cmd)
-                break
-            except Exception:
-                continue
+    setter = getattr(axis_obj, "show", None)
+    if callable(setter):
+        try:
+            setter(show_ticks)
+        except Exception:
+            pass
 
 
 def _prepare_origin_workspace(
@@ -521,6 +507,7 @@ def _plot_origin_simple(
     graph: Any | None,
     layer: Any | None,
     legend_label: str,
+    display_label: str,
 ) -> None:
     if worksheet is None or graph is None or layer is None:
         return
@@ -536,10 +523,10 @@ def _plot_origin_simple(
         plot_any.symbol_size = 4
         plot_any.symbol_edge_color = color
         plot_any.symbol_fill_color = color
-        plot_any.legend = legend_label
+        plot_any.legend = display_label
     except Exception:
         try:
-            plot_any.legend = legend_label
+            plot_any.legend = display_label
         except Exception:
             pass
     dataset_index = getattr(plot_any, 'index', None)
@@ -548,7 +535,7 @@ def _plot_origin_simple(
     legend = _legend_label(layer)
     if legend is not None:
         try:
-            legend.text = f"\\l({dataset_index}) {legend_label}"
+            legend.text = f"\\l({dataset_index}) {display_label}"
         except Exception:
             pass
     try:
@@ -570,12 +557,20 @@ def _plot_origin_experimental(
     currents: np.ndarray,
     resistances: np.ndarray,
     legend_label: str,
+    display_label: str | None = None,
 ) -> None:
     if graph is None or layer is None:
         return
     _, segments = _direction_profile(currents)
     if not segments:
-        _plot_origin_simple(workbook, worksheet, graph, layer, legend_label)
+        _plot_origin_simple(
+            workbook,
+            worksheet,
+            graph,
+            layer,
+            legend_label,
+            display_label or legend_label,
+        )
         return
 
     inc_x: List[float] = []
@@ -651,7 +646,10 @@ def _plot_origin_experimental(
 
     legend = _legend_label(layer)
     if legend is not None and legend_entries:
-        lines = [f"\\l({idx}) {text}" for idx, text in legend_entries if text]
+        lines = []
+        if display_label:
+            lines.append(display_label)
+        lines.extend(f"\\l({idx}) {text}" for idx, text in legend_entries if text)
         try:
             legend.text = "\n".join(lines)
         except Exception:
@@ -718,14 +716,15 @@ def plot_one_origin(
     if graph is None or layer is None:
         return
 
+    display_label = _format_origin_annotation(legend_label)
     _apply_axis_labels(layer, "Current (mA)", "Resistance (Ohm)")
-    _set_graph_title(layer, legend_label)
+    _set_graph_title(layer, display_label)
     _assign_long_name(graph, legend_label)
     _assign_long_name(workbook, legend_label)
 
     resolved_mode = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
     if resolved_mode == "simple":
-        _plot_origin_simple(workbook, worksheet, graph, layer, legend_label)
+        _plot_origin_simple(workbook, worksheet, graph, layer, legend_label, display_label)
         _hide_workbook(origin_any, workbook, graph)
     else:
         _plot_origin_experimental(
@@ -737,6 +736,7 @@ def plot_one_origin(
             currents,
             resistances,
             legend_label,
+            display_label,
         )
 
     _apply_origin_readability(layer, graph)
