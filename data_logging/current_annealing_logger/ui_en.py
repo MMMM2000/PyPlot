@@ -33,14 +33,18 @@ class SampleSpinBox(QtWidgets.QSpinBox):
         self.setKeyboardTracking(False)
         self.setButtonSymbols(QtWidgets.QAbstractSpinBox.ButtonSymbols.UpDownArrows)
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
-        self.lineEdit().setPlaceholderText("Sample, e.g., s1 or s2-1")
-        self.lineEdit().setToolTip("Sample identifier, e.g., s1 or s2-1")
+        line_edit = self.lineEdit()
+        if isinstance(line_edit, QtWidgets.QLineEdit):
+            line_edit.setPlaceholderText("Sample, e.g., s1 or s2-1")
+            line_edit.setToolTip("Sample identifier, e.g., s1 or s2-1")
 
     # Qt uses ``textFromValue``/``valueFromText`` to keep the display updated.
-    def textFromValue(self, value: int) -> str:  # noqa: D401
-        return f"{self._prefix}{value}{self._suffix}"
+    def textFromValue(self, v: int) -> str:  # noqa: D401
+        return f"{self._prefix}{v}{self._suffix}"
 
-    def valueFromText(self, text: str) -> int:  # noqa: D401
+    def valueFromText(self, text: Optional[str]) -> int:  # noqa: D401
+        if text is None:
+            return max(0, min(self.maximum(), self.value()))
         parsed = self._parse(text)
         if parsed is None:
             return max(0, min(self.maximum(), self.value()))
@@ -49,14 +53,14 @@ class SampleSpinBox(QtWidgets.QSpinBox):
         self._suffix = suffix or ""
         return max(self.minimum(), min(self.maximum(), value))
 
-    def validate(self, text: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
-        if not text:
-            return (QtGui.QValidator.State.Intermediate, text, pos)
-        if self._pattern.match(text):
-            return (QtGui.QValidator.State.Acceptable, text, pos)
-        if re.match(r"^.*?\d*$", text):
-            return (QtGui.QValidator.State.Intermediate, text, pos)
-        return (QtGui.QValidator.State.Invalid, text, pos)
+    def validate(self, input: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
+        if not input:
+            return (QtGui.QValidator.State.Intermediate, input, pos)
+        if self._pattern.match(input):
+            return (QtGui.QValidator.State.Acceptable, input, pos)
+        if re.match(r"^.*?\d*$", input):
+            return (QtGui.QValidator.State.Intermediate, input, pos)
+        return (QtGui.QValidator.State.Invalid, input, pos)
 
     # Public helpers mirroring QLineEdit for backwards compatibility
     def text(self) -> str:  # noqa: D401

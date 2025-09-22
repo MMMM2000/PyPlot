@@ -230,12 +230,12 @@ class SettingsDialog(QtWidgets.QDialog):
                 release_origin()
 
 
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+    def closeEvent(self, a0: QtGui.QCloseEvent) -> None:
         orig.common.CHECK_OUTLIERS = False
         orig.common.AUTO_REMOVE_OUTLIERS = False
         self._preprocessed_data = None
         self._preprocessed_snapshot = None
-        super().closeEvent(event)
+        super().closeEvent(a0)
 
 class ProgressDialog:
     def __init__(self, total: int):

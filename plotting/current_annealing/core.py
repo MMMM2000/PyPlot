@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 import os
 import re
 from pathlib import Path
@@ -92,7 +93,16 @@ def load_file(path: str) -> pd.DataFrame:
 
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
-    df = pd.read_csv(path, sep=None, engine="python", header=None, comment="#")
+    try:
+        df = pd.read_csv(path, sep=None, engine="python", header=None, comment="#")
+    except (csv.Error, pd.errors.ParserError):
+        df = pd.read_csv(
+            path,
+            delim_whitespace=True,
+            engine="python",
+            header=None,
+            comment="#",
+        )
     if df.shape[1] < 3:
         raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3]
@@ -773,4 +783,3 @@ def main(files: List[str], backend: str = BACKEND) -> None:
             Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
             for fig, fname in outs:
                 save_figure(fig, Path(OUTPUT_DIR) / fname, SAVE_FORMAT, PNG_DPI)
-

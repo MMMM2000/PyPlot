@@ -4,8 +4,9 @@ from pathlib import Path
 import time
 import math
 import re
-from typing import Any, cast
+from typing import Any, SupportsBytes, cast
 from collections import deque
+from importlib import import_module
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtCore import QMutexLocker
@@ -24,13 +25,22 @@ import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 try:
-    from matplotlib.backends.backend_qt5agg import (
-        FigureCanvasQTAgg as FigureCanvas,
-        NavigationToolbar2QT as NavigationToolbar,
-    )
+    from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 except Exception:
-    FigureCanvas = None
-    NavigationToolbar = None
+    try:
+        FigureCanvas = getattr(import_module("matplotlib.backends.backend_qt5agg"), "FigureCanvasQTAgg")
+    except Exception:  # pragma: no cover - backend optional
+        FigureCanvas = None  # type: ignore[assignment]
+
+try:
+    from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
+except Exception:
+    try:
+        NavigationToolbar = getattr(
+            import_module("matplotlib.backends.backend_qt5agg"), "NavigationToolbar2QT"
+        )
+    except Exception:  # pragma: no cover - backend optional
+        NavigationToolbar = None  # type: ignore[assignment]
 from matplotlib.lines import Line2D
 try:
     import pyqtgraph as pg  # Optional realtime backend
@@ -159,16 +169,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lineEdit_log_file.returnPressed.connect(self.start_logging)
         self.ui.lineEdit_port_command.setText(DEFAULT_PORT_COMMAND)
 
-        # hook into file name builder if present
-        self.name_builder = getattr(self.ui, "file_name_builder", None)
-        if self.name_builder is not None:
-            load_edit = self.name_builder.s_load.lineEdit()
-            if load_edit is not None:
-                load_edit.returnPressed.connect(self.start_logging)
-            self.naming_history.register("composition", getattr(self.name_builder, "s_comp", None))
-            self.naming_history.register("composition", getattr(self.name_builder, "t_comp", None))
-            self.naming_history.register("microwire", getattr(self.name_builder, "s_sample", None))
-            self.naming_history.register("microwire", getattr(self.name_builder, "t_sample", None))
+        # hook into file name builder; required for naming presets
+        builder_obj = getattr(self.ui, "file_name_builder", None)
+        if not isinstance(builder_obj, FileNameBuilderWidget):
+            raise AttributeError("UI is missing the file_name_builder widget")
+        self.name_builder: FileNameBuilderWidget = builder_obj
+        load_edit = self.name_builder.s_load.lineEdit()
+        if load_edit is not None:
+            load_edit.returnPressed.connect(self.start_logging)
+        self.naming_history.register("composition", getattr(self.name_builder, "s_comp", None))
+        self.naming_history.register("composition", getattr(self.name_builder, "t_comp", None))
+        self.naming_history.register("microwire", getattr(self.name_builder, "s_sample", None))
+        self.naming_history.register("microwire", getattr(self.name_builder, "t_sample", None))
 
         # connect signals
         self.ui.pushButton_connect_port.clicked.connect(self.toggle_connection)
@@ -223,19 +235,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pg_min_interval = 1.0 / float(fps_initial.value() if fps_initial is not None else 30)
         self._pg_last_draw = 0.0
         self._pg_timer: QtCore.QTimer | None = None
-        if getattr(self, 'name_builder', None) is not None:
-            try:
-                self.name_builder.combo_format.currentIndexChanged.connect(self._on_format_changed)
-                self.name_builder.s_load.valueChanged.connect(self._send_emulator_mode)
-                self.name_builder.s_dir.currentIndexChanged.connect(self._send_emulator_mode)
-                self.name_builder.t_temp.currentIndexChanged.connect(self._send_emulator_mode)
-                # Clear graph on identity change
-                self.name_builder.s_comp.textChanged.connect(self._clear_on_identity_change)
-                self.name_builder.s_sample.textChanged.connect(self._clear_on_identity_change)
-                self.name_builder.s_number.textChanged.connect(self._clear_on_identity_change)
-                self.name_builder.s_end.currentIndexChanged.connect(self._clear_on_identity_change)
-            except Exception:
-                pass
+        try:
+            self.name_builder.combo_format.currentIndexChanged.connect(self._on_format_changed)
+            self.name_builder.s_load.valueChanged.connect(self._send_emulator_mode)
+            self.name_builder.s_dir.currentIndexChanged.connect(self._send_emulator_mode)
+            self.name_builder.t_temp.currentIndexChanged.connect(self._send_emulator_mode)
+            # Clear graph on identity change
+            self.name_builder.s_comp.textChanged.connect(self._clear_on_identity_change)
+            self.name_builder.s_sample.textChanged.connect(self._clear_on_identity_change)
+            self.name_builder.s_number.textChanged.connect(self._clear_on_identity_change)
+            self.name_builder.s_end.currentIndexChanged.connect(self._clear_on_identity_change)
+        except Exception:
+            pass
         # Buffers for stress means
         self._batch_values = []
         self._rt_means = {}
@@ -363,12 +374,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
         with QMutexLocker(self.lock):
             raw = self.serial.readLine()
-            # PyQt6 returns a QByteArray; at runtime bytes(raw) works fine.
-            raw_bytes = bytes(raw)            # type: ignore[arg-type]
+            # PyQt6 returns a QByteArray; cast to SupportsBytes for typing.
+            raw_bytes = bytes(cast(SupportsBytes, raw))
             self.port_response = raw_bytes.decode('ascii')
             extra_lines: list[bytes] = []
             while self.serial.canReadLine():
-                extra_lines.append(bytes(self.serial.readLine()))  # type: ignore[arg-type]
+                extra_raw = self.serial.readLine()
+                extra_lines.append(bytes(cast(SupportsBytes, extra_raw)))
 
             now = time.perf_counter()
             n_lines = 1 + len(extra_lines)
@@ -401,6 +413,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
                 if self.sample_idx >= self.sample_count:
                     # finalize this batch
+                    fmt_now: str | None = None
                     try:
                         fmt_now = self._current_format()
                         if fmt_now == 'Stress' and self._batch_values:
@@ -611,9 +624,11 @@ class MainWindow(QtWidgets.QMainWindow):
             layout.setSpacing(0)
         while layout.count():
             item = layout.takeAt(0)
-            w = item.widget()
-            if w is not None:
-                w.deleteLater()
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
         try:
             palette = self.palette()
             win = palette.color(QtGui.QPalette.ColorRole.Window)
@@ -825,9 +840,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 mode = self._current_format()
                 if pg is not None and mode == 'Maxion' and hasattr(self, 'pg_plots'):
                     for p in self.pg_plots:
-                        p.setXRange(1, max(2, self._rt_window), padding=0)
+                        p.setXRange(1, max(2, self._rt_window), 0)
                 elif pg is not None and mode == 'Temperature' and hasattr(self, 'pg_plot'):
-                    self.pg_plot.setXRange(1, max(2, self._rt_window), padding=0)
+                    self.pg_plot.setXRange(1, max(2, self._rt_window), 0)
                 elif hasattr(self, 'ax'):
                     cur = getattr(self, 'sample_idx', 0)
                     self.ax.set_xlim(max(1, cur - self._rt_window + 1), max(self._rt_window, cur))
@@ -890,7 +905,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     ys = [v for v in data]
                     self.pg_scatters[i].setData(xs, ys)
                 try:
-                    self.pg_plots[i].setXRange(1, max(2, self._rt_window), padding=0)
+                    self.pg_plots[i].setXRange(1, max(2, self._rt_window), 0)
                 except Exception:
                     pass
         elif mode == 'Temperature' and hasattr(self, 'pg_plot') and hasattr(self, 'pg_scatter'):
@@ -900,7 +915,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 ys = [v for v in data]
                 self.pg_scatter.setData(xs, ys)
             try:
-                self.pg_plot.setXRange(1, max(2, self._rt_window), padding=0)
+                self.pg_plot.setXRange(1, max(2, self._rt_window), 0)
             except Exception:
                 pass
         self._pg_last_draw = now
@@ -1172,10 +1187,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 getattr(self.ui, gb).setEnabled(connected)
             except Exception:
                 pass
-        if getattr(self, '_overlay', None) is not None:
+        overlay = getattr(self, '_overlay', None)
+        if overlay is not None:
             try:
                 self._position_connect_overlay()
-                self._overlay.setVisible(not connected)
+                overlay.setVisible(not connected)
             except Exception:
                 pass
 
@@ -1569,7 +1585,7 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
 
     app = QtWidgets.QApplication.instance()
     owns_app = False
-    if app is None:
+    if not isinstance(app, QtWidgets.QApplication):
         app = QtWidgets.QApplication(sys.argv)
         owns_app = True
 

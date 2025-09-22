@@ -14,7 +14,8 @@ import math
 import re
 from pathlib import Path
 from collections import deque
-from typing import Any, Deque, Dict, Optional, TextIO, Tuple, cast
+from importlib import import_module
+from typing import Any, Deque, Dict, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
@@ -34,7 +35,7 @@ try:
     from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 except Exception:
     try:
-        from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+        FigureCanvas = getattr(import_module("matplotlib.backends.backend_qt5agg"), "FigureCanvasQTAgg")
     except Exception:  # pragma: no cover - backend optional
         FigureCanvas = None  # type: ignore[assignment]
 
@@ -42,7 +43,9 @@ try:
     from matplotlib.backends.backend_qt import NavigationToolbar2QT as NavigationToolbar
 except Exception:
     try:
-        from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+        NavigationToolbar = getattr(
+            import_module("matplotlib.backends.backend_qt5agg"), "NavigationToolbar2QT"
+        )
     except Exception:  # pragma: no cover - backend optional
         NavigationToolbar = None  # type: ignore[assignment]
 
@@ -680,7 +683,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.lock.lock()
             try:
                 raw_line = self.ser_mcu.readLine()
-                self.serial_response = bytes(raw_line).decode('ascii', errors='ignore')
+                raw_bytes = bytes(cast(SupportsBytes, raw_line))
+                self.serial_response = raw_bytes.decode('ascii', errors='ignore')
             except Exception:
                 self.serial_response = str(self.ser_mcu.readLine())
             try:
@@ -1734,9 +1738,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lcd_current_mA = self.label_live_current
         self.ui.label_set_current = self.label_live_set
         self.ui.label_live_voltage = self.label_live_voltage
-        self.ui.lcd_current_mA.display = self.label_live_current.setText
-        self.ui.label_set_current.display = self.label_live_set.setText
-        self.ui.label_live_voltage.display = self.label_live_voltage.setText
+        setattr(self.ui.lcd_current_mA, "display", self.label_live_current.setText)
+        setattr(self.ui.label_set_current, "display", self.label_live_set.setText)
+        setattr(self.ui.label_live_voltage, "display", self.label_live_voltage.setText)
 
     def handle_max_voltage(self) -> None:
         self._max_voltage_dialog = True
@@ -1783,7 +1787,9 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def _show_status_message(self, message: str, timeout_ms: int = 10000) -> None:
         try:
-            self.statusBar().showMessage(message, timeout_ms)
+            status_bar = self.statusBar()
+            if status_bar is not None:
+                status_bar.showMessage(message, timeout_ms)
         except Exception:
             pass
 
@@ -1893,7 +1899,9 @@ class MainWindow(QtWidgets.QMainWindow):
             app = QtWidgets.QApplication.instance()
             if isinstance(app, QtWidgets.QApplication):
                 try:
-                    scheme = app.styleHints().colorScheme()
+                    style_hints = app.styleHints()
+                    if style_hints is not None:
+                        scheme = style_hints.colorScheme()
                     palette = app.palette()
                     win = palette.color(QtGui.QPalette.ColorRole.Window)
                     base = palette.color(QtGui.QPalette.ColorRole.Base)
