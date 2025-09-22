@@ -39,12 +39,8 @@ SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
 
-
-def _lt_literal(text: str) -> str:
-    """Return a LabTalk-safe string literal."""
-
-    escaped = text.replace("\\", "\\\\").replace('"', "\"")
-    return f'"{escaped}"'
+ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
+ORIGIN_MODE: str = ORIGIN_MODES[0]
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -114,6 +110,347 @@ def _direction_profile(currents: np.ndarray) -> Tuple[np.ndarray, List[Tuple[int
     return smoothed_values, segments
 
 
+def _normalise_origin_mode(mode: str | None) -> str:
+    if not mode:
+        return ORIGIN_MODES[0]
+    normalised = str(mode).lower()
+    return normalised if normalised in ORIGIN_MODES else ORIGIN_MODES[0]
+
+
+def _clear_layer(layer: Any) -> None:
+    remover = getattr(layer, "remove_plot", None)
+    if callable(remover):
+        removed = False
+        try:
+            count = len(layer)  # type: ignore[arg-type]
+        except Exception:
+            count = getattr(layer, "plot_count", None)
+        if isinstance(count, int):
+            for idx in range(count - 1, -1, -1):
+                try:
+                    remover(idx)
+                    removed = True
+                except Exception:
+                    pass
+        if not removed:
+            for _ in range(8):
+                try:
+                    remover(0)
+                    removed = True
+                except Exception:
+                    break
+    clearer = getattr(layer, "clear", None)
+    if callable(clearer):
+        try:
+            clearer()
+        except Exception:
+            pass
+
+
+def _legend_label(layer: Any) -> Any | None:
+    label_method = getattr(layer, "label", None)
+    if not callable(label_method):
+        return None
+    try:
+        legend = label_method("Legend")
+    except Exception:
+        legend = None
+    if legend is None or not hasattr(legend, "text"):
+        return None
+    return cast(Any, legend)
+
+
+def _set_graph_title(layer: Any, text: str) -> None:
+    label_method = getattr(layer, "label", None)
+    if not callable(label_method):
+        return
+    try:
+        title_label = label_method("Title")
+    except Exception:
+        title_label = None
+    if title_label is None or not hasattr(title_label, "text"):
+        return
+    try:
+        cast(Any, title_label).text = text
+    except Exception:
+        pass
+
+
+def _assign_long_name(target: Any | None, name: str) -> None:
+    if target is None:
+        return
+    for attr in ("long_name", "longname", "lname"):
+        if hasattr(target, attr):
+            try:
+                setattr(cast(Any, target), attr, name)
+                return
+            except Exception:
+                continue
+
+
+def _apply_axis_labels(layer: Any, x_label: str, y_label: str) -> None:
+    axis_method = getattr(layer, "axis", None)
+    if not callable(axis_method):
+        return
+    for axis_name, label_text in (("x", x_label), ("y", y_label)):
+        try:
+            axis_obj = axis_method(axis_name)
+        except Exception:
+            axis_obj = None
+        if axis_obj is None:
+            continue
+        label_obj = getattr(axis_obj, "label", None)
+        if label_obj is not None and hasattr(label_obj, "text"):
+            try:
+                cast(Any, label_obj).text = label_text
+                continue
+            except Exception:
+                pass
+        for attr in ("title", "text"):
+            if hasattr(axis_obj, attr):
+                try:
+                    setattr(cast(Any, axis_obj), attr, label_text)
+                    break
+                except Exception:
+                    continue
+
+
+def _prepare_origin_workspace(
+    currents: np.ndarray,
+    resistances: np.ndarray,
+    title: str,
+    source_name: str,
+) -> Tuple[Any, Any | None, Any | None, Any | None, Any | None, str]:
+    import originpro as op  # lazy import
+
+    origin_any: Any = cast(Any, op)
+    try:
+        origin_any.set_show()
+    except Exception:
+        pass
+
+    source_stem = Path(source_name).stem or title
+    legend_label = source_stem or title
+    workbook_name = (source_stem or title)[:32] or "Annealing"
+
+    workbook: Any | None
+    try:
+        book_obj = origin_any.new_book('w', lname=workbook_name)
+        workbook = cast(Any, book_obj) if book_obj is not None else None
+    except Exception:
+        workbook = None
+
+    worksheet: Any | None = None
+    if workbook is not None:
+        try:
+            worksheet = cast(Any, workbook[0])
+        except Exception:
+            worksheet = None
+    if worksheet is None:
+        sheet_obj: Any | None
+        try:
+            sheet_obj = origin_any.new_sheet('w', lname='Data')
+        except Exception:
+            sheet_obj = None
+        if sheet_obj is not None:
+            worksheet = cast(Any, sheet_obj)
+            try:
+                workbook = getattr(worksheet, 'parent', workbook)
+            except Exception:
+                pass
+    if worksheet is None:
+        return origin_any, None, None, None, None, legend_label
+
+    try:
+        worksheet.from_list(0, currents.tolist())
+        worksheet.from_list(1, resistances.tolist())
+    except Exception:
+        return origin_any, None, None, None, None, legend_label
+    try:
+        worksheet.cols_axis('XY')
+    except Exception:
+        pass
+    try:
+        worksheet.set_label(0, "Current (mA)")
+        worksheet.set_label(1, "Resistance (Ohm)")
+    except Exception:
+        pass
+
+    graph: Any | None
+    try:
+        graph_obj = origin_any.new_graph(template='scatter')
+        graph = cast(Any, graph_obj) if graph_obj is not None else None
+    except Exception:
+        graph = None
+    if graph is None:
+        return origin_any, workbook, worksheet, None, None, legend_label
+
+    try:
+        graph.activate()
+    except Exception:
+        pass
+
+    try:
+        layer = cast(Any, graph[0])
+    except Exception:
+        layer = None
+
+    if layer is not None:
+        _clear_layer(layer)
+
+    return origin_any, workbook, worksheet, graph, layer, legend_label
+
+
+def _plot_origin_simple(
+    workbook: Any | None,
+    worksheet: Any | None,
+    graph: Any | None,
+    layer: Any | None,
+    legend_label: str,
+) -> None:
+    if worksheet is None or graph is None or layer is None:
+        return
+    plot_obj = layer.add_plot(worksheet, coly=1, colx=0, type='y')
+    if plot_obj is None:
+        return
+    plot_any = cast(Any, plot_obj)
+    color = '#1f77b4'
+    try:
+        plot_any.color = color
+        plot_any.line_width = 1.5
+        plot_any.symbol_shape = 2
+        plot_any.symbol_size = 4
+        plot_any.symbol_edge_color = color
+        plot_any.symbol_fill_color = color
+        plot_any.legend = legend_label
+    except Exception:
+        try:
+            plot_any.legend = legend_label
+        except Exception:
+            pass
+    dataset_index = getattr(plot_any, 'index', None)
+    if not isinstance(dataset_index, int):
+        dataset_index = 1
+    legend = _legend_label(layer)
+    if legend is not None:
+        try:
+            legend.text = f"\\l({dataset_index}) {legend_label}"
+        except Exception:
+            pass
+    try:
+        layer.rescale()
+    except Exception:
+        pass
+    try:
+        graph.activate()
+    except Exception:
+        pass
+
+
+def _plot_origin_experimental(
+    origin_any: Any,
+    workbook: Any | None,
+    worksheet: Any | None,
+    graph: Any | None,
+    layer: Any | None,
+    currents: np.ndarray,
+    resistances: np.ndarray,
+    legend_label: str,
+) -> None:
+    if graph is None or layer is None:
+        return
+    _, segments = _direction_profile(currents)
+    if not segments:
+        _plot_origin_simple(workbook, worksheet, graph, layer, legend_label)
+        return
+
+    inc_x: List[float] = []
+    inc_y: List[float] = []
+    dec_x: List[float] = []
+    dec_y: List[float] = []
+
+    for start, end, direction in segments:
+        if end <= start:
+            continue
+        xs = currents[start:end].tolist()
+        ys = resistances[start:end].tolist()
+        target_x, target_y = (inc_x, inc_y) if direction >= 0 else (dec_x, dec_y)
+        if target_x and xs:
+            target_x.append(float('nan'))
+            target_y.append(float('nan'))
+        target_x.extend(xs)
+        target_y.extend(ys)
+
+    legend_entries: List[Tuple[int, str]] = []
+
+    def _add_direction_plot(data_x: List[float], data_y: List[float], label: str, color: str) -> None:
+        if not data_x:
+            return
+        sheet_obj: Any | None
+        try:
+            sheet_obj = origin_any.new_sheet('w', lname=label.lower().replace(' ', '_'))
+        except Exception:
+            sheet_obj = None
+        if sheet_obj is None:
+            return
+        sheet = cast(Any, sheet_obj)
+        try:
+            sheet.from_list(0, data_x)
+            sheet.from_list(1, data_y)
+            sheet.cols_axis('XY')
+        except Exception:
+            return
+        plot_obj = layer.add_plot(sheet, coly=1, colx=0, type='y')
+        if plot_obj is None:
+            return
+        plot_any = cast(Any, plot_obj)
+        try:
+            plot_any.color = color
+            plot_any.line_width = 1.5
+            plot_any.symbol_shape = 2
+            plot_any.symbol_size = 4
+            plot_any.symbol_edge_color = color
+            plot_any.symbol_fill_color = color
+            plot_any.legend = ''
+        except Exception:
+            try:
+                plot_any.legend = ''
+            except Exception:
+                pass
+        dataset_index = getattr(plot_any, 'index', None)
+        if not isinstance(dataset_index, int):
+            try:
+                dataset_index = getattr(layer, 'plot_count', None)
+            except Exception:
+                dataset_index = None
+        if not isinstance(dataset_index, int):
+            try:
+                dataset_index = len(layer)  # type: ignore[arg-type]
+            except Exception:
+                dataset_index = None
+        if not isinstance(dataset_index, int):
+            dataset_index = len(legend_entries) + 1
+        legend_entries.append((dataset_index, label))
+
+    _add_direction_plot(inc_x, inc_y, "Increasing current", '#d32f2f')
+    _add_direction_plot(dec_x, dec_y, "Decreasing current", '#1976d2')
+
+    legend = _legend_label(layer)
+    if legend is not None and legend_entries:
+        lines = [f"\\l({idx}) {text}" for idx, text in legend_entries if text]
+        try:
+            legend.text = "\n".join(lines)
+        except Exception:
+            pass
+
+    try:
+        layer.rescale()
+    except Exception:
+        pass
+    try:
+        graph.activate()
+    except Exception:
+        pass
 def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     fig, ax = plt.subplots(figsize=(8, 4.5))
 
@@ -150,243 +487,42 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     return fig, fname
 
 
-def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
-    import originpro as op  # lazy import
-
-    origin_any: Any = cast(Any, op)
-    try:
-        origin_any.set_show()
-    except Exception:
-        pass
-
-    source_stem = Path(source_name).stem or title
-    workbook_name = source_stem[:32] if source_stem else title[:32]
-    legend_label = source_stem or title
-    legend_literal = _lt_literal(legend_label)
-
-    book_obj: Any | None
-    try:
-        book_obj = origin_any.new_book('w', lname=workbook_name)
-    except Exception:
-        book_obj = None
-
-    workbook: Any | None = cast(Any, book_obj) if book_obj is not None else None
-    worksheet: Any | None = None
-    if workbook is not None:
-        try:
-            workbook.activate()
-        except Exception:
-            pass
-        try:
-            worksheet = cast(Any, workbook[0])
-        except Exception:
-            worksheet = None
-
-    if worksheet is None:
-        sheet_obj: Any | None
-        try:
-            sheet_obj = origin_any.new_sheet('w', lname='Data')
-        except Exception:
-            sheet_obj = None
-        if sheet_obj is None:
-            return
-        worksheet = cast(Any, sheet_obj)
-        try:
-            workbook = getattr(worksheet, 'parent', None)
-        except Exception:
-            workbook = None
-
-    if worksheet is None:
-        return
-
+def plot_one_origin(
+    df: pd.DataFrame,
+    title: str,
+    source_name: str,
+    mode: str | None = None,
+) -> None:
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
-
-    try:
-        worksheet.from_list(0, currents.tolist())
-        worksheet.from_list(1, resistances.tolist())
-    except Exception:
+    origin_any, workbook, worksheet, graph, layer, legend_label = _prepare_origin_workspace(
+        currents,
+        resistances,
+        title,
+        source_name,
+    )
+    if graph is None or layer is None:
         return
 
-    try:
-        worksheet.cols_axis('XY')
-    except Exception:
-        pass
-    try:
-        worksheet.set_label(0, "Current (mA)")
-        worksheet.set_label(1, "Resistance (Ohm)")
-    except Exception:
-        pass
+    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ohm)")
+    _set_graph_title(layer, legend_label)
+    _assign_long_name(graph, legend_label)
+    _assign_long_name(workbook, legend_label)
 
-    _, segments = _direction_profile(currents)
-    inc_x: List[float] = []
-    inc_y: List[float] = []
-    dec_x: List[float] = []
-    dec_y: List[float] = []
-
-    for start, end, direction in segments:
-        if end <= start:
-            continue
-        xs = currents[start:end].tolist()
-        ys = resistances[start:end].tolist()
-        if direction >= 0:
-            target_x, target_y = inc_x, inc_y
-        else:
-            target_x, target_y = dec_x, dec_y
-        if target_x:
-            target_x.append(float('nan'))
-            target_y.append(float('nan'))
-        target_x.extend(xs)
-        target_y.extend(ys)
-
-    graph_obj: Any | None
-    try:
-        graph_obj = origin_any.new_graph(template='scatter')
-    except Exception:
-        graph_obj = None
-    if graph_obj is None:
-        return
-
-    graph = cast(Any, graph_obj)
-    try:
-        graph.activate()
-    except Exception:
-        pass
-
-    try:
-        layer = cast(Any, graph[0])
-    except Exception:
-        return
-
-    try:
-        origin_any.lt_exec('layer -c;')
-    except Exception:
-        pass
-
-    if workbook is not None:
-        try:
-            workbook.activate()
-        except Exception:
-            pass
-
-    inc_plot: Any | None = None
-    if inc_x:
-        inc_sheet_obj: Any | None
-        try:
-            inc_sheet_obj = origin_any.new_sheet('w', lname='increasing')
-        except Exception:
-            inc_sheet_obj = None
-        if inc_sheet_obj is not None:
-            inc_sheet = cast(Any, inc_sheet_obj)
-            try:
-                inc_sheet.from_list(0, inc_x)
-                inc_sheet.from_list(1, inc_y)
-            except Exception:
-                inc_sheet = None
-            if inc_sheet is not None:
-                try:
-                    inc_sheet.cols_axis('XY')
-                except Exception:
-                    pass
-                inc_plot = cast(Any, layer.add_plot(inc_sheet, coly=1, colx=0, type='y'))
-                if inc_plot is not None:
-                    try:
-                        inc_plot.color = '#ff0000'
-                        inc_plot.line_width = 1.5
-                        inc_plot.symbol_shape = 2
-                        inc_plot.symbol_size = 4
-                        inc_plot.symbol_edge_color = '#ff0000'
-                        inc_plot.symbol_fill_color = '#ff0000'
-                        inc_plot.legend = 'Increasing current'
-                    except Exception:
-                        pass
-
-    if workbook is not None:
-        try:
-            workbook.activate()
-        except Exception:
-            pass
-
-    dec_plot: Any | None = None
-    if dec_x:
-        dec_sheet_obj: Any | None
-        try:
-            dec_sheet_obj = origin_any.new_sheet('w', lname='decreasing')
-        except Exception:
-            dec_sheet_obj = None
-        if dec_sheet_obj is not None:
-            dec_sheet = cast(Any, dec_sheet_obj)
-            try:
-                dec_sheet.from_list(0, dec_x)
-                dec_sheet.from_list(1, dec_y)
-            except Exception:
-                dec_sheet = None
-            if dec_sheet is not None:
-                try:
-                    dec_sheet.cols_axis('XY')
-                except Exception:
-                    pass
-                dec_plot = cast(Any, layer.add_plot(dec_sheet, coly=1, colx=0, type='y'))
-                if dec_plot is not None:
-                    try:
-                        dec_plot.color = '#0000ff'
-                        dec_plot.line_width = 1.5
-                        dec_plot.symbol_shape = 2
-                        dec_plot.symbol_size = 4
-                        dec_plot.symbol_edge_color = '#0000ff'
-                        dec_plot.symbol_fill_color = '#0000ff'
-                        dec_plot.legend = 'Decreasing current'
-                    except Exception:
-                        pass
-
-    try:
-        layer.rescale()
-    except Exception:
-        pass
-
-    try:
-        graph.activate()
-    except Exception:
-        pass
-
-    try:
-        origin_any.lt_exec('legendupdate;')
-    except Exception:
-        pass
-
-    if inc_plot is not None:
-        try:
-            origin_any.lt_exec(f'legend -s 1 {_lt_literal("Increasing current")};')
-        except Exception:
-            pass
-    if dec_plot is not None:
-        try:
-            origin_any.lt_exec(f'legend -s 2 {_lt_literal("Decreasing current")};')
-        except Exception:
-            pass
-
-    try:
-        origin_any.lt_exec('lab -xb "Current (mA)"; lab -yl "Resistance (Ohm)";')
-    except Exception:
-        pass
-
-    try:
-        origin_any.lt_exec(f'title -s {legend_literal};')
-    except Exception:
-        pass
-
-    if workbook is not None:
-        try:
-            workbook.activate()
-            origin_any.lt_exec(f'page.longname$ = {legend_literal};')
-        except Exception:
-            pass
-
-    try:
-        graph.activate()
-        origin_any.lt_exec(f'page.longname$ = {legend_literal};')
-    except Exception:
-        pass
+    resolved_mode = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
+    if resolved_mode == "simple":
+        _plot_origin_simple(workbook, worksheet, graph, layer, legend_label)
+    else:
+        _plot_origin_experimental(
+            origin_any,
+            workbook,
+            worksheet,
+            graph,
+            layer,
+            currents,
+            resistances,
+            legend_label,
+        )
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:
@@ -394,6 +530,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         apply_readability_fonts()
     outs: List[Tuple[Figure, str]] = []
     use_origin = wants_origin(backend)
+    origin_mode = _normalise_origin_mode(ORIGIN_MODE)
     try:
         for path in files:
             df = load_file(path)
@@ -403,7 +540,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
                 outs.append((fig, fname))
             if use_origin:
                 try:
-                    plot_one_origin(df, title, Path(path).name)
+                    plot_one_origin(df, title, Path(path).name, mode=origin_mode)
                 except Exception as e:
                     print(f"Origin plot failed for {title}: {e}")
     finally:

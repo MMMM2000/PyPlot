@@ -326,6 +326,55 @@ def selected_backend(combo: QtWidgets.QComboBox) -> str:
     return _BACKEND_CHOICES[0]
 
 
+def _combo_values(combo: QtWidgets.QComboBox) -> list[str]:
+    values: list[str] = []
+    for idx in range(combo.count()):
+        data = combo.itemData(idx, QtCore.Qt.ItemDataRole.UserRole)
+        if data is None:
+            data = combo.itemText(idx)
+        values.append(str(data))
+    return values
+
+
+def restore_combo_choice(
+    key: str,
+    name: str,
+    combo: QtWidgets.QComboBox,
+    default: str,
+) -> str:
+    """Restore a stored combo-box value identified by ``key``/``name``."""
+
+    stored = str(_settings().value(f"{key}_{name}", default, type=str) or default)
+    values = _combo_values(combo)
+    if not values:
+        return stored
+
+    stored_lower = stored.lower()
+    lowered = [value.lower() for value in values]
+    if stored_lower in lowered:
+        combo.setCurrentIndex(lowered.index(stored_lower))
+    elif default.lower() in lowered:
+        combo.setCurrentIndex(lowered.index(default.lower()))
+        stored = values[combo.currentIndex()]
+    else:
+        combo.setCurrentIndex(0)
+        stored = values[0]
+    return values[combo.currentIndex()]
+
+
+def store_combo_choice(key: str, name: str, combo: QtWidgets.QComboBox) -> str:
+    """Persist the combo-box selection identified by ``key``/``name``."""
+
+    idx = combo.currentIndex()
+    if idx < 0:
+        value = ""
+    else:
+        data = combo.itemData(idx, QtCore.Qt.ItemDataRole.UserRole)
+        value = str(data if data is not None else combo.itemText(idx))
+    _settings().setValue(f"{key}_{name}", value.lower())
+    return value.lower()
+
+
 def restore_png_dpi(key: str, spin: QtWidgets.QSpinBox, default: int) -> int:
     """Set ``spin`` to the last stored PNG DPI for ``key`` and return it."""
 
