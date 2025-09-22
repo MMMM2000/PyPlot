@@ -301,6 +301,39 @@ def _prepare_origin_workspace(
     return origin_any, workbook, worksheet, graph, layer, legend_label
 
 
+def _minimise_workbook(origin_any: Any, workbook: Any | None, graph: Any | None) -> None:
+    if workbook is None:
+        return
+
+    candidates: List[str] = []
+    for attr in ("name", "short_name", "shortname"):
+        value = getattr(workbook, attr, None)
+        if isinstance(value, str) and value:
+            candidates.append(value)
+
+    commands: List[str] = []
+    for name in candidates:
+        commands.append(f"win -i {name};")
+        commands.append(f"window -i {name};")
+    commands.extend(["win -i;", "window -i;"])
+
+    executors = [getattr(workbook, "lt_exec", None), getattr(origin_any, "lt_exec", None)]
+    for cmd in commands:
+        for executor in executors:
+            if not callable(executor):
+                continue
+            try:
+                executor(cmd)
+                if graph is not None:
+                    try:
+                        graph.activate()
+                    except Exception:
+                        pass
+                return
+            except Exception:
+                continue
+
+
 def _plot_origin_simple(
     workbook: Any | None,
     worksheet: Any | None,
@@ -314,7 +347,7 @@ def _plot_origin_simple(
     if plot_obj is None:
         return
     plot_any = cast(Any, plot_obj)
-    color = '#1f77b4'
+    color = '#000000'
     try:
         plot_any.color = color
         plot_any.line_width = 1.5
@@ -512,6 +545,7 @@ def plot_one_origin(
     resolved_mode = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
     if resolved_mode == "simple":
         _plot_origin_simple(workbook, worksheet, graph, layer, legend_label)
+        _minimise_workbook(origin_any, workbook, graph)
     else:
         _plot_origin_experimental(
             origin_any,

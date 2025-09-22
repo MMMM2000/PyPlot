@@ -93,15 +93,17 @@ Origin’s embedded Python API and expose an **Origin style** selector: the
 default **Experimental** mode mirrors the Matplotlib view by splitting the ramp
 into rising and falling passes, colouring them red and blue with matching
 markers, and trimming the legend to two entries. The **Simple** mode mirrors the
-lightweight LabTalk macro by plotting a single line+symbol trace that carries
-the filename (without the `.txt` suffix) as both the legend entry and the graph
-long name. Both variants set axis labels and titles through the API so the
-generated workbooks and graphs appear immediately in the Project Explorer
-without relying on template-specific LabTalk. Origin connections stay
-attached while the plotting dialogs remain open—detaching is scheduled for the
-Qt application shutdown (or immediate when running headless)—so Python windows
-no longer disappear the moment an Origin export finishes, yet the Origin
-application can still be closed cleanly afterwards.
+lightweight LabTalk macro by plotting a single black line+symbol trace that
+carries the filename (without the `.txt` suffix) as both the legend entry and
+the graph long name, then minimises the populated workbook so a multi-file run
+doesn’t flood the workspace with sheets. Both variants set axis labels and
+titles through the API so the generated workbooks and graphs appear immediately
+in the Project Explorer without relying on template-specific LabTalk. Origin
+connections stay attached while the plotting dialogs remain
+open—detaching is scheduled for the Qt application shutdown (or immediate when
+running headless)—so Python windows no longer disappear the moment an Origin
+export finishes, yet the Origin application can still be closed cleanly
+afterwards.
 Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
