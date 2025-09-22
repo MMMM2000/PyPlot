@@ -116,11 +116,11 @@ def _resolve_origin_names(
     return book_short, sheet_short
 
 
-def _safe_assign(obj: Any, attr: str, value: Any) -> None:
-    try:
-        setattr(obj, attr, value)
-    except Exception:
-        pass
+def _lt_literal(text: str) -> str:
+    """Return a LabTalk-safe string literal."""
+
+    escaped = text.replace("\\", "\\\\").replace('"', "\"")
+    return f'"{escaped}"'
 
 
 def load_file(path: str) -> pd.DataFrame:
@@ -295,7 +295,7 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
         pass
 
     legend_label = source_stem or title
-    esc_legend = legend_label.replace('"', "'")
+    legend_literal = _lt_literal(legend_label)
 
     try:
         origin_any.lt_exec(
@@ -303,96 +303,34 @@ def plot_one_origin(df: pd.DataFrame, title: str, source_name: str) -> None:
             'wks.col1.unit$ = "mA";',
             'wks.col2.lname$ = "Resistance";',
             'wks.col2.unit$ = "Ohm";',
-            f'wks.col2.comment$ = "{esc_legend}";',
+            f"wks.col2.comment$ = {legend_literal};",
         )
     except Exception:
         pass
 
     book_hint = source_stem or workbook_name or "CA"
-    _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
+    book_short, _ = _resolve_origin_names(origin_any, workbook, worksheet, book_hint)
 
-    graph_obj: Any | None
-    try:
-        graph_obj = origin_any.new_graph(template='scatter')
-    except Exception:
-        graph_obj = None
-    if graph_obj is None:
-        return
+    graph_short = _sanitize_lt_name(book_hint, "G")
+    graph_short_literal = _lt_literal(graph_short)
 
-    graph = cast(Any, graph_obj)
-    try:
-        graph.activate()
-    except Exception:
-        pass
-
-    try:
-        layer = cast(Any, graph[0])
-    except Exception:
-        layer = None
-    if layer is None:
-        return
-
-    try:
-        plot_obj = layer.add_plot(worksheet, coly=1, colx=0, type='y')
-    except Exception:
-        plot_obj = None
-    if plot_obj is None:
-        return
-
-    plot = cast(Any, plot_obj)
-
-    try:
-        origin_any.lt_exec('layer -i 1;', 'set %C -d 202;', 'set %C -z 4;')
-    except Exception:
-        pass
-
-    _safe_assign(plot, "symbol_shape", 2)
-    _safe_assign(plot, "symbol_size", 6)
-    _safe_assign(plot, "line_width", 2)
-    _safe_assign(plot, "legend", legend_label)
-
-    try:
-        layer.rescale()
-    except Exception:
-        pass
-
-    try:
-        title_label = layer.label('Title')
-    except Exception:
-        title_label = None
-    if title_label is not None and hasattr(title_label, 'text'):
-        try:
-            cast(Any, title_label).text = title
-        except Exception:
-            pass
-
-    try:
-        x_axis = layer.axis('x')
-    except Exception:
-        x_axis = None
-    try:
-        y_axis = layer.axis('y')
-    except Exception:
-        y_axis = None
-
-    if x_axis is not None:
-        try:
-            x_axis.title = "Current (mA)"
-        except Exception:
-            pass
-    if y_axis is not None:
-        try:
-            y_axis.title = "Resistance (Ohm)"
-        except Exception:
-            pass
-
-    esc_graph = (source_stem or title).replace('"', "'")
     try:
         origin_any.lt_exec(
-            f'legend -s 0 "{esc_legend}";',
-            f'page.longname$ = "{esc_graph}";',
+            f"win -a {book_short};",
+            f"page.longname$ = {legend_literal};",
+            f"wks.longname$ = {legend_literal};",
+            f"plotxy iy:=(col(1),col(2)) plot:=202;",
+            'set %C -d 202;',
+            'set %C -z 3;',
+            f"page.name$ = {graph_short_literal};",
+            'legendupdate;',
+            f"legend -s 0 {legend_literal};",
             'layer.x.showAxes=3;',
             'layer.y.showAxes=3;',
+            f"page.longname$ = {legend_literal};",
+            f"win -a {book_short};",
+            'window -ch 1;',
+            f"win -a {graph_short};",
         )
     except Exception:
         pass

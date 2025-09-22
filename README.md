@@ -88,25 +88,20 @@ point so figures start with the first real sample, and ramps are coloured red
 while current increases and blue while it decreases to mirror the live logger.
 A small smoothing pass filters out measurement jitter so the Matplotlib
 outputs keep their red/blue segments even when the current wiggles while
-holding at the peak. Origin exports now generate a single line+symbol trace per
-file, label it with the source filename (without the `.txt` suffix), and
-reapply the marker styling through LabTalk so the legend matches the dataset
-list without the lingering black markers from earlier revisions. Each input
-file spawns its own Origin workbook so multi-file runs
-keep every dataset visible after Python exits, each workbook and graph inherits
-the source filename as its long name, the axes rescale automatically, and the
-graph title is written through the Origin API (with a label fallback) so the
-generated windows appear immediately in the Project Explorer with their
-headings already in place. Graphs are now assembled through the Origin Python
-API, so the plots register alongside their worksheets without spurious LabTalk
-warnings even when custom templates are unavailable. Origin connections stay
+holding at the peak. Origin exports now hand control to a compact LabTalk
+`plotxy` script after the worksheet is populated, so each file produces a single
+line+symbol trace whose legend entry, workbook long name, and graph long name
+all mirror the worksheet name (the source filename without the `.txt` suffix).
+The helper resizes the axes, shows the outer axis frames, and minimises the
+populated workbook once its plot is created so Origin’s workspace stays tidy
+while the graphs remain visible in the Project Explorer. Because plotting now
+happens through LabTalk, the graphs register reliably even when custom
+templates are missing, while the Python side still prepares the workbook,
+column labels, and data transfer before the script runs. Origin connections stay
 attached while the plotting dialogs remain open—detaching is scheduled for the
 Qt application shutdown (or immediate when running headless)—so Python windows
 no longer disappear the moment an Origin export finishes, yet the Origin
 application can still be closed cleanly afterwards.
-Origin stays open throughout multi-file exports and names each graph after the
-source file (without the `.txt` suffix), so batching datasets no longer causes
-Origin to reopen repeatedly.
 Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
