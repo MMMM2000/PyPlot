@@ -42,7 +42,7 @@ SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
 
 ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
-ORIGIN_MODE: str = ORIGIN_MODES[0]
+ORIGIN_MODE: str = ORIGIN_MODES[1]
 
 
 _SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
@@ -410,7 +410,7 @@ def _prepare_origin_workspace(
         pass
     try:
         worksheet.set_label(0, "Current (mA)")
-        worksheet.set_label(1, "Resistance (Ohm)")
+        worksheet.set_label(1, "Resistance (Ω)")
     except Exception:
         pass
 
@@ -731,7 +731,7 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
             previous_direction = direction
 
     ax.set_xlabel("Current (mA)")
-    ax.set_ylabel("Resistance (Ohm)")
+    ax.set_ylabel("Resistance (Ω)")
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
     fig.tight_layout()
@@ -768,7 +768,7 @@ def plot_one_origin(
         return handles if return_handles else None
 
     display_label = _format_origin_annotation(legend_label)
-    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ohm)")
+    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ω)")
     _set_graph_title(layer, display_label)
     _assign_long_name(graph, legend_label)
     _assign_long_name(workbook, legend_label)

@@ -810,8 +810,8 @@ def _embed_plots_in_excel(
                     continue
 
                 # Downscale very large images so they fit within the worksheet cells.
-                max_width = 640
-                max_height = 360
+                max_width = 320
+                max_height = 180
                 if image.width and image.height:
                     width_scale = max_width / image.width if image.width > max_width else 1.0
                     height_scale = max_height / image.height if image.height > max_height else 1.0
