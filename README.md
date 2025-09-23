@@ -327,24 +327,47 @@ plotting tools:
   per-draw piece workbooks for the measurements you want to combine. The
   program maps Slovak headers to English fields, keeps a raw text copy for
   ambiguous numeric cells, and joins draw/piece data by composition and draw X /
-  piece Y.
+  piece Y. Added paths are remembered between runs.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
-  logs. The loader auto-detects delimiters, validates that \(R \approx V/I\),
-  and computes summary features (linear slope, gradient mean, percentile anchors,
-  non-linearity, etc.).
+  logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
+  logs warnings whenever the check drifts beyond tolerance. File selections are
+  restored on launch so repeat builds are quick.
 * **Options** – tick **Generate plots (PNG)** to reuse the existing annealing
-  plotter style, and enable the Excel exporter if you need that format in
-  addition to the default CSV.
-* **Output** – choose an output directory; the tool writes
-  `microwire_database.csv` and, when selected, the Excel workbook and a `plots/`
-  folder. Detailed diagnostics go to `microwire_database.log` in the same
-  directory.
+  plotter style. Choose **Export CSV** and/or **Export Excel** to control the
+  output formats; the builder remembers these toggles along with the last output
+  folder.
+* **Output** – pick a destination directory; the tool writes
+  `microwire_database.csv`, `microwire_database.xlsx` when requested, and (if
+  plots are enabled) PNG files under `plots/`. Detailed diagnostics go to
+  `microwire_database.log` beside the exports.
 
-Each measurement row in the export contains the file provenance, composition and
-microwire identifiers, fabrication/piece metadata (when available), curve
-quality checks, statistical features, and optional plot paths. You can rerun the
-builder whenever new annealing runs or fabrication sheets are added—the log pane
-highlights missing joins or sanity-check failures without aborting the build.
+Each microwire (composition + draw/piece) becomes a single row with English
+headers tailored for analytics. The builder selects the 1000 mA measurement and
+the lowest available current for each microwire, generates optional plots with
+the familiar red/blue styling, and records provenance back to the source files.
+The exported columns are:
+
+* Composition
+* Microwire (e.g. `4/1`)
+* d (µm)
+* D (µm)
+* d/D
+* Length (m)
+* Production datetime
+* Mass (g)
+* Resistance (Ω)
+* Temperature (°C)
+* Winding speed (m/min)
+* Glass feeding (mm/min)
+* Underpressure
+* Notes (combined bistable status and any note fields)
+* Figure — 1000 mA / File 1000 mA
+* Figure — low mA / File low mA
+* Low mA value (mA)
+
+The log pane summarises skipped files, missing joins, and cases where a 1000 mA
+or low-current measurement is absent so you can investigate without re-running
+the whole build.
 
 ## 7. Repository maintenance
 

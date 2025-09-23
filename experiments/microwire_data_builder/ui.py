@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import sys
 from pathlib import Path
@@ -62,18 +63,23 @@ class BuildWorker(QtCore.QObject):
                 progress_callback=self.progress.emit,
                 root_for_relpaths=Path.cwd(),
             )
-            self.logger.info("CSV written to %s", result.csv_path)
-            if result.excel_path:
-                self.logger.info("Excel written to %s", result.excel_path)
+            if result.exports:
+                for fmt, path in result.exports.items():
+                    self.logger.info("%s written to %s", fmt.upper(), path)
+            else:
+                self.logger.info("No export files were generated.")
             if config.make_plots:
                 self.logger.info("Generated %s plot(s)", len(result.plot_paths))
             stats = result.stats
             self.logger.info(
-                "Summary: parsed=%s skipped=%s missing_draw=%s missing_piece=%s R≈V/I failures=%s",
+                "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R≈V/I failures=%s",
                 stats.parsed,
                 stats.skipped,
+                stats.rows_built,
                 stats.missing_draw,
                 stats.missing_piece,
+                stats.missing_high_measurement,
+                stats.missing_low_measurement,
                 stats.resistance_checks_failed,
             )
             self.finished.emit(result)
@@ -104,14 +110,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._running = False
 
         cwd = Path.cwd()
+        self._default_output_dir = cwd / "builder_output"
         self._last_fabrication_dir = str(cwd)
         self._last_anneal_dir = str(cwd)
         self._last_output_dir = str(cwd)
+        self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
         self.log_message.connect(self._append_log)
 
         self._build_ui()
         self._configure_logging()
+        self._load_settings()
         install_standard_menu(self)
 
     # ------------------------------------------------------------------ setup
@@ -176,8 +185,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.options_group = QtWidgets.QGroupBox("Options")
         options_layout = QtWidgets.QVBoxLayout(self.options_group)
         self.make_plots_check = QtWidgets.QCheckBox("Generate plots (PNG)")
+        self.make_plots_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.make_plots_check)
-        self.export_excel_check = QtWidgets.QCheckBox("Also export Excel")
+        self.export_csv_check = QtWidgets.QCheckBox("Export CSV")
+        self.export_csv_check.setChecked(True)
+        self.export_csv_check.stateChanged.connect(self._save_settings)
+        options_layout.addWidget(self.export_csv_check)
+        self.export_excel_check = QtWidgets.QCheckBox("Export Excel")
+        self.export_excel_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.export_excel_check)
         layout.addWidget(self.options_group)
 
@@ -186,8 +201,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         output_layout = QtWidgets.QGridLayout(self.output_group)
         output_label = QtWidgets.QLabel("Directory:")
         output_layout.addWidget(output_label, 0, 0)
-        default_output = Path.cwd() / "builder_output"
-        self.output_edit = QtWidgets.QLineEdit(str(default_output))
+        self.output_edit = QtWidgets.QLineEdit(str(self._default_output_dir))
+        self.output_edit.editingFinished.connect(self._save_settings)
         output_layout.addWidget(self.output_edit, 0, 1)
         self.output_button = QtWidgets.QPushButton("Browse…")
         self.output_button.clicked.connect(self._select_output_dir)
@@ -231,6 +246,75 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if self._log_handler not in self.logger.handlers:
             self.logger.addHandler(self._log_handler)
 
+    def _load_settings(self) -> None:
+        def _decode_paths(value: object) -> list[Path]:
+            if isinstance(value, list | tuple):
+                return [Path(str(item)) for item in value]
+            if isinstance(value, str):
+                if not value:
+                    return []
+                try:
+                    data = json.loads(value)
+                    if isinstance(data, list):
+                        return [Path(str(item)) for item in data]
+                except json.JSONDecodeError:
+                    items = [segment.strip() for segment in value.splitlines() if segment.strip()]
+                    return [Path(item) for item in items]
+            return []
+
+        def _read_bool(key: str, default: bool) -> bool:
+            value = self.settings.value(key, default)
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                if lowered in {"true", "1", "yes", "y"}:
+                    return True
+                if lowered in {"false", "0", "no", "n"}:
+                    return False
+            return default
+
+        self.fabrication_paths = _decode_paths(self.settings.value("fabrication_paths", ""))
+        self._update_list_widget(self.fabrication_list, self.fabrication_paths)
+        self.annealing_paths = _decode_paths(self.settings.value("annealing_paths", ""))
+        self._update_list_widget(self.anneal_list, self.annealing_paths)
+
+        with QtCore.QSignalBlocker(self.make_plots_check):
+            self.make_plots_check.setChecked(_read_bool("make_plots", False))
+        with QtCore.QSignalBlocker(self.export_csv_check):
+            self.export_csv_check.setChecked(_read_bool("export_csv", True))
+        with QtCore.QSignalBlocker(self.export_excel_check):
+            self.export_excel_check.setChecked(_read_bool("export_excel", False))
+
+        output_dir_value = self.settings.value("output_dir", "")
+        if isinstance(output_dir_value, str) and output_dir_value.strip():
+            self.output_edit.setText(output_dir_value)
+            self._last_output_dir = output_dir_value
+
+        last_fab = self.settings.value("last_fabrication_dir", "")
+        if isinstance(last_fab, str) and last_fab.strip():
+            self._last_fabrication_dir = last_fab
+        last_anneal = self.settings.value("last_anneal_dir", "")
+        if isinstance(last_anneal, str) and last_anneal.strip():
+            self._last_anneal_dir = last_anneal
+        last_output = self.settings.value("last_output_dir", "")
+        if isinstance(last_output, str) and last_output.strip():
+            self._last_output_dir = last_output
+
+    def _save_settings(self) -> None:
+        if not hasattr(self, "settings"):
+            return
+        self.settings.setValue("fabrication_paths", json.dumps([str(p) for p in self.fabrication_paths]))
+        self.settings.setValue("annealing_paths", json.dumps([str(p) for p in self.annealing_paths]))
+        self.settings.setValue("output_dir", self.output_edit.text())
+        self.settings.setValue("make_plots", self.make_plots_check.isChecked())
+        self.settings.setValue("export_csv", self.export_csv_check.isChecked())
+        self.settings.setValue("export_excel", self.export_excel_check.isChecked())
+        self.settings.setValue("last_fabrication_dir", self._last_fabrication_dir)
+        self.settings.setValue("last_anneal_dir", self._last_anneal_dir)
+        self.settings.setValue("last_output_dir", self._last_output_dir)
+        self.settings.sync()
+
     # ------------------------------------------------------------------ helpers
     def _extend_paths(self, attr: str, paths: Iterable[Path]) -> None:
         current: list[Path] = getattr(self, attr)
@@ -254,6 +338,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_fabrication_dir = str(Path(files[0]).parent)
         self._extend_paths("fabrication_paths", (Path(f) for f in files))
         self._update_list_widget(self.fabrication_list, self.fabrication_paths)
+        self._save_settings()
 
     def _add_fabrication_folder(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(
@@ -272,10 +357,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_fabrication_dir = folder
         self._extend_paths("fabrication_paths", files)
         self._update_list_widget(self.fabrication_list, self.fabrication_paths)
+        self._save_settings()
 
     def _clear_fabrication(self) -> None:
         self.fabrication_paths = []
         self.fabrication_list.clear()
+        self._save_settings()
 
     def _add_anneal_files(self) -> None:
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -289,6 +376,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_anneal_dir = str(Path(files[0]).parent)
         self._extend_paths("annealing_paths", (Path(f) for f in files))
         self._update_list_widget(self.anneal_list, self.annealing_paths)
+        self._save_settings()
 
     def _add_anneal_folder(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(
@@ -307,10 +395,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_anneal_dir = folder
         self._extend_paths("annealing_paths", files)
         self._update_list_widget(self.anneal_list, self.annealing_paths)
+        self._save_settings()
 
     def _clear_anneal(self) -> None:
         self.annealing_paths = []
         self.anneal_list.clear()
+        self._save_settings()
 
     def _select_output_dir(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(
@@ -321,6 +411,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if directory:
             self._last_output_dir = directory
             self.output_edit.setText(directory)
+            self._save_settings()
 
     def _set_running(self, running: bool) -> None:
         self._running = running
@@ -351,13 +442,26 @@ class BuilderWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "Please choose an output directory.")
             return
         output_dir = Path(output_dir_text).expanduser()
+        export_formats: list[str] = []
+        if self.export_csv_check.isChecked():
+            export_formats.append("csv")
+        if self.export_excel_check.isChecked():
+            export_formats.append("excel")
+        if not export_formats:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Please select at least one export format.",
+            )
+            return
         config = BuilderConfig(
             fabrication_files=list(dict.fromkeys(self.fabrication_paths)),
             annealing_files=list(dict.fromkeys(self.annealing_paths)),
             output_dir=output_dir,
             make_plots=self.make_plots_check.isChecked(),
-            export_excel=self.export_excel_check.isChecked(),
+            export_formats=tuple(export_formats),
         )
+        self._save_settings()
         self._set_running(True)
         self.log_view.clear()
         self.logger.info(
@@ -389,11 +493,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._set_running(False)
         self.progress_bar.setValue(100)
         self.progress_label.setText("Complete")
+        if result.exports:
+            lines = [f"{fmt.upper()}: {path}" for fmt, path in result.exports.items()]
+            export_text = "\n".join(lines)
+        else:
+            export_text = "No export files were created."
         QtWidgets.QMessageBox.information(
             self,
             "Microwire Data Builder",
-            "Build finished successfully.\n\n"
-            f"CSV file: {result.csv_path}",
+            "Build finished successfully.\n\n" + export_text,
         )
 
     def _handle_failed(self, message: str) -> None:
@@ -431,6 +539,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             return
         if hasattr(self, "_log_handler") and self._log_handler in self.logger.handlers:
             self.logger.removeHandler(self._log_handler)
+        self._save_settings()
         super().closeEvent(event)
 
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from .core import (
-    ASSUMED_COLS,
     BuilderConfig,
     BuildResult,
     BuildStats,
@@ -18,7 +17,6 @@ from .ui import BuilderWindow, main, run_app
 BuilderApp = BuilderWindow
 
 __all__ = [
-    "ASSUMED_COLS",
     "BuilderApp",
     "BuilderWindow",
     "BuilderConfig",

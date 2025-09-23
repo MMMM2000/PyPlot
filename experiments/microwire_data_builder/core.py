@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import dataclasses
 import hashlib
 import logging
 import math
@@ -18,14 +17,36 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 LOGGER_NAME = "microwire_data_builder"
-ASSUMED_COLS = "I_A,V_V,R_ohm"
-PLOT_STYLE_DESCRIPTION = "red=up, blue=down"
 R_CHECK_THRESHOLD = 0.05
 CSV_NAME = "microwire_database.csv"
 EXCEL_NAME = "microwire_database.xlsx"
 LOG_NAME = "microwire_database.log"
 PLOT_DIR_NAME = "plots"
+
+OUTPUT_COLUMNS = [
+    "Composition",
+    "Microwire",
+    "d (µm)",
+    "D (µm)",
+    "d/D",
+    "Length (m)",
+    "Production datetime",
+    "Mass (g)",
+    "Resistance (Ω)",
+    "Temperature (°C)",
+    "Winding speed (m/min)",
+    "Glass feeding (mm/min)",
+    "Underpressure",
+    "Notes",
+    "Figure — 1000 mA",
+    "Figure — low mA",
+    "Low mA value (mA)",
+    "File 1000 mA",
+    "File low mA",
+]
 
 DRAW_NUMERIC_FIELDS = {
     "mass_g",
@@ -69,6 +90,13 @@ HEADER_HINTS: Dict[str, str] = {
     "glass feeding (mm/min)": "glass_feed_mm_per_min",
     "underpressure": "underpressure",
     "bistabilny/nebistabilny": "bistable_status",
+    "poznámka": "notes",
+    "Poznámka": "notes",
+    "poznamka": "notes",
+    "Poznamka": "notes",
+    "pozn.": "notes",
+    "pozn": "notes",
+    "poznámky": "notes",
     "p.č": "piece_y",
     "p.c": "piece_y",
     "p.č.": "piece_y",
@@ -97,7 +125,6 @@ HEADER_HINTS: Dict[str, str] = {
 }
 
 ANNEALING_COLUMNS = ["I_A", "V_V", "R_ohm"]
-PERCENTILES = [0, 25, 50, 75, 100]
 
 DRAW_PATTERN = re.compile(r"^(?P<draw>\d+)")
 PIECE_PATTERN = re.compile(r"^(?P<piece>\d+)")
@@ -114,7 +141,7 @@ class BuilderConfig:
     annealing_files: List[Path]
     output_dir: Path
     make_plots: bool = False
-    export_excel: bool = False
+    export_formats: Tuple[str, ...] = ("csv",)
     plot_dir_name: str = PLOT_DIR_NAME
     log_file_name: str = LOG_NAME
 
@@ -128,6 +155,9 @@ class BuildStats:
     missing_draw: int = 0
     missing_piece: int = 0
     resistance_checks_failed: int = 0
+    rows_built: int = 0
+    missing_high_measurement: int = 0
+    missing_low_measurement: int = 0
 
 
 @dataclass
@@ -135,8 +165,7 @@ class BuildResult:
     """Return value from :func:`build_database`."""
 
     dataframe: pd.DataFrame
-    csv_path: Path
-    excel_path: Optional[Path]
+    exports: Dict[str, Path]
     plot_paths: List[Path]
     stats: BuildStats
 
@@ -475,6 +504,15 @@ class MeasurementMetadata:
     timestamp_mtime_utc: str
 
 
+@dataclass
+class MeasurementRecord:
+    path: Path
+    metadata: MeasurementMetadata
+    dataframe: pd.DataFrame
+    sanity_ok: bool
+    sanity_error: Optional[float]
+
+
 def _hash_file(path: Path) -> str:
     h = hashlib.md5()
     with path.open("rb") as fh:
@@ -542,72 +580,73 @@ def _resistance_sanity_check(df: pd.DataFrame) -> Tuple[bool, Optional[float]]:
     return mean_error < R_CHECK_THRESHOLD, mean_error
 
 
-def _linear_fit(currents: np.ndarray, resistances: np.ndarray) -> Tuple[float, float, float, np.ndarray]:
-    if currents.size < 2:
-        return (float("nan"), float("nan"), float("nan"), np.full_like(resistances, np.nan))
-    slope, intercept = np.polyfit(currents, resistances, 1)
-    fitted = slope * currents + intercept
-    ss_res = float(np.sum((resistances - fitted) ** 2))
-    ss_tot = float(np.sum((resistances - np.mean(resistances)) ** 2))
-    if ss_tot == 0:
-        r2 = 1.0
-    else:
-        r2 = 1.0 - ss_res / ss_tot
-    return slope, intercept, r2, fitted
+def _value_for_output(record: Dict[str, object], field: str) -> Optional[object]:
+    if not record:
+        return None
+    value = record.get(field)
+    if value is None or _is_nan(value):
+        raw = record.get(f"{field}_raw")
+        if raw is None:
+            return None
+        text = str(raw).strip()
+        return text or None
+    return value
 
 
-def _percentile_anchors(currents: np.ndarray, resistances: np.ndarray) -> Dict[int, float]:
-    if currents.size == 0:
-        return {p: float("nan") for p in PERCENTILES}
-    sorted_indices = np.argsort(currents)
-    sorted_currents = currents[sorted_indices]
-    sorted_resistances = resistances[sorted_indices]
-    anchors: Dict[int, float] = {}
-    for pct in PERCENTILES:
-        target = np.percentile(sorted_currents, pct)
-        anchors[pct] = float(np.interp(target, sorted_currents, sorted_resistances))
-    return anchors
+def _compose_notes(*records: Dict[str, object]) -> Optional[str]:
+    notes: List[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if not record:
+            continue
+        for key in ("bistable_status", "notes"):
+            candidate = _value_for_output(record, key)
+            if candidate is None:
+                continue
+            text = str(candidate).strip()
+            if not text:
+                continue
+            lowered = text.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            notes.append(text)
+    return "; ".join(notes) if notes else None
 
 
-def _curve_features(df: pd.DataFrame) -> Dict[str, object]:
-    currents = df["I_A"].to_numpy(dtype=float)
-    voltages = df["V_V"].to_numpy(dtype=float)
-    resistances = df["R_ohm"].to_numpy(dtype=float)
-    order = np.argsort(currents)
-    currents = currents[order]
-    voltages = voltages[order]
-    resistances = resistances[order]
-    slope, intercept, r2, fitted = _linear_fit(currents, resistances)
-    gradients = np.gradient(resistances, currents) if currents.size >= 2 else np.array([float("nan")])
-    integrate = getattr(np, "trapezoid", np.trapz)
-    area = float(integrate(resistances, currents)) if currents.size >= 2 else float("nan")
-    r0 = float(resistances[np.argmin(np.abs(currents))]) if currents.size else float("nan")
-    rmax = float(resistances[np.argmax(currents)]) if currents.size else float("nan")
-    anchors = _percentile_anchors(currents, resistances)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        nonlinearity = np.abs(resistances - fitted) / np.maximum(np.abs(resistances), 1e-9)
-    return {
-        "points": int(currents.size),
-        "current_min_A": float(np.min(currents)) if currents.size else float("nan"),
-        "current_max_A": float(np.max(currents)) if currents.size else float("nan"),
-        "current_mean_A": float(np.mean(currents)) if currents.size else float("nan"),
-        "resistance_min_ohm": float(np.min(resistances)) if currents.size else float("nan"),
-        "resistance_max_ohm": float(np.max(resistances)) if currents.size else float("nan"),
-        "resistance_mean_ohm": float(np.mean(resistances)) if currents.size else float("nan"),
-        "slope_dR_dI_ohm_per_A": float(slope),
-        "intercept_ohm": float(intercept),
-        "linear_r2": float(r2),
-        "grad_mean_dR_dI_ohm_per_A": float(np.nanmean(gradients)) if gradients.size else float("nan"),
-        "area_RdI_ohmA": area,
-        "R_at_I0_ohm": r0,
-        "R_at_Imax_ohm": rmax,
-        "nonlinearity_mae_frac": float(np.nanmean(nonlinearity)) if nonlinearity.size else float("nan"),
-        "R_at_Ipct_0_ohm": anchors[0],
-        "R_at_Ipct_25_ohm": anchors[25],
-        "R_at_Ipct_50_ohm": anchors[50],
-        "R_at_Ipct_75_ohm": anchors[75],
-        "R_at_Ipct_100_ohm": anchors[100],
-    }
+def _microwire_label(draw_x: Optional[int], piece_y: Optional[int]) -> str:
+    if draw_x is None or piece_y is None:
+        return ""
+    return f"{draw_x}/{piece_y}"
+
+
+def _select_high_measurement(records: List[MeasurementRecord]) -> Optional[MeasurementRecord]:
+    if not records:
+        return None
+
+    def key(record: MeasurementRecord) -> Tuple[int, int, int, str]:
+        setpoint = record.metadata.setpoint_mA
+        priority_exact = 1 if setpoint == 1000 else 0
+        magnitude = setpoint if setpoint is not None else -1
+        variant_score = 1 if not record.metadata.alt_variant else 0
+        return (priority_exact, magnitude, variant_score, record.metadata.file_name.lower())
+
+    return max(records, key=key)
+
+
+def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[MeasurementRecord]:
+    if not records:
+        return None
+    candidates = [r for r in records if r.metadata.setpoint_mA is not None]
+    if not candidates:
+        return None
+
+    def key(record: MeasurementRecord) -> Tuple[int, int, str]:
+        setpoint = record.metadata.setpoint_mA or 0
+        variant_penalty = 0 if not record.metadata.alt_variant else 1
+        return (setpoint, variant_penalty, record.metadata.file_name.lower())
+
+    return min(candidates, key=key)
 
 
 def _plot_measurement(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
@@ -634,9 +673,10 @@ def build_database(
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     fabrication_index = build_fabrication_index(config.fabrication_files, log)
-    rows: List[Dict[str, object]] = []
     stats = BuildStats()
+    grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
     plot_paths: List[Path] = []
+    plot_cache: Dict[str, Path] = {}
     total = len(config.annealing_files)
     for idx, path in enumerate(config.annealing_files, start=1):
         try:
@@ -648,67 +688,142 @@ def build_database(
                 progress_callback(idx, total)
             continue
         metadata = _metadata_from_path(path, root_for_relpaths)
-        row: Dict[str, object] = dataclasses.asdict(metadata)
-        row["source_type"] = "annealing_txt"
-        row["microwire_xy"] = (
-            f"{metadata.draw_x}/{metadata.piece_y}" if metadata.draw_x is not None and metadata.piece_y is not None else ""
-        )
-        row["assumed_cols"] = ASSUMED_COLS
         ok, mean_error = _resistance_sanity_check(df)
-        row["R_equals_V_over_I_check"] = bool(ok)
-        if mean_error is not None:
-            row["R_equals_V_over_I_error"] = mean_error
-        else:
-            row["R_equals_V_over_I_error"] = float("nan")
         if not ok:
             stats.resistance_checks_failed += 1
-        features = _curve_features(df)
-        row.update(features)
-        draw_info = fabrication_index.get_draw(metadata.composition_token, metadata.draw_x)
-        if draw_info:
-            row.update(draw_info)
-        else:
-            stats.missing_draw += 1
-        piece_info = fabrication_index.get_piece(metadata.composition_token, metadata.draw_x, metadata.piece_y)
-        if piece_info:
-            row.update(piece_info)
-        else:
-            stats.missing_piece += 1
-        if config.make_plots:
-            plot_dir = output_dir / config.plot_dir_name
-            try:
-                plot_path = _plot_measurement(df, path, plot_dir)
-                row["plot_png_path"] = os.fspath(plot_path)
-                row["plot_style"] = PLOT_STYLE_DESCRIPTION
-                plot_paths.append(plot_path)
-            except Exception:
-                log.exception("Failed to generate plot for %s", path)
-        rows.append(row)
+            if mean_error is None:
+                log.warning("R≈V/I sanity check failed for %s", path)
+            else:
+                log.warning(
+                    "R≈V/I sanity check failed for %s (mean error %.2f%%)",
+                    path,
+                    mean_error * 100,
+                )
+        if metadata.draw_x is None or metadata.piece_y is None:
+            log.warning(
+                "Skipping %s because the microwire draw/piece identifiers could not be parsed",
+                path,
+            )
+            stats.skipped += 1
+            if progress_callback:
+                progress_callback(idx, total)
+            continue
+        key = (metadata.composition_token, metadata.draw_x, metadata.piece_y)
+        record = MeasurementRecord(
+            path=path,
+            metadata=metadata,
+            dataframe=df,
+            sanity_ok=ok,
+            sanity_error=mean_error,
+        )
+        grouped.setdefault(key, []).append(record)
         stats.parsed += 1
         if progress_callback:
             progress_callback(idx, total)
-    if not rows:
-        df_out = pd.DataFrame(columns=["measurement_id"])
+    rows: List[Dict[str, object]] = []
+    for (composition, draw_x, piece_y), records in sorted(grouped.items()):
+        draw_info = fabrication_index.get_draw(composition, draw_x)
+        piece_info = fabrication_index.get_piece(composition, draw_x, piece_y)
+        row: Dict[str, object] = {column: None for column in OUTPUT_COLUMNS}
+        row["Composition"] = composition
+        row["Microwire"] = _microwire_label(draw_x, piece_y)
+        row["d (µm)"] = _value_for_output(piece_info, "d_um")
+        row["D (µm)"] = _value_for_output(piece_info, "D_um")
+        row["d/D"] = _value_for_output(piece_info, "d_over_D")
+        row["Length (m)"] = _value_for_output(piece_info, "length_m")
+        row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
+        row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
+        row["Resistance (Ω)"] = _value_for_output(draw_info, "fabrication_resistance_ohm")
+        row["Temperature (°C)"] = _value_for_output(draw_info, "fabrication_temperature_c")
+        row["Winding speed (m/min)"] = _value_for_output(draw_info, "winding_speed_m_per_min")
+        row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
+        row["Underpressure"] = _value_for_output(draw_info, "underpressure")
+        row["Notes"] = _compose_notes(draw_info, piece_info)
+        if not draw_info:
+            stats.missing_draw += 1
+        if not piece_info:
+            stats.missing_piece += 1
+        high_record = _select_high_measurement(records)
+        low_record = _select_low_measurement(records)
+        if low_record and high_record:
+            high_sp = high_record.metadata.setpoint_mA
+            low_sp = low_record.metadata.setpoint_mA
+            setpoints = {r.metadata.setpoint_mA for r in records if r.metadata.setpoint_mA is not None}
+            if high_sp is not None and low_sp == high_sp and len(setpoints) <= 1:
+                low_record = None
+        if high_record:
+            row["File 1000 mA"] = high_record.metadata.relpath
+        else:
+            stats.missing_high_measurement += 1
+            log.warning("No 1000 mA measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
+        if low_record:
+            row["File low mA"] = low_record.metadata.relpath
+            if low_record.metadata.setpoint_mA is not None:
+                row["Low mA value (mA)"] = low_record.metadata.setpoint_mA
+        else:
+            stats.missing_low_measurement += 1
+            log.warning("No low-current measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
+        if config.make_plots:
+            plot_dir = output_dir / config.plot_dir_name
+            if high_record:
+                cached = plot_cache.get(high_record.metadata.measurement_id)
+                if cached is None:
+                    try:
+                        cached = _plot_measurement(high_record.dataframe, high_record.path, plot_dir)
+                        plot_cache[high_record.metadata.measurement_id] = cached
+                        plot_paths.append(cached)
+                    except Exception:
+                        log.exception("Failed to generate plot for %s", high_record.path)
+                        cached = None
+                if cached is not None:
+                    row["Figure — 1000 mA"] = os.fspath(cached)
+            if low_record:
+                cached = plot_cache.get(low_record.metadata.measurement_id)
+                if cached is None:
+                    try:
+                        cached = _plot_measurement(low_record.dataframe, low_record.path, plot_dir)
+                        plot_cache[low_record.metadata.measurement_id] = cached
+                        if cached not in plot_paths:
+                            plot_paths.append(cached)
+                    except Exception:
+                        log.exception("Failed to generate plot for %s", low_record.path)
+                        cached = None
+                if cached is not None:
+                    row["Figure — low mA"] = os.fspath(cached)
+        rows.append(row)
+        stats.rows_built += 1
+    if rows:
+        df_out = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
     else:
-        df_out = pd.DataFrame(rows)
-    csv_path = output_dir / CSV_NAME
-    df_out.to_csv(csv_path, index=False)
-    excel_path = None
-    if config.export_excel:
-        excel_path = output_dir / EXCEL_NAME
-        df_out.to_excel(excel_path, index=False)
+        df_out = pd.DataFrame(columns=OUTPUT_COLUMNS)
+    exports: Dict[str, Path] = {}
+    requested_formats = tuple(dict.fromkeys(config.export_formats)) if config.export_formats else ("csv",)
+    for fmt in requested_formats:
+        fmt_lower = fmt.lower()
+        if fmt_lower == "csv":
+            csv_path = output_dir / CSV_NAME
+            df_out.to_csv(csv_path, index=False)
+            exports["csv"] = csv_path
+        elif fmt_lower == "excel":
+            excel_path = output_dir / EXCEL_NAME
+            df_out.to_excel(excel_path, index=False)
+            exports["excel"] = excel_path
+        else:
+            log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
-        "Measurements parsed: %s | Skipped: %s | Missing draw info: %s | Missing piece info: %s | R≈V/I failures: %s",
+        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Missing low mA: %s | R≈V/I failures: %s",
         stats.parsed,
         stats.skipped,
+        stats.rows_built,
         stats.missing_draw,
         stats.missing_piece,
+        stats.missing_high_measurement,
+        stats.missing_low_measurement,
         stats.resistance_checks_failed,
     )
     return BuildResult(
         dataframe=df_out,
-        csv_path=csv_path,
-        excel_path=excel_path,
+        exports=exports,
         plot_paths=plot_paths,
         stats=stats,
     )
