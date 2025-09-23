@@ -53,15 +53,17 @@ class SampleSpinBox(QtWidgets.QSpinBox):
         self._suffix = suffix or ""
         return max(self.minimum(), min(self.maximum(), value))
 
-    def validate(self, input: str, pos: int) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
-        if not input:
-            return (QtGui.QValidator.State.Intermediate, input, pos)
-        if self._pattern.match(input):
-            return (QtGui.QValidator.State.Acceptable, input, pos)
-        if re.match(r"^.*?\d*$", input):
-            return (QtGui.QValidator.State.Intermediate, input, pos)
-        return (QtGui.QValidator.State.Invalid, input, pos)
-
+    def validate(
+        self, text: str | None, pos: int
+    ) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
+        normalized = text or ""
+        if not normalized:
+            return (QtGui.QValidator.State.Intermediate, normalized, pos)
+        if self._pattern.match(normalized):
+            return (QtGui.QValidator.State.Acceptable, normalized, pos)
+        if re.match(r"^.*?\d*$", normalized):
+            return (QtGui.QValidator.State.Intermediate, normalized, pos)
+        return (QtGui.QValidator.State.Invalid, normalized, pos)
     # Public helpers mirroring QLineEdit for backwards compatibility
     def text(self) -> str:  # noqa: D401
         return super().text()
@@ -566,3 +568,4 @@ class Ui_MainWindow(object):
         MainWindow.setStatusBar(self.statusBar)
 
         QtCore.QMetaObject.connectSlotsByName(MainWindow)
+

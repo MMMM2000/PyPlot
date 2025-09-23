@@ -1,6 +1,7 @@
-﻿import os
+import os
 import re
 from pathlib import Path
+from numbers import Real
 from typing import List, Dict, Any, Tuple, cast, Callable, Protocol
 
 from PyQt6 import QtWidgets, QtCore
@@ -92,6 +93,34 @@ FNAME_RE = re.compile(
     r"(?P<anneal>\S+)\s+"
     r"(?P<temp>\d+(?:-\d+)?C)$"
 )
+
+def _as_float(value: object) -> float | None:
+    if isinstance(value, Real):
+        return float(value)
+    return None
+
+
+def _as_color(value: Any) -> ColorType | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, tuple):
+        return cast(ColorType, value)
+    if isinstance(value, list):
+        try:
+            floats = tuple(float(v) for v in value)
+        except (TypeError, ValueError):
+            return None
+        return cast(ColorType, floats) if len(floats) in {3, 4} else None
+    if isinstance(value, np.ndarray):
+        flat = value.flatten()
+        if flat.size in (3, 4):
+            try:
+                floats = tuple(float(v) for v in flat.tolist())
+            except (TypeError, ValueError):
+                return None
+            return cast(ColorType, floats)
+    return None
+
 
 class ProgressDialog:
     """Fallback progress indicator used when no GUI is provided."""
@@ -444,30 +473,32 @@ def plot_variable(
             label=f'mean {_format_temp_label(temp)}\N{DEGREE SIGN}C',
         )
 
-    # Connect 25Â°C and 100Â°C means per sample and show delta
+    # Connect 25C and 100C means per sample and show delta
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
-            x = float(idx)
-            y25 = float(row[25])
-            y100 = float(row[100])
-            has_cont = include_cont and (idx in cont_samples)
+            x_val = _as_float(idx)
+            y25_val = _as_float(row[25])
+            y100_val = _as_float(row[100])
+            if x_val is None or y25_val is None or y100_val is None:
+                continue
+            has_cont = include_cont and (x_val in cont_samples)
             if not has_cont:
                 ax.plot(
-                    [x, x],
-                    [y25, y100],
-                    color='black',
+                    [x_val, x_val],
+                    [y25_val, y100_val],
+                    color="black",
                     linewidth=1,
                     zorder=0,
                 )
-            delta = y100 - y25
-            delta_x = x - 0.1
-            delta_y = y100 + (delta_offset if has_cont else 0.0)
+            delta = y100_val - y25_val
+            delta_x = x_val - 0.1
+            delta_y = y100_val + (delta_offset if has_cont else 0.0)
             ax.annotate(
                 f"{delta:.1f}",
                 (delta_x, delta_y),
-                ha='right',
-                va='bottom' if has_cont else 'center',
+                ha="right",
+                va="bottom" if has_cont else "center",
                 fontsize=10,
             )
 
@@ -512,7 +543,7 @@ def plot_variable(
                 handles = list(found)
                 break
         for text, handle in zip(legend_obj.get_texts(), handles):
-            rawcol: ColorType | str = 'black'
+            rawcol: Any = 'black'
             if isinstance(handle, Line2D):
                 rawcol = handle.get_color()
                 face = handle.get_markerfacecolor()
@@ -532,8 +563,11 @@ def plot_variable(
                         pass
                 if isinstance(rawcol, np.ndarray) and rawcol.ndim > 1:
                     rawcol = rawcol[0]
+            color_spec = _as_color(rawcol)
+            if color_spec is None:
+                continue
             try:
-                text.set_color(to_hex(cast(ColorType, rawcol)))
+                text.set_color(to_hex(color_spec))
             except Exception:
                 pass
 
@@ -602,7 +636,7 @@ def plot_variable(
 
     ax.set_xlabel('Sample')
     ax.set_ylabel(TS_LABELS[var])
-    ax.set_title(f"{comp} {anneal} — {TS_LABELS[var]}")
+    ax.set_title(f"{comp} {anneal} - {TS_LABELS[var]}")
     ax.grid(True)
 
     legend_kwargs = _legend_kwargs_from_location(str(globals().get("LEGEND_LOCATION", "inside")))
@@ -651,12 +685,12 @@ def plot_variable_origin(
     samples = sorted(df['sample'].unique())
     display_samples = [s.replace('_', '/') for s in samples]
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
-    idx_to_sample = {idx: sample for sample, idx in sample_idx.items()}
+    idx_to_sample: dict[float, str] = {float(idx): sample for sample, idx in sample_idx.items()}
     display_by_idx: dict[float, str] = {}
     for sample, label in zip(samples, display_samples):
-        idx = sample_idx[sample]
+        idx = float(sample_idx[sample])
         display_by_idx[idx] = label
-        display_by_idx[float(idx)] = label
+
 
     work = df.copy()
     work['sample_idx'] = work['sample'].map(sample_idx).astype(float)
@@ -701,22 +735,29 @@ def plot_variable_origin(
     means['plot_x'] = means['sample_idx']
     if include_cont and cont_samples:
         def _shift(row: pd.Series) -> float:
-            sample = idx_to_sample.get(row['sample_idx'])
-            if sample not in cont_samples:
-                return row['sample_idx']
-            if row['temp'] == 25:
-                return row['sample_idx'] - MEAN_SHIFT
-            if row['temp'] == 100:
-                return row['sample_idx'] + MEAN_SHIFT
-            return row['sample_idx']
-        means['plot_x'] = means.apply(_shift, axis=1)
+            sample_idx_value = _as_float(row['sample_idx'])
+            temp_value = _as_float(row['temp'])
+            if sample_idx_value is None:
+                return cast(float, row['sample_idx'])
+            sample = idx_to_sample.get(sample_idx_value)
+            if sample not in cont_samples or temp_value is None:
+                return sample_idx_value
+            if temp_value == 25.0:
+                return sample_idx_value - MEAN_SHIFT
+            if temp_value == 100.0:
+                return sample_idx_value + MEAN_SHIFT
+            return sample_idx_value
+
 
     mean_positions: dict[tuple[float, float], float] = {}
     if not means.empty:
-        mean_positions = {
-            (float(row.sample_idx), float(row.temp)): float(row.plot_x)
-            for row in means.itertuples()
-        }
+        for row in means.itertuples():
+            sample_idx_value = _as_float(getattr(row, 'sample_idx', None))
+            temp_value = _as_float(getattr(row, 'temp', None))
+            plot_x_value = _as_float(getattr(row, 'plot_x', None))
+            if sample_idx_value is None or temp_value is None or plot_x_value is None:
+                continue
+            mean_positions[(sample_idx_value, temp_value)] = plot_x_value
 
     sample_label_positions: dict[str, float] = {
         sample: mean_positions.get((float(sample_idx[sample]), 25.0), float(sample_idx[sample]))
@@ -727,13 +768,19 @@ def plot_variable_origin(
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
-            sample = idx_to_sample.get(idx)
-            has_cont = sample in cont_samples
-            delta = row[100] - row[25]
+            idx_value = _as_float(idx)
+            val_25 = _as_float(row[25])
+            val_100 = _as_float(row[100])
+            if idx_value is None or val_25 is None or val_100 is None:
+                continue
+            sample = idx_to_sample.get(idx_value)
+            has_cont = (sample in cont_samples) if sample is not None else False
+            delta = val_100 - val_25
             extra = delta_pad if has_cont else max(delta_pad * 0.5, 0.3)
-            y_top = row[100] + extra
-            x_pos = mean_positions.get((float(idx), 100.0), float(idx))
+            y_top = val_100 + extra
+            x_pos = mean_positions.get((idx_value, 100.0), idx_value)
             delta_labels.append((x_pos, y_top, f"{delta:.1f}"))
+
 
     cont_processed: list[pd.DataFrame] = []
     if include_cont and not cont.empty:
@@ -982,7 +1029,7 @@ def plot_variable_origin(
 
     manual_labels_added = False
     for idx, sample in enumerate(samples, start=1):
-        text = display_by_idx.get(sample_idx[sample], sample.replace('_', '/'))
+        text = display_by_idx.get(float(sample_idx[sample]), sample.replace('_', '/'))
         x_pos = sample_label_positions.get(sample, float(sample_idx[sample]))
         try:
             label = gl.add_label(text, float(x_pos), tick_level)
@@ -1036,7 +1083,7 @@ def plot_variable_origin(
         except Exception:
             pass
 
-    title = f"{comp} {anneal} — {TS_LABELS[var]}"
+    title = f"{comp} {anneal} - {TS_LABELS[var]}"
     try:
         title_label = gl.label('Title')
     except Exception:
@@ -1142,4 +1189,7 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
             plt.close('all')
     else:
         plt.close('all')
+
+
+
 

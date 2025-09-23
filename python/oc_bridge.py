@@ -38,9 +38,10 @@ def export_and_plot_in_oc(
     xlabel = "Applied load (g)"
     ylabel = ylabel_map.get(var, var)
 
-    out_dir = Path(out_dir); out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = Path(out_dir)
+    out_path.mkdir(parents=True, exist_ok=True)
     stem = f"stress_{comp}_{title}_{samp}_{anneal}_{var}".strip().replace(" ", "_")
-    csv_path = out_dir / f"{stem}.csv"
+    csv_path = out_path / f"{stem}.csv"
     df_out.to_csv(csv_path, index=False)
 
     # Call Origin / OC
@@ -54,4 +55,5 @@ def export_and_plot_in_oc(
         )
 
     return csv_path
+
 
