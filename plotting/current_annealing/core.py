@@ -79,11 +79,17 @@ def _trim_burnthrough_glitch(
         return currents, resistances
 
     typical = float(np.median(finite))
-    spread = float(np.quantile(finite, 0.75) - np.quantile(finite, 0.25)) if finite.size > 1 else 0.0
+    spread = (
+        float(np.quantile(finite, 0.75) - np.quantile(finite, 0.25))
+        if finite.size > 1
+        else 0.0
+    )
     span = float(np.nanmax(currents) - np.nanmin(currents)) if count else 0.0
-    threshold = max(typical * 8.0, spread * 6.0 if spread > 0 else 0.0, span * 0.05, 5.0)
+    threshold = max(typical * 12.0, spread * 8.0 if spread > 0 else 0.0, span * 0.15)
+    previous = float(currents[-2])
+    relative_drop = last_drop / max(abs(previous), 1e-12)
 
-    if last_drop > threshold:
+    if last_drop > threshold or relative_drop > 0.25:
         return currents[:-1], resistances[:-1]
     return currents, resistances
 
@@ -588,17 +594,23 @@ def _plot_origin_experimental(
     dec_x: List[float] = []
     dec_y: List[float] = []
 
+    previous_direction: float | None = None
     for start, end, direction in segments:
         if end <= start:
+            previous_direction = direction
             continue
         xs = currents[start:end].tolist()
         ys = resistances[start:end].tolist()
         target_x, target_y = (inc_x, inc_y) if direction >= 0 else (dec_x, dec_y)
+        if direction < 0 and previous_direction is not None and previous_direction >= 0 and start > 0:
+            xs.insert(0, float(currents[start - 1]))
+            ys.insert(0, float(resistances[start - 1]))
         if target_x and xs:
             target_x.append(float('nan'))
             target_y.append(float('nan'))
         target_x.extend(xs)
         target_y.extend(ys)
+        previous_direction = direction
 
     legend_entries: List[Tuple[int, str]] = []
 
@@ -674,7 +686,7 @@ def _plot_origin_experimental(
     except Exception:
         pass
 def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+    fig, ax = plt.subplots(figsize=(4.0, 2.25))
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
@@ -685,11 +697,29 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     elif currents.size == 1:
         ax.plot(currents, resistances, marker="o", linestyle="None", color="r", markersize=3)
     else:
+        previous_direction: float | None = None
         for start, end, direction in segments:
             color = "r" if direction >= 0 else "b"
+            if end <= start:
+                previous_direction = direction
+                continue
+            segment_currents = currents[start:end]
+            segment_resistances = resistances[start:end]
+            if (
+                direction < 0
+                and previous_direction is not None
+                and previous_direction >= 0
+                and start > 0
+            ):
+                segment_currents = np.concatenate(
+                    ([currents[start - 1]], segment_currents)
+                )
+                segment_resistances = np.concatenate(
+                    ([resistances[start - 1]], segment_resistances)
+                )
             ax.plot(
-                currents[start:end],
-                resistances[start:end],
+                segment_currents,
+                segment_resistances,
                 color=color,
                 marker="o",
                 linestyle="-",
@@ -698,6 +728,7 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
                 markeredgecolor=color,
                 linewidth=1.5,
             )
+            previous_direction = direction
 
     ax.set_xlabel("Current (mA)")
     ax.set_ylabel("Resistance (Ohm)")

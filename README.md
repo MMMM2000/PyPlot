@@ -336,12 +336,16 @@ plotting tools:
   restored on launch so repeat builds are quick.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an
-  Origin session. You can select both to capture PNG paths and Origin object
-  identifiers in separate columns. Choose **Export CSV** and/or **Export Excel**
-  to control the output formats; the builder remembers every toggle and the last
-  output folder between runs. When Excel export is enabled the builder now
-  embeds the Matplotlib plots straight into the “Figure” cells so the workbook
-  opens with thumbnails in place rather than plain filenames.
+  Origin session. Matplotlib renders compact 4"×2.25" figures, automatically
+  discards the burn-through sample that drops back to a low current, and draws
+  the transition from the last increasing point to the first decreasing point in
+  blue so the curve ends cleanly. You can select both Matplotlib and Origin to
+  capture PNG paths and Origin object identifiers in separate columns. Choose
+  **Export CSV** and/or **Export Excel** to control the output formats; the
+  builder remembers every toggle and the last output folder between runs. When
+  Excel export is enabled the builder now embeds the Matplotlib plots straight
+  into the “Figure” cells so the workbook opens with thumbnails in place rather
+  than plain filenames.
 * **Output** – pick a destination directory and supply a base file name. The
   builder writes `<name>.csv`, `<name>.xlsx` when requested and (for Matplotlib
   plots) PNG files under `plots/`. CSV exports continue to hold the plot file
