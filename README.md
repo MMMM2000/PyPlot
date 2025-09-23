@@ -320,7 +320,7 @@ current-annealing text files into a single analytics-ready table. Enable the
 python -m experiments.microwire_data_builder
 ```
 
-The Tkinter window mirrors the file-picking pattern used by the existing
+The PyQt6 window mirrors the file-picking pattern used by the existing
 plotting tools:
 
 * **Fabrication spreadsheets (.xlsx)** – add the composition workbook and any
@@ -333,12 +333,12 @@ plotting tools:
   and computes summary features (linear slope, gradient mean, percentile anchors,
   non-linearity, etc.).
 * **Options** – tick **Generate plots (PNG)** to reuse the existing annealing
-  plotter style, and enable the Excel or Parquet exporters if you need those
-  formats in addition to the default CSV.
+  plotter style, and enable the Excel exporter if you need that format in
+  addition to the default CSV.
 * **Output** – choose an output directory; the tool writes
-  `microwire_database.csv` and, when selected, the Excel/Parquet variants and a
-  `plots/` folder. Detailed diagnostics go to `microwire_database.log` in the
-  same directory.
+  `microwire_database.csv` and, when selected, the Excel workbook and a `plots/`
+  folder. Detailed diagnostics go to `microwire_database.log` in the same
+  directory.
 
 Each measurement row in the export contains the file provenance, composition and
 microwire identifiers, fabrication/piece metadata (when available), curve

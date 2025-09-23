@@ -77,7 +77,6 @@ def test_build_database_integration(tmp_path: Path) -> None:
         output_dir=tmp_path / "out",
         make_plots=False,
         export_excel=False,
-        export_parquet=False,
     )
 
     result = build_database(config)

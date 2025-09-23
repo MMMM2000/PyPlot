@@ -24,7 +24,6 @@ PLOT_STYLE_DESCRIPTION = "red=up, blue=down"
 R_CHECK_THRESHOLD = 0.05
 CSV_NAME = "microwire_database.csv"
 EXCEL_NAME = "microwire_database.xlsx"
-PARQUET_NAME = "microwire_database.parquet"
 LOG_NAME = "microwire_database.log"
 PLOT_DIR_NAME = "plots"
 
@@ -116,7 +115,6 @@ class BuilderConfig:
     output_dir: Path
     make_plots: bool = False
     export_excel: bool = False
-    export_parquet: bool = False
     plot_dir_name: str = PLOT_DIR_NAME
     log_file_name: str = LOG_NAME
 
@@ -139,7 +137,6 @@ class BuildResult:
     dataframe: pd.DataFrame
     csv_path: Path
     excel_path: Optional[Path]
-    parquet_path: Optional[Path]
     plot_paths: List[Path]
     stats: BuildStats
 
@@ -697,17 +694,9 @@ def build_database(
     csv_path = output_dir / CSV_NAME
     df_out.to_csv(csv_path, index=False)
     excel_path = None
-    parquet_path = None
     if config.export_excel:
         excel_path = output_dir / EXCEL_NAME
         df_out.to_excel(excel_path, index=False)
-    if config.export_parquet:
-        try:
-            parquet_path = output_dir / PARQUET_NAME
-            df_out.to_parquet(parquet_path, index=False)
-        except ImportError:
-            log.warning("Parquet export requested but pyarrow/fastparquet is not installed")
-            parquet_path = None
     log.info(
         "Measurements parsed: %s | Skipped: %s | Missing draw info: %s | Missing piece info: %s | R≈V/I failures: %s",
         stats.parsed,
@@ -720,7 +709,6 @@ def build_database(
         dataframe=df_out,
         csv_path=csv_path,
         excel_path=excel_path,
-        parquet_path=parquet_path,
         plot_paths=plot_paths,
         stats=stats,
     )

@@ -12,11 +12,15 @@ from .core import (
     build_fabrication_index,
     LOGGER_NAME,
 )
-from .ui import main, run_app, BuilderApp
+from .ui import BuilderWindow, main, run_app
+
+# Backwards compatibility for older imports expecting a Tkinter-style name.
+BuilderApp = BuilderWindow
 
 __all__ = [
     "ASSUMED_COLS",
     "BuilderApp",
+    "BuilderWindow",
     "BuilderConfig",
     "BuildResult",
     "BuildStats",

@@ -1,249 +1,55 @@
-"""Tkinter user interface for the microwire database builder."""
+"""PyQt6 user interface for the microwire database builder."""
 
 from __future__ import annotations
 
 import logging
-import threading
+import sys
 from pathlib import Path
-from typing import Iterable, List
+from typing import Callable, Iterable
 
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from PyQt6 import QtCore, QtGui, QtWidgets
+
+from plotting.utils import ensure_app_theme, install_standard_menu
 
 from .core import (
     LOGGER_NAME,
+    BuildResult,
     BuilderConfig,
     build_database,
 )
 
 
-class TextHandler(logging.Handler):
-    """Logging handler that appends messages to a Tkinter text widget."""
+class QtLogHandler(logging.Handler):
+    """Logging handler that forwards records to a Qt slot."""
 
-    def __init__(self, widget: tk.Text) -> None:
+    def __init__(self, emit: Callable[[str], None]) -> None:
         super().__init__()
-        self.widget = widget
+        self._emit = emit
 
-    def emit(self, record: logging.LogRecord) -> None:
+    def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - thin wrapper
         message = self.format(record)
-        self.widget.after(0, self._append, message)
-
-    def _append(self, message: str) -> None:
-        self.widget.configure(state="normal")
-        self.widget.insert("end", message + "\n")
-        self.widget.see("end")
-        self.widget.configure(state="disabled")
+        self._emit(message)
 
 
-class BuilderApp:
-    """Tkinter front-end for the microwire database builder."""
+class BuildWorker(QtCore.QObject):
+    """Background worker that runs the database builder."""
 
-    def __init__(self, root: tk.Tk) -> None:
-        self.root = root
-        self.root.title("Microwire Data Builder")
-        self.fabrication_paths: List[Path] = []
-        self.annealing_paths: List[Path] = []
+    progress = QtCore.pyqtSignal(int, int)
+    finished = QtCore.pyqtSignal(object)
+    error = QtCore.pyqtSignal(str)
 
-        default_output = Path.cwd() / "builder_output"
-        self.output_dir_var = tk.StringVar(value=str(default_output))
-        self.make_plots_var = tk.BooleanVar(value=False)
-        self.export_excel_var = tk.BooleanVar(value=False)
-        self.export_parquet_var = tk.BooleanVar(value=False)
-        self.fabrication_recursive_var = tk.BooleanVar(value=True)
-        self.anneal_recursive_var = tk.BooleanVar(value=True)
+    def __init__(self, config: BuilderConfig, logger: logging.Logger) -> None:
+        super().__init__()
+        self.config = config
+        self.logger = logger
 
-        self.progress_var = tk.DoubleVar(value=0.0)
-        self.progress_text_var = tk.StringVar(value="Idle")
-        self._running = False
-
-        self._build_ui()
-        self._configure_logging()
-
-    # ------------------------------------------------------------------ UI
-    def _build_ui(self) -> None:
-        main = ttk.Frame(self.root, padding=12)
-        main.grid(sticky="nsew")
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(0, weight=1)
-        main.columnconfigure(0, weight=1)
-
-        fab_frame = ttk.LabelFrame(main, text="Fabrication spreadsheets (.xlsx)")
-        fab_frame.grid(row=0, column=0, sticky="nsew", padx=4, pady=4)
-        fab_frame.columnconfigure(0, weight=1)
-
-        self.fabrication_list = tk.Listbox(fab_frame, height=6, selectmode="browse")
-        self.fabrication_list.grid(row=0, column=0, columnspan=3, sticky="nsew", pady=(0, 4))
-        fab_frame.rowconfigure(0, weight=1)
-
-        ttk.Button(fab_frame, text="Add files…", command=self._add_fabrication_files).grid(row=1, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(fab_frame, text="Add folder…", command=self._add_fabrication_folder).grid(row=1, column=1, sticky="ew", padx=(0, 4))
-        ttk.Button(fab_frame, text="Clear", command=self._clear_fabrication).grid(row=1, column=2, sticky="ew")
-        ttk.Checkbutton(
-            fab_frame,
-            text="Recursive scan",
-            variable=self.fabrication_recursive_var,
-        ).grid(row=2, column=0, columnspan=3, sticky="w")
-
-        anneal_frame = ttk.LabelFrame(main, text="Current-annealing files (.txt)")
-        anneal_frame.grid(row=1, column=0, sticky="nsew", padx=4, pady=4)
-        anneal_frame.columnconfigure(0, weight=1)
-
-        self.anneal_list = tk.Listbox(anneal_frame, height=8, selectmode="browse")
-        self.anneal_list.grid(row=0, column=0, columnspan=3, sticky="nsew", pady=(0, 4))
-        anneal_frame.rowconfigure(0, weight=1)
-
-        ttk.Button(anneal_frame, text="Add files…", command=self._add_anneal_files).grid(row=1, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(anneal_frame, text="Add folder…", command=self._add_anneal_folder).grid(row=1, column=1, sticky="ew", padx=(0, 4))
-        ttk.Button(anneal_frame, text="Clear", command=self._clear_anneal).grid(row=1, column=2, sticky="ew")
-        ttk.Checkbutton(
-            anneal_frame,
-            text="Recursive scan",
-            variable=self.anneal_recursive_var,
-        ).grid(row=2, column=0, columnspan=3, sticky="w")
-
-        options = ttk.LabelFrame(main, text="Options")
-        options.grid(row=2, column=0, sticky="ew", padx=4, pady=4)
-        ttk.Checkbutton(options, text="Generate plots (PNG)", variable=self.make_plots_var).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(options, text="Also export Excel", variable=self.export_excel_var).grid(row=1, column=0, sticky="w")
-        ttk.Checkbutton(options, text="Also export Parquet", variable=self.export_parquet_var).grid(row=2, column=0, sticky="w")
-
-        output = ttk.LabelFrame(main, text="Output")
-        output.grid(row=3, column=0, sticky="ew", padx=4, pady=4)
-        output.columnconfigure(1, weight=1)
-        ttk.Label(output, text="Directory:").grid(row=0, column=0, sticky="w")
-        self.output_entry = ttk.Entry(output, textvariable=self.output_dir_var)
-        self.output_entry.grid(row=0, column=1, sticky="ew", padx=(4, 4))
-        ttk.Button(output, text="Browse…", command=self._select_output_dir).grid(row=0, column=2, sticky="ew")
-
-        progress_frame = ttk.Frame(main)
-        progress_frame.grid(row=4, column=0, sticky="ew", padx=4, pady=4)
-        progress_frame.columnconfigure(0, weight=1)
-        self.progress = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=1.0)
-        self.progress.grid(row=0, column=0, sticky="ew")
-        self.progress_label = ttk.Label(progress_frame, textvariable=self.progress_text_var)
-        self.progress_label.grid(row=0, column=1, padx=(8, 0))
-
-        log_frame = ttk.LabelFrame(main, text="Log")
-        log_frame.grid(row=5, column=0, sticky="nsew", padx=4, pady=4)
-        log_frame.columnconfigure(0, weight=1)
-        log_frame.rowconfigure(0, weight=1)
-        self.log_text = tk.Text(log_frame, height=12, state="disabled")
-        self.log_text.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-
-        self.run_button = ttk.Button(main, text="Run", command=self.run_builder)
-        self.run_button.grid(row=6, column=0, sticky="ew", padx=4, pady=(4, 0))
-
-        for row in range(7):
-            main.rowconfigure(row, weight=0)
-        main.rowconfigure(5, weight=1)
-
-    def _configure_logging(self) -> None:
-        self.logger = logging.getLogger(LOGGER_NAME)
-        self.logger.setLevel(logging.INFO)
-        self.logger.propagate = False
-        self.text_handler = TextHandler(self.log_text)
-        formatter = logging.Formatter("%(levelname)s: %(message)s")
-        self.text_handler.setFormatter(formatter)
-        if self.text_handler not in self.logger.handlers:
-            self.logger.addHandler(self.text_handler)
-
-    # ------------------------------------------------------------------ helpers
-    def _update_listbox(self, listbox: tk.Listbox, items: Iterable[Path]) -> None:
-        listbox.delete(0, "end")
-        for path in sorted({str(p) for p in items}):
-            listbox.insert("end", path)
-
-    def _add_fabrication_files(self) -> None:
-        paths = filedialog.askopenfilenames(filetypes=[("Excel", "*.xlsx")])
-        if not paths:
-            return
-        self.fabrication_paths.extend(Path(p) for p in paths)
-        self._update_listbox(self.fabrication_list, self.fabrication_paths)
-
-    def _add_fabrication_folder(self) -> None:
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
-        root = Path(folder)
-        pattern = root.rglob("*.xlsx") if self.fabrication_recursive_var.get() else root.glob("*.xlsx")
-        self.fabrication_paths.extend(Path(p) for p in pattern)
-        self._update_listbox(self.fabrication_list, self.fabrication_paths)
-
-    def _clear_fabrication(self) -> None:
-        self.fabrication_paths.clear()
-        self.fabrication_list.delete(0, "end")
-
-    def _add_anneal_files(self) -> None:
-        paths = filedialog.askopenfilenames(filetypes=[("Text", "*.txt")])
-        if not paths:
-            return
-        self.annealing_paths.extend(Path(p) for p in paths)
-        self._update_listbox(self.anneal_list, self.annealing_paths)
-
-    def _add_anneal_folder(self) -> None:
-        folder = filedialog.askdirectory()
-        if not folder:
-            return
-        root = Path(folder)
-        pattern = root.rglob("*.txt") if self.anneal_recursive_var.get() else root.glob("*.txt")
-        self.annealing_paths.extend(Path(p) for p in pattern)
-        self._update_listbox(self.anneal_list, self.annealing_paths)
-
-    def _clear_anneal(self) -> None:
-        self.annealing_paths.clear()
-        self.anneal_list.delete(0, "end")
-
-    def _select_output_dir(self) -> None:
-        folder = filedialog.askdirectory()
-        if folder:
-            self.output_dir_var.set(folder)
-
-    def _set_running(self, running: bool) -> None:
-        self._running = running
-        state = "disabled" if running else "normal"
-        self.run_button.configure(state=state)
-        if running:
-            self.progress_var.set(0.0)
-            self.progress_text_var.set("Running…")
-        else:
-            self.progress_text_var.set("Idle")
-
-    def _progress_callback(self, current: int, total: int) -> None:
-        total = max(total, 1)
-        value = current / total
-        self.root.after(0, self.progress_var.set, value)
-        self.root.after(0, self.progress_text_var.set, f"{current}/{total}")
-
-    def run_builder(self) -> None:
-        if self._running:
-            return
-        if not self.annealing_paths:
-            messagebox.showwarning("Microwire Data Builder", "Please add at least one annealing file.")
-            return
-        output_dir = Path(self.output_dir_var.get()).expanduser()
-        if not output_dir:
-            messagebox.showwarning("Microwire Data Builder", "Please choose an output directory.")
-            return
-        config = BuilderConfig(
-            fabrication_files=list(dict.fromkeys(self.fabrication_paths)),
-            annealing_files=list(dict.fromkeys(self.annealing_paths)),
-            output_dir=output_dir,
-            make_plots=self.make_plots_var.get(),
-            export_excel=self.export_excel_var.get(),
-            export_parquet=self.export_parquet_var.get(),
-        )
-        self._set_running(True)
-        thread = threading.Thread(target=self._run_worker, args=(config,), daemon=True)
-        thread.start()
-
-    def _run_worker(self, config: BuilderConfig) -> None:
-        file_handler = None
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - exercised via integration test
+        file_handler: logging.Handler | None = None
         try:
-            log_path = config.output_dir / config.log_file_name
+            config = self.config
             config.output_dir.mkdir(parents=True, exist_ok=True)
+            log_path = config.output_dir / config.log_file_name
             file_handler = logging.FileHandler(log_path, encoding="utf-8")
             file_handler.setLevel(logging.INFO)
             file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
@@ -253,14 +59,12 @@ class BuilderApp:
             result = build_database(
                 config,
                 logger=self.logger,
-                progress_callback=self._progress_callback,
+                progress_callback=self.progress.emit,
                 root_for_relpaths=Path.cwd(),
             )
             self.logger.info("CSV written to %s", result.csv_path)
             if result.excel_path:
                 self.logger.info("Excel written to %s", result.excel_path)
-            if result.parquet_path:
-                self.logger.info("Parquet written to %s", result.parquet_path)
             if config.make_plots:
                 self.logger.info("Generated %s plot(s)", len(result.plot_paths))
             stats = result.stats
@@ -272,24 +76,380 @@ class BuilderApp:
                 stats.missing_piece,
                 stats.resistance_checks_failed,
             )
-        except Exception:
+            self.finished.emit(result)
+        except Exception as exc:  # pragma: no cover - safety net
             self.logger.exception("Build failed")
-            self.root.after(0, lambda: messagebox.showerror("Microwire Data Builder", "Build failed. See log for details."))
+            message = str(exc) if str(exc) else exc.__class__.__name__
+            self.error.emit(message)
         finally:
-            if file_handler:
+            if file_handler is not None:
                 self.logger.removeHandler(file_handler)
                 file_handler.close()
-            self.root.after(0, self._set_running, False)
+
+
+class BuilderWindow(QtWidgets.QMainWindow):
+    """Main window that orchestrates the microwire database build."""
+
+    log_message = QtCore.pyqtSignal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setWindowTitle("Microwire Data Builder")
+        self.resize(960, 720)
+
+        self.fabrication_paths: list[Path] = []
+        self.annealing_paths: list[Path] = []
+        self._thread: QtCore.QThread | None = None
+        self._worker: BuildWorker | None = None
+        self._running = False
+
+        cwd = Path.cwd()
+        self._last_fabrication_dir = str(cwd)
+        self._last_anneal_dir = str(cwd)
+        self._last_output_dir = str(cwd)
+
+        self.log_message.connect(self._append_log)
+
+        self._build_ui()
+        self._configure_logging()
+        install_standard_menu(self)
+
+    # ------------------------------------------------------------------ setup
+    def _build_ui(self) -> None:
+        central = QtWidgets.QWidget(self)
+        self.setCentralWidget(central)
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # Fabrication inputs
+        self.fabrication_group = QtWidgets.QGroupBox("Fabrication spreadsheets (.xlsx)")
+        fab_layout = QtWidgets.QVBoxLayout(self.fabrication_group)
+        self.fabrication_list = QtWidgets.QListWidget()
+        self.fabrication_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        fab_layout.addWidget(self.fabrication_list)
+
+        fab_buttons = QtWidgets.QHBoxLayout()
+        fab_add_files = QtWidgets.QPushButton("Add files…")
+        fab_add_files.clicked.connect(self._add_fabrication_files)
+        fab_buttons.addWidget(fab_add_files)
+        fab_add_folder = QtWidgets.QPushButton("Add folder…")
+        fab_add_folder.clicked.connect(self._add_fabrication_folder)
+        fab_buttons.addWidget(fab_add_folder)
+        fab_clear = QtWidgets.QPushButton("Clear")
+        fab_clear.clicked.connect(self._clear_fabrication)
+        fab_buttons.addWidget(fab_clear)
+        fab_buttons.addStretch(1)
+        fab_layout.addLayout(fab_buttons)
+
+        self.fabrication_recursive = QtWidgets.QCheckBox("Recursive scan")
+        self.fabrication_recursive.setChecked(True)
+        fab_layout.addWidget(self.fabrication_recursive)
+        layout.addWidget(self.fabrication_group)
+
+        # Annealing inputs
+        self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt)")
+        anneal_layout = QtWidgets.QVBoxLayout(self.anneal_group)
+        self.anneal_list = QtWidgets.QListWidget()
+        self.anneal_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        anneal_layout.addWidget(self.anneal_list)
+
+        anneal_buttons = QtWidgets.QHBoxLayout()
+        anneal_add_files = QtWidgets.QPushButton("Add files…")
+        anneal_add_files.clicked.connect(self._add_anneal_files)
+        anneal_buttons.addWidget(anneal_add_files)
+        anneal_add_folder = QtWidgets.QPushButton("Add folder…")
+        anneal_add_folder.clicked.connect(self._add_anneal_folder)
+        anneal_buttons.addWidget(anneal_add_folder)
+        anneal_clear = QtWidgets.QPushButton("Clear")
+        anneal_clear.clicked.connect(self._clear_anneal)
+        anneal_buttons.addWidget(anneal_clear)
+        anneal_buttons.addStretch(1)
+        anneal_layout.addLayout(anneal_buttons)
+
+        self.anneal_recursive = QtWidgets.QCheckBox("Recursive scan")
+        self.anneal_recursive.setChecked(True)
+        anneal_layout.addWidget(self.anneal_recursive)
+        layout.addWidget(self.anneal_group)
+
+        # Options
+        self.options_group = QtWidgets.QGroupBox("Options")
+        options_layout = QtWidgets.QVBoxLayout(self.options_group)
+        self.make_plots_check = QtWidgets.QCheckBox("Generate plots (PNG)")
+        options_layout.addWidget(self.make_plots_check)
+        self.export_excel_check = QtWidgets.QCheckBox("Also export Excel")
+        options_layout.addWidget(self.export_excel_check)
+        layout.addWidget(self.options_group)
+
+        # Output directory
+        self.output_group = QtWidgets.QGroupBox("Output")
+        output_layout = QtWidgets.QGridLayout(self.output_group)
+        output_label = QtWidgets.QLabel("Directory:")
+        output_layout.addWidget(output_label, 0, 0)
+        default_output = Path.cwd() / "builder_output"
+        self.output_edit = QtWidgets.QLineEdit(str(default_output))
+        output_layout.addWidget(self.output_edit, 0, 1)
+        self.output_button = QtWidgets.QPushButton("Browse…")
+        self.output_button.clicked.connect(self._select_output_dir)
+        output_layout.addWidget(self.output_button, 0, 2)
+        output_layout.setColumnStretch(1, 1)
+        layout.addWidget(self.output_group)
+
+        # Progress row
+        progress_row = QtWidgets.QHBoxLayout()
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        progress_row.addWidget(self.progress_bar, stretch=1)
+        self.progress_label = QtWidgets.QLabel("Idle")
+        progress_row.addWidget(self.progress_label)
+        layout.addLayout(progress_row)
+
+        # Log view
+        self.log_group = QtWidgets.QGroupBox("Log")
+        log_layout = QtWidgets.QVBoxLayout(self.log_group)
+        self.log_view = QtWidgets.QPlainTextEdit()
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        log_layout.addWidget(self.log_view)
+        layout.addWidget(self.log_group, stretch=1)
+
+        # Run button
+        run_row = QtWidgets.QHBoxLayout()
+        run_row.addStretch(1)
+        self.run_button = QtWidgets.QPushButton("Run")
+        self.run_button.clicked.connect(self.start_build)
+        run_row.addWidget(self.run_button)
+        layout.addLayout(run_row)
+
+    def _configure_logging(self) -> None:
+        self.logger = logging.getLogger(LOGGER_NAME)
+        self.logger.setLevel(logging.INFO)
+        self.logger.propagate = False
+        self._log_handler = QtLogHandler(self.log_message.emit)
+        self._log_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        if self._log_handler not in self.logger.handlers:
+            self.logger.addHandler(self._log_handler)
+
+    # ------------------------------------------------------------------ helpers
+    def _extend_paths(self, attr: str, paths: Iterable[Path]) -> None:
+        current: list[Path] = getattr(self, attr)
+        combined = list(dict.fromkeys(current + [Path(p) for p in paths]))
+        setattr(self, attr, combined)
+
+    def _update_list_widget(self, widget: QtWidgets.QListWidget, items: Iterable[Path]) -> None:
+        widget.clear()
+        for text in sorted({str(Path(p)) for p in items}):
+            widget.addItem(text)
+
+    def _add_fabrication_files(self) -> None:
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Select fabrication spreadsheets",
+            self._last_fabrication_dir,
+            "Excel files (*.xlsx)",
+        )
+        if not files:
+            return
+        self._last_fabrication_dir = str(Path(files[0]).parent)
+        self._extend_paths("fabrication_paths", (Path(f) for f in files))
+        self._update_list_widget(self.fabrication_list, self.fabrication_paths)
+
+    def _add_fabrication_folder(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select folder with fabrication spreadsheets",
+            self._last_fabrication_dir,
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        iterator = root.rglob("*.xlsx") if self.fabrication_recursive.isChecked() else root.glob("*.xlsx")
+        files = [p for p in iterator if p.is_file()]
+        if not files:
+            QtWidgets.QMessageBox.information(self, "Microwire Data Builder", "No Excel files were found in that folder.")
+            return
+        self._last_fabrication_dir = folder
+        self._extend_paths("fabrication_paths", files)
+        self._update_list_widget(self.fabrication_list, self.fabrication_paths)
+
+    def _clear_fabrication(self) -> None:
+        self.fabrication_paths = []
+        self.fabrication_list.clear()
+
+    def _add_anneal_files(self) -> None:
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Select current-annealing files",
+            self._last_anneal_dir,
+            "Text files (*.txt)",
+        )
+        if not files:
+            return
+        self._last_anneal_dir = str(Path(files[0]).parent)
+        self._extend_paths("annealing_paths", (Path(f) for f in files))
+        self._update_list_widget(self.anneal_list, self.annealing_paths)
+
+    def _add_anneal_folder(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select folder with current-annealing files",
+            self._last_anneal_dir,
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        iterator = root.rglob("*.txt") if self.anneal_recursive.isChecked() else root.glob("*.txt")
+        files = [p for p in iterator if p.is_file()]
+        if not files:
+            QtWidgets.QMessageBox.information(self, "Microwire Data Builder", "No text files were found in that folder.")
+            return
+        self._last_anneal_dir = folder
+        self._extend_paths("annealing_paths", files)
+        self._update_list_widget(self.anneal_list, self.annealing_paths)
+
+    def _clear_anneal(self) -> None:
+        self.annealing_paths = []
+        self.anneal_list.clear()
+
+    def _select_output_dir(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select output directory",
+            self.output_edit.text() or self._last_output_dir,
+        )
+        if directory:
+            self._last_output_dir = directory
+            self.output_edit.setText(directory)
+
+    def _set_running(self, running: bool) -> None:
+        self._running = running
+        for widget in (
+            self.fabrication_group,
+            self.anneal_group,
+            self.options_group,
+            self.output_group,
+        ):
+            widget.setEnabled(not running)
+        self.run_button.setEnabled(not running)
+        if running:
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Running…")
+        else:
+            if self.progress_label.text() not in {"Complete", "Failed"}:
+                self.progress_label.setText("Idle")
+
+    # ------------------------------------------------------------------ build orchestration
+    def start_build(self) -> None:
+        if self._running:
+            return
+        if not self.annealing_paths:
+            QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "Please add at least one annealing file.")
+            return
+        output_dir_text = self.output_edit.text().strip()
+        if not output_dir_text:
+            QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "Please choose an output directory.")
+            return
+        output_dir = Path(output_dir_text).expanduser()
+        config = BuilderConfig(
+            fabrication_files=list(dict.fromkeys(self.fabrication_paths)),
+            annealing_files=list(dict.fromkeys(self.annealing_paths)),
+            output_dir=output_dir,
+            make_plots=self.make_plots_check.isChecked(),
+            export_excel=self.export_excel_check.isChecked(),
+        )
+        self._set_running(True)
+        self.log_view.clear()
+        self.logger.info(
+            "Queued build for %s annealing measurement(s)",
+            len(config.annealing_files),
+        )
+        self._start_worker(config)
+
+    def _start_worker(self, config: BuilderConfig) -> None:
+        self._thread = QtCore.QThread(self)
+        self._worker = BuildWorker(config, self.logger)
+        self._worker.moveToThread(self._thread)
+        self._thread.started.connect(self._worker.run)
+        self._worker.progress.connect(self._update_progress)
+        self._worker.finished.connect(self._handle_finished)
+        self._worker.error.connect(self._handle_failed)
+        self._worker.finished.connect(self._thread.quit)
+        self._worker.error.connect(self._thread.quit)
+        self._thread.finished.connect(self._cleanup_thread)
+        self._thread.start()
+
+    def _update_progress(self, current: int, total: int) -> None:
+        total = max(total, 1)
+        percent = int(round(100 * current / total))
+        self.progress_bar.setValue(max(0, min(100, percent)))
+        self.progress_label.setText(f"{current}/{total}")
+
+    def _handle_finished(self, result: BuildResult) -> None:
+        self._set_running(False)
+        self.progress_bar.setValue(100)
+        self.progress_label.setText("Complete")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Microwire Data Builder",
+            "Build finished successfully.\n\n"
+            f"CSV file: {result.csv_path}",
+        )
+
+    def _handle_failed(self, message: str) -> None:
+        self._set_running(False)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Failed")
+        QtWidgets.QMessageBox.critical(
+            self,
+            "Microwire Data Builder",
+            "Build failed.\n\n" + message,
+        )
+
+    def _cleanup_thread(self) -> None:
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
+        if self._thread is not None:
+            self._thread.deleteLater()
+            self._thread = None
+
+    # ------------------------------------------------------------------ Qt hooks
+    def _append_log(self, message: str) -> None:
+        self.log_view.appendPlainText(message)
+        scrollbar = self.log_view.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._running:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "A build is currently running. Please wait for it to finish before closing.",
+            )
+            event.ignore()
+            return
+        if hasattr(self, "_log_handler") and self._log_handler in self.logger.handlers:
+            self.logger.removeHandler(self._log_handler)
+        super().closeEvent(event)
 
 
 def run_app() -> None:
-    root = tk.Tk()
-    app = BuilderApp(root)
-    root.mainloop()
+    main()
 
 
-def main() -> None:
-    run_app()
+def main() -> QtWidgets.QWidget | None:
+    app = QtWidgets.QApplication.instance()
+    owns_app = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        ensure_app_theme(app)
+        owns_app = True
+    window = BuilderWindow()
+    window.show()
+    if owns_app:
+        app.exec()
+    return window
 
 
-__all__ = ["BuilderApp", "main", "run_app"]
+__all__ = ["BuilderWindow", "main", "run_app"]
