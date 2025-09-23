@@ -131,6 +131,8 @@ PIECE_PATTERN = re.compile(r"^(?P<piece>\d+)")
 XY_PATTERN = re.compile(r"(\d+)_+(\d+)")
 SETPOINT_PATTERN = re.compile(r"(\d{1,4})mA", re.IGNORECASE)
 ALT_VARIANT_PATTERN = re.compile(r"(?:s\d+|\d+_\d+)a(?!\w)", re.IGNORECASE)
+DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
+SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
 
 @dataclass
@@ -308,7 +310,19 @@ def _parse_datetime(value: object) -> Optional[str]:
     if not text:
         return None
     try:
-        dt = pd.to_datetime(text, dayfirst=False, errors="coerce")
+        dayfirst: Optional[bool]
+        if DOT_DATE_PATTERN.search(text):
+            dayfirst = True
+        elif SLASH_DATE_PATTERN.search(text):
+            dayfirst = False
+        else:
+            dayfirst = None
+        if dayfirst is None:
+            dt = pd.to_datetime(text, dayfirst=False, errors="coerce")
+            if pd.isna(dt):
+                dt = pd.to_datetime(text, dayfirst=True, errors="coerce")
+        else:
+            dt = pd.to_datetime(text, dayfirst=dayfirst, errors="coerce")
     except (TypeError, ValueError):
         return None
     if pd.isna(dt):
@@ -553,7 +567,7 @@ def _load_annealing(path: Path) -> pd.DataFrame:
     except (csv.Error, pd.errors.ParserError):
         df = pd.read_csv(
             path,
-            delim_whitespace=True,
+            sep=r"\s+",
             engine="python",
             names=ANNEALING_COLUMNS,
             header=None,
@@ -650,6 +664,16 @@ def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[Measur
 
 
 def _plot_measurement(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
+    import matplotlib
+
+    try:
+        matplotlib.use("Agg", force=True)
+    except Exception:
+        pass
+    import matplotlib.pyplot as plt
+
+    matplotlib.rcParams["figure.max_open_warning"] = 0
+
     from plotting.current_annealing.core import plot_one
     from plotting.utils import format_annealing_title
 
@@ -659,7 +683,7 @@ def _plot_measurement(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
     fig, fname = plot_one(plot_df, title)
     plot_path = plot_dir / f"{fname}.png"
     fig.savefig(plot_path, dpi=300)
-    fig.close()
+    plt.close(fig)
     return plot_path
 
 

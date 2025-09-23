@@ -335,7 +335,9 @@ plotting tools:
 * **Options** – tick **Generate plots (PNG)** to reuse the existing annealing
   plotter style. Choose **Export CSV** and/or **Export Excel** to control the
   output formats; the builder remembers these toggles along with the last output
-  folder.
+  folder. Plot generation now forces Matplotlib’s headless backend, closes
+  figures automatically, and records the generated PNG paths in the “Figure”
+  columns so exports stay tidy.
 * **Output** – pick a destination directory; the tool writes
   `microwire_database.csv`, `microwire_database.xlsx` when requested, and (if
   plots are enabled) PNG files under `plots/`. Detailed diagnostics go to

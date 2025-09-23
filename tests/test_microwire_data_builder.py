@@ -95,3 +95,36 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert row["Production datetime"] == "2024-11-26 08:50:00"
     assert "csv" in result.exports
     assert Path(result.exports["csv"]).exists()
+
+
+def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    produced: dict[str, Path] = {}
+
+    def fake_plot(df, source: Path, plot_dir: Path) -> Path:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plot_dir / f"{source.stem}.png"
+        out_path.write_text("stub")
+        produced[source.name] = out_path
+        return out_path
+
+    monkeypatch.setattr(core, "_plot_measurement", fake_plot)
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        make_plots=True,
+    )
+
+    result = build_database(config)
+    assert result.plot_paths
+    row = result.dataframe.iloc[0]
+    assert row["Figure — 1000 mA"] == str(produced[high.name])
+    assert row["Figure — low mA"] == str(produced[low.name])
+    assert set(result.plot_paths) == {produced[high.name], produced[low.name]}
+    assert row["Low mA value (mA)"] == 120
