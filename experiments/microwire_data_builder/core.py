@@ -686,7 +686,9 @@ def _plot_measurement_matplotlib(df: pd.DataFrame, source: Path, plot_dir: Path)
     title = format_annealing_title(source.stem)
     plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
     fig, fname = plot_one(plot_df, title)
-    plot_path = plot_dir / f"{fname}.png"
+    safe_stem = _safe_plot_stem(fname)
+    plot_path = plot_dir / f"{safe_stem}.png"
+    plot_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(plot_path, dpi=300)
     plt.close(fig)
     return plot_path
@@ -755,6 +757,23 @@ def _normalise_output_name(name: str) -> str:
     cleaned = cleaned.strip(".")
     if not cleaned:
         return DEFAULT_OUTPUT_NAME
+    return cleaned
+
+
+def _safe_plot_stem(stem: str) -> str:
+    normalised = unicodedata.normalize("NFKC", stem)
+    cleaned_chars: list[str] = []
+    invalid = _INVALID_FILENAME_CHARS | {os.sep}
+    if os.altsep:
+        invalid.add(os.altsep)
+    for ch in normalised:
+        if ch in invalid or ord(ch) < 32:
+            cleaned_chars.append("_")
+        else:
+            cleaned_chars.append(ch)
+    cleaned = "".join(cleaned_chars).strip("._ ")
+    if not cleaned:
+        return "measurement"
     return cleaned
 
 
@@ -870,12 +889,12 @@ def build_database(
             if high_sp is not None and low_sp == high_sp and len(setpoints) <= 1:
                 low_record = None
         if high_record:
-            row["File 1000 mA"] = high_record.metadata.relpath
+            row["File 1000 mA"] = high_record.metadata.file_name
         else:
             stats.missing_high_measurement += 1
             log.warning("No 1000 mA measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
         if low_record:
-            row["File low mA"] = low_record.metadata.relpath
+            row["File low mA"] = low_record.metadata.file_name
             if low_record.metadata.setpoint_mA is not None:
                 row["Low mA value (mA)"] = low_record.metadata.setpoint_mA
         else:
@@ -894,7 +913,7 @@ def build_database(
                         log.exception("Failed to generate plot for %s", high_record.path)
                         cached = None
                 if cached is not None:
-                    row["Figure — 1000 mA"] = os.fspath(cached)
+                    row["Figure — 1000 mA"] = Path(cached).name
             if low_record:
                 cached = plot_cache.get(low_record.metadata.measurement_id)
                 if cached is None:
@@ -907,7 +926,7 @@ def build_database(
                         log.exception("Failed to generate plot for %s", low_record.path)
                         cached = None
                 if cached is not None:
-                    row["Figure — low mA"] = os.fspath(cached)
+                    row["Figure — low mA"] = Path(cached).name
         if origin_enabled:
             if high_record:
                 cached_origin = origin_cache.get(high_record.metadata.measurement_id)

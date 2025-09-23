@@ -29,6 +29,7 @@ _header_key = core._header_key
 _load_annealing = core._load_annealing
 _metadata_from_path = core._metadata_from_path
 _resistance_sanity_check = core._resistance_sanity_check
+_safe_plot_stem = core._safe_plot_stem
 
 
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
@@ -65,6 +66,12 @@ def test_header_normaliser_variants() -> None:
     assert _header_key("Poznámka") == "notes"
 
 
+def test_safe_plot_stem_removes_path_separators() -> None:
+    stem = _safe_plot_stem("Ni55Fe18Ga27 4/1 s1 1000mA")
+    assert "/" not in stem
+    assert stem.endswith("1000mA")
+
+
 def test_build_database_integration(tmp_path: Path) -> None:
     pytest.importorskip("openpyxl")
     base = Path("sample_data/database_builder")
@@ -89,8 +96,8 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert list(df.columns) == core.OUTPUT_COLUMNS
     assert row["Composition"] == "Ni55Fe18Ga27"
     assert row["Microwire"] == "4/1"
-    assert row["File 1000 mA"].endswith("Ni55Fe18Ga27 4_1 s1 1000mA.txt")
-    assert row["File low mA"].endswith("Ni55Fe18Ga27 4_1 s2 100mA.txt")
+    assert row["File 1000 mA"] == anneal_files[0].name
+    assert row["File low mA"] == anneal_files[1].name
     assert row["Low mA value (mA)"] == 100
     assert float(row["d (µm)"]) > 0.0
     assert row["Production datetime"] == "2024-11-26 08:50:00"
@@ -126,8 +133,8 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
     assert result.plot_paths
     assert not result.origin_targets
     row = result.dataframe.iloc[0]
-    assert row["Figure — 1000 mA"] == str(produced[high.name])
-    assert row["Figure — low mA"] == str(produced[low.name])
+    assert row["Figure — 1000 mA"] == produced[high.name].name
+    assert row["Figure — low mA"] == produced[low.name].name
     assert pd.isna(row["Figure — 1000 mA (Origin)"])
     assert pd.isna(row["Figure — low mA (Origin)"])
     assert set(result.plot_paths) == {produced[high.name], produced[low.name]}

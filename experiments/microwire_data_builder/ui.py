@@ -121,9 +121,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(12, 12, 12, 12)
-        layout.setSpacing(10)
+        main_layout = QtWidgets.QHBoxLayout(central)
+        main_layout.setContentsMargins(12, 12, 12, 12)
+        main_layout.setSpacing(12)
+
+        left_layout = QtWidgets.QVBoxLayout()
+        left_layout.setSpacing(10)
+        right_layout = QtWidgets.QVBoxLayout()
+        right_layout.setSpacing(10)
+
+        main_layout.addLayout(left_layout, 2)
+        main_layout.addLayout(right_layout, 3)
 
         # Fabrication inputs
         self.fabrication_group = QtWidgets.QGroupBox("Fabrication spreadsheets (.xlsx)")
@@ -148,7 +156,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.fabrication_recursive = QtWidgets.QCheckBox("Recursive scan")
         self.fabrication_recursive.setChecked(True)
         fab_layout.addWidget(self.fabrication_recursive)
-        layout.addWidget(self.fabrication_group)
+        right_layout.addWidget(self.fabrication_group, 1)
 
         # Annealing inputs
         self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt)")
@@ -173,7 +181,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.anneal_recursive = QtWidgets.QCheckBox("Recursive scan")
         self.anneal_recursive.setChecked(True)
         anneal_layout.addWidget(self.anneal_recursive)
-        layout.addWidget(self.anneal_group)
+        right_layout.addWidget(self.anneal_group, 1)
+        right_layout.addStretch(1)
 
         # Options
         self.options_group = QtWidgets.QGroupBox("Options")
@@ -192,7 +201,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.export_excel_check = QtWidgets.QCheckBox("Export Excel")
         self.export_excel_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.export_excel_check)
-        layout.addWidget(self.options_group)
+        left_layout.addWidget(self.options_group)
 
         # Output directory
         self.output_group = QtWidgets.QGroupBox("Output")
@@ -213,7 +222,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.output_name_edit.editingFinished.connect(self._save_settings)
         output_layout.addWidget(self.output_name_edit, 1, 1)
         output_layout.setColumnStretch(1, 1)
-        layout.addWidget(self.output_group)
+        left_layout.addWidget(self.output_group)
 
         # Progress row
         progress_row = QtWidgets.QHBoxLayout()
@@ -223,7 +232,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         progress_row.addWidget(self.progress_bar, stretch=1)
         self.progress_label = QtWidgets.QLabel("Idle")
         progress_row.addWidget(self.progress_label)
-        layout.addLayout(progress_row)
+        left_layout.addLayout(progress_row)
 
         # Log view
         self.log_group = QtWidgets.QGroupBox("Log")
@@ -232,7 +241,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
         log_layout.addWidget(self.log_view)
-        layout.addWidget(self.log_group, stretch=1)
+        left_layout.addWidget(self.log_group, stretch=1)
 
         # Run button
         run_row = QtWidgets.QHBoxLayout()
@@ -240,7 +249,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.start_build)
         run_row.addWidget(self.run_button)
-        layout.addLayout(run_row)
+        left_layout.addLayout(run_row)
 
     def _configure_logging(self) -> None:
         self.logger = logging.getLogger(LOGGER_NAME)
