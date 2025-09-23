@@ -12,6 +12,7 @@ dependencies = [
     "PyPDF2==3.0.1",
     "pyqtgraph==0.13.7",
     "plotly==6.2.0",
+    "XlsxWriter==3.2.0",
     "tqdm==4.67.1",
     "pyinstaller==6.15.0",
     "pyserial==3.5",

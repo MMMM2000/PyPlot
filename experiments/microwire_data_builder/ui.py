@@ -67,7 +67,10 @@ class BuildWorker(QtCore.QObject):
                 if "matplotlib" in config.plot_backends or not config.plot_backends:
                     self.logger.info("Generated %s Matplotlib plot(s)", len(result.plot_paths))
                 if "origin" in config.plot_backends:
-                    self.logger.info("Origin plots created: %s", len(result.origin_targets))
+                    self.logger.info(
+                        "Origin plots created: %s",
+                        len(result.origin_artifacts),
+                    )
             stats = result.stats
             self.logger.info(
                 "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R≈V/I failures=%s",
@@ -201,6 +204,25 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.export_excel_check = QtWidgets.QCheckBox("Export Excel")
         self.export_excel_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.export_excel_check)
+
+        figure_size_form = QtWidgets.QFormLayout()
+        figure_size_form.setHorizontalSpacing(8)
+        figure_size_form.setVerticalSpacing(4)
+        self.figure_width_spin = QtWidgets.QDoubleSpinBox()
+        self.figure_width_spin.setRange(1.0, 12.0)
+        self.figure_width_spin.setDecimals(2)
+        self.figure_width_spin.setSingleStep(0.25)
+        self.figure_width_spin.setValue(4.0)
+        self.figure_width_spin.valueChanged.connect(self._save_settings)
+        figure_size_form.addRow("Figure width (in)", self.figure_width_spin)
+        self.figure_height_spin = QtWidgets.QDoubleSpinBox()
+        self.figure_height_spin.setRange(0.5, 8.0)
+        self.figure_height_spin.setDecimals(2)
+        self.figure_height_spin.setSingleStep(0.25)
+        self.figure_height_spin.setValue(2.25)
+        self.figure_height_spin.valueChanged.connect(self._save_settings)
+        figure_size_form.addRow("Figure height (in)", self.figure_height_spin)
+        options_layout.addLayout(figure_size_form)
         left_layout.addWidget(self.options_group)
 
         # Output directory
@@ -288,6 +310,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     return False
             return default
 
+        def _read_float(key: str, default: float) -> float:
+            value = self.settings.value(key, default)
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return default
+
         self.fabrication_paths = _decode_paths(self.settings.value("fabrication_paths", ""))
         self._update_list_widget(self.fabrication_list, self.fabrication_paths)
         self.annealing_paths = _decode_paths(self.settings.value("annealing_paths", ""))
@@ -301,6 +330,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.export_csv_check.setChecked(_read_bool("export_csv", True))
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
+
+        width_value = _read_float("figure_width", 4.0)
+        height_value = _read_float("figure_height", 2.25)
+        with QtCore.QSignalBlocker(self.figure_width_spin):
+            self.figure_width_spin.setValue(width_value)
+        with QtCore.QSignalBlocker(self.figure_height_spin):
+            self.figure_height_spin.setValue(height_value)
 
         output_dir_value = self.settings.value("output_dir", "")
         if isinstance(output_dir_value, str) and output_dir_value.strip():
@@ -331,6 +367,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("plot_origin", self.plot_origin_check.isChecked())
         self.settings.setValue("export_csv", self.export_csv_check.isChecked())
         self.settings.setValue("export_excel", self.export_excel_check.isChecked())
+        self.settings.setValue("figure_width", self.figure_width_spin.value())
+        self.settings.setValue("figure_height", self.figure_height_spin.value())
         self.settings.setValue("output_name", self.output_name_edit.text())
         self.settings.setValue("last_fabrication_dir", self._last_fabrication_dir)
         self.settings.setValue("last_anneal_dir", self._last_anneal_dir)
@@ -577,6 +615,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
             output_name=output_name,
             plot_backends=tuple(plot_backends),
             export_behaviour=behaviours,
+            matplotlib_figsize=(
+                float(self.figure_width_spin.value()),
+                float(self.figure_height_spin.value()),
+            ),
         )
         self._save_settings()
         self._set_running(True)

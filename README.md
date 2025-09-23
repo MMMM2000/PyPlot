@@ -336,25 +336,27 @@ plotting tools:
   restored on launch so repeat builds are quick.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
-  session using the simple single-trace template. Matplotlib renders compact
-  4"×2.25" figures, automatically discards the burn-through sample that drops
-  back to a low current, and draws the transition from the last increasing point
-  to the first decreasing point in blue so the curve ends cleanly. The Excel
-  export scales each PNG to roughly 320×180 px so the thumbnails occupy about
-  half the previous footprint. You can select both Matplotlib and Origin to
-  capture PNG paths and Origin object identifiers in separate columns. Choose
-  **Export CSV** and/or **Export Excel** to control the output formats; the
-  builder remembers every toggle and the last output folder between runs. When
-  Excel export is enabled the builder embeds the Matplotlib plots straight into
-  the “Figure” cells so the workbook opens with thumbnails in place rather than
-  plain filenames.
+  session using the simple single-trace template. Use the **Figure width/height**
+  controls to choose the Matplotlib canvas size in inches; the values are saved
+  between runs and the axis labels, ticks, markers, and line widths rescale so
+  the smaller figures stay legible. Matplotlib still trims the burn-through
+  sample that collapses to low current and bridges the final increasing/decreasing
+  points with a blue segment so the trace ends cleanly. Excel thumbnails are
+  scaled from the chosen figure size and embedded directly in the “Figure”
+  columns instead of leaving the PNG filename behind. Selecting **Origin plots**
+  alongside Excel export now drops each graph into the worksheet as an Origin
+  OLE object (stored under `origin_objects/`), while CSV output continues to list
+  the corresponding filenames. Choose **Export CSV** and/or **Export Excel** to
+  control the output formats; every toggle, folder, and size preference is
+  remembered between runs.
 * **Output** – pick a destination directory and supply a base file name. The
-  builder writes `<name>.csv`, `<name>.xlsx` when requested and (for Matplotlib
-  plots) PNG files under `plots/`. CSV exports continue to hold the plot file
-  names while the Excel workbook replaces those cells with embedded images.
-  If a file already exists you can **Replace** it, **Continue** appending new
-  rows, or **Cancel** the build. The completion dialog now includes an **Open**
-  button for quick inspection of the freshly generated dataset.
+  builder writes `<name>.csv`, `<name>.xlsx` when requested, PNG plots under
+  `plots/`, and Origin project snippets under `origin_objects/` whenever that
+  backend is enabled. CSV exports continue to hold the plot file names while the
+  Excel workbook replaces those cells with embedded media. If a file already
+  exists you can **Replace** it, **Continue** appending new rows, or **Cancel**
+  the build. The completion dialog now includes an **Open** button for quick
+  inspection of the freshly generated dataset.
 
 Each microwire (composition + draw/piece) becomes a single row with English
 headers tailored for analytics. The builder selects the 1000 mA measurement and

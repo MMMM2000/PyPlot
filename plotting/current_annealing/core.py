@@ -685,17 +685,43 @@ def _plot_origin_experimental(
         graph.activate()
     except Exception:
         pass
-def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
-    fig, ax = plt.subplots(figsize=(4.0, 2.25))
+def plot_one(
+    df: pd.DataFrame,
+    title: str,
+    *,
+    figsize: Tuple[float, float] | None = None,
+) -> Tuple[Figure, str]:
+    if not figsize:
+        figsize = (4.0, 2.25)
+    width, height = max(float(figsize[0]), 0.5), max(float(figsize[1]), 0.5)
+    fig, ax = plt.subplots(figsize=(width, height))
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     _, segments = _direction_profile(currents)
 
+    base_width, base_height = 8.0, 4.5
+    scale = min(width / base_width, height / base_height)
+    if not np.isfinite(scale) or scale <= 0:
+        scale = min(width, height) / base_height
+    scale = max(0.3, float(scale))
+    tick_size = max(6, int(round(18 * scale)))
+    axis_size = max(6, int(round(18 * scale)))
+    title_size = max(8, int(round(22 * scale)))
+    marker_size = max(1.5, 4.0 * scale)
+    line_width = max(1.0, 1.5 * scale)
+
     if currents.size == 0:
         pass
     elif currents.size == 1:
-        ax.plot(currents, resistances, marker="o", linestyle="None", color="r", markersize=3)
+        ax.plot(
+            currents,
+            resistances,
+            marker="o",
+            linestyle="None",
+            color="r",
+            markersize=marker_size,
+        )
     else:
         previous_direction: float | None = None
         for start, end, direction in segments:
@@ -723,10 +749,10 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
                 color=color,
                 marker="o",
                 linestyle="-",
-                markersize=3,
+                markersize=marker_size,
                 markerfacecolor=color,
                 markeredgecolor=color,
-                linewidth=1.5,
+                linewidth=line_width,
             )
             previous_direction = direction
 
@@ -735,7 +761,13 @@ def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
     fig.tight_layout()
-    apply_readability(ax, globals())
+    cfg = dict(globals())
+    cfg.update({
+        "TICK_SIZE": tick_size,
+        "AXIS_LABEL_SIZE": axis_size,
+        "TITLE_SIZE": title_size,
+    })
+    apply_readability(ax, cfg)
     fname = title.replace(os.sep, "_")
     return fig, fname
 

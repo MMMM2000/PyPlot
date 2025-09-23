@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import importlib.util
+import logging
 import sys
 
 import pandas as pd
@@ -30,6 +31,7 @@ _load_annealing = core._load_annealing
 _metadata_from_path = core._metadata_from_path
 _resistance_sanity_check = core._resistance_sanity_check
 _safe_plot_stem = core._safe_plot_stem
+OriginArtifact = core.OriginArtifact
 
 
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
@@ -113,7 +115,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
 
     produced: dict[str, Path] = {}
 
-    def fake_plot(df, source: Path, plot_dir: Path) -> Path:
+    def fake_plot(df, source: Path, plot_dir: Path, figsize: tuple[float, float]) -> Path:
         plot_dir.mkdir(parents=True, exist_ok=True)
         out_path = plot_dir / f"{source.stem}.png"
         out_path.write_text("stub")
@@ -131,7 +133,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
 
     result = build_database(config)
     assert result.plot_paths
-    assert not result.origin_targets
+    assert not result.origin_artifacts
     row = result.dataframe.iloc[0]
     assert row["Figure — 1000 mA"] == produced[high.name].name
     assert row["Figure — low mA"] == produced[low.name].name
@@ -147,11 +149,15 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
     low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
 
-    origin_records: dict[str, str] = {}
+    origin_records: dict[str, OriginArtifact] = {}
 
-    def fake_origin(df, source: Path) -> str:
-        origin_records[source.name] = f"Origin:{source.stem}"
-        return origin_records[source.name]
+    def fake_origin(df, source: Path, origin_dir: Path, log: logging.Logger | None) -> OriginArtifact:
+        origin_dir.mkdir(parents=True, exist_ok=True)
+        descriptor = f"{source.stem}.oggu"
+        artifact_path = origin_dir / descriptor
+        artifact = OriginArtifact(descriptor=descriptor, object_path=artifact_path)
+        origin_records[source.name] = artifact
+        return artifact
 
     monkeypatch.setattr(core, "_plot_measurement_origin", fake_origin)
 
@@ -165,10 +171,10 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
 
     result = build_database(config)
     assert not result.plot_paths
-    assert set(result.origin_targets) == set(origin_records.values())
+    assert set(result.origin_artifacts.keys()) == {artifact.descriptor for artifact in origin_records.values()}
     row = result.dataframe.iloc[0]
-    assert row["Figure — 1000 mA (Origin)"] == origin_records[high.name]
-    assert row["Figure — low mA (Origin)"] == origin_records[low.name]
+    assert row["Figure — 1000 mA (Origin)"] == origin_records[high.name].descriptor
+    assert row["Figure — low mA (Origin)"] == origin_records[low.name].descriptor
     assert pd.isna(row["Figure — 1000 mA"])
     assert pd.isna(row["Figure — low mA"])
 
@@ -182,7 +188,7 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
     high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
     low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
 
-    def fake_plot(df, source: Path, plot_dir: Path) -> Path:
+    def fake_plot(df, source: Path, plot_dir: Path, figsize: tuple[float, float]) -> Path:
         plot_dir.mkdir(parents=True, exist_ok=True)
         out_path = plot_dir / f"{source.stem}.png"
         PILImage.new("RGB", (320, 200), color=(255, 0, 0)).save(out_path)

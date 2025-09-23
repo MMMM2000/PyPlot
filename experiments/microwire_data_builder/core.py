@@ -23,6 +23,7 @@ LOGGER_NAME = "microwire_data_builder"
 R_CHECK_THRESHOLD = 0.05
 DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
+ORIGIN_DIR_NAME = "origin_objects"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -142,6 +143,26 @@ DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
 SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
 
+def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> Tuple[float, float]:
+    default = (4.0, 2.25)
+    if not value:
+        return default
+    try:
+        width, height = value  # type: ignore[misc]
+    except Exception:
+        return default
+    try:
+        width_f = float(width)
+        height_f = float(height)
+    except Exception:
+        return default
+    if not math.isfinite(width_f) or width_f <= 0:
+        width_f = default[0]
+    if not math.isfinite(height_f) or height_f <= 0:
+        height_f = default[1]
+    return (max(0.5, width_f), max(0.5, height_f))
+
+
 @dataclass
 class BuilderConfig:
     """Configuration for the database builder."""
@@ -152,9 +173,11 @@ class BuilderConfig:
     make_plots: bool = False
     export_formats: Tuple[str, ...] = ("csv",)
     plot_dir_name: str = PLOT_DIR_NAME
+    origin_dir_name: str = ORIGIN_DIR_NAME
     output_name: str = DEFAULT_OUTPUT_NAME
     plot_backends: Tuple[str, ...] = ()
     export_behaviour: Optional[Dict[str, str]] = None
+    matplotlib_figsize: Tuple[float, float] = (4.0, 2.25)
 
 
 @dataclass
@@ -172,13 +195,25 @@ class BuildStats:
 
 
 @dataclass
+class OriginArtifact:
+    """Metadata describing an Origin object exported for Excel embedding."""
+
+    descriptor: str
+    object_path: Optional[Path]
+    graph_name: Optional[str] = None
+    workbook_name: Optional[str] = None
+    worksheet_name: Optional[str] = None
+    display_text: Optional[str] = None
+
+
+@dataclass
 class BuildResult:
     """Return value from :func:`build_database`."""
 
     dataframe: pd.DataFrame
     exports: Dict[str, Path]
     plot_paths: List[Path]
-    origin_targets: List[str]
+    origin_artifacts: Dict[str, OriginArtifact]
     stats: BuildStats
 
 
@@ -673,7 +708,12 @@ def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[Measur
     return min(candidates, key=key)
 
 
-def _plot_measurement_matplotlib(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
+def _plot_measurement_matplotlib(
+    df: pd.DataFrame,
+    source: Path,
+    plot_dir: Path,
+    figsize: Tuple[float, float],
+) -> Path:
     import matplotlib
 
     try:
@@ -690,7 +730,7 @@ def _plot_measurement_matplotlib(df: pd.DataFrame, source: Path, plot_dir: Path)
     plot_dir.mkdir(parents=True, exist_ok=True)
     title = format_annealing_title(source.stem)
     plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
-    fig, fname = plot_one(plot_df, title)
+    fig, fname = plot_one(plot_df, title, figsize=figsize)
     safe_stem = _safe_plot_stem(fname)
     plot_path = plot_dir / f"{safe_stem}.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -699,7 +739,12 @@ def _plot_measurement_matplotlib(df: pd.DataFrame, source: Path, plot_dir: Path)
     return plot_path
 
 
-def _plot_measurement_origin(df: pd.DataFrame, source: Path) -> Optional[str]:
+def _plot_measurement_origin(
+    df: pd.DataFrame,
+    source: Path,
+    origin_dir: Path,
+    log: Optional[logging.Logger] = None,
+) -> Optional[OriginArtifact]:
     try:
         from plotting.current_annealing.core import plot_one_origin
         from plotting.utils import format_annealing_title, schedule_origin_release
@@ -719,12 +764,29 @@ def _plot_measurement_origin(df: pd.DataFrame, source: Path) -> Optional[str]:
     except Exception:
         pass
 
-    if isinstance(handles, dict):
-        return _describe_origin_handles(handles)
-    return None
+    if not isinstance(handles, dict):
+        return None
+
+    description, graph_name, workbook_name, worksheet_name = _describe_origin_handles(handles)
+    safe_stem = _safe_plot_stem(source.stem)
+    origin_dir.mkdir(parents=True, exist_ok=True)
+    artifact_name = f"{safe_stem}.oggu"
+    target_path = origin_dir / artifact_name
+    exported_path = _export_origin_object(handles, target_path, log)
+
+    return OriginArtifact(
+        descriptor=artifact_name,
+        object_path=exported_path,
+        graph_name=graph_name,
+        workbook_name=workbook_name,
+        worksheet_name=worksheet_name,
+        display_text=description,
+    )
 
 
-def _describe_origin_handles(handles: Dict[str, object]) -> Optional[str]:
+def _describe_origin_handles(
+    handles: Dict[str, object],
+) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str]]:
     graph = handles.get("graph")
     workbook = handles.get("workbook")
     worksheet = handles.get("worksheet")
@@ -742,17 +804,92 @@ def _describe_origin_handles(handles: Dict[str, object]) -> Optional[str]:
     worksheet_name = _origin_object_name(worksheet)
     if worksheet_name:
         parts.append(f"Sheet: {worksheet_name}")
-    if parts:
-        return " | ".join(parts)
+    description = " | ".join(parts) if parts else None
+    return description, graph_name, workbook_name, worksheet_name
+
+
+def _export_origin_object(
+    handles: Dict[str, object], target_path: Path, log: Optional[logging.Logger]
+) -> Optional[Path]:
+    origin_any = handles.get("origin")
+    graph = handles.get("graph")
+    if origin_any is None or graph is None:
+        return None
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    attempted: list[str] = []
+
+    def _path_created() -> Optional[Path]:
+        candidates = [
+            target_path,
+            target_path.with_suffix(".oggu"),
+            target_path.with_suffix(".opju"),
+        ]
+        for candidate in candidates:
+            try:
+                if candidate.exists():
+                    return candidate
+            except OSError:
+                continue
+        return None
+
+    for attr in ("save_copy", "save_as", "save"):
+        method = getattr(graph, attr, None)
+        if callable(method):
+            try:
+                method(str(target_path))
+                created = _path_created()
+                if created is not None:
+                    return created
+            except Exception:
+                attempted.append(attr)
+
+    for attr in ("save_page", "save_window"):
+        method = getattr(origin_any, attr, None)
+        if callable(method):
+            try:
+                method(str(target_path))
+                created = _path_created()
+                if created is not None:
+                    return created
+            except Exception:
+                attempted.append(attr)
+
+    lt_exec = getattr(origin_any, "lt_exec", None)
+    if callable(lt_exec):
+        graph_name = _origin_object_name(graph) or ""
+        base = str(target_path)
+        commands = []
+        if graph_name:
+            commands.append(f"page -s \"{graph_name}\"; save -oggu \"{base}\";")
+            commands.append(f"page -s \"{graph_name}\"; save -opju \"{base}\";")
+        commands.append(f"save -oggu \"{base}\";")
+        commands.append(f"save -opju \"{base}\";")
+        for command in commands:
+            try:
+                lt_exec(command)
+                created = _path_created()
+                if created is not None:
+                    return created
+            except Exception:
+                attempted.append(command)
+
+    if log is not None:
+        log.warning(
+            "Origin graph export failed for %s; attempted %s",
+            target_path,
+            ", ".join(attempted) if attempted else "no-export",
+        )
     return None
 
 
-def _embed_plots_in_excel(
+def _embed_plots_in_excel_openpyxl(
     excel_path: Path,
     dataframe: pd.DataFrame,
     plot_name_to_path: Dict[str, Path],
     plot_dir: Path,
     log: logging.Logger,
+    figure_size: Tuple[float, float],
 ) -> None:
     """Insert Matplotlib plot images directly into the Excel export."""
 
@@ -810,8 +947,8 @@ def _embed_plots_in_excel(
                     continue
 
                 # Downscale very large images so they fit within the worksheet cells.
-                max_width = 320
-                max_height = 180
+                max_width = max(int(round(figure_size[0] * 96)), 1)
+                max_height = max(int(round(figure_size[1] * 96)), 1)
                 if image.width and image.height:
                     width_scale = max_width / image.width if image.width > max_width else 1.0
                     height_scale = max_height / image.height if image.height > max_height else 1.0
@@ -848,6 +985,124 @@ def _embed_plots_in_excel(
     finally:
         workbook.close()
 
+
+def _embed_assets_with_xlsxwriter(
+    writer: "pd.ExcelWriter",
+    dataframe: pd.DataFrame,
+    plot_name_to_path: Dict[str, Path],
+    plot_dir: Path,
+    origin_artifacts: Dict[str, OriginArtifact],
+    figure_size: Tuple[float, float],
+    log: logging.Logger,
+) -> None:
+    try:
+        workbook = writer.book
+        worksheets = list(writer.sheets.values())
+    except Exception:
+        return
+    if not worksheets:
+        return
+    worksheet = worksheets[0]
+
+    figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
+    origin_columns = [
+        column
+        for column in ("Figure — 1000 mA (Origin)", "Figure — low mA (Origin)")
+        if column in dataframe.columns
+    ]
+    if not figure_columns and not origin_columns:
+        return
+
+    reset_df = dataframe.reset_index(drop=True)
+    available: Dict[str, Path] = {}
+    for name, path in plot_name_to_path.items():
+        if path.exists():
+            available[name] = path
+    if plot_dir and plot_dir.exists():
+        for candidate in plot_dir.glob("*.png"):
+            available.setdefault(candidate.name, candidate)
+
+    from PIL import Image as PILImage  # local import to avoid hard dependency elsewhere
+
+    max_width = max(int(round(figure_size[0] * 96)), 1)
+    max_height = max(int(round(figure_size[1] * 96)), 1)
+    row_heights: Dict[int, float] = {}
+    column_widths: Dict[int, float] = {}
+
+    for row_idx, row in reset_df.iterrows():
+        row_number = row_idx + 1
+        for column in figure_columns:
+            value = row.get(column)
+            if not isinstance(value, str):
+                continue
+            name = value.strip()
+            if not name:
+                continue
+            image_path = available.get(name)
+            if image_path is None and plot_dir:
+                candidate = plot_dir / name
+                if candidate.exists():
+                    available[name] = candidate
+                    image_path = candidate
+            if image_path is None or not image_path.exists():
+                continue
+            try:
+                with PILImage.open(image_path) as pil_image:
+                    width_px, height_px = pil_image.size
+            except Exception:
+                width_px = height_px = 0
+            x_scale = min(1.0, max_width / width_px) if width_px else 1.0
+            y_scale = min(1.0, max_height / height_px) if height_px else 1.0
+            options: Dict[str, float] = {}
+            if x_scale < 1.0:
+                options["x_scale"] = x_scale
+            if y_scale < 1.0:
+                options["y_scale"] = y_scale
+            column_index = dataframe.columns.get_loc(column)
+            worksheet.write_blank(row_number, column_index, None)
+            try:
+                worksheet.insert_image(row_number, column_index, str(image_path), options)
+            except Exception:
+                log.exception("Failed to insert plot image %s", image_path)
+                continue
+            target_height = (height_px * y_scale * 0.75) if height_px else max_height * 0.75
+            if target_height > row_heights.get(row_number, 0.0):
+                worksheet.set_row(row_number, target_height)
+                row_heights[row_number] = target_height
+            approx_width = (width_px * x_scale / 7.0) if width_px else (max_width / 7.0)
+            if approx_width > column_widths.get(column_index, 0.0):
+                worksheet.set_column(column_index, column_index, approx_width)
+                column_widths[column_index] = approx_width
+
+        for column in origin_columns:
+            value = row.get(column)
+            if not isinstance(value, str):
+                continue
+            descriptor = value.strip()
+            if not descriptor:
+                continue
+            artifact = origin_artifacts.get(descriptor)
+            if artifact is None or artifact.object_path is None:
+                continue
+            try:
+                if not artifact.object_path.exists():
+                    continue
+            except OSError:
+                continue
+            column_index = dataframe.columns.get_loc(column)
+            worksheet.write_blank(row_number, column_index, None)
+            options: Dict[str, object] = {"object_position": 1}
+            try:
+                worksheet.insert_object(row_number, column_index, str(artifact.object_path), options)
+            except Exception:
+                log.exception("Failed to insert Origin object %s", artifact.object_path)
+                continue
+            target_height = max(row_heights.get(row_number, 0.0), max_height * 0.75)
+            worksheet.set_row(row_number, target_height)
+            row_heights[row_number] = target_height
+            approx_width = max(column_widths.get(column_index, 0.0), max_width / 7.0)
+            worksheet.set_column(column_index, column_index, approx_width)
+            column_widths[column_index] = approx_width
 
 def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
@@ -916,10 +1171,13 @@ def build_database(
     stats = BuildStats()
     grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
     plot_paths: List[Path] = []
-    origin_targets: List[str] = []
     plot_cache: Dict[str, Path] = {}
-    origin_cache: Dict[str, str] = {}
     plot_name_to_path: Dict[str, Path] = {}
+    origin_artifacts: Dict[str, OriginArtifact] = {}
+    origin_cache: Dict[str, OriginArtifact] = {}
+    figure_size = _normalise_figsize(getattr(config, "matplotlib_figsize", (4.0, 2.25)))
+    plot_dir = output_dir / config.plot_dir_name
+    origin_dir = output_dir / config.origin_dir_name
     origin_enabled = wants_origin_requested
     origin_disabled_reason: Optional[str] = None
     total = len(config.annealing_files)
@@ -1009,12 +1267,16 @@ def build_database(
             stats.missing_low_measurement += 1
             log.warning("No low-current measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
         if wants_matplotlib:
-            plot_dir = output_dir / config.plot_dir_name
             if high_record:
                 cached = plot_cache.get(high_record.metadata.measurement_id)
                 if cached is None:
                     try:
-                        cached = _plot_measurement_matplotlib(high_record.dataframe, high_record.path, plot_dir)
+                        cached = _plot_measurement_matplotlib(
+                            high_record.dataframe,
+                            high_record.path,
+                            plot_dir,
+                            figure_size,
+                        )
                         plot_cache[high_record.metadata.measurement_id] = cached
                         plot_paths.append(cached)
                     except Exception:
@@ -1028,7 +1290,12 @@ def build_database(
                 cached = plot_cache.get(low_record.metadata.measurement_id)
                 if cached is None:
                     try:
-                        cached = _plot_measurement_matplotlib(low_record.dataframe, low_record.path, plot_dir)
+                        cached = _plot_measurement_matplotlib(
+                            low_record.dataframe,
+                            low_record.path,
+                            plot_dir,
+                            figure_size,
+                        )
                         plot_cache[low_record.metadata.measurement_id] = cached
                         if cached not in plot_paths:
                             plot_paths.append(cached)
@@ -1044,7 +1311,12 @@ def build_database(
                 cached_origin = origin_cache.get(high_record.metadata.measurement_id)
                 if cached_origin is None:
                     try:
-                        cached_origin = _plot_measurement_origin(high_record.dataframe, high_record.path)
+                        cached_origin = _plot_measurement_origin(
+                            high_record.dataframe,
+                            high_record.path,
+                            origin_dir,
+                            log,
+                        )
                     except RuntimeError as exc:
                         if origin_disabled_reason is None:
                             origin_disabled_reason = str(exc) or exc.__class__.__name__
@@ -1057,15 +1329,19 @@ def build_database(
                     else:
                         if cached_origin is not None:
                             origin_cache[high_record.metadata.measurement_id] = cached_origin
-                            if cached_origin not in origin_targets:
-                                origin_targets.append(cached_origin)
+                            origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
-                    row["Figure — 1000 mA (Origin)"] = cached_origin
+                    row["Figure — 1000 mA (Origin)"] = cached_origin.descriptor
             if origin_enabled and low_record:
                 cached_origin = origin_cache.get(low_record.metadata.measurement_id)
                 if cached_origin is None:
                     try:
-                        cached_origin = _plot_measurement_origin(low_record.dataframe, low_record.path)
+                        cached_origin = _plot_measurement_origin(
+                            low_record.dataframe,
+                            low_record.path,
+                            origin_dir,
+                            log,
+                        )
                     except RuntimeError as exc:
                         if origin_disabled_reason is None:
                             origin_disabled_reason = str(exc) or exc.__class__.__name__
@@ -1078,10 +1354,9 @@ def build_database(
                     else:
                         if cached_origin is not None:
                             origin_cache[low_record.metadata.measurement_id] = cached_origin
-                            if cached_origin not in origin_targets:
-                                origin_targets.append(cached_origin)
+                            origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
-                    row["Figure — low mA (Origin)"] = cached_origin
+                    row["Figure — low mA (Origin)"] = cached_origin.descriptor
         rows.append(row)
         stats.rows_built += 1
     if rows:
@@ -1122,17 +1397,36 @@ def build_database(
                 else:
                     to_write = pd.concat([existing, df_out], ignore_index=True)
                     to_write = to_write.drop_duplicates()
-            to_write.to_excel(excel_path, index=False)
             try:
-                _embed_plots_in_excel(
-                    excel_path,
-                    to_write,
-                    plot_name_to_path,
-                    output_dir / config.plot_dir_name,
-                    log,
-                )
-            except Exception:
-                log.exception("Failed to embed figure images into %s", excel_path)
+                import xlsxwriter  # noqa: F401
+
+                with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
+                    to_write.to_excel(writer, index=False, sheet_name="Sheet1")
+                    try:
+                        _embed_assets_with_xlsxwriter(
+                            writer,
+                            to_write,
+                            plot_name_to_path,
+                            plot_dir,
+                            origin_artifacts,
+                            figure_size,
+                            log,
+                        )
+                    except Exception:
+                        log.exception("Failed to embed figures into %s", excel_path)
+            except ImportError:
+                to_write.to_excel(excel_path, index=False)
+                try:
+                    _embed_plots_in_excel_openpyxl(
+                        excel_path,
+                        to_write,
+                        plot_name_to_path,
+                        plot_dir,
+                        log,
+                        figure_size,
+                    )
+                except Exception:
+                    log.exception("Failed to embed figure images into %s", excel_path)
             exports["excel"] = excel_path
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
@@ -1151,7 +1445,7 @@ def build_database(
         dataframe=df_out,
         exports=exports,
         plot_paths=plot_paths,
-        origin_targets=origin_targets,
+        origin_artifacts=origin_artifacts,
         stats=stats,
     )
 
@@ -1160,6 +1454,7 @@ __all__ = [
     "BuilderConfig",
     "BuildResult",
     "BuildStats",
+    "OriginArtifact",
     "FabricationIndex",
     "build_database",
     "build_fabrication_index",
