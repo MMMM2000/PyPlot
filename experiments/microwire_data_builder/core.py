@@ -48,6 +48,11 @@ OUTPUT_COLUMNS = [
     "File low mA",
 ]
 
+FIGURE_COLUMNS = (
+    "Figure — 1000 mA",
+    "Figure — low mA",
+)
+
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
 DRAW_NUMERIC_FIELDS = {
@@ -742,6 +747,108 @@ def _describe_origin_handles(handles: Dict[str, object]) -> Optional[str]:
     return None
 
 
+def _embed_plots_in_excel(
+    excel_path: Path,
+    dataframe: pd.DataFrame,
+    plot_name_to_path: Dict[str, Path],
+    plot_dir: Path,
+    log: logging.Logger,
+) -> None:
+    """Insert Matplotlib plot images directly into the Excel export."""
+
+    if not excel_path.exists():
+        return
+    if dataframe.empty:
+        return
+    figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
+    if not figure_columns:
+        return
+
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.drawing.image import Image as XLImage
+        from openpyxl.utils import get_column_letter
+    except ImportError:  # pragma: no cover - optional dependency guard
+        log.warning("openpyxl is required to embed plots into Excel workbooks")
+        return
+
+    available: Dict[str, Path] = {}
+    for name, path in plot_name_to_path.items():
+        if path.exists():
+            available[name] = path
+    if plot_dir and plot_dir.exists():
+        for candidate in plot_dir.glob("*.png"):
+            available.setdefault(candidate.name, candidate)
+    if not available:
+        return
+
+    workbook = load_workbook(excel_path)
+    try:
+        worksheet = workbook.active
+
+        inserted = False
+        reset_df = dataframe.reset_index(drop=True)
+        for row_idx, row in reset_df.iterrows():
+            for column in figure_columns:
+                value = row.get(column)
+                if not isinstance(value, str):
+                    continue
+                name = value.strip()
+                if not name:
+                    continue
+                image_path = available.get(name)
+                if image_path is None or not image_path.exists():
+                    candidate = plot_dir / name if plot_dir else None
+                    if candidate is None or not candidate.exists():
+                        continue
+                    available[name] = candidate
+                    image_path = candidate
+                try:
+                    image = XLImage(str(image_path))
+                except Exception:
+                    log.exception("Failed to load plot image %s for Excel export", image_path)
+                    continue
+
+                # Downscale very large images so they fit within the worksheet cells.
+                max_width = 640
+                max_height = 360
+                if image.width and image.height:
+                    width_scale = max_width / image.width if image.width > max_width else 1.0
+                    height_scale = max_height / image.height if image.height > max_height else 1.0
+                    scale = min(width_scale, height_scale)
+                    if scale < 1.0:
+                        image.width = int(image.width * scale)
+                        image.height = int(image.height * scale)
+
+                column_index = dataframe.columns.get_loc(column) + 1
+                row_number = row_idx + 2  # account for the header row
+                column_letter = get_column_letter(column_index)
+                cell_reference = f"{column_letter}{row_number}"
+
+                # Clear the textual filename and embed the image anchored at the cell.
+                worksheet[cell_reference].value = None
+                worksheet.add_image(image, cell_reference)
+
+                # Adjust the row height and column width to accommodate the scaled figure.
+                if image.height:
+                    target_height = image.height * 0.75  # approximate px→pt conversion
+                    current_height = worksheet.row_dimensions[row_number].height or 0
+                    if target_height > current_height:
+                        worksheet.row_dimensions[row_number].height = target_height
+                if image.width:
+                    approx_width = image.width / 7.0
+                    current_width = worksheet.column_dimensions[column_letter].width or 0
+                    if approx_width > current_width:
+                        worksheet.column_dimensions[column_letter].width = approx_width
+
+                inserted = True
+
+        if inserted:
+            workbook.save(excel_path)
+    finally:
+        workbook.close()
+
+
 def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
         return None
@@ -812,6 +919,7 @@ def build_database(
     origin_targets: List[str] = []
     plot_cache: Dict[str, Path] = {}
     origin_cache: Dict[str, str] = {}
+    plot_name_to_path: Dict[str, Path] = {}
     origin_enabled = wants_origin_requested
     origin_disabled_reason: Optional[str] = None
     total = len(config.annealing_files)
@@ -913,7 +1021,9 @@ def build_database(
                         log.exception("Failed to generate plot for %s", high_record.path)
                         cached = None
                 if cached is not None:
-                    row["Figure — 1000 mA"] = Path(cached).name
+                    figure_name = Path(cached).name
+                    row["Figure — 1000 mA"] = figure_name
+                    plot_name_to_path.setdefault(figure_name, cached)
             if low_record:
                 cached = plot_cache.get(low_record.metadata.measurement_id)
                 if cached is None:
@@ -926,7 +1036,9 @@ def build_database(
                         log.exception("Failed to generate plot for %s", low_record.path)
                         cached = None
                 if cached is not None:
-                    row["Figure — low mA"] = Path(cached).name
+                    figure_name = Path(cached).name
+                    row["Figure — low mA"] = figure_name
+                    plot_name_to_path.setdefault(figure_name, cached)
         if origin_enabled:
             if high_record:
                 cached_origin = origin_cache.get(high_record.metadata.measurement_id)
@@ -1011,6 +1123,16 @@ def build_database(
                     to_write = pd.concat([existing, df_out], ignore_index=True)
                     to_write = to_write.drop_duplicates()
             to_write.to_excel(excel_path, index=False)
+            try:
+                _embed_plots_in_excel(
+                    excel_path,
+                    to_write,
+                    plot_name_to_path,
+                    output_dir / config.plot_dir_name,
+                    log,
+                )
+            except Exception:
+                log.exception("Failed to embed figure images into %s", excel_path)
             exports["excel"] = excel_path
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)

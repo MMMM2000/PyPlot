@@ -339,14 +339,16 @@ plotting tools:
   Origin session. You can select both to capture PNG paths and Origin object
   identifiers in separate columns. Choose **Export CSV** and/or **Export Excel**
   to control the output formats; the builder remembers every toggle and the last
-  output folder between runs.
+  output folder between runs. When Excel export is enabled the builder now
+  embeds the Matplotlib plots straight into the “Figure” cells so the workbook
+  opens with thumbnails in place rather than plain filenames.
 * **Output** – pick a destination directory and supply a base file name. The
   builder writes `<name>.csv`, `<name>.xlsx` when requested and (for Matplotlib
-  plots) PNG files under `plots/`, recording only the base filenames in the
-  spreadsheet. If a file already exists you can **Replace** it, **Continue**
-  appending new rows, or **Cancel** the build. The completion dialog now
-  includes an **Open** button for quick inspection of the freshly generated
-  dataset.
+  plots) PNG files under `plots/`. CSV exports continue to hold the plot file
+  names while the Excel workbook replaces those cells with embedded images.
+  If a file already exists you can **Replace** it, **Continue** appending new
+  rows, or **Cancel** the build. The completion dialog now includes an **Open**
+  button for quick inspection of the freshly generated dataset.
 
 Each microwire (composition + draw/piece) becomes a single row with English
 headers tailored for analytics. The builder selects the 1000 mA measurement and

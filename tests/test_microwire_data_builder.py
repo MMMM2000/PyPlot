@@ -171,3 +171,50 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert row["Figure — low mA (Origin)"] == origin_records[low.name]
     assert pd.isna(row["Figure — 1000 mA"])
     assert pd.isna(row["Figure — low mA"])
+
+
+def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("openpyxl")
+    from PIL import Image as PILImage
+
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    def fake_plot(df, source: Path, plot_dir: Path) -> Path:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plot_dir / f"{source.stem}.png"
+        PILImage.new("RGB", (320, 200), color=(255, 0, 0)).save(out_path)
+        return out_path
+
+    monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        make_plots=True,
+        export_formats=("excel",),
+    )
+
+    result = build_database(config)
+    excel_path = result.exports["excel"]
+    from openpyxl import load_workbook
+    from openpyxl.utils import get_column_letter
+
+    workbook = load_workbook(excel_path)
+    worksheet = workbook.active
+    images = getattr(worksheet, "_images", [])
+    assert images, "Expected embedded plot images in the Excel export"
+
+    figure_col_idx = core.OUTPUT_COLUMNS.index("Figure — 1000 mA")
+    col_letter = get_column_letter(figure_col_idx + 1)
+    assert worksheet[f"{col_letter}2"].value is None
+
+    anchor = images[0].anchor
+    if hasattr(anchor, "_from"):
+        assert anchor._from.col == figure_col_idx
+        assert anchor._from.row == 1
+
+    workbook.close()
