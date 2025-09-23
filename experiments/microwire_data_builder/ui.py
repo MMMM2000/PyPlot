@@ -14,9 +14,11 @@ from plotting.utils import ensure_app_theme, install_standard_menu
 
 from .core import (
     LOGGER_NAME,
+    DEFAULT_OUTPUT_NAME,
     BuildResult,
     BuilderConfig,
     build_database,
+    _normalise_output_name,
 )
 
 
@@ -46,16 +48,9 @@ class BuildWorker(QtCore.QObject):
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - exercised via integration test
-        file_handler: logging.Handler | None = None
         try:
             config = self.config
             config.output_dir.mkdir(parents=True, exist_ok=True)
-            log_path = config.output_dir / config.log_file_name
-            file_handler = logging.FileHandler(log_path, encoding="utf-8")
-            file_handler.setLevel(logging.INFO)
-            file_handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-            self.logger.addHandler(file_handler)
-
             self.logger.info("Starting build with %s annealing file(s)", len(config.annealing_files))
             result = build_database(
                 config,
@@ -69,7 +64,10 @@ class BuildWorker(QtCore.QObject):
             else:
                 self.logger.info("No export files were generated.")
             if config.make_plots:
-                self.logger.info("Generated %s plot(s)", len(result.plot_paths))
+                if "matplotlib" in config.plot_backends or not config.plot_backends:
+                    self.logger.info("Generated %s Matplotlib plot(s)", len(result.plot_paths))
+                if "origin" in config.plot_backends:
+                    self.logger.info("Origin plots created: %s", len(result.origin_targets))
             stats = result.stats
             self.logger.info(
                 "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R≈V/I failures=%s",
@@ -87,10 +85,6 @@ class BuildWorker(QtCore.QObject):
             self.logger.exception("Build failed")
             message = str(exc) if str(exc) else exc.__class__.__name__
             self.error.emit(message)
-        finally:
-            if file_handler is not None:
-                self.logger.removeHandler(file_handler)
-                file_handler.close()
 
 
 class BuilderWindow(QtWidgets.QMainWindow):
@@ -184,9 +178,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         # Options
         self.options_group = QtWidgets.QGroupBox("Options")
         options_layout = QtWidgets.QVBoxLayout(self.options_group)
-        self.make_plots_check = QtWidgets.QCheckBox("Generate plots (PNG)")
-        self.make_plots_check.stateChanged.connect(self._save_settings)
-        options_layout.addWidget(self.make_plots_check)
+        self.plot_matplotlib_check = QtWidgets.QCheckBox("Matplotlib plots (PNG)")
+        self.plot_matplotlib_check.setChecked(True)
+        self.plot_matplotlib_check.stateChanged.connect(self._save_settings)
+        options_layout.addWidget(self.plot_matplotlib_check)
+        self.plot_origin_check = QtWidgets.QCheckBox("Origin plots")
+        self.plot_origin_check.stateChanged.connect(self._save_settings)
+        options_layout.addWidget(self.plot_origin_check)
         self.export_csv_check = QtWidgets.QCheckBox("Export CSV")
         self.export_csv_check.setChecked(True)
         self.export_csv_check.stateChanged.connect(self._save_settings)
@@ -199,6 +197,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         # Output directory
         self.output_group = QtWidgets.QGroupBox("Output")
         output_layout = QtWidgets.QGridLayout(self.output_group)
+        output_layout.setHorizontalSpacing(8)
+        output_layout.setVerticalSpacing(6)
         output_label = QtWidgets.QLabel("Directory:")
         output_layout.addWidget(output_label, 0, 0)
         self.output_edit = QtWidgets.QLineEdit(str(self._default_output_dir))
@@ -207,6 +207,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.output_button = QtWidgets.QPushButton("Browse…")
         self.output_button.clicked.connect(self._select_output_dir)
         output_layout.addWidget(self.output_button, 0, 2)
+        name_label = QtWidgets.QLabel("File name:")
+        output_layout.addWidget(name_label, 1, 0)
+        self.output_name_edit = QtWidgets.QLineEdit(DEFAULT_OUTPUT_NAME)
+        self.output_name_edit.editingFinished.connect(self._save_settings)
+        output_layout.addWidget(self.output_name_edit, 1, 1)
         output_layout.setColumnStretch(1, 1)
         layout.addWidget(self.output_group)
 
@@ -279,8 +284,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.annealing_paths = _decode_paths(self.settings.value("annealing_paths", ""))
         self._update_list_widget(self.anneal_list, self.annealing_paths)
 
-        with QtCore.QSignalBlocker(self.make_plots_check):
-            self.make_plots_check.setChecked(_read_bool("make_plots", False))
+        with QtCore.QSignalBlocker(self.plot_matplotlib_check):
+            self.plot_matplotlib_check.setChecked(_read_bool("plot_matplotlib", True))
+        with QtCore.QSignalBlocker(self.plot_origin_check):
+            self.plot_origin_check.setChecked(_read_bool("plot_origin", False))
         with QtCore.QSignalBlocker(self.export_csv_check):
             self.export_csv_check.setChecked(_read_bool("export_csv", True))
         with QtCore.QSignalBlocker(self.export_excel_check):
@@ -290,6 +297,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(output_dir_value, str) and output_dir_value.strip():
             self.output_edit.setText(output_dir_value)
             self._last_output_dir = output_dir_value
+
+        output_name_value = self.settings.value("output_name", "")
+        if isinstance(output_name_value, str) and output_name_value.strip():
+            self.output_name_edit.setText(output_name_value)
 
         last_fab = self.settings.value("last_fabrication_dir", "")
         if isinstance(last_fab, str) and last_fab.strip():
@@ -307,9 +318,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("fabrication_paths", json.dumps([str(p) for p in self.fabrication_paths]))
         self.settings.setValue("annealing_paths", json.dumps([str(p) for p in self.annealing_paths]))
         self.settings.setValue("output_dir", self.output_edit.text())
-        self.settings.setValue("make_plots", self.make_plots_check.isChecked())
+        self.settings.setValue("plot_matplotlib", self.plot_matplotlib_check.isChecked())
+        self.settings.setValue("plot_origin", self.plot_origin_check.isChecked())
         self.settings.setValue("export_csv", self.export_csv_check.isChecked())
         self.settings.setValue("export_excel", self.export_excel_check.isChecked())
+        self.settings.setValue("output_name", self.output_name_edit.text())
         self.settings.setValue("last_fabrication_dir", self._last_fabrication_dir)
         self.settings.setValue("last_anneal_dir", self._last_anneal_dir)
         self.settings.setValue("last_output_dir", self._last_output_dir)
@@ -413,6 +426,58 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.output_edit.setText(directory)
             self._save_settings()
 
+    def _check_origin_available(self) -> tuple[bool, str]:
+        try:
+            import originpro  # type: ignore  # noqa: F401
+        except Exception as exc:
+            message = str(exc) if str(exc) else exc.__class__.__name__
+            return False, message
+        return True, ""
+
+    def _prompt_overwrite(self, path: Path) -> str | None:
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("File exists")
+        msg.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        msg.setText(f"'{path.name}' already exists.")
+        msg.setInformativeText("Choose how to continue:")
+        replace_btn = msg.addButton("Replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+        continue_btn = msg.addButton("Continue", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        cancel_btn = msg.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked is cancel_btn:
+            return None
+        if clicked is continue_btn:
+            return "append"
+        return "replace"
+
+    def _preferred_export_path(self, exports: dict[str, Path]) -> Path | None:
+        for key in ("excel", "csv"):
+            candidate = exports.get(key)
+            if isinstance(candidate, Path):
+                return candidate
+        for candidate in exports.values():
+            if isinstance(candidate, Path):
+                return candidate
+        return None
+
+    def _open_path(self, path: Path) -> None:
+        resolved = path.expanduser().resolve()
+        if not resolved.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                f"{resolved} could not be found.",
+            )
+            return
+        url = QtCore.QUrl.fromLocalFile(str(resolved))
+        if not QtGui.QDesktopServices.openUrl(url):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Unable to open the exported file.",
+            )
+
     def _set_running(self, running: bool) -> None:
         self._running = running
         for widget in (
@@ -454,12 +519,55 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 "Please select at least one export format.",
             )
             return
+        output_name_text = self.output_name_edit.text().strip()
+        if not output_name_text:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Please enter a base file name.",
+            )
+            return
+        output_name = _normalise_output_name(output_name_text)
+        if output_name != output_name_text:
+            self.output_name_edit.setText(output_name)
+
+        plot_backends: list[str] = []
+        if self.plot_matplotlib_check.isChecked():
+            plot_backends.append("matplotlib")
+        if self.plot_origin_check.isChecked():
+            origin_ok, origin_error = self._check_origin_available()
+            if origin_ok:
+                plot_backends.append("origin")
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Microwire Data Builder",
+                    "Origin plotting is unavailable.\n\n" + origin_error,
+                )
+                with QtCore.QSignalBlocker(self.plot_origin_check):
+                    self.plot_origin_check.setChecked(False)
+
+        behaviours: dict[str, str] = {}
+        for fmt in export_formats:
+            extension = "csv" if fmt.lower() == "csv" else "xlsx"
+            target_path = output_dir / f"{output_name}.{extension}"
+            if target_path.exists():
+                action = self._prompt_overwrite(target_path)
+                if action is None:
+                    return
+                behaviours[fmt.lower()] = action
+            else:
+                behaviours[fmt.lower()] = "replace"
+
         config = BuilderConfig(
             fabrication_files=list(dict.fromkeys(self.fabrication_paths)),
             annealing_files=list(dict.fromkeys(self.annealing_paths)),
             output_dir=output_dir,
-            make_plots=self.make_plots_check.isChecked(),
+            make_plots=bool(plot_backends),
             export_formats=tuple(export_formats),
+            output_name=output_name,
+            plot_backends=tuple(plot_backends),
+            export_behaviour=behaviours,
         )
         self._save_settings()
         self._set_running(True)
@@ -496,13 +604,23 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if result.exports:
             lines = [f"{fmt.upper()}: {path}" for fmt, path in result.exports.items()]
             export_text = "\n".join(lines)
+            open_target = self._preferred_export_path(result.exports)
         else:
             export_text = "No export files were created."
-        QtWidgets.QMessageBox.information(
-            self,
-            "Microwire Data Builder",
-            "Build finished successfully.\n\n" + export_text,
-        )
+            open_target = None
+
+        msg = QtWidgets.QMessageBox(self)
+        msg.setWindowTitle("Microwire Data Builder")
+        msg.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        msg.setText("Build finished successfully.")
+        msg.setInformativeText(export_text)
+        open_button: QtWidgets.QAbstractButton | None = None
+        if open_target is not None:
+            open_button = msg.addButton("Open", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        close_button = msg.addButton("Close", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        msg.exec()
+        if open_button is not None and msg.clickedButton() is open_button:
+            self._open_path(open_target)
 
     def _handle_failed(self, message: str) -> None:
         self._set_running(False)

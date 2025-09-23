@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import importlib.util
 import sys
+
+import pandas as pd
+import pytest
 
 CORE_PATH = (
     Path(__file__).resolve().parent.parent
@@ -112,7 +113,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
         produced[source.name] = out_path
         return out_path
 
-    monkeypatch.setattr(core, "_plot_measurement", fake_plot)
+    monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
 
     config = BuilderConfig(
         fabrication_files=[],
@@ -123,8 +124,43 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
 
     result = build_database(config)
     assert result.plot_paths
+    assert not result.origin_targets
     row = result.dataframe.iloc[0]
     assert row["Figure — 1000 mA"] == str(produced[high.name])
     assert row["Figure — low mA"] == str(produced[low.name])
+    assert pd.isna(row["Figure — 1000 mA (Origin)"])
+    assert pd.isna(row["Figure — low mA (Origin)"])
     assert set(result.plot_paths) == {produced[high.name], produced[low.name]}
     assert row["Low mA value (mA)"] == 120
+
+
+def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    origin_records: dict[str, str] = {}
+
+    def fake_origin(df, source: Path) -> str:
+        origin_records[source.name] = f"Origin:{source.stem}"
+        return origin_records[source.name]
+
+    monkeypatch.setattr(core, "_plot_measurement_origin", fake_origin)
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        make_plots=True,
+        plot_backends=("origin",),
+    )
+
+    result = build_database(config)
+    assert not result.plot_paths
+    assert set(result.origin_targets) == set(origin_records.values())
+    row = result.dataframe.iloc[0]
+    assert row["Figure — 1000 mA (Origin)"] == origin_records[high.name]
+    assert row["Figure — low mA (Origin)"] == origin_records[low.name]
+    assert pd.isna(row["Figure — 1000 mA"])
+    assert pd.isna(row["Figure — low mA"])

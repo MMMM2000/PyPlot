@@ -21,9 +21,7 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 LOGGER_NAME = "microwire_data_builder"
 R_CHECK_THRESHOLD = 0.05
-CSV_NAME = "microwire_database.csv"
-EXCEL_NAME = "microwire_database.xlsx"
-LOG_NAME = "microwire_database.log"
+DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
 
 OUTPUT_COLUMNS = [
@@ -43,10 +41,14 @@ OUTPUT_COLUMNS = [
     "Notes",
     "Figure — 1000 mA",
     "Figure — low mA",
+    "Figure — 1000 mA (Origin)",
+    "Figure — low mA (Origin)",
     "Low mA value (mA)",
     "File 1000 mA",
     "File low mA",
 ]
+
+_INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
 DRAW_NUMERIC_FIELDS = {
     "mass_g",
@@ -145,7 +147,9 @@ class BuilderConfig:
     make_plots: bool = False
     export_formats: Tuple[str, ...] = ("csv",)
     plot_dir_name: str = PLOT_DIR_NAME
-    log_file_name: str = LOG_NAME
+    output_name: str = DEFAULT_OUTPUT_NAME
+    plot_backends: Tuple[str, ...] = ()
+    export_behaviour: Optional[Dict[str, str]] = None
 
 
 @dataclass
@@ -169,6 +173,7 @@ class BuildResult:
     dataframe: pd.DataFrame
     exports: Dict[str, Path]
     plot_paths: List[Path]
+    origin_targets: List[str]
     stats: BuildStats
 
 
@@ -663,7 +668,7 @@ def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[Measur
     return min(candidates, key=key)
 
 
-def _plot_measurement(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
+def _plot_measurement_matplotlib(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
     import matplotlib
 
     try:
@@ -687,6 +692,72 @@ def _plot_measurement(df: pd.DataFrame, source: Path, plot_dir: Path) -> Path:
     return plot_path
 
 
+def _plot_measurement_origin(df: pd.DataFrame, source: Path) -> Optional[str]:
+    try:
+        from plotting.current_annealing.core import plot_one_origin
+        from plotting.utils import format_annealing_title, schedule_origin_release
+    except ImportError as exc:  # pragma: no cover - depends on optional module
+        raise RuntimeError("originpro is not available") from exc
+
+    plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
+    title = format_annealing_title(source.stem)
+    handles = plot_one_origin(
+        plot_df,
+        title,
+        source.name,
+        return_handles=True,
+    )
+    try:
+        schedule_origin_release()
+    except Exception:
+        pass
+
+    if isinstance(handles, dict):
+        return _describe_origin_handles(handles)
+    return None
+
+
+def _describe_origin_handles(handles: Dict[str, object]) -> Optional[str]:
+    graph = handles.get("graph")
+    workbook = handles.get("workbook")
+    worksheet = handles.get("worksheet")
+    legend_label = handles.get("legend_label")
+
+    parts: list[str] = []
+    if legend_label:
+        parts.append(str(legend_label))
+    graph_name = _origin_object_name(graph)
+    if graph_name:
+        parts.append(f"Graph: {graph_name}")
+    workbook_name = _origin_object_name(workbook)
+    if workbook_name:
+        parts.append(f"Book: {workbook_name}")
+    worksheet_name = _origin_object_name(worksheet)
+    if worksheet_name:
+        parts.append(f"Sheet: {worksheet_name}")
+    if parts:
+        return " | ".join(parts)
+    return None
+
+
+def _origin_object_name(obj: object) -> Optional[str]:
+    if obj is None:
+        return None
+    for attr in ("lt_name", "name", "lname", "long_name"):
+        value = getattr(obj, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _normalise_output_name(name: str) -> str:
+    cleaned = "".join("_" if ch in _INVALID_FILENAME_CHARS else ch for ch in name.strip())
+    cleaned = cleaned.strip(".")
+    if not cleaned:
+        return DEFAULT_OUTPUT_NAME
+    return cleaned
+
+
 def build_database(
     config: BuilderConfig,
     logger: Optional[logging.Logger] = None,
@@ -696,16 +767,39 @@ def build_database(
     log = _logger(logger)
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
+    output_name = _normalise_output_name(getattr(config, "output_name", DEFAULT_OUTPUT_NAME))
+
+    raw_backends = tuple(config.plot_backends) if config.plot_backends else ()
+    cleaned_backends = []
+    for backend in raw_backends:
+        if isinstance(backend, str):
+            cleaned_backends.append(backend.lower())
+    if config.make_plots and not cleaned_backends:
+        cleaned_backends.append("matplotlib")
+    deduped_backends = tuple(dict.fromkeys(cleaned_backends))
+    recognised_backends = {"matplotlib", "origin"}
+    for backend in deduped_backends:
+        if backend not in recognised_backends:
+            log.warning("Unsupported plot backend '%s'; skipping", backend)
+    plot_backends = tuple(b for b in deduped_backends if b in recognised_backends)
+
+    wants_matplotlib = "matplotlib" in plot_backends
+    wants_origin_requested = "origin" in plot_backends
+
     fabrication_index = build_fabrication_index(config.fabrication_files, log)
     stats = BuildStats()
     grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
     plot_paths: List[Path] = []
+    origin_targets: List[str] = []
     plot_cache: Dict[str, Path] = {}
+    origin_cache: Dict[str, str] = {}
+    origin_enabled = wants_origin_requested
+    origin_disabled_reason: Optional[str] = None
     total = len(config.annealing_files)
     for idx, path in enumerate(config.annealing_files, start=1):
         try:
             df = _load_annealing(path)
-        except Exception as exc:
+        except Exception:
             log.exception("Failed to parse %s", path)
             stats.skipped += 1
             if progress_callback:
@@ -787,13 +881,13 @@ def build_database(
         else:
             stats.missing_low_measurement += 1
             log.warning("No low-current measurement found for %s %s", composition, row["Microwire"] or "(unknown)")
-        if config.make_plots:
+        if wants_matplotlib:
             plot_dir = output_dir / config.plot_dir_name
             if high_record:
                 cached = plot_cache.get(high_record.metadata.measurement_id)
                 if cached is None:
                     try:
-                        cached = _plot_measurement(high_record.dataframe, high_record.path, plot_dir)
+                        cached = _plot_measurement_matplotlib(high_record.dataframe, high_record.path, plot_dir)
                         plot_cache[high_record.metadata.measurement_id] = cached
                         plot_paths.append(cached)
                     except Exception:
@@ -805,7 +899,7 @@ def build_database(
                 cached = plot_cache.get(low_record.metadata.measurement_id)
                 if cached is None:
                     try:
-                        cached = _plot_measurement(low_record.dataframe, low_record.path, plot_dir)
+                        cached = _plot_measurement_matplotlib(low_record.dataframe, low_record.path, plot_dir)
                         plot_cache[low_record.metadata.measurement_id] = cached
                         if cached not in plot_paths:
                             plot_paths.append(cached)
@@ -814,6 +908,49 @@ def build_database(
                         cached = None
                 if cached is not None:
                     row["Figure — low mA"] = os.fspath(cached)
+        if origin_enabled:
+            if high_record:
+                cached_origin = origin_cache.get(high_record.metadata.measurement_id)
+                if cached_origin is None:
+                    try:
+                        cached_origin = _plot_measurement_origin(high_record.dataframe, high_record.path)
+                    except RuntimeError as exc:
+                        if origin_disabled_reason is None:
+                            origin_disabled_reason = str(exc) or exc.__class__.__name__
+                            log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+                        origin_enabled = False
+                        cached_origin = None
+                    except Exception:
+                        log.exception("Failed to generate Origin plot for %s", high_record.path)
+                        cached_origin = None
+                    else:
+                        if cached_origin is not None:
+                            origin_cache[high_record.metadata.measurement_id] = cached_origin
+                            if cached_origin not in origin_targets:
+                                origin_targets.append(cached_origin)
+                if cached_origin is not None:
+                    row["Figure — 1000 mA (Origin)"] = cached_origin
+            if origin_enabled and low_record:
+                cached_origin = origin_cache.get(low_record.metadata.measurement_id)
+                if cached_origin is None:
+                    try:
+                        cached_origin = _plot_measurement_origin(low_record.dataframe, low_record.path)
+                    except RuntimeError as exc:
+                        if origin_disabled_reason is None:
+                            origin_disabled_reason = str(exc) or exc.__class__.__name__
+                            log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+                        origin_enabled = False
+                        cached_origin = None
+                    except Exception:
+                        log.exception("Failed to generate Origin plot for %s", low_record.path)
+                        cached_origin = None
+                    else:
+                        if cached_origin is not None:
+                            origin_cache[low_record.metadata.measurement_id] = cached_origin
+                            if cached_origin not in origin_targets:
+                                origin_targets.append(cached_origin)
+                if cached_origin is not None:
+                    row["Figure — low mA (Origin)"] = cached_origin
         rows.append(row)
         stats.rows_built += 1
     if rows:
@@ -822,15 +959,39 @@ def build_database(
         df_out = pd.DataFrame(columns=OUTPUT_COLUMNS)
     exports: Dict[str, Path] = {}
     requested_formats = tuple(dict.fromkeys(config.export_formats)) if config.export_formats else ("csv",)
+    behaviours = {
+        (key.lower() if isinstance(key, str) else ""): str(value).lower()
+        for key, value in (config.export_behaviour or {}).items()
+    }
     for fmt in requested_formats:
         fmt_lower = fmt.lower()
         if fmt_lower == "csv":
-            csv_path = output_dir / CSV_NAME
-            df_out.to_csv(csv_path, index=False)
+            csv_path = output_dir / f"{output_name}.csv"
+            behaviour = behaviours.get("csv", "replace")
+            to_write = df_out
+            if behaviour == "append" and csv_path.exists():
+                try:
+                    existing = pd.read_csv(csv_path)
+                except Exception:
+                    log.exception("Failed to read existing CSV at %s; overwriting", csv_path)
+                else:
+                    to_write = pd.concat([existing, df_out], ignore_index=True)
+                    to_write = to_write.drop_duplicates()
+            to_write.to_csv(csv_path, index=False)
             exports["csv"] = csv_path
         elif fmt_lower == "excel":
-            excel_path = output_dir / EXCEL_NAME
-            df_out.to_excel(excel_path, index=False)
+            excel_path = output_dir / f"{output_name}.xlsx"
+            behaviour = behaviours.get("excel", "replace")
+            to_write = df_out
+            if behaviour == "append" and excel_path.exists():
+                try:
+                    existing = pd.read_excel(excel_path)
+                except Exception:
+                    log.exception("Failed to read existing Excel at %s; overwriting", excel_path)
+                else:
+                    to_write = pd.concat([existing, df_out], ignore_index=True)
+                    to_write = to_write.drop_duplicates()
+            to_write.to_excel(excel_path, index=False)
             exports["excel"] = excel_path
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
@@ -849,6 +1010,7 @@ def build_database(
         dataframe=df_out,
         exports=exports,
         plot_paths=plot_paths,
+        origin_targets=origin_targets,
         stats=stats,
     )
 
@@ -861,4 +1023,5 @@ __all__ = [
     "build_database",
     "build_fabrication_index",
     "LOGGER_NAME",
+    "DEFAULT_OUTPUT_NAME",
 ]

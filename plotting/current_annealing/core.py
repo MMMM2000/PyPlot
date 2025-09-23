@@ -714,7 +714,9 @@ def plot_one_origin(
     title: str,
     source_name: str,
     mode: str | None = None,
-) -> None:
+    *,
+    return_handles: bool = False,
+) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     origin_any, workbook, worksheet, graph, layer, legend_label = _prepare_origin_workspace(
@@ -723,8 +725,16 @@ def plot_one_origin(
         title,
         source_name,
     )
+    handles: dict[str, object] = {
+        "origin": origin_any,
+        "workbook": workbook,
+        "worksheet": worksheet,
+        "graph": graph,
+        "layer": layer,
+        "legend_label": legend_label,
+    }
     if graph is None or layer is None:
-        return
+        return handles if return_handles else None
 
     display_label = _format_origin_annotation(legend_label)
     _apply_axis_labels(layer, "Current (mA)", "Resistance (Ohm)")
@@ -750,6 +760,16 @@ def plot_one_origin(
         )
 
     _apply_origin_readability(layer, graph)
+
+    if return_handles:
+        handles["graph"] = graph
+        handles["layer"] = layer
+        handles["workbook"] = workbook
+        handles["worksheet"] = worksheet
+        handles["legend_label"] = legend_label
+        return handles
+
+    return None
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:

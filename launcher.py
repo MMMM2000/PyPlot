@@ -57,6 +57,10 @@ class MasterLauncher(QtWidgets.QWidget):
         self.setWindowTitle("Master Launcher")
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
+        # Ensure window bookkeeping exists even if later setup fails so the
+        # destroyed callbacks can run safely.
+        self._open_windows: list[QtWidgets.QWidget] = []
+
         self._settings = QtCore.QSettings("MicrowireData", "Launcher")
         self.dev_opts = developer_options()
         self._closing = False
@@ -80,10 +84,6 @@ class MasterLauncher(QtWidgets.QWidget):
                 app.installEventFilter(self)
             except Exception:
                 pass
-
-        # Keep references to launched windows so they stay open when
-        # the launcher calls their ``main`` functions.
-        self._open_windows: list[QtWidgets.QWidget] = []
 
         self.search_bar = QtWidgets.QLineEdit(self)
         self.search_bar.setPlaceholderText("Search tools…")
@@ -210,8 +210,11 @@ class MasterLauncher(QtWidgets.QWidget):
             pass
 
         def _remove(_: object = None, w: QtWidgets.QWidget = widget) -> None:
+            windows = getattr(self, "_open_windows", None)
+            if windows is None:
+                return
             try:
-                self._open_windows.remove(w)
+                windows.remove(w)
             except ValueError:
                 pass
 

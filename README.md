@@ -332,16 +332,18 @@ plotting tools:
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
   restored on launch so repeat builds are quick.
-* **Options** – tick **Generate plots (PNG)** to reuse the existing annealing
-  plotter style. Choose **Export CSV** and/or **Export Excel** to control the
-  output formats; the builder remembers these toggles along with the last output
-  folder. Plot generation now forces Matplotlib’s headless backend, closes
-  figures automatically, and records the generated PNG paths in the “Figure”
-  columns so exports stay tidy.
-* **Output** – pick a destination directory; the tool writes
-  `microwire_database.csv`, `microwire_database.xlsx` when requested, and (if
-  plots are enabled) PNG files under `plots/`. Detailed diagnostics go to
-  `microwire_database.log` beside the exports.
+* **Options** – enable **Matplotlib plots (PNG)** to reuse the familiar
+  red/blue annealing style or tick **Origin plots** to push the data to an
+  Origin session. You can select both to capture PNG paths and Origin object
+  identifiers in separate columns. Choose **Export CSV** and/or **Export Excel**
+  to control the output formats; the builder remembers every toggle and the last
+  output folder between runs.
+* **Output** – pick a destination directory and supply a base file name. The
+  builder writes `<name>.csv`, `<name>.xlsx` when requested and (for Matplotlib
+  plots) PNG files under `plots/`. If a file already exists you can **Replace**
+  it, **Continue** appending new rows, or **Cancel** the build. The completion
+  dialog now includes an **Open** button for quick inspection of the freshly
+  generated dataset.
 
 Each microwire (composition + draw/piece) becomes a single row with English
 headers tailored for analytics. The builder selects the 1000 mA measurement and
@@ -363,8 +365,10 @@ The exported columns are:
 * Glass feeding (mm/min)
 * Underpressure
 * Notes (combined bistable status and any note fields)
-* Figure — 1000 mA / File 1000 mA
-* Figure — low mA / File low mA
+* Figure — 1000 mA (Matplotlib) / File 1000 mA
+* Figure — low mA (Matplotlib) / File low mA
+* Figure — 1000 mA (Origin)
+* Figure — low mA (Origin)
 * Low mA value (mA)
 
 The log pane summarises skipped files, missing joins, and cases where a 1000 mA
