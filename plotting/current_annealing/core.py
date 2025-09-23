@@ -11,6 +11,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
+from .burnthrough import trim_burnthrough_glitch
 from ..utils import (
     apply_readability,
     apply_readability_fonts,
@@ -60,40 +61,6 @@ def _format_origin_annotation(text: str) -> str:
     return _SUBSCRIPT_PATTERN.sub(_sub, formatted)
 
 
-def _trim_burnthrough_glitch(
-    currents: np.ndarray, resistances: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Drop the trailing sample if it collapses sharply as the wire burns."""
-
-    count = currents.size
-    if count < 3:
-        return currents, resistances
-
-    deltas = np.diff(currents.astype(float))
-    finite = np.abs(deltas[np.isfinite(deltas)])
-    if finite.size == 0:
-        return currents, resistances
-
-    last_drop = float(currents[-2] - currents[-1])
-    if not np.isfinite(last_drop) or last_drop <= 0:
-        return currents, resistances
-
-    typical = float(np.median(finite))
-    spread = (
-        float(np.quantile(finite, 0.75) - np.quantile(finite, 0.25))
-        if finite.size > 1
-        else 0.0
-    )
-    span = float(np.nanmax(currents) - np.nanmin(currents)) if count else 0.0
-    threshold = max(typical * 12.0, spread * 8.0 if spread > 0 else 0.0, span * 0.15)
-    previous = float(currents[-2])
-    relative_drop = last_drop / max(abs(previous), 1e-12)
-
-    if last_drop > threshold or relative_drop > 0.25:
-        return currents[:-1], resistances[:-1]
-    return currents, resistances
-
-
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
@@ -119,7 +86,7 @@ def load_file(path: str) -> pd.DataFrame:
     df = df[df["I_mA"] != 0].reset_index(drop=True)
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
-    trimmed_currents, trimmed_resistances = _trim_burnthrough_glitch(currents, resistances)
+    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents, resistances)
     if trimmed_currents is not currents:
         # NumPy may or may not return the original view; guard with a length check.
         if trimmed_currents.shape[0] != currents.shape[0]:

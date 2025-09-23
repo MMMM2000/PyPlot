@@ -620,8 +620,23 @@ def _load_annealing(path: Path) -> pd.DataFrame:
     df = df.iloc[:, :3].copy()
     for column in ANNEALING_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
-    df = df.dropna(subset=["I_A", "R_ohm"])
-    return df.reset_index(drop=True)
+    df = df.dropna(subset=["I_A", "R_ohm"]).reset_index(drop=True)
+
+    try:
+        from plotting.current_annealing.burnthrough import trim_burnthrough_glitch
+    except ImportError:
+        return df
+
+    currents_mA = df["I_A"].to_numpy(dtype=float) * 1e3
+    resistances = df["R_ohm"].to_numpy(dtype=float)
+    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
+    trimmed_count = int(trimmed_currents.shape[0])
+    if trimmed_count < currents_mA.shape[0]:
+        df = df.iloc[:trimmed_count].copy()
+        df.loc[:, "I_A"] = trimmed_currents / 1e3
+        df.loc[:, "R_ohm"] = trimmed_resistances
+        df = df.reset_index(drop=True)
+    return df
 
 
 def _resistance_sanity_check(df: pd.DataFrame) -> Tuple[bool, Optional[float]]:

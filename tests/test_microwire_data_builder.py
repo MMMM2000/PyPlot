@@ -59,6 +59,15 @@ def test_annealing_loader_and_sanity_check(tmp_path: Path) -> None:
     assert error < 1e-6
 
 
+def test_annealing_loader_trims_burnthrough_spike(tmp_path: Path) -> None:
+    path = tmp_path / "burn.txt"
+    path.write_text("0.05 0.10 2.0\n0.06 0.12 2.0\n0.03 0.50 20.0\n")
+    df = _load_annealing(path)
+    assert len(df) == 2
+    assert df["I_A"].tolist() == pytest.approx([0.05, 0.06])
+    assert df["R_ohm"].tolist() == pytest.approx([2.0, 2.0])
+
+
 def test_header_normaliser_variants() -> None:
     assert _header_key("hmotnosť") == "mass_g"
     assert _header_key("P.Č") == "piece_y"
