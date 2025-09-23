@@ -25,6 +25,16 @@ def test_load_file_trims_burnthrough_point(tmp_path: Path) -> None:
     assert values == pytest.approx([10.0, 120.0])
 
 
+def test_load_file_trims_resistance_spike(tmp_path: Path) -> None:
+    path = tmp_path / "burn_resistance.txt"
+    path.write_text(
+        "0.095 0.019 200\n0.100 0.020 210\n0.095 0.019 310\n"
+    )
+    df = anneal_core.load_file(path)
+    assert df["I_mA"].tolist() == pytest.approx([95.0, 100.0])
+    assert df["R_Ohm"].tolist() == pytest.approx([200.0, 210.0])
+
+
 def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:
     df = pd.DataFrame(
         {

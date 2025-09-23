@@ -667,10 +667,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         msg.setInformativeText(export_text)
         open_button: QtWidgets.QAbstractButton | None = None
         if open_target is not None:
-            open_button = msg.addButton("Open", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+            open_button = msg.addButton(
+                "Open", QtWidgets.QMessageBox.ButtonRole.AcceptRole
+            )
         close_button = msg.addButton("Close", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         msg.exec()
-        if open_button is not None and msg.clickedButton() is open_button:
+        if (
+            open_target is not None
+            and open_button is not None
+            and msg.clickedButton() is open_button
+        ):
             self._open_path(open_target)
 
     def _handle_failed(self, message: str) -> None:
@@ -695,7 +701,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _append_log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
         scrollbar = self.log_view.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+        if scrollbar is not None:
+            scrollbar.setValue(scrollbar.maximum())
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._running:

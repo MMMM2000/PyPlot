@@ -340,10 +340,11 @@ plotting tools:
   controls to choose the Matplotlib canvas size in inches; the values are saved
   between runs and the axis labels, ticks, markers, and line widths rescale so
   the smaller figures stay legible. Matplotlib still trims the burn-through
-  sample that collapses to low current and bridges the final increasing/decreasing
-  points with a blue segment so the trace ends cleanly, and the measurement loader
-  applies the same trimming so the exported tables no longer inherit the
-  burn-through spike that forces the Y-axis to stretch. Excel thumbnails are
+  sample that collapses to low current or spikes sharply in resistance and bridges
+  the final increasing/decreasing points with a blue segment so the trace ends
+  cleanly, and the measurement loader applies the same trimming so the exported
+  tables no longer inherit the burn-through spike that forces the Y-axis to
+  stretch. Excel thumbnails are
   scaled from the chosen figure size and embedded directly in the “Figure”
   columns instead of leaving the PNG filename behind. Selecting **Origin plots**
   alongside Excel export now drops each graph into the worksheet as an Origin
