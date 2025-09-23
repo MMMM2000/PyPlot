@@ -111,6 +111,14 @@ open—detaching is scheduled for the Qt application shutdown (or immediate when
 running headless)—so Python windows no longer disappear the moment an Origin
 export finishes, yet the Origin application can still be closed cleanly
 afterwards.
+Batch runs stay resilient: the loader now accepts whitespace- or comma-separated
+current logs, normalises decimal commas, and drops empty rows before plotting so
+each dataset yields a clean curve.  Every run ends with a summary that lists
+files that failed to parse and how many plots were generated successfully, and
+when **Show plots** is unchecked the tool switches Matplotlib into a headless
+mode that saves and closes each figure immediately.  Generating hundreds of
+plots no longer trips Matplotlib’s “too many open figures” warning or blocks the
+UI while dozens of windows try to render.
 Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.

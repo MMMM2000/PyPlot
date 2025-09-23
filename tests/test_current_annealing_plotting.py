@@ -35,6 +35,14 @@ def test_load_file_trims_resistance_spike(tmp_path: Path) -> None:
     assert df["R_Ohm"].tolist() == pytest.approx([200.0, 210.0])
 
 
+def test_load_file_handles_decimal_commas(tmp_path: Path) -> None:
+    path = tmp_path / "comma_values.txt"
+    path.write_text("0,001 0,002 1000,5\n0,002 0,004 1001,5\n")
+    df = anneal_core.load_file(path)
+    assert df["I_mA"].tolist() == pytest.approx([1.0, 2.0])
+    assert df["R_Ohm"].tolist() == pytest.approx([1000.5, 1001.5])
+
+
 def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:
     df = pd.DataFrame(
         {

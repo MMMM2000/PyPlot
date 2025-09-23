@@ -67,23 +67,52 @@ def load_file(path: str) -> pd.DataFrame:
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
     try:
-        df = pd.read_csv(path, sep=None, engine="python", header=None, comment="#")
-    except (csv.Error, pd.errors.ParserError):
         df = pd.read_csv(
             path,
-            delim_whitespace=True,
+            sep=None,
             engine="python",
             header=None,
             comment="#",
+            dtype=str,
+        )
+    except (csv.Error, pd.errors.ParserError):
+        df = pd.read_csv(
+            path,
+            sep=r"\s+",
+            engine="python",
+            header=None,
+            comment="#",
+            dtype=str,
         )
     if df.shape[1] < 3:
         raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
-    df = df.iloc[:, :3]
+    df = df.iloc[:, :3].copy()
     df.columns = ["I_A", "V_V", "R_Ohm"]
-    df["I_A"] = df["I_A"].astype(float)
+
+    def _to_numeric(series: pd.Series) -> pd.Series:
+        cleaned = (
+            series.astype(str)
+            .str.replace("\u2212", "-", regex=False)
+            .str.replace(",", ".", regex=False)
+            .str.strip()
+        )
+        return pd.to_numeric(cleaned, errors="coerce")
+
+    df["I_A"] = _to_numeric(df["I_A"])
+    df["V_V"] = _to_numeric(df["V_V"])
+    df["R_Ohm"] = _to_numeric(df["R_Ohm"])
+    df = df.dropna(subset=["I_A", "R_Ohm"])
+    if df.empty:
+        raise ValueError(f"{path}: no valid samples after parsing")
     df["I_mA"] = df["I_A"] * 1e3
-    df["R_Ohm"] = df["R_Ohm"].astype(float)
-    df = df[df["I_mA"] != 0].reset_index(drop=True)
+    mask = (
+        np.isfinite(df["I_mA"]) &
+        np.isfinite(df["R_Ohm"]) &
+        (df["I_mA"] != 0)
+    )
+    df = df.loc[mask].reset_index(drop=True)
+    if df.empty:
+        raise ValueError(f"{path}: no usable samples after filtering zeros")
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents, resistances)
@@ -805,31 +834,80 @@ def plot_one_origin(
 def main(files: List[str], backend: str = BACKEND) -> None:
     if IMPROVE_READABILITY:
         apply_readability_fonts()
-    outs: List[Tuple[Figure, str]] = []
+    use_matplotlib = wants_matplotlib(backend)
     use_origin = wants_origin(backend)
     origin_mode = _normalise_origin_mode(ORIGIN_MODE)
+    keep_open = bool(use_matplotlib and SHOW_PLOTS)
+    prev_interactive = plt.isinteractive()
+    if use_matplotlib and not SHOW_PLOTS:
+        plt.ioff()
+
+    open_figures: List[Figure] = []
+    failures: List[Tuple[str, str]] = []
+    successes = 0
+    output_dir: Path | None = None
+
     try:
         for path in files:
-            df = load_file(path)
+            try:
+                df = load_file(path)
+            except Exception as exc:
+                failures.append((path, f"load: {exc}"))
+                print(f"ERROR: Failed to read {Path(path).name}: {exc}")
+                continue
+
             title = format_annealing_title(Path(path).stem)
-            if wants_matplotlib(backend):
-                fig, fname = plot_one(df, title)
-                outs.append((fig, fname))
+            success = True
+            fig: Figure | None = None
+            fname: str = ""
+
+            if use_matplotlib:
+                try:
+                    fig, fname = plot_one(df, title)
+                    if SAVE_PLOTS:
+                        if output_dir is None:
+                            output_dir = Path(OUTPUT_DIR)
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                        save_figure(fig, output_dir / fname, SAVE_FORMAT, PNG_DPI)
+                    if keep_open:
+                        open_figures.append(fig)
+                    else:
+                        plt.close(fig)
+                except Exception as exc:
+                    failures.append((path, f"matplotlib: {exc}"))
+                    print(
+                        f"ERROR: Matplotlib plot failed for {Path(path).name}: {exc}"
+                    )
+                    success = False
+                    if fig is not None:
+                        plt.close(fig)
+
             if use_origin:
                 try:
                     plot_one_origin(df, title, Path(path).name, mode=origin_mode)
                 except Exception as e:
                     print(f"Origin plot failed for {title}: {e}")
+
+            if success:
+                successes += 1
     finally:
         if use_origin:
             schedule_origin_release()
 
-    if wants_matplotlib(backend):
-        if SHOW_PLOTS:
+    if use_matplotlib:
+        if keep_open and open_figures:
             show_plots()
-        else:
-            plt.close('all')
-        if SAVE_PLOTS and outs:
-            Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-            for fig, fname in outs:
-                save_figure(fig, Path(OUTPUT_DIR) / fname, SAVE_FORMAT, PNG_DPI)
+        elif not keep_open:
+            plt.close("all")
+
+    if use_matplotlib and not SHOW_PLOTS and prev_interactive:
+        plt.ion()
+
+    total = successes + len(failures)
+    if total:
+        print(f"Summary: processed {successes} of {total} file(s).")
+        if failures:
+            for path, reason in failures:
+                print(f"  Skipped {Path(path).name}: {reason}")
+    else:
+        print("No files supplied for plotting.")
