@@ -309,6 +309,43 @@ the window to compare the production interface against the translucent skin, or
 open the serial logger for extra context. Use the concept to gather feedback
 before enabling a "liquid glass" appearance toggle in the main tools.
 
+### Microwire data builder
+
+`experiments/microwire_data_builder` assembles fabrication spreadsheets and
+current-annealing text files into a single analytics-ready table. Enable the
+**Experiments** tab from the launcher’s **Developer** menu and choose
+**Microwire Data Builder** or start it directly:
+
+```bash
+python -m experiments.microwire_data_builder
+```
+
+The Tkinter window mirrors the file-picking pattern used by the existing
+plotting tools:
+
+* **Fabrication spreadsheets (.xlsx)** – add the composition workbook and any
+  per-draw piece workbooks for the measurements you want to combine. The
+  program maps Slovak headers to English fields, keeps a raw text copy for
+  ambiguous numeric cells, and joins draw/piece data by composition and draw X /
+  piece Y.
+* **Current-annealing files (.txt)** – add one or more three-column annealing
+  logs. The loader auto-detects delimiters, validates that \(R \approx V/I\),
+  and computes summary features (linear slope, gradient mean, percentile anchors,
+  non-linearity, etc.).
+* **Options** – tick **Generate plots (PNG)** to reuse the existing annealing
+  plotter style, and enable the Excel or Parquet exporters if you need those
+  formats in addition to the default CSV.
+* **Output** – choose an output directory; the tool writes
+  `microwire_database.csv` and, when selected, the Excel/Parquet variants and a
+  `plots/` folder. Detailed diagnostics go to `microwire_database.log` in the
+  same directory.
+
+Each measurement row in the export contains the file provenance, composition and
+microwire identifiers, fabrication/piece metadata (when available), curve
+quality checks, statistical features, and optional plot paths. You can rerun the
+builder whenever new annealing runs or fabrication sheets are added—the log pane
+highlights missing joins or sanity-check failures without aborting the build.
+
 ## 7. Repository maintenance
 
 * Temporary Origin HTML exports and scratch files are removed from the

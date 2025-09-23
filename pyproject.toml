@@ -8,6 +8,7 @@ dependencies = [
     "matplotlib==3.10.3",
     "numpy==2.3.2",
     "pandas==2.3.1",
+    "openpyxl==3.1.5",
     "PyPDF2==3.0.1",
     "pyqtgraph==0.13.7",
     "plotly==6.2.0",
