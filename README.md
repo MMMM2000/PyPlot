@@ -111,6 +111,14 @@ open—detaching is scheduled for the Qt application shutdown (or immediate when
 running headless)—so Python windows no longer disappear the moment an Origin
 export finishes, yet the Origin application can still be closed cleanly
 afterwards.
+Batch runs stay resilient: the loader now accepts whitespace- or comma-separated
+current logs, normalises decimal commas, and drops empty rows before plotting so
+each dataset yields a clean curve.  Every run ends with a summary that lists
+files that failed to parse and how many plots were generated successfully, and
+when **Show plots** is unchecked the tool switches Matplotlib into a headless
+mode that saves and closes each figure immediately.  Generating hundreds of
+plots no longer trips Matplotlib’s “too many open figures” warning or blocks the
+UI while dozens of windows try to render.
 Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
@@ -308,6 +316,90 @@ macOS 26-inspired glass workspace. Launch the classic logger from the buttons i
 the window to compare the production interface against the translucent skin, or
 open the serial logger for extra context. Use the concept to gather feedback
 before enabling a "liquid glass" appearance toggle in the main tools.
+
+### Microwire data builder
+
+`experiments/microwire_data_builder` assembles fabrication spreadsheets and
+current-annealing text files into a single analytics-ready table. Enable the
+**Experiments** tab from the launcher’s **Developer** menu and choose
+**Microwire Data Builder** or start it directly:
+
+```bash
+python -m experiments.microwire_data_builder
+```
+
+The PyQt6 window splits the settings and status widgets on the left from the
+file pickers on the right so the full control set stays visible on short
+displays while still mirroring the file-picking pattern used by the existing
+plotting tools:
+
+* **Fabrication spreadsheets (.xlsx)** – add the composition workbook and any
+  per-draw piece workbooks for the measurements you want to combine. The
+  program maps Slovak headers to English fields, keeps a raw text copy for
+  ambiguous numeric cells, and joins draw/piece data by composition and draw X /
+  piece Y. Added paths are remembered between runs.
+* **Current-annealing files (.txt)** – add one or more three-column annealing
+  logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
+  logs warnings whenever the check drifts beyond tolerance. File selections are
+  restored on launch so repeat builds are quick.
+* **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
+  red/blue annealing style or tick **Origin plots** to push the data to an Origin
+  session using the simple single-trace template. Use the **Figure width/height**
+  controls to choose the Matplotlib canvas size in inches; the values are saved
+  between runs and the axis labels, ticks, markers, and line widths rescale so
+  the smaller figures stay legible. Matplotlib still trims the burn-through
+  sample that collapses to low current or spikes sharply in resistance and bridges
+  the final increasing/decreasing points with a blue segment so the trace ends
+  cleanly, and the measurement loader applies the same trimming so the exported
+  tables no longer inherit the burn-through spike that forces the Y-axis to
+  stretch. Excel thumbnails are
+  scaled from the chosen figure size and embedded directly in the “Figure”
+  columns instead of leaving the PNG filename behind. Selecting **Origin plots**
+  alongside Excel export now drops each graph into the worksheet as an Origin
+  OLE object (stored under `origin_objects/`), while CSV output continues to list
+  the corresponding filenames. Choose **Export CSV** and/or **Export Excel** to
+  control the output formats; every toggle, folder, and size preference is
+  remembered between runs.
+* **Output** – pick a destination directory and supply a base file name. The
+  builder writes `<name>.csv`, `<name>.xlsx` when requested, PNG plots under
+  `plots/`, and Origin project snippets under `origin_objects/` whenever that
+  backend is enabled. CSV exports continue to hold the plot file names while the
+  Excel workbook replaces those cells with embedded media. If a file already
+  exists you can **Replace** it, **Continue** appending new rows, or **Cancel**
+  the build. The completion dialog now includes an **Open** button for quick
+  inspection of the freshly generated dataset.
+
+Each microwire (composition + draw/piece) becomes a single row with English
+headers tailored for analytics. The builder selects the 1000 mA measurement and
+the lowest available current for each microwire, generates optional plots with
+the familiar red/blue styling, and records provenance back to the source files.
+The exported columns are:
+
+* Composition
+* Microwire (e.g. `4/1`)
+* d (µm)
+* D (µm)
+* d/D
+* Length (m)
+* Production datetime
+* Mass (g)
+* Resistance (Ω)
+* Temperature (°C)
+* Winding speed (m/min)
+* Glass feeding (mm/min)
+* Underpressure
+* Notes (combined bistable status and any note fields)
+* Figure — 1000 mA (Matplotlib) / File 1000 mA
+* Figure — low mA (Matplotlib) / File low mA
+* Figure — 1000 mA (Origin)
+* Figure — low mA (Origin)
+* Low mA value (mA)
+
+The log pane summarises skipped files, missing joins, and cases where a 1000 mA
+or low-current measurement is absent so you can investigate without re-running
+the whole build. The exported table keeps just the source and plot filenames,
+so combine them with the chosen output directory (and `plots/` sub-folder for
+PNGs) when you want to open the artefacts later.
 
 ## 7. Repository maintenance
 

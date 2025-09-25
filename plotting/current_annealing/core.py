@@ -11,6 +11,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
+from .burnthrough import trim_burnthrough_glitch
 from ..utils import (
     apply_readability,
     apply_readability_fonts,
@@ -42,7 +43,7 @@ SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
 
 ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
-ORIGIN_MODE: str = ORIGIN_MODES[0]
+ORIGIN_MODE: str = ORIGIN_MODES[1]
 
 
 _SUBSCRIPT_PATTERN = re.compile(r"([A-Z][a-z])(\d+)")
@@ -60,60 +61,61 @@ def _format_origin_annotation(text: str) -> str:
     return _SUBSCRIPT_PATTERN.sub(_sub, formatted)
 
 
-def _trim_burnthrough_glitch(
-    currents: np.ndarray, resistances: np.ndarray
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Drop the trailing sample if it collapses sharply as the wire burns."""
-
-    count = currents.size
-    if count < 3:
-        return currents, resistances
-
-    deltas = np.diff(currents.astype(float))
-    finite = np.abs(deltas[np.isfinite(deltas)])
-    if finite.size == 0:
-        return currents, resistances
-
-    last_drop = float(currents[-2] - currents[-1])
-    if not np.isfinite(last_drop) or last_drop <= 0:
-        return currents, resistances
-
-    typical = float(np.median(finite))
-    spread = float(np.quantile(finite, 0.75) - np.quantile(finite, 0.25)) if finite.size > 1 else 0.0
-    span = float(np.nanmax(currents) - np.nanmin(currents)) if count else 0.0
-    threshold = max(typical * 8.0, spread * 6.0 if spread > 0 else 0.0, span * 0.05, 5.0)
-
-    if last_drop > threshold:
-        return currents[:-1], resistances[:-1]
-    return currents, resistances
-
-
 def load_file(path: str) -> pd.DataFrame:
     """Load current annealing tri-column file: I(A) V(V) R(Ohm).
 
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
     try:
-        df = pd.read_csv(path, sep=None, engine="python", header=None, comment="#")
-    except (csv.Error, pd.errors.ParserError):
         df = pd.read_csv(
             path,
-            delim_whitespace=True,
+            sep=None,
             engine="python",
             header=None,
             comment="#",
+            dtype=str,
+        )
+    except (csv.Error, pd.errors.ParserError):
+        df = pd.read_csv(
+            path,
+            sep=r"\s+",
+            engine="python",
+            header=None,
+            comment="#",
+            dtype=str,
         )
     if df.shape[1] < 3:
         raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
-    df = df.iloc[:, :3]
+    df = df.iloc[:, :3].copy()
     df.columns = ["I_A", "V_V", "R_Ohm"]
-    df["I_A"] = df["I_A"].astype(float)
+
+    def _to_numeric(series: pd.Series) -> pd.Series:
+        cleaned = (
+            series.astype(str)
+            .str.replace("\u2212", "-", regex=False)
+            .str.replace(",", ".", regex=False)
+            .str.strip()
+        )
+        return pd.to_numeric(cleaned, errors="coerce")
+
+    df["I_A"] = _to_numeric(df["I_A"])
+    df["V_V"] = _to_numeric(df["V_V"])
+    df["R_Ohm"] = _to_numeric(df["R_Ohm"])
+    df = df.dropna(subset=["I_A", "R_Ohm"])
+    if df.empty:
+        raise ValueError(f"{path}: no valid samples after parsing")
     df["I_mA"] = df["I_A"] * 1e3
-    df["R_Ohm"] = df["R_Ohm"].astype(float)
-    df = df[df["I_mA"] != 0].reset_index(drop=True)
+    mask = (
+        np.isfinite(df["I_mA"]) &
+        np.isfinite(df["R_Ohm"]) &
+        (df["I_mA"] != 0)
+    )
+    df = df.loc[mask].reset_index(drop=True)
+    if df.empty:
+        raise ValueError(f"{path}: no usable samples after filtering zeros")
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
-    trimmed_currents, trimmed_resistances = _trim_burnthrough_glitch(currents, resistances)
+    trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents, resistances)
     if trimmed_currents is not currents:
         # NumPy may or may not return the original view; guard with a length check.
         if trimmed_currents.shape[0] != currents.shape[0]:
@@ -404,7 +406,7 @@ def _prepare_origin_workspace(
         pass
     try:
         worksheet.set_label(0, "Current (mA)")
-        worksheet.set_label(1, "Resistance (Ohm)")
+        worksheet.set_label(1, "Resistance (Ω)")
     except Exception:
         pass
 
@@ -588,17 +590,23 @@ def _plot_origin_experimental(
     dec_x: List[float] = []
     dec_y: List[float] = []
 
+    previous_direction: float | None = None
     for start, end, direction in segments:
         if end <= start:
+            previous_direction = direction
             continue
         xs = currents[start:end].tolist()
         ys = resistances[start:end].tolist()
         target_x, target_y = (inc_x, inc_y) if direction >= 0 else (dec_x, dec_y)
+        if direction < 0 and previous_direction is not None and previous_direction >= 0 and start > 0:
+            xs.insert(0, float(currents[start - 1]))
+            ys.insert(0, float(resistances[start - 1]))
         if target_x and xs:
             target_x.append(float('nan'))
             target_y.append(float('nan'))
         target_x.extend(xs)
         target_y.extend(ys)
+        previous_direction = direction
 
     legend_entries: List[Tuple[int, str]] = []
 
@@ -673,38 +681,89 @@ def _plot_origin_experimental(
         graph.activate()
     except Exception:
         pass
-def plot_one(df: pd.DataFrame, title: str) -> Tuple[Figure, str]:
-    fig, ax = plt.subplots(figsize=(8, 4.5))
+def plot_one(
+    df: pd.DataFrame,
+    title: str,
+    *,
+    figsize: Tuple[float, float] | None = None,
+) -> Tuple[Figure, str]:
+    if not figsize:
+        figsize = (4.0, 2.25)
+    width, height = max(float(figsize[0]), 0.5), max(float(figsize[1]), 0.5)
+    fig, ax = plt.subplots(figsize=(width, height))
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     _, segments = _direction_profile(currents)
 
+    base_width, base_height = 8.0, 4.5
+    scale = min(width / base_width, height / base_height)
+    if not np.isfinite(scale) or scale <= 0:
+        scale = min(width, height) / base_height
+    scale = max(0.3, float(scale))
+    tick_size = max(6, int(round(18 * scale)))
+    axis_size = max(6, int(round(18 * scale)))
+    title_size = max(8, int(round(22 * scale)))
+    marker_size = max(1.5, 4.0 * scale)
+    line_width = max(1.0, 1.5 * scale)
+
     if currents.size == 0:
         pass
     elif currents.size == 1:
-        ax.plot(currents, resistances, marker="o", linestyle="None", color="r", markersize=3)
+        ax.plot(
+            currents,
+            resistances,
+            marker="o",
+            linestyle="None",
+            color="r",
+            markersize=marker_size,
+        )
     else:
+        previous_direction: float | None = None
         for start, end, direction in segments:
             color = "r" if direction >= 0 else "b"
+            if end <= start:
+                previous_direction = direction
+                continue
+            segment_currents = currents[start:end]
+            segment_resistances = resistances[start:end]
+            if (
+                direction < 0
+                and previous_direction is not None
+                and previous_direction >= 0
+                and start > 0
+            ):
+                segment_currents = np.concatenate(
+                    ([currents[start - 1]], segment_currents)
+                )
+                segment_resistances = np.concatenate(
+                    ([resistances[start - 1]], segment_resistances)
+                )
             ax.plot(
-                currents[start:end],
-                resistances[start:end],
+                segment_currents,
+                segment_resistances,
                 color=color,
                 marker="o",
                 linestyle="-",
-                markersize=3,
+                markersize=marker_size,
                 markerfacecolor=color,
                 markeredgecolor=color,
-                linewidth=1.5,
+                linewidth=line_width,
             )
+            previous_direction = direction
 
     ax.set_xlabel("Current (mA)")
-    ax.set_ylabel("Resistance (Ohm)")
+    ax.set_ylabel("Resistance (Ω)")
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
     fig.tight_layout()
-    apply_readability(ax, globals())
+    cfg = dict(globals())
+    cfg.update({
+        "TICK_SIZE": tick_size,
+        "AXIS_LABEL_SIZE": axis_size,
+        "TITLE_SIZE": title_size,
+    })
+    apply_readability(ax, cfg)
     fname = title.replace(os.sep, "_")
     return fig, fname
 
@@ -714,7 +773,9 @@ def plot_one_origin(
     title: str,
     source_name: str,
     mode: str | None = None,
-) -> None:
+    *,
+    return_handles: bool = False,
+) -> dict[str, object] | None:
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     origin_any, workbook, worksheet, graph, layer, legend_label = _prepare_origin_workspace(
@@ -723,11 +784,19 @@ def plot_one_origin(
         title,
         source_name,
     )
+    handles: dict[str, object] = {
+        "origin": origin_any,
+        "workbook": workbook,
+        "worksheet": worksheet,
+        "graph": graph,
+        "layer": layer,
+        "legend_label": legend_label,
+    }
     if graph is None or layer is None:
-        return
+        return handles if return_handles else None
 
     display_label = _format_origin_annotation(legend_label)
-    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ohm)")
+    _apply_axis_labels(layer, "Current (mA)", "Resistance (Ω)")
     _set_graph_title(layer, display_label)
     _assign_long_name(graph, legend_label)
     _assign_long_name(workbook, legend_label)
@@ -751,35 +820,94 @@ def plot_one_origin(
 
     _apply_origin_readability(layer, graph)
 
+    if return_handles:
+        handles["graph"] = graph
+        handles["layer"] = layer
+        handles["workbook"] = workbook
+        handles["worksheet"] = worksheet
+        handles["legend_label"] = legend_label
+        return handles
+
+    return None
+
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     if IMPROVE_READABILITY:
         apply_readability_fonts()
-    outs: List[Tuple[Figure, str]] = []
+    use_matplotlib = wants_matplotlib(backend)
     use_origin = wants_origin(backend)
     origin_mode = _normalise_origin_mode(ORIGIN_MODE)
+    keep_open = bool(use_matplotlib and SHOW_PLOTS)
+    prev_interactive = plt.isinteractive()
+    if use_matplotlib and not SHOW_PLOTS:
+        plt.ioff()
+
+    open_figures: List[Figure] = []
+    failures: List[Tuple[str, str]] = []
+    successes = 0
+    output_dir: Path | None = None
+
     try:
         for path in files:
-            df = load_file(path)
+            try:
+                df = load_file(path)
+            except Exception as exc:
+                failures.append((path, f"load: {exc}"))
+                print(f"ERROR: Failed to read {Path(path).name}: {exc}")
+                continue
+
             title = format_annealing_title(Path(path).stem)
-            if wants_matplotlib(backend):
-                fig, fname = plot_one(df, title)
-                outs.append((fig, fname))
+            success = True
+            fig: Figure | None = None
+            fname: str = ""
+
+            if use_matplotlib:
+                try:
+                    fig, fname = plot_one(df, title)
+                    if SAVE_PLOTS:
+                        if output_dir is None:
+                            output_dir = Path(OUTPUT_DIR)
+                            output_dir.mkdir(parents=True, exist_ok=True)
+                        save_figure(fig, output_dir / fname, SAVE_FORMAT, PNG_DPI)
+                    if keep_open:
+                        open_figures.append(fig)
+                    else:
+                        plt.close(fig)
+                except Exception as exc:
+                    failures.append((path, f"matplotlib: {exc}"))
+                    print(
+                        f"ERROR: Matplotlib plot failed for {Path(path).name}: {exc}"
+                    )
+                    success = False
+                    if fig is not None:
+                        plt.close(fig)
+
             if use_origin:
                 try:
                     plot_one_origin(df, title, Path(path).name, mode=origin_mode)
                 except Exception as e:
                     print(f"Origin plot failed for {title}: {e}")
+
+            if success:
+                successes += 1
     finally:
         if use_origin:
             schedule_origin_release()
 
-    if wants_matplotlib(backend):
-        if SHOW_PLOTS:
+    if use_matplotlib:
+        if keep_open and open_figures:
             show_plots()
-        else:
-            plt.close('all')
-        if SAVE_PLOTS and outs:
-            Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-            for fig, fname in outs:
-                save_figure(fig, Path(OUTPUT_DIR) / fname, SAVE_FORMAT, PNG_DPI)
+        elif not keep_open:
+            plt.close("all")
+
+    if use_matplotlib and not SHOW_PLOTS and prev_interactive:
+        plt.ion()
+
+    total = successes + len(failures)
+    if total:
+        print(f"Summary: processed {successes} of {total} file(s).")
+        if failures:
+            for path, reason in failures:
+                print(f"  Skipped {Path(path).name}: {reason}")
+    else:
+        print("No files supplied for plotting.")
