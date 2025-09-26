@@ -4,18 +4,50 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import importlib.util
+import sys
 import logging
 import math
 import os
 import re
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
+
+try:
+    from .video import extract_video_metrics
+except ImportError:
+    module_name = "experiments.microwire_data_builder.video"
+    module_path = Path(__file__).with_name("video.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        extract_video_metrics = module.extract_video_metrics
+    else:
+        raise
+
+try:
+    from .ocr import ensure_tesseract_available
+except ImportError:
+    module_name = "experiments.microwire_data_builder.ocr"
+    module_path = Path(__file__).with_name("ocr.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        ensure_tesseract_available = module.ensure_tesseract_available
+    else:
+        raise
+
+sys.modules.setdefault("experiments.microwire_data_builder.core", sys.modules.get(__name__))
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -24,6 +56,8 @@ R_CHECK_THRESHOLD = 0.05
 DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
 ORIGIN_DIR_NAME = "origin_objects"
+
+MICRO_SIGN = "µ"
 
 OUTPUT_COLUMNS = [
     "Composition",
@@ -52,6 +86,12 @@ OUTPUT_COLUMNS = [
 FIGURE_COLUMNS = (
     "Figure — 1000 mA",
     "Figure — low mA",
+)
+
+ORIGIN_FIGURE_COLUMNS = tuple(
+    column
+    for column in OUTPUT_COLUMNS
+    if column.startswith("Figure") and "(Origin)" in column
 )
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
@@ -142,6 +182,11 @@ ALT_VARIANT_PATTERN = re.compile(r"(?:s\d+|\d+_\d+)a(?!\w)", re.IGNORECASE)
 DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
 SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
+MICROSCOPE_VALUE_PATTERN = re.compile(
+    rf"(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
+    re.IGNORECASE,
+)
+
 
 def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> Tuple[float, float]:
     default = (4.0, 2.25)
@@ -162,6 +207,23 @@ def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> T
         height_f = default[1]
     return (max(0.5, width_f), max(0.5, height_f))
 
+EXCEL_EMBED_DPI = 150.0
+
+
+def _excel_pixel_limits(figure_size: Tuple[float, float]) -> Tuple[int, int]:
+    width_in, height_in = figure_size
+    width_px = max(int(round(width_in * EXCEL_EMBED_DPI)), 1)
+    height_px = max(int(round(height_in * EXCEL_EMBED_DPI)), 1)
+    return width_px, height_px
+
+
+def _excel_row_height(height_in: float) -> float:
+    return max(height_in * 72.0, 18.0)
+
+
+def _excel_column_width(width_in: float) -> float:
+    return max(width_in * 7.0, 12.0)
+
 
 @dataclass
 class BuilderConfig:
@@ -170,6 +232,8 @@ class BuilderConfig:
     fabrication_files: List[Path]
     annealing_files: List[Path]
     output_dir: Path
+    microscope_files: List[Path] = field(default_factory=list)
+    video_files: List[Path] = field(default_factory=list)
     make_plots: bool = False
     export_formats: Tuple[str, ...] = ("csv",)
     plot_dir_name: str = PLOT_DIR_NAME

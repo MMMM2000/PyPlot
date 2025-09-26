@@ -101,7 +101,9 @@ def load_file(path: str) -> pd.DataFrame:
     df["I_A"] = _to_numeric(df["I_A"])
     df["V_V"] = _to_numeric(df["V_V"])
     df["R_Ohm"] = _to_numeric(df["R_Ohm"])
-    df = df.dropna(subset=["I_A", "R_Ohm"])
+    df = df.dropna(subset=["I_A", "R_Ohm"]).reset_index(drop=True)
+    while len(df) > 1 and float(df.loc[0, "R_Ohm"]) <= 0.0:
+        df = df.iloc[1:].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"{path}: no valid samples after parsing")
     df["I_mA"] = df["I_A"] * 1e3

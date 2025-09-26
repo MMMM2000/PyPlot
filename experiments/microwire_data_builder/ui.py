@@ -1,9 +1,10 @@
-"""PyQt6 user interface for the microwire database builder."""
+﻿"""PyQt6 user interface for the microwire database builder."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Callable, Iterable
@@ -19,8 +20,12 @@ from .core import (
     BuilderConfig,
     build_database,
     _normalise_output_name,
+    _metadata_from_path,
 )
 
+
+MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
+VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
 
 class QtLogHandler(logging.Handler):
     """Logging handler that forwards records to a Qt slot."""
@@ -73,7 +78,7 @@ class BuildWorker(QtCore.QObject):
                     )
             stats = result.stats
             self.logger.info(
-                "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R≈V/I failures=%s",
+                "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s Râ‰ˆV/I failures=%s",
                 stats.parsed,
                 stats.skipped,
                 stats.rows_built,
@@ -100,16 +105,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.setWindowTitle("Microwire Data Builder")
         self.resize(960, 720)
 
-        self.fabrication_paths: list[Path] = []
+        self.microscope_paths: list[Path] = []
         self.annealing_paths: list[Path] = []
+        self.data_roots: list[Path] = []
         self._thread: QtCore.QThread | None = None
         self._worker: BuildWorker | None = None
         self._running = False
 
         cwd = Path.cwd()
         self._default_output_dir = cwd / "builder_output"
-        self._last_fabrication_dir = str(cwd)
+        self._last_microscope_dir = str(cwd)
         self._last_anneal_dir = str(cwd)
+        self._last_root_dir = str(cwd)
         self._last_output_dir = str(cwd)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
@@ -136,30 +143,22 @@ class BuilderWindow(QtWidgets.QMainWindow):
         main_layout.addLayout(left_layout, 2)
         main_layout.addLayout(right_layout, 3)
 
-        # Fabrication inputs
-        self.fabrication_group = QtWidgets.QGroupBox("Fabrication spreadsheets (.xlsx)")
-        fab_layout = QtWidgets.QVBoxLayout(self.fabrication_group)
-        self.fabrication_list = QtWidgets.QListWidget()
-        self.fabrication_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
-        fab_layout.addWidget(self.fabrication_list)
-
-        fab_buttons = QtWidgets.QHBoxLayout()
-        fab_add_files = QtWidgets.QPushButton("Add files…")
-        fab_add_files.clicked.connect(self._add_fabrication_files)
-        fab_buttons.addWidget(fab_add_files)
-        fab_add_folder = QtWidgets.QPushButton("Add folder…")
-        fab_add_folder.clicked.connect(self._add_fabrication_folder)
-        fab_buttons.addWidget(fab_add_folder)
-        fab_clear = QtWidgets.QPushButton("Clear")
-        fab_clear.clicked.connect(self._clear_fabrication)
-        fab_buttons.addWidget(fab_clear)
-        fab_buttons.addStretch(1)
-        fab_layout.addLayout(fab_buttons)
-
-        self.fabrication_recursive = QtWidgets.QCheckBox("Recursive scan")
-        self.fabrication_recursive.setChecked(True)
-        fab_layout.addWidget(self.fabrication_recursive)
-        right_layout.addWidget(self.fabrication_group, 1)
+        # Data roots
+        self.root_group = QtWidgets.QGroupBox("Microwire data folder")
+        root_layout = QtWidgets.QVBoxLayout(self.root_group)
+        self.root_list = QtWidgets.QListWidget()
+        self.root_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        root_layout.addWidget(self.root_list)
+        root_buttons = QtWidgets.QHBoxLayout()
+        root_add = QtWidgets.QPushButton("Add rootâ€¦")
+        root_add.clicked.connect(self._add_data_root)
+        root_buttons.addWidget(root_add)
+        root_clear = QtWidgets.QPushButton("Clear")
+        root_clear.clicked.connect(self._clear_data_roots)
+        root_buttons.addWidget(root_clear)
+        root_buttons.addStretch(1)
+        root_layout.addLayout(root_buttons)
+        right_layout.addWidget(self.root_group)
 
         # Annealing inputs
         self.anneal_group = QtWidgets.QGroupBox("Current-annealing files (.txt)")
@@ -169,10 +168,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         anneal_layout.addWidget(self.anneal_list)
 
         anneal_buttons = QtWidgets.QHBoxLayout()
-        anneal_add_files = QtWidgets.QPushButton("Add files…")
+        anneal_add_files = QtWidgets.QPushButton("Add filesâ€¦")
         anneal_add_files.clicked.connect(self._add_anneal_files)
         anneal_buttons.addWidget(anneal_add_files)
-        anneal_add_folder = QtWidgets.QPushButton("Add folder…")
+        anneal_add_folder = QtWidgets.QPushButton("Add folderâ€¦")
         anneal_add_folder.clicked.connect(self._add_anneal_folder)
         anneal_buttons.addWidget(anneal_add_folder)
         anneal_clear = QtWidgets.QPushButton("Clear")
@@ -185,7 +184,29 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.anneal_recursive.setChecked(True)
         anneal_layout.addWidget(self.anneal_recursive)
         right_layout.addWidget(self.anneal_group, 1)
-        right_layout.addStretch(1)
+
+        # Microscope inputs
+        self.microscope_group = QtWidgets.QGroupBox("Microscope images")
+        micro_layout = QtWidgets.QVBoxLayout(self.microscope_group)
+        self.microscope_list = QtWidgets.QListWidget()
+        self.microscope_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        micro_layout.addWidget(self.microscope_list)
+        micro_buttons = QtWidgets.QHBoxLayout()
+        micro_add_files = QtWidgets.QPushButton("Add filesâ€¦")
+        micro_add_files.clicked.connect(self._add_microscope_files)
+        micro_buttons.addWidget(micro_add_files)
+        micro_add_folder = QtWidgets.QPushButton("Add folderâ€¦")
+        micro_add_folder.clicked.connect(self._add_microscope_folder)
+        micro_buttons.addWidget(micro_add_folder)
+        micro_clear = QtWidgets.QPushButton("Clear")
+        micro_clear.clicked.connect(self._clear_microscope)
+        micro_buttons.addWidget(micro_clear)
+        micro_buttons.addStretch(1)
+        micro_layout.addLayout(micro_buttons)
+        self.microscope_recursive = QtWidgets.QCheckBox("Recursive scan")
+        self.microscope_recursive.setChecked(True)
+        micro_layout.addWidget(self.microscope_recursive)
+        right_layout.addWidget(self.microscope_group, 1)
 
         # Options
         self.options_group = QtWidgets.QGroupBox("Options")
@@ -209,19 +230,19 @@ class BuilderWindow(QtWidgets.QMainWindow):
         figure_size_form.setHorizontalSpacing(8)
         figure_size_form.setVerticalSpacing(4)
         self.figure_width_spin = QtWidgets.QDoubleSpinBox()
-        self.figure_width_spin.setRange(1.0, 12.0)
-        self.figure_width_spin.setDecimals(2)
-        self.figure_width_spin.setSingleStep(0.25)
-        self.figure_width_spin.setValue(4.0)
+        self.figure_width_spin.setRange(20.0, 400.0)
+        self.figure_width_spin.setDecimals(1)
+        self.figure_width_spin.setSingleStep(5.0)
+        self.figure_width_spin.setValue(140.0)
         self.figure_width_spin.valueChanged.connect(self._save_settings)
-        figure_size_form.addRow("Figure width (in)", self.figure_width_spin)
+        figure_size_form.addRow("Figure width (mm)", self.figure_width_spin)
         self.figure_height_spin = QtWidgets.QDoubleSpinBox()
-        self.figure_height_spin.setRange(0.5, 8.0)
-        self.figure_height_spin.setDecimals(2)
-        self.figure_height_spin.setSingleStep(0.25)
-        self.figure_height_spin.setValue(2.25)
+        self.figure_height_spin.setRange(20.0, 250.0)
+        self.figure_height_spin.setDecimals(1)
+        self.figure_height_spin.setSingleStep(5.0)
+        self.figure_height_spin.setValue(90.0)
         self.figure_height_spin.valueChanged.connect(self._save_settings)
-        figure_size_form.addRow("Figure height (in)", self.figure_height_spin)
+        figure_size_form.addRow("Figure height (mm)", self.figure_height_spin)
         options_layout.addLayout(figure_size_form)
         left_layout.addWidget(self.options_group)
 
@@ -235,7 +256,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.output_edit = QtWidgets.QLineEdit(str(self._default_output_dir))
         self.output_edit.editingFinished.connect(self._save_settings)
         output_layout.addWidget(self.output_edit, 0, 1)
-        self.output_button = QtWidgets.QPushButton("Browse…")
+        self.output_button = QtWidgets.QPushButton("Browseâ€¦")
         self.output_button.clicked.connect(self._select_output_dir)
         output_layout.addWidget(self.output_button, 0, 2)
         name_label = QtWidgets.QLabel("File name:")
@@ -317,10 +338,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except (TypeError, ValueError):
                 return default
 
-        self.fabrication_paths = _decode_paths(self.settings.value("fabrication_paths", ""))
-        self._update_list_widget(self.fabrication_list, self.fabrication_paths)
         self.annealing_paths = _decode_paths(self.settings.value("annealing_paths", ""))
         self._update_list_widget(self.anneal_list, self.annealing_paths)
+        self.microscope_paths = _decode_paths(self.settings.value("microscope_paths", ""))
+        self._update_list_widget(self.microscope_list, self.microscope_paths)
+        self.data_roots = _decode_paths(self.settings.value("data_roots", ""))
+        self._update_list_widget(self.root_list, self.data_roots)
 
         with QtCore.QSignalBlocker(self.plot_matplotlib_check):
             self.plot_matplotlib_check.setChecked(_read_bool("plot_matplotlib", True))
@@ -330,9 +353,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.export_csv_check.setChecked(_read_bool("export_csv", True))
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
+        if hasattr(self, "microscope_recursive"):
+            with QtCore.QSignalBlocker(self.microscope_recursive):
+                self.microscope_recursive.setChecked(_read_bool("microscope_recursive", True))
 
-        width_value = _read_float("figure_width", 4.0)
-        height_value = _read_float("figure_height", 2.25)
+        width_value = _read_float("figure_width", 140.0)
+        height_value = _read_float("figure_height", 90.0)
+        if width_value <= 20.0 and height_value <= 20.0:
+            width_value *= 25.4
+            height_value *= 25.4
         with QtCore.QSignalBlocker(self.figure_width_spin):
             self.figure_width_spin.setValue(width_value)
         with QtCore.QSignalBlocker(self.figure_height_spin):
@@ -347,12 +376,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(output_name_value, str) and output_name_value.strip():
             self.output_name_edit.setText(output_name_value)
 
-        last_fab = self.settings.value("last_fabrication_dir", "")
-        if isinstance(last_fab, str) and last_fab.strip():
-            self._last_fabrication_dir = last_fab
+        last_microscope = self.settings.value("last_microscope_dir", "")
+        if isinstance(last_microscope, str) and last_microscope.strip():
+            self._last_microscope_dir = last_microscope
         last_anneal = self.settings.value("last_anneal_dir", "")
         if isinstance(last_anneal, str) and last_anneal.strip():
             self._last_anneal_dir = last_anneal
+        last_root = self.settings.value("last_root_dir", "")
+        if isinstance(last_root, str) and last_root.strip():
+            self._last_root_dir = last_root
         last_output = self.settings.value("last_output_dir", "")
         if isinstance(last_output, str) and last_output.strip():
             self._last_output_dir = last_output
@@ -360,8 +392,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _save_settings(self) -> None:
         if not hasattr(self, "settings"):
             return
-        self.settings.setValue("fabrication_paths", json.dumps([str(p) for p in self.fabrication_paths]))
         self.settings.setValue("annealing_paths", json.dumps([str(p) for p in self.annealing_paths]))
+        self.settings.setValue("microscope_paths", json.dumps([str(p) for p in self.microscope_paths]))
+        self.settings.setValue("data_roots", json.dumps([str(p) for p in self.data_roots]))
         self.settings.setValue("output_dir", self.output_edit.text())
         self.settings.setValue("plot_matplotlib", self.plot_matplotlib_check.isChecked())
         self.settings.setValue("plot_origin", self.plot_origin_check.isChecked())
@@ -370,9 +403,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("figure_width", self.figure_width_spin.value())
         self.settings.setValue("figure_height", self.figure_height_spin.value())
         self.settings.setValue("output_name", self.output_name_edit.text())
-        self.settings.setValue("last_fabrication_dir", self._last_fabrication_dir)
+        self.settings.setValue("last_microscope_dir", self._last_microscope_dir)
         self.settings.setValue("last_anneal_dir", self._last_anneal_dir)
+        self.settings.setValue("last_root_dir", self._last_root_dir)
         self.settings.setValue("last_output_dir", self._last_output_dir)
+        self.settings.setValue("microscope_recursive", self.microscope_recursive.isChecked())
         self.settings.sync()
 
     # ------------------------------------------------------------------ helpers
@@ -386,44 +421,235 @@ class BuilderWindow(QtWidgets.QMainWindow):
         for text in sorted({str(Path(p)) for p in items}):
             widget.addItem(text)
 
-    def _add_fabrication_files(self) -> None:
-        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
-            self,
-            "Select fabrication spreadsheets",
-            self._last_fabrication_dir,
-            "Excel files (*.xlsx)",
-        )
-        if not files:
-            return
-        self._last_fabrication_dir = str(Path(files[0]).parent)
-        self._extend_paths("fabrication_paths", (Path(f) for f in files))
-        self._update_list_widget(self.fabrication_list, self.fabrication_paths)
-        self._save_settings()
+    def _is_microscope_candidate(self, path: Path) -> bool:
+        if path.suffix.lower() not in MICROSCOPE_EXTENSIONS:
+            return False
+        stem = path.stem.lower()
+        return "core" in stem or "glass" in stem
 
-    def _add_fabrication_folder(self) -> None:
-        folder = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Select folder with fabrication spreadsheets",
-            self._last_fabrication_dir,
-        )
-        if not folder:
-            return
-        root = Path(folder)
-        iterator = root.rglob("*.xlsx") if self.fabrication_recursive.isChecked() else root.glob("*.xlsx")
-        files = [p for p in iterator if p.is_file()]
-        if not files:
-            QtWidgets.QMessageBox.information(self, "Microwire Data Builder", "No Excel files were found in that folder.")
-            return
-        self._last_fabrication_dir = folder
-        self._extend_paths("fabrication_paths", files)
-        self._update_list_widget(self.fabrication_list, self.fabrication_paths)
-        self._save_settings()
+    def _collect_support_files(
+        self, annealing_files: list[Path]
+    ) -> tuple[list[Path], list[Path], list[Path]]:
+        if not annealing_files:
+            return [], [], []
 
-    def _clear_fabrication(self) -> None:
-        self.fabrication_paths = []
-        self.fabrication_list.clear()
-        self._save_settings()
+        unique_annealing = list(dict.fromkeys(Path(p) for p in annealing_files))
+        records: list[tuple[Path, object]] = []
+        for path in unique_annealing:
+            try:
+                meta = _metadata_from_path(path)
+            except Exception:
+                continue
+            composition = getattr(meta, 'composition_token', None)
+            draw = getattr(meta, 'draw_x', None)
+            if composition and draw is not None:
+                records.append((path, meta))
+        if not records:
+            return [], [], []
 
+        def _is_relative(path: Path, root: Path) -> bool:
+            try:
+                path.relative_to(root)
+            except ValueError:
+                return False
+            return True
+
+        candidate_roots: list[Path] = []
+        for candidate in dict.fromkeys(self.data_roots):
+            root_path = Path(candidate).expanduser()
+            if root_path.is_dir():
+                candidate_roots.append(root_path)
+        primary_root: Path | None = None
+        for root_path in candidate_roots:
+            if any(_is_relative(path, root_path) for path, _ in records):
+                primary_root = root_path
+                break
+        if primary_root is None:
+            if candidate_roots:
+                primary_root = candidate_roots[0]
+            else:
+                common = Path(records[0][0]).resolve().parent
+                primary_root = common
+
+        def _resolve_subdir(root: Path | None, names: tuple[str, ...]) -> Path | None:
+            if root is None:
+                return None
+            for name in names:
+                candidate = root / name
+                if candidate.is_dir():
+                    return candidate
+            return None
+
+        fabrication_root = _resolve_subdir(primary_root, ('microwire data', 'Microwire data')) or primary_root
+        microscope_root = _resolve_subdir(primary_root, ('microscope', 'Microscope'))
+        video_root = _resolve_subdir(primary_root, ('microwire data', 'Microwire data', 'videos', 'Videos', 'Microscope', 'microscope'))
+
+        fabrication: list[Path] = []
+        auto_micro: list[Path] = []
+        videos: list[Path] = []
+        seen_fabrication: set[Path] = set()
+        seen_micro: set[Path] = set()
+        seen_video: set[Path] = set()
+
+        def _append_unique(container: list[Path], seen: set[Path], candidate: Path | None) -> None:
+            if candidate is None:
+                return
+            resolved = candidate.expanduser()
+            try:
+                exists = resolved.exists()
+            except OSError:
+                exists = False
+            if not exists:
+                return
+            try:
+                key = resolved.resolve()
+            except OSError:
+                key = resolved
+            if key in seen:
+                return
+            seen.add(key)
+            container.append(resolved)
+
+        def _composition_dirs(base: Path | None, composition: str) -> list[Path]:
+            dirs: list[Path] = []
+            if base is None or not base.is_dir():
+                return dirs
+            exact = base / composition
+            if exact.is_dir():
+                dirs.append(exact)
+            try:
+                for child in base.iterdir():
+                    if child.is_dir() and child.name.lower().startswith(composition.lower()):
+                        dirs.append(child)
+            except OSError:
+                pass
+            if not dirs:
+                dirs.append(base)
+            return dirs
+
+        def _piece_dirs(comp_dir: Path, draw: int) -> list[Path]:
+            dirs: list[Path] = []
+            draw_token = str(draw)
+            try:
+                for child in comp_dir.iterdir():
+                    if child.is_dir() and draw_token in child.name:
+                        dirs.append(child)
+            except OSError:
+                pass
+            return dirs
+
+        def _iter_fragment_files(
+            root: Path,
+            fragment: str,
+            extensions: tuple[str, ...],
+            *,
+            max_depth: int = 4,
+            limit: int | None = None,
+        ) -> list[Path]:
+            if root is None or not root.exists():
+                return []
+            fragment_lower = fragment.lower()
+            stack: list[tuple[Path, int]] = [(root, 0)]
+            visited: set[Path] = set()
+            matches: list[Path] = []
+            keywords = ("microscope", "video", "videos")
+            while stack:
+                current, depth = stack.pop()
+                try:
+                    entries = list(current.iterdir())
+                except OSError:
+                    continue
+                for entry in entries:
+                    try:
+                        if entry.is_dir():
+                            if depth >= max_depth:
+                                continue
+                            try:
+                                key = entry.resolve()
+                            except OSError:
+                                key = entry
+                            if key in visited:
+                                continue
+                            visited.add(key)
+                            name_lower = entry.name.lower()
+                            if depth < 1 or fragment_lower in name_lower or any(token in name_lower for token in keywords):
+                                stack.append((entry, depth + 1))
+                        elif entry.is_file():
+                            if entry.suffix.lower() in extensions and fragment_lower in entry.name.lower():
+                                matches.append(entry)
+                                if limit is not None and len(matches) >= limit:
+                                    return matches
+                    except OSError:
+                        continue
+            return matches
+
+
+
+        for _, meta in records:
+            composition = getattr(meta, 'composition_token', None)
+            draw = getattr(meta, 'draw_x', None)
+            piece = getattr(meta, 'piece_y', None)
+            if composition is None or draw is None:
+                continue
+            composition_dirs = _composition_dirs(fabrication_root, composition)
+            for comp_dir in composition_dirs:
+                _append_unique(fabrication, seen_fabrication, comp_dir / f"{composition}.xlsx")
+                try:
+                    for candidate in comp_dir.glob('*.xlsx'):
+                        if candidate.name.lower() == f"{composition.lower()}.xlsx":
+                            continue
+                        if candidate.stem.startswith(f"{draw}_"):
+                            _append_unique(fabrication, seen_fabrication, candidate)
+                except OSError:
+                    pass
+                if piece is not None:
+                    for piece_dir in _piece_dirs(comp_dir, draw):
+                        try:
+                            for candidate in piece_dir.glob('*.xlsx'):
+                                _append_unique(fabrication, seen_fabrication, candidate)
+                        except OSError:
+                            continue
+            if piece is None:
+                continue
+            search_dirs: list[Path] = []
+            if microscope_root is not None:
+                search_dirs.extend(_composition_dirs(microscope_root, composition))
+            if not search_dirs and microscope_root is not None:
+                search_dirs.append(microscope_root)
+            for comp_dir in composition_dirs:
+                for piece_dir in _piece_dirs(comp_dir, draw):
+                    if piece_dir not in search_dirs:
+                        search_dirs.append(piece_dir)
+            fragment = f"{draw}_{piece}"
+            for search_dir in search_dirs:
+                if not search_dir.is_dir():
+                    continue
+                try:
+                    candidates = _iter_fragment_files(search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50)
+                except Exception:
+                    continue
+                for candidate in candidates:
+                    if self._is_microscope_candidate(candidate):
+                        _append_unique(auto_micro, seen_micro, candidate)
+            video_dirs: list[Path] = []
+            if video_root is not None:
+                video_dirs.extend(_composition_dirs(video_root, composition))
+            for comp_dir in composition_dirs:
+                video_dirs.extend(_piece_dirs(comp_dir, draw))
+            for search_dir in video_dirs:
+                if not search_dir.is_dir():
+                    continue
+                try:
+                    candidates = _iter_fragment_files(search_dir, fragment, VIDEO_EXTENSIONS, limit=40)
+                except Exception:
+                    continue
+                for candidate in candidates:
+                    _append_unique(videos, seen_video, candidate)
+
+        fabrication = list(dict.fromkeys(fabrication))
+        auto_micro = list(dict.fromkeys(auto_micro))
+        videos = list(dict.fromkeys(videos))
+        return fabrication, auto_micro, videos
     def _add_anneal_files(self) -> None:
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
@@ -462,6 +688,86 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.anneal_list.clear()
         self._save_settings()
 
+    def _add_microscope_files(self) -> None:
+        files, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Select microscope images",
+            self._last_microscope_dir,
+            "Image files (*.jpg *.jpeg *.png *.tif *.tiff *.bmp)",
+        )
+        if not files:
+            return
+        self._last_microscope_dir = str(Path(files[0]).parent)
+        candidates = [Path(f) for f in files if self._is_microscope_candidate(Path(f))]
+        if not candidates:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No matching microscope images were selected.",
+            )
+            return
+        self._extend_paths("microscope_paths", candidates)
+        self._update_list_widget(self.microscope_list, self.microscope_paths)
+        self._save_settings()
+
+    def _add_microscope_folder(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select folder with microscope images",
+            self._last_microscope_dir,
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        iterator = root.rglob('*') if self.microscope_recursive.isChecked() else root.glob('*')
+        files = [p for p in iterator if p.is_file() and self._is_microscope_candidate(p)]
+        if not files:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No microscope images were found in that folder.",
+            )
+            return
+        self._last_microscope_dir = folder
+        self._extend_paths("microscope_paths", files)
+        self._update_list_widget(self.microscope_list, self.microscope_paths)
+        self._save_settings()
+
+    def _clear_microscope(self) -> None:
+        self.microscope_paths = []
+        self.microscope_list.clear()
+        self._save_settings()
+
+    def _add_data_root(self) -> None:
+        folder = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select microwire data folder",
+            self._last_root_dir,
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        if not root.exists():
+            QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "The selected folder does not exist.")
+            return
+        self._last_root_dir = folder
+        self.data_roots = [root]
+        self._update_list_widget(self.root_list, self.data_roots)
+        self._ingest_data_root(root, announce=True)
+        self._save_settings()
+
+    def _clear_data_roots(self) -> None:
+        self.data_roots = []
+        self.root_list.clear()
+        self._save_settings()
+    def _clear_data_roots(self) -> None:
+        self.data_roots = []
+        self.root_list.clear()
+        self._save_settings()
+
+    def _ingest_data_root(self, root: Path, announce: bool = False) -> None:
+        if announce and hasattr(self, 'logger'):
+            self.logger.info('Microwire data folder set to %s', root)
     def _select_output_dir(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self,
@@ -528,8 +834,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _set_running(self, running: bool) -> None:
         self._running = running
         for widget in (
-            self.fabrication_group,
+            self.root_group,
             self.anneal_group,
+            self.microscope_group,
             self.options_group,
             self.output_group,
         ):
@@ -537,7 +844,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.run_button.setEnabled(not running)
         if running:
             self.progress_bar.setValue(0)
-            self.progress_label.setText("Running…")
+            self.progress_label.setText("Runningâ€¦")
         else:
             if self.progress_label.text() not in {"Complete", "Failed"}:
                 self.progress_label.setText("Idle")
@@ -606,18 +913,24 @@ class BuilderWindow(QtWidgets.QMainWindow):
             else:
                 behaviours[fmt.lower()] = "replace"
 
+        annealing_files = list(dict.fromkeys(self.annealing_paths))
+        fabrication_files, auto_microscope_files, video_files = self._collect_support_files(annealing_files)
+        microscope_files = list(dict.fromkeys(list(self.microscope_paths) + auto_microscope_files))
+
         config = BuilderConfig(
-            fabrication_files=list(dict.fromkeys(self.fabrication_paths)),
-            annealing_files=list(dict.fromkeys(self.annealing_paths)),
+            fabrication_files=fabrication_files,
+            annealing_files=annealing_files,
             output_dir=output_dir,
+            microscope_files=microscope_files,
+            video_files=video_files,
             make_plots=bool(plot_backends),
             export_formats=tuple(export_formats),
             output_name=output_name,
             plot_backends=tuple(plot_backends),
             export_behaviour=behaviours,
             matplotlib_figsize=(
-                float(self.figure_width_spin.value()),
-                float(self.figure_height_spin.value()),
+                float(self.figure_width_spin.value()) / 25.4,
+                float(self.figure_height_spin.value()) / 25.4,
             ),
         )
         self._save_settings()
@@ -738,3 +1051,12 @@ def main() -> QtWidgets.QWidget | None:
 
 
 __all__ = ["BuilderWindow", "main", "run_app"]
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,192 @@
+﻿"""Video analysis helpers for the microwire database builder."""
+
+from __future__ import annotations
+
+import logging
+import math
+import re
+import tempfile
+import sys
+import importlib.util
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Iterable, List, Optional
+
+import numpy as np
+
+MICRO_SIGN = "\u00b5"
+
+sys.modules.setdefault("experiments.microwire_data_builder.video", sys.modules.get(__name__))
+_METRIC_PATTERN = re.compile(r"(-?\d+(?:[.,]\d+)?)")
+
+try:
+    from .ocr import ensure_tesseract_available
+except ImportError:
+    module_name = "experiments.microwire_data_builder.ocr"
+    module_path = Path(__file__).with_name("ocr.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        ensure_tesseract_available = module.ensure_tesseract_available
+    else:
+        raise
+
+
+@dataclass
+class VideoExtractionResult:
+    """Aggregated OCR metrics extracted from a fabrication video."""
+
+    video_path: Path
+    frame_paths: List[Path] = field(default_factory=list)
+    texts: List[str] = field(default_factory=list)
+    temperatures_c: List[float] = field(default_factory=list)
+    underpressures: List[float] = field(default_factory=list)
+
+    def median_temperature(self) -> Optional[float]:
+        if not self.temperatures_c:
+            return None
+        return float(np.median(self.temperatures_c))
+
+    def median_underpressure(self) -> Optional[float]:
+        if not self.underpressures:
+            return None
+        return float(np.median(self.underpressures))
+
+
+def extract_video_metrics(
+    video_path: Path,
+    frame_interval: float = 5.0,
+    max_frames: int = 200,
+    logger: Optional[logging.Logger] = None,
+    frame_output_dir: Optional[Path] = None,
+) -> VideoExtractionResult:
+    """Sample frames from *video_path* and attempt to OCR process metrics.
+
+    The function favours optional dependencies. If OpenCV or pytesseract are
+    not installed (or the Tesseract binary is missing), an empty result is
+    returned and a warning is logged instead of raising an exception.
+    """
+
+    result = VideoExtractionResult(video_path=video_path)
+    log = logger or logging.getLogger("microwire_video")
+
+    try:
+        import cv2  # type: ignore[import-not-found]
+    except ImportError:
+        log.warning("OpenCV (cv2) is not installed; skipping video analysis for %s", video_path)
+        return result
+
+    try:
+        import pytesseract  # type: ignore[import-not-found]
+    except ImportError:
+        log.warning("pytesseract is not installed; skipping video analysis for %s", video_path)
+        return result
+
+    if not ensure_tesseract_available(pytesseract, log):
+        log.warning("Tesseract OCR executable is unavailable; skipping video analysis for %s", video_path)
+        return result
+
+    tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
+
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+        log.warning("Unable to open video %s", video_path)
+        return result
+
+    fps = capture.get(cv2.CAP_PROP_FPS) or 0.0
+    if not fps or not math.isfinite(fps):
+        fps = 25.0
+    frame_step = max(int(round(frame_interval * fps)), 1)
+
+    if frame_output_dir is None:
+        tmp_root = Path(tempfile.gettempdir()) / "microwire_video_frames"
+        tmp_root.mkdir(parents=True, exist_ok=True)
+        frame_output_dir = tmp_root
+
+    frame_index = 0
+    harvested = 0
+    while True:
+        ret, frame = capture.read()
+        if not ret:
+            break
+        if frame_index % frame_step == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            enhanced = cv2.equalizeHist(gray)
+            try:
+                text = pytesseract.image_to_string(enhanced, config="--psm 6")
+            except tesseract_not_found:
+                log.warning(
+                    "Tesseract OCR executable not found while analysing %s; aborting video extraction",
+                    video_path,
+                )
+                break
+            result.texts.append(text)
+            result.temperatures_c.extend(
+                _extract_metric_candidates(text, ("temp", "temperature"), ("c", f"{MICRO_SIGN}c"))
+            )
+            result.underpressures.extend(
+                _extract_metric_candidates(text, ("underpressure", "vacuum", "under pres", "podtlak"))
+            )
+            out_path = frame_output_dir / f"{video_path.stem}_{frame_index:06d}.png"
+            try:
+                cv2.imwrite(str(out_path), frame)
+            except Exception:
+                pass
+            else:
+                result.frame_paths.append(out_path)
+            harvested += 1
+            if harvested >= max_frames:
+                break
+        frame_index += 1
+
+    capture.release()
+    return result
+
+
+def _extract_metric_candidates(
+    text: str,
+    keywords: Iterable[str],
+    unit_candidates: Iterable[str] = (),
+) -> List[float]:
+    """Return numeric candidates found on lines containing *keywords*."""
+
+    values: List[float] = []
+    lowered = text.lower()
+    lines = [line for line in lowered.splitlines() if line.strip()]
+    for line in lines:
+        if not any(keyword in line for keyword in keywords):
+            continue
+        for match in _METRIC_PATTERN.finditer(line):
+            raw_value = match.group(1).replace(",", ".")
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            if not math.isfinite(value):
+                continue
+            values.append(value)
+    if not values and unit_candidates:
+        for unit in unit_candidates:
+            pattern = re.compile(rf"(-?\d+(?:[.,]\d+)?)\s*{re.escape(unit)}", re.IGNORECASE)
+            for match in pattern.finditer(lowered):
+                raw_value = match.group(1).replace(",", ".")
+                try:
+                    value = float(raw_value)
+                except ValueError:
+                    continue
+                if math.isfinite(value):
+                    values.append(value)
+    return values
+
+
+__all__ = [
+    "VideoExtractionResult",
+    "extract_video_metrics",
+]
+
+
+
+
+

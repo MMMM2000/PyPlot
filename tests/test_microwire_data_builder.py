@@ -233,3 +233,74 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
         assert anchor._from.row == 1
 
     workbook.close()
+
+
+def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+    core_img = tmp_path / "Ni55Fe18Ga27 1_1 core.jpg"
+    glass_img = tmp_path / "Ni55Fe18Ga27 1_1 glass.jpg"
+    core_img.write_bytes(b"core")
+    glass_img.write_bytes(b"glass")
+
+    def fake_extract(path: Path, logger: logging.Logger) -> list[float]:
+        name = path.name.lower()
+        if 'core' in name:
+            return [16.7]
+        if 'glass' in name:
+            return [134.4, 212.4]
+        return []
+
+    monkeypatch.setattr(core, "_extract_microscope_diameters", fake_extract)
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        microscope_files=[core_img, glass_img],
+    )
+
+    result = build_database(config)
+    row = result.dataframe.iloc[0]
+    d_col = core.OUTPUT_COLUMNS[2]
+    D_col = core.OUTPUT_COLUMNS[3]
+    ratio_col = core.OUTPUT_COLUMNS[4]
+    assert float(row[d_col]) == pytest.approx(16.7)
+    assert float(row[D_col]) == pytest.approx(212.4)
+    assert float(row[ratio_col]) == pytest.approx(16.7 / 212.4)
+
+
+def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 4_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 4_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+    video_dir = tmp_path / "Ni55Fe18Ga27" / "4.Ni55Fe18Ga27 01012024 0800"
+    video_dir.mkdir(parents=True, exist_ok=True)
+    video_path = video_dir / "2025-07-02 11-44-34.mkv"
+    video_path.write_bytes(b"video")
+
+    class FakeVideoResult:
+        def median_temperature(self) -> float | None:
+            return 382.5
+
+        def median_underpressure(self) -> float | None:
+            return -0.85
+
+    monkeypatch.setattr(core, "extract_video_metrics", lambda *args, **kwargs: FakeVideoResult())
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        video_files=[video_path],
+    )
+
+    result = build_database(config)
+    row = result.dataframe.iloc[0]
+    temperature_column = core.OUTPUT_COLUMNS[9]
+    underpressure_column = core.OUTPUT_COLUMNS[12]
+    assert float(row[temperature_column]) == pytest.approx(382.5)
+    assert float(row[underpressure_column]) == pytest.approx(-0.85)
