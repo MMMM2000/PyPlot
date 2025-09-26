@@ -345,10 +345,13 @@ plotting tools:
   \(d\) and `*glass*` images for \(D\) and only trusts measurements that start
   with the `[1]` marker used in the overlays, ignoring the `[2]` annotations that
   often describe a secondary feature in glass captures. Install Tesseract so the
-  OCR layer can run (`brew install tesseract` on macOS is sufficient); the
-  builder now searches the PATH as well as common Homebrew, MacPorts, and
-  Windows installation folders, and logs a single warning if the binary is still
-  missing.
+  OCR layer can run (`brew install tesseract` on macOS, `choco install
+  tesseract` on Windows, or `apt install tesseract-ocr` on Ubuntu). The builder
+  now searches PATH, Homebrew/MacPorts trees, Windows Program Files, Chocolatey,
+  user-level installs, and even the `.app` bundles that ship a private copy of
+  the binary before giving up with a single warning. Setting the `TESSERACT_CMD`
+  environment variable still overrides the autodetection when you have a custom
+  install location.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
@@ -368,9 +371,9 @@ plotting tools:
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
-  7.0 × 4.5 in to better fill the Excel slots); the values are saved between runs
-  and the axis labels, ticks, markers, and line widths rescale so the smaller
-  figures stay legible. Matplotlib still trims the burn-through
+  10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
+  resizing); the values are saved between runs and the axis labels, ticks,
+  markers, and line widths rescale so larger canvases stay crisp. Matplotlib still trims the burn-through
   sample that collapses to low current or spikes sharply in resistance and bridges
   the final increasing/decreasing points with a blue segment so the trace ends
   cleanly, and the measurement loader applies the same trimming so the exported

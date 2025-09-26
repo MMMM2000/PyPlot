@@ -45,10 +45,18 @@ def _iter_candidate_paths() -> Iterable[Path]:
 
     hinted = os.environ.get("LOCALAPPDATA")
     if hinted:
+        hinted_path = Path(hinted)
         for resolved in _candidate_from_path(
-            Path(hinted) / "Programs" / "Tesseract-OCR"
+            hinted_path / "Programs" / "Tesseract-OCR"
         ):
             yield resolved
+        for resolved in _candidate_from_path(hinted_path / "Tesseract-OCR"):
+            yield resolved
+    home = Path.home()
+    for resolved in _candidate_from_path(
+        home / "AppData" / "Local" / "Programs" / "Tesseract-OCR"
+    ):
+        yield resolved
 
     program_dirs = [
         os.environ.get("ProgramFiles"),
@@ -59,6 +67,11 @@ def _iter_candidate_paths() -> Iterable[Path]:
             continue
         for resolved in _candidate_from_path(Path(root) / "Tesseract-OCR"):
             yield resolved
+    for programdata in (os.environ.get("ProgramData"),):
+        if not programdata:
+            continue
+        for resolved in _candidate_from_path(Path(programdata) / "chocolatey" / "lib" / "tesseract" / "tools"):
+            yield resolved
 
     unix_hints = (
         Path("/usr/bin"),
@@ -67,10 +80,47 @@ def _iter_candidate_paths() -> Iterable[Path]:
         Path("/opt/homebrew/bin"),
         Path.home() / "opt" / "homebrew" / "bin",
         Path("/opt/local/bin"),
+        Path.home() / ".local" / "bin",
     )
     for root in unix_hints:
         for resolved in _candidate_from_path(root):
             yield resolved
+
+    mac_bundle_hints = (
+        Path("/Applications/Tesseract-OCR.app/Contents/MacOS"),
+        Path("/Applications/Tesseract.app/Contents/MacOS"),
+        home / "Applications" / "Tesseract-OCR.app" / "Contents" / "MacOS",
+        home / "Applications" / "Tesseract.app" / "Contents" / "MacOS",
+        home
+        / "Library"
+        / "Frameworks"
+        / "Tesseract.framework"
+        / "Versions"
+        / "Current"
+        / "Resources"
+        / "bin",
+    )
+    for root in mac_bundle_hints:
+        for resolved in _candidate_from_path(root):
+            yield resolved
+
+    cellar_roots = (
+        Path("/opt/homebrew/Cellar/tesseract"),
+        Path("/usr/local/Cellar/tesseract"),
+    )
+    for cellar in cellar_roots:
+        try:
+            if not cellar.exists():
+                continue
+        except OSError:
+            continue
+        try:
+            version_dirs = list(sorted(cellar.iterdir()))
+        except OSError:
+            continue
+        for version_dir in version_dirs:
+            for resolved in _candidate_from_path(version_dir / "bin"):
+                yield resolved
 
 
 @lru_cache(maxsize=1)

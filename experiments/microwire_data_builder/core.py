@@ -215,7 +215,7 @@ KNOWN_TIMEZONE_TOKENS = {
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 
 
-DEFAULT_FIGSIZE: Tuple[float, float] = (7.0, 4.5)
+DEFAULT_FIGSIZE: Tuple[float, float] = (10.0, 6.0)
 
 
 def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> Tuple[float, float]:
@@ -841,6 +841,8 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
             continue
         if text:
             candidates.append(text)
+            if MICROSCOPE_PRIMARY_PATTERN.search(text):
+                break
 
     preferred: Dict[float, float] = {}
     fallback: Dict[float, float] = {}
@@ -856,7 +858,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
             key = round(value, 2)
             preferred.setdefault(key, value)
         if preferred:
-            continue
+            break
         for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
             start = max(match.start() - 4, 0)
             prefix = text[start:match.start()]
@@ -1533,16 +1535,17 @@ def _embed_plots_in_excel_openpyxl(
                 worksheet.add_image(image, cell_reference)
 
                 # Adjust the row height and column width to accommodate the scaled figure.
-                if image.height:
-                    target_height = _pixels_to_points(float(image.height))
-                    current_height = worksheet.row_dimensions[row_number].height or 0
-                    if target_height > current_height:
-                        worksheet.row_dimensions[row_number].height = target_height
-                if image.width:
-                    approx_width = image.width / 7.0
-                    current_width = worksheet.column_dimensions[column_letter].width or 0
-                    if approx_width > current_width:
-                        worksheet.column_dimensions[column_letter].width = approx_width
+                current_height = worksheet.row_dimensions[row_number].height or 0
+                target_height = _pixels_to_points(float(image.height)) if image.height else 0.0
+                desired_height = max(target_height, _excel_row_height(figure_size[1]))
+                if desired_height > current_height:
+                    worksheet.row_dimensions[row_number].height = desired_height
+
+                current_width = worksheet.column_dimensions[column_letter].width or 0
+                approx_width = image.width / 7.0 if image.width else 0.0
+                desired_width = max(approx_width, _excel_column_width(figure_size[0]))
+                if desired_width > current_width:
+                    worksheet.column_dimensions[column_letter].width = desired_width
 
                 inserted = True
 
@@ -1630,17 +1633,17 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert plot image %s", image_path)
                 continue
-            if height_px:
-                target_height = _pixels_to_points(height_px * y_scale)
-            else:
-                target_height = _pixels_to_points(float(max_height))
-            if target_height > row_heights.get(row_number, 0.0):
-                worksheet.set_row(row_number, target_height)
-                row_heights[row_number] = target_height
+            scaled_height = _pixels_to_points(height_px * y_scale) if height_px else _pixels_to_points(float(max_height))
+            desired_height = max(scaled_height, _excel_row_height(figure_size[1]))
+            if desired_height > row_heights.get(row_number, 0.0):
+                worksheet.set_row(row_number, desired_height)
+                row_heights[row_number] = desired_height
+
             approx_width = (width_px * x_scale / 7.0) if width_px else (max_width / 7.0)
-            if approx_width > column_widths.get(column_index, 0.0):
-                worksheet.set_column(column_index, column_index, approx_width)
-                column_widths[column_index] = approx_width
+            desired_width = max(approx_width, _excel_column_width(figure_size[0]))
+            if desired_width > column_widths.get(column_index, 0.0):
+                worksheet.set_column(column_index, column_index, desired_width)
+                column_widths[column_index] = desired_width
 
         for column in origin_columns:
             value = row.get(column)
@@ -1665,12 +1668,12 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert Origin object %s", artifact.object_path)
                 continue
-            target_height = max(row_heights.get(row_number, 0.0), max_height * 0.75)
-            worksheet.set_row(row_number, target_height)
-            row_heights[row_number] = target_height
-            approx_width = max(column_widths.get(column_index, 0.0), max_width / 7.0)
-            worksheet.set_column(column_index, column_index, approx_width)
-            column_widths[column_index] = approx_width
+            desired_height = max(row_heights.get(row_number, 0.0), _excel_row_height(figure_size[1]))
+            worksheet.set_row(row_number, desired_height)
+            row_heights[row_number] = desired_height
+            desired_width = max(column_widths.get(column_index, 0.0), _excel_column_width(figure_size[0]))
+            worksheet.set_column(column_index, column_index, desired_width)
+            column_widths[column_index] = desired_width
 
 def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
