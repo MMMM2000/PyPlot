@@ -14,7 +14,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -187,6 +187,8 @@ MICROSCOPE_VALUE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
+
 
 def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> Tuple[float, float]:
     default = (4.0, 2.25)
@@ -309,6 +311,71 @@ class FabricationIndex:
         if draw_x is None or piece_y is None:
             return {}
         return self.piece_level.get((composition, draw_x, piece_y), {})
+
+
+@dataclass
+class MicroscopeMeasurements:
+    """Diameter samples gathered from microscope images."""
+
+    core: List[float] = field(default_factory=list)
+    glass: List[float] = field(default_factory=list)
+    other: List[float] = field(default_factory=list)
+
+    def extend(self, category: str, values: Iterable[float]) -> None:
+        target: List[float]
+        if category == "core":
+            target = self.core
+        elif category == "glass":
+            target = self.glass
+        else:
+            target = self.other
+        for value in values:
+            if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
+                target.append(float(value))
+
+    def best_core(self) -> Optional[float]:
+        for pool in (self.core, self.other, self.glass):
+            candidate = _select_microscope_value(pool, prefer="min")
+            if candidate is not None:
+                return candidate
+        return None
+
+    def best_glass(self) -> Optional[float]:
+        for pool in (self.glass, self.other, self.core):
+            candidate = _select_microscope_value(pool, prefer="max")
+            if candidate is not None:
+                return candidate
+        return None
+
+
+@dataclass
+class VideoMetricsSummary:
+    """Aggregated metrics extracted from fabrication videos."""
+
+    temperatures: List[float] = field(default_factory=list)
+    underpressures: List[float] = field(default_factory=list)
+
+    def record(self, result) -> None:
+        temp = getattr(result, "median_temperature", None)
+        if callable(temp):
+            value = temp()
+        else:
+            value = None
+        if value is not None and isinstance(value, (int, float)) and math.isfinite(float(value)):
+            self.temperatures.append(float(value))
+        under_fn = getattr(result, "median_underpressure", None)
+        if callable(under_fn):
+            under_value = under_fn()
+        else:
+            under_value = None
+        if under_value is not None and isinstance(under_value, (int, float)) and math.isfinite(float(under_value)):
+            self.underpressures.append(float(under_value))
+
+    def temperature(self) -> Optional[float]:
+        return _select_microscope_value(self.temperatures, "median", allow_negative=True)
+
+    def underpressure(self) -> Optional[float]:
+        return _select_microscope_value(self.underpressures, "median", allow_negative=True)
 
 
 def _logger(logger: Optional[logging.Logger]) -> logging.Logger:
@@ -454,6 +521,32 @@ def _parse_date(value: object) -> Optional[str]:
     return dt.date().isoformat()
 
 
+def _select_microscope_value(
+    values: Sequence[float], prefer: str, *, allow_negative: bool = False
+) -> Optional[float]:
+    cleaned: List[float] = []
+    for v in values:
+        if not isinstance(v, (int, float)):
+            continue
+        value = float(v)
+        if not math.isfinite(value):
+            continue
+        if not allow_negative and value <= 0:
+            continue
+        cleaned.append(value)
+    if not cleaned:
+        return None
+    if prefer == "min":
+        return float(min(cleaned))
+    if prefer == "max":
+        return float(max(cleaned))
+    cleaned.sort()
+    mid = len(cleaned) // 2
+    if len(cleaned) % 2:
+        return float(cleaned[mid])
+    return float((cleaned[mid - 1] + cleaned[mid]) / 2.0)
+
+
 def _extract_field_value(field: str, value: object) -> Tuple[Optional[object], Optional[str]]:
     raw = _raw_string(value)
     if field in DATETIME_FIELDS:
@@ -473,6 +566,329 @@ def _extract_field_value(field: str, value: object) -> Tuple[Optional[object], O
 def _composition_from_path(path: Path) -> str:
     stem = path.stem
     return stem.split()[0]
+
+
+def _extract_composition_token(text: str) -> Optional[str]:
+    if not text:
+        return None
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9]+", text)
+    if not tokens:
+        return None
+    return tokens[0]
+
+
+def _microscope_key(path: Path) -> Optional[Tuple[str, int, int]]:
+    def _match(text: str) -> Optional[Tuple[str, int, int]]:
+        if not text:
+            return None
+        match = XY_PATTERN.search(text)
+        if not match:
+            return None
+        composition = _extract_composition_token(text)
+        if not composition:
+            return None
+        try:
+            draw_x = int(match.group(1))
+            piece_y = int(match.group(2))
+        except (TypeError, ValueError):
+            return None
+        return composition, draw_x, piece_y
+
+    for candidate in (path.stem, path.name):
+        result = _match(candidate)
+        if result is not None:
+            return result
+    for parent in path.parents:
+        result = _match(parent.name)
+        if result is not None:
+            return result
+    return None
+
+
+def _microscope_category(path: Path) -> str:
+    stem = path.stem.lower()
+    if "core" in stem:
+        return "core"
+    if "glass" in stem:
+        return "glass"
+    return "other"
+
+
+def _iter_fragment_files(
+    root: Path,
+    fragment: str,
+    extensions: Sequence[str],
+    *,
+    max_depth: int = 3,
+    limit: Optional[int] = None,
+) -> List[Path]:
+    if root is None:
+        return []
+    try:
+        if not root.exists():
+            return []
+    except OSError:
+        return []
+
+    fragment_lower = fragment.lower()
+    matches: List[Path] = []
+    stack: List[Tuple[Path, int]] = [(root, 0)]
+    visited: Set[Path] = set()
+    while stack:
+        current, depth = stack.pop()
+        try:
+            entries = list(current.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            try:
+                if entry.is_dir():
+                    if depth >= max_depth:
+                        continue
+                    try:
+                        key = entry.resolve()
+                    except OSError:
+                        key = entry
+                    if key in visited:
+                        continue
+                    visited.add(key)
+                    name_lower = entry.name.lower()
+                    if depth == 0 or fragment_lower in name_lower:
+                        stack.append((entry, depth + 1))
+                elif entry.is_file():
+                    if entry.suffix.lower() in extensions and fragment_lower in entry.name.lower():
+                        matches.append(entry)
+                        if limit is not None and len(matches) >= limit:
+                            return matches
+            except OSError:
+                continue
+    return matches
+
+
+def _auto_discover_microscope_paths(
+    annealing_files: Sequence[Path], logger: logging.Logger
+) -> List[Path]:
+    discovered: List[Path] = []
+    seen: Set[Path] = set()
+    for raw_path in annealing_files:
+        path = Path(raw_path)
+        key = _microscope_key(path)
+        if key is None:
+            continue
+        composition, draw_x, piece_y = key
+        fragment = f"{draw_x}_{piece_y}"
+        try:
+            resolved = path.resolve()
+            parents = list(resolved.parents)
+        except OSError:
+            parents = list(path.parents)
+        candidate_roots: List[Path] = []
+        for parent in parents:
+            for name in ("microscope", "Microscope"):
+                candidate = parent / name
+                try:
+                    if candidate.is_dir():
+                        candidate_roots.append(candidate)
+                except OSError:
+                    continue
+            if candidate_roots:
+                break
+        if not candidate_roots:
+            continue
+        lowered = composition.lower()
+        search_dirs: List[Path] = []
+        for root_dir in candidate_roots:
+            search_dirs.append(root_dir)
+            try:
+                direct = root_dir / composition
+                if direct.is_dir():
+                    search_dirs.append(direct)
+                for child in root_dir.iterdir():
+                    if child.is_dir() and child.name.lower().startswith(lowered):
+                        search_dirs.append(child)
+            except OSError:
+                continue
+        for search_dir in dict.fromkeys(search_dirs):
+            matches = _iter_fragment_files(search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=20)
+            for match in matches:
+                try:
+                    resolved_match = match.resolve()
+                except OSError:
+                    resolved_match = match
+                if resolved_match in seen:
+                    continue
+                seen.add(resolved_match)
+                discovered.append(match)
+    if discovered:
+        logger.debug("Auto-discovered %s microscope image(s)", len(discovered))
+    return discovered
+
+
+def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[float]:
+    """Attempt to OCR diameter annotations from a microscope capture."""
+
+    log = logger or logging.getLogger(LOGGER_NAME)
+    try:
+        import pytesseract  # type: ignore[import-not-found]
+    except ImportError:
+        log.debug("pytesseract is not installed; skipping microscope OCR for %s", path)
+        return []
+
+    if not ensure_tesseract_available(pytesseract, log):
+        log.debug("Tesseract executable unavailable; skipping microscope OCR for %s", path)
+        return []
+
+    try:
+        from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
+    except ImportError:
+        log.debug("Pillow is not installed; skipping microscope OCR for %s", path)
+        return []
+
+    try:
+        with Image.open(path) as img:
+            base = img.convert("RGB")
+    except Exception:
+        log.warning("Failed to open microscope image %s", path, exc_info=True)
+        return []
+
+    def _resample(image):
+        width, height = image.size
+        target = 1600
+        longest = max(width, height)
+        if longest >= target:
+            return image
+        scale = target / float(longest)
+        new_size = (int(width * scale), int(height * scale))
+        resample_attr = getattr(Image, "Resampling", None)
+        if resample_attr is not None:
+            resample_filter = getattr(resample_attr, "LANCZOS", Image.BICUBIC)
+        else:
+            resample_filter = getattr(Image, "LANCZOS", Image.BICUBIC)
+        return image.resize(new_size, resample_filter)
+
+    candidates: List[str] = []
+    grayscale = ImageOps.grayscale(base)
+    resized = _resample(grayscale)
+    enhanced = ImageEnhance.Contrast(resized).enhance(2.0)
+    sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
+    variants = [resized, enhanced, sharpened, ImageOps.autocontrast(resized)]
+
+    tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
+    for variant in variants:
+        try:
+            text = pytesseract.image_to_string(variant, config="--psm 6")
+        except tesseract_not_found:
+            log.warning(
+                "Tesseract executable vanished while processing %s; aborting microscope OCR",
+                path,
+            )
+            return []
+        except Exception:
+            continue
+        if text:
+            candidates.append(text)
+
+    unique: Dict[float, None] = {}
+    for text in candidates:
+        for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
+            raw = match.group("value").replace(",", ".")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if not math.isfinite(value) or value <= 0:
+                continue
+            key = round(value, 2)
+            unique.setdefault(key, value)
+
+    return [float(v) for v in unique.values()]
+
+
+def _group_microscope_measurements(
+    microscope_files: Sequence[Path],
+    annealing_files: Sequence[Path],
+    logger: Optional[logging.Logger],
+) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
+    log = _logger(logger)
+    auto_paths = _auto_discover_microscope_paths(annealing_files, log)
+    combined = list(dict.fromkeys([Path(p) for p in microscope_files] + auto_paths))
+    grouped: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+    for raw_path in combined:
+        path = raw_path.expanduser()
+        try:
+            if not path.exists():
+                log.debug("Microscope image %s does not exist; skipping", path)
+                continue
+        except OSError:
+            continue
+        key = _microscope_key(path)
+        if key is None:
+            log.debug("Unable to derive microwire key from microscope image %s", path)
+            continue
+        category = _microscope_category(path)
+        try:
+            values = _extract_microscope_diameters(path, log)
+        except Exception:
+            log.exception("Microscope OCR failed for %s", path)
+            continue
+        if not values:
+            continue
+        record = grouped.setdefault(key, MicroscopeMeasurements())
+        record.extend(category, values)
+    return grouped
+
+
+def _draw_key(path: Path) -> Optional[Tuple[str, int]]:
+    candidates: List[str] = [parent.name for parent in path.parents]
+    candidates.extend([path.stem, path.name])
+    for candidate in candidates:
+        if not candidate:
+            continue
+        composition = _extract_composition_token(candidate)
+        if not composition:
+            continue
+        draw_match = re.search(r"(\d+)", candidate)
+        if not draw_match:
+            continue
+        try:
+            draw_x = int(draw_match.group(1))
+        except (TypeError, ValueError):
+            continue
+        return composition, draw_x
+    return None
+
+
+def _collect_video_metrics(
+    video_files: Sequence[Path], logger: Optional[logging.Logger]
+) -> Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]:
+    log = _logger(logger)
+    aggregated: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
+    for raw_path in dict.fromkeys(Path(p) for p in video_files):
+        path = raw_path.expanduser()
+        try:
+            if not path.exists():
+                log.debug("Video file %s does not exist; skipping", path)
+                continue
+        except OSError:
+            continue
+        key = _microscope_key(path)
+        if key is not None:
+            composition, draw_x, piece_y = key
+        else:
+            draw_key = _draw_key(path)
+            if draw_key is None:
+                log.debug("Unable to derive microwire key from video %s", path)
+                continue
+            composition, draw_x = draw_key
+            piece_y = None
+        try:
+            result = extract_video_metrics(path, logger=log)
+        except Exception:
+            log.exception("Failed to analyse video %s", path)
+            continue
+        summary = aggregated.setdefault((composition, draw_x, piece_y), VideoMetricsSummary())
+        summary.record(result)
+    return aggregated
 
 
 def _parse_draw_rows(
@@ -1259,6 +1675,8 @@ def build_database(
     origin_dir = output_dir / config.origin_dir_name
     origin_enabled = wants_origin_requested
     origin_disabled_reason: Optional[str] = None
+    microscope_index = _group_microscope_measurements(config.microscope_files, config.annealing_files, log)
+    video_index = _collect_video_metrics(config.video_files, log)
     total = len(config.annealing_files)
     for idx, path in enumerate(config.annealing_files, start=1):
         try:
@@ -1321,6 +1739,42 @@ def build_database(
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
         row["Notes"] = _compose_notes(draw_info, piece_info)
+        microscope_data = microscope_index.get((composition, draw_x, piece_y))
+        if microscope_data:
+            d_numeric = _parse_numeric(row["d (µm)"])
+            if d_numeric is None:
+                d_from_micro = microscope_data.best_core()
+                if d_from_micro is not None:
+                    row["d (µm)"] = d_from_micro
+                    d_numeric = d_from_micro
+            D_numeric = _parse_numeric(row["D (µm)"])
+            if D_numeric is None:
+                D_from_micro = microscope_data.best_glass()
+                if D_from_micro is not None:
+                    row["D (µm)"] = D_from_micro
+                    D_numeric = D_from_micro
+            ratio_numeric = _parse_numeric(row["d/D"])
+            if ratio_numeric is None and d_numeric is not None and D_numeric not in (None, 0):
+                try:
+                    ratio = d_numeric / D_numeric
+                except ZeroDivisionError:
+                    ratio = None
+                if ratio is not None and math.isfinite(ratio):
+                    row["d/D"] = ratio
+        video_data = video_index.get((composition, draw_x, piece_y))
+        if video_data is None:
+            video_data = video_index.get((composition, draw_x, None))
+        if video_data:
+            temp_numeric = _parse_numeric(row["Temperature (°C)"])
+            if temp_numeric is None:
+                temp = video_data.temperature()
+                if temp is not None:
+                    row["Temperature (°C)"] = temp
+            under_numeric = _parse_numeric(row["Underpressure"])
+            if under_numeric is None:
+                under_value = video_data.underpressure()
+                if under_value is not None:
+                    row["Underpressure"] = under_value
         if not draw_info:
             stats.missing_draw += 1
         if not piece_info:
@@ -1476,11 +1930,17 @@ def build_database(
                 else:
                     to_write = pd.concat([existing, df_out], ignore_index=True)
                     to_write = to_write.drop_duplicates()
+            excel_frame = to_write.copy()
+            columns_to_blank = [
+                column for column in (FIGURE_COLUMNS + ORIGIN_FIGURE_COLUMNS) if column in excel_frame.columns
+            ]
+            for column in columns_to_blank:
+                excel_frame[column] = None
             try:
                 import xlsxwriter  # noqa: F401
 
                 with pd.ExcelWriter(excel_path, engine="xlsxwriter") as writer:
-                    to_write.to_excel(writer, index=False, sheet_name="Sheet1")
+                    excel_frame.to_excel(writer, index=False, sheet_name="Sheet1")
                     try:
                         _embed_assets_with_xlsxwriter(
                             writer,
@@ -1494,7 +1954,7 @@ def build_database(
                     except Exception:
                         log.exception("Failed to embed figures into %s", excel_path)
             except ImportError:
-                to_write.to_excel(excel_path, index=False)
+                excel_frame.to_excel(excel_path, index=False)
                 try:
                     _embed_plots_in_excel_openpyxl(
                         excel_path,

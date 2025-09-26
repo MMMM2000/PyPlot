@@ -338,6 +338,12 @@ plotting tools:
   program maps Slovak headers to English fields, keeps a raw text copy for
   ambiguous numeric cells, and joins draw/piece data by composition and draw X /
   piece Y. Added paths are remembered between runs.
+* **Microscope images (.jpg/.png)** – drop calibrated microscope captures for
+  the same draw/piece identifiers and the builder OCRs the red overlay labels to
+  fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
+  fabrication workbook is incomplete. The reader prioritises `*core*` images for
+  \(d\) and `*glass*` images for \(D\), falling back to any detected measurement
+  in the capture when no explicit variant is available.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
