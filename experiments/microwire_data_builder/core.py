@@ -182,10 +182,35 @@ ALT_VARIANT_PATTERN = re.compile(r"(?:s\d+|\d+_\d+)a(?!\w)", re.IGNORECASE)
 DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
 SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
+MICROSCOPE_PRIMARY_PATTERN = re.compile(
+    rf"\[1\]\s*(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
+    re.IGNORECASE,
+)
 MICROSCOPE_VALUE_PATTERN = re.compile(
     rf"(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
     re.IGNORECASE,
 )
+
+KNOWN_TIMEZONE_TOKENS = {
+    "UTC",
+    "GMT",
+    "CET",
+    "CEST",
+    "EET",
+    "EEST",
+    "BST",
+    "IST",
+    "WEST",
+    "WET",
+    "EST",
+    "EDT",
+    "CST",
+    "CDT",
+    "MST",
+    "MDT",
+    "PST",
+    "PDT",
+}
 
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 
@@ -477,6 +502,27 @@ def _parse_numeric(value: object) -> Optional[float]:
         return None
 
 
+def _sanitize_datetime_text(text: str) -> str:
+    cleaned = text.strip()
+    cleaned = re.sub(r"(?<=\d)/(?=\d{1,2}(?::\d{1,2})?)", " ", cleaned)
+    cleaned = re.sub(r"\s*\([^)]*\)\s*$", "", cleaned)
+    tokens: list[str] = []
+    for raw_token in cleaned.split():
+        token = raw_token.strip().strip(",.;")
+        if not token:
+            continue
+        tokens.append(token)
+    while tokens:
+        candidate = tokens[-1]
+        upper = candidate.upper()
+        if any(char.isdigit() for char in candidate):
+            break
+        if upper in KNOWN_TIMEZONE_TOKENS:
+            break
+        tokens.pop()
+    return " ".join(tokens)
+
+
 def _parse_datetime(value: object) -> Optional[str]:
     if value is None:
         return None
@@ -485,6 +531,7 @@ def _parse_datetime(value: object) -> Optional[str]:
     text = _normalise_text(value)
     if not text:
         return None
+    text = _sanitize_datetime_text(text)
     try:
         dayfirst: Optional[bool]
         if DOT_DATE_PATTERN.search(text):
@@ -788,9 +835,10 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
         if text:
             candidates.append(text)
 
-    unique: Dict[float, None] = {}
+    preferred: Dict[float, float] = {}
+    fallback: Dict[float, float] = {}
     for text in candidates:
-        for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
+        for match in MICROSCOPE_PRIMARY_PATTERN.finditer(text):
             raw = match.group("value").replace(",", ".")
             try:
                 value = float(raw)
@@ -799,9 +847,26 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
             if not math.isfinite(value) or value <= 0:
                 continue
             key = round(value, 2)
-            unique.setdefault(key, value)
+            preferred.setdefault(key, value)
+        if preferred:
+            continue
+        for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
+            start = max(match.start() - 4, 0)
+            prefix = text[start:match.start()]
+            if "[2" in prefix:
+                continue
+            raw = match.group("value").replace(",", ".")
+            try:
+                value = float(raw)
+            except ValueError:
+                continue
+            if not math.isfinite(value) or value <= 0:
+                continue
+            key = round(value, 2)
+            fallback.setdefault(key, value)
 
-    return [float(v) for v in unique.values()]
+    selected = preferred if preferred else fallback
+    return [float(v) for v in selected.values()]
 
 
 def _group_microscope_measurements(
@@ -1775,6 +1840,9 @@ def build_database(
                 under_value = video_data.underpressure()
                 if under_value is not None:
                     row["Underpressure"] = under_value
+        ratio_display = _parse_numeric(row["d/D"])
+        if ratio_display is not None:
+            row["d/D"] = round(ratio_display, 3)
         if not draw_info:
             stats.missing_draw += 1
         if not piece_info:

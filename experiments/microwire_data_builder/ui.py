@@ -8,7 +8,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -56,8 +56,14 @@ def is_microscope_candidate(path: Path) -> bool:
 def collect_support_files(
     annealing_files: Sequence[Path],
     data_roots: Sequence[Path],
+    progress_callback: Optional[Callable[[], None]] = None,
 ) -> tuple[list[Path], list[Path], list[Path]]:
-    """Locate fabrication spreadsheets, microscope images and videos."""
+    """Locate fabrication spreadsheets, microscope images and videos.
+
+    When ``progress_callback`` is supplied it is invoked after each annealing
+    file has been analysed so callers can surface responsive progress updates
+    while the filesystem scan is running.
+    """
 
     if not annealing_files:
         return [], [], []
@@ -220,69 +226,76 @@ def collect_support_files(
         return matches
 
     for _, meta in records:
-        composition = getattr(meta, "composition_token", None)
-        draw = getattr(meta, "draw_x", None)
-        piece = getattr(meta, "piece_y", None)
-        if composition is None or draw is None:
-            continue
-        composition_dirs = _composition_dirs(fabrication_root, composition)
-        for comp_dir in composition_dirs:
-            _append_unique(fabrication, seen_fabrication, comp_dir / f"{composition}.xlsx")
-            try:
-                for candidate in comp_dir.glob("*.xlsx"):
-                    if candidate.name.lower() == f"{composition.lower()}.xlsx":
-                        continue
-                    if candidate.stem.startswith(f"{draw}_"):
-                        _append_unique(fabrication, seen_fabrication, candidate)
-            except OSError:
-                pass
-            if piece is not None:
-                for piece_dir in _piece_dirs(comp_dir, draw):
-                    try:
-                        for candidate in piece_dir.glob("*.xlsx"):
+        try:
+            composition = getattr(meta, "composition_token", None)
+            draw = getattr(meta, "draw_x", None)
+            piece = getattr(meta, "piece_y", None)
+            if composition is None or draw is None:
+                continue
+            composition_dirs = _composition_dirs(fabrication_root, composition)
+            for comp_dir in composition_dirs:
+                _append_unique(fabrication, seen_fabrication, comp_dir / f"{composition}.xlsx")
+                try:
+                    for candidate in comp_dir.glob("*.xlsx"):
+                        if candidate.name.lower() == f"{composition.lower()}.xlsx":
+                            continue
+                        if candidate.stem.startswith(f"{draw}_"):
                             _append_unique(fabrication, seen_fabrication, candidate)
-                    except OSError:
-                        continue
-        if piece is None:
-            continue
-        search_dirs: list[Path] = []
-        if microscope_root is not None:
-            search_dirs.extend(_composition_dirs(microscope_root, composition))
-        if not search_dirs and microscope_root is not None:
-            search_dirs.append(microscope_root)
-        for comp_dir in composition_dirs:
-            for piece_dir in _piece_dirs(comp_dir, draw):
-                if piece_dir not in search_dirs:
-                    search_dirs.append(piece_dir)
-        fragment = f"{draw}_{piece}"
-        for search_dir in search_dirs:
-            if not search_dir.is_dir():
+                except OSError:
+                    pass
+                if piece is not None:
+                    for piece_dir in _piece_dirs(comp_dir, draw):
+                        try:
+                            for candidate in piece_dir.glob("*.xlsx"):
+                                _append_unique(fabrication, seen_fabrication, candidate)
+                        except OSError:
+                            continue
+            if piece is None:
                 continue
-            try:
-                candidates = _iter_fragment_files(
-                    search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50
-                )
-            except Exception:
-                continue
-            for candidate in candidates:
-                if is_microscope_candidate(candidate):
-                    _append_unique(auto_micro, seen_micro, candidate)
-        video_dirs: list[Path] = []
-        if video_root is not None:
-            video_dirs.extend(_composition_dirs(video_root, composition))
-        for comp_dir in composition_dirs:
-            video_dirs.extend(_piece_dirs(comp_dir, draw))
-        for search_dir in video_dirs:
-            if not search_dir.is_dir():
-                continue
-            try:
-                candidates = _iter_fragment_files(
-                    search_dir, fragment, VIDEO_EXTENSIONS, limit=40
-                )
-            except Exception:
-                continue
-            for candidate in candidates:
-                _append_unique(videos, seen_video, candidate)
+            search_dirs: list[Path] = []
+            if microscope_root is not None:
+                search_dirs.extend(_composition_dirs(microscope_root, composition))
+            if not search_dirs and microscope_root is not None:
+                search_dirs.append(microscope_root)
+            for comp_dir in composition_dirs:
+                for piece_dir in _piece_dirs(comp_dir, draw):
+                    if piece_dir not in search_dirs:
+                        search_dirs.append(piece_dir)
+            fragment = f"{draw}_{piece}"
+            for search_dir in search_dirs:
+                if not search_dir.is_dir():
+                    continue
+                try:
+                    candidates = _iter_fragment_files(
+                        search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50
+                    )
+                except Exception:
+                    continue
+                for candidate in candidates:
+                    if is_microscope_candidate(candidate):
+                        _append_unique(auto_micro, seen_micro, candidate)
+            video_dirs: list[Path] = []
+            if video_root is not None:
+                video_dirs.extend(_composition_dirs(video_root, composition))
+            for comp_dir in composition_dirs:
+                video_dirs.extend(_piece_dirs(comp_dir, draw))
+            for search_dir in video_dirs:
+                if not search_dir.is_dir():
+                    continue
+                try:
+                    candidates = _iter_fragment_files(
+                        search_dir, fragment, VIDEO_EXTENSIONS, limit=40
+                    )
+                except Exception:
+                    continue
+                for candidate in candidates:
+                    _append_unique(videos, seen_video, candidate)
+        finally:
+            if progress_callback is not None:
+                try:
+                    progress_callback()
+                except Exception:
+                    pass
 
     fabrication = list(dict.fromkeys(fabrication))
     auto_micro = list(dict.fromkeys(auto_micro))
@@ -302,6 +315,61 @@ class QtLogHandler(logging.Handler):
         self._emit(message)
 
 
+class _ProgressTracker:
+    """Translate multi-phase progress updates into a single counter."""
+
+    def __init__(self, emit: Callable[[int, int], None]) -> None:
+        self._emit_fn = emit
+        self._total_units = 1
+        self._completed = 0
+        self._prep_units = 0
+        self._build_units = 0
+        self._extra_units = 0
+
+    def configure(self, prep_units: int, build_units: int, extra_units: int = 1) -> None:
+        self._prep_units = max(prep_units, 0)
+        self._build_units = max(build_units, 0)
+        self._extra_units = max(extra_units, 0)
+        total = self._prep_units + self._build_units + self._extra_units
+        self._total_units = total if total > 0 else 1
+        self._completed = 0
+        self._emit()
+
+    def _emit(self) -> None:
+        self._emit_fn(min(self._completed, self._total_units), self._total_units)
+
+    def advance_prepare(self) -> None:
+        if self._completed < self._prep_units:
+            self._completed += 1
+            self._emit()
+
+    def finish_prepare(self) -> None:
+        target = self._prep_units
+        if target > self._completed:
+            self._completed = target
+            self._emit()
+
+    def build_progress(self, current: int, total: int) -> None:
+        mapped_total = self._build_units if self._build_units else total
+        if mapped_total <= 0:
+            return
+        target = self._prep_units + min(max(current, 0), mapped_total)
+        if target > self._completed:
+            self._completed = target
+            self._emit()
+
+    def finish_build(self) -> None:
+        target = self._prep_units + self._build_units
+        if target > self._completed:
+            self._completed = target
+            self._emit()
+
+    def finalize(self) -> None:
+        if self._total_units > self._completed:
+            self._completed = self._total_units
+            self._emit()
+
+
 class BuildWorker(QtCore.QObject):
     """Background worker that runs the database builder."""
 
@@ -313,6 +381,7 @@ class BuildWorker(QtCore.QObject):
         super().__init__()
         self.inputs = inputs
         self.logger = logger
+        self._tracker = _ProgressTracker(self.progress.emit)
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - exercised via integration test
@@ -320,11 +389,16 @@ class BuildWorker(QtCore.QObject):
             inputs = self.inputs
             annealing_files = list(dict.fromkeys(inputs.annealing_files))
             manual_microscope = list(dict.fromkeys(inputs.manual_microscope_files))
+            prep_units = len(annealing_files)
+            build_units = len(annealing_files)
+            self._tracker.configure(prep_units, build_units, extra_units=1)
             self.logger.info("Preparing support files...")
             fabrication_files, auto_microscope, video_files = collect_support_files(
                 annealing_files,
                 inputs.data_roots,
+                progress_callback=self._tracker.advance_prepare,
             )
+            self._tracker.finish_prepare()
             microscope_files = list(dict.fromkeys(manual_microscope + auto_microscope))
             config = BuilderConfig(
                 fabrication_files=fabrication_files,
@@ -353,12 +427,17 @@ class BuildWorker(QtCore.QObject):
                 )
             if video_files:
                 self.logger.info("Using %s video file(s)", len(video_files))
+
+            def _progress_bridge(current: int, total: int) -> None:
+                self._tracker.build_progress(current, total)
+
             result = build_database(
                 config,
                 logger=self.logger,
-                progress_callback=self.progress.emit,
+                progress_callback=_progress_bridge,
                 root_for_relpaths=Path.cwd(),
             )
+            self._tracker.finish_build()
             if result.exports:
                 for fmt, path in result.exports.items():
                     self.logger.info("%s written to %s", fmt.upper(), path)
@@ -384,6 +463,7 @@ class BuildWorker(QtCore.QObject):
                 stats.missing_low_measurement,
                 stats.resistance_checks_failed,
             )
+            self._tracker.finalize()
             self.finished.emit(result)
         except Exception as exc:  # pragma: no cover - safety net
             self.logger.exception("Build failed")
@@ -444,6 +524,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         root_layout = QtWidgets.QVBoxLayout(self.root_group)
         self.root_list = QtWidgets.QListWidget()
         self.root_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.root_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Preferred,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.root_list.setMaximumHeight(110)
         root_layout.addWidget(self.root_list)
         root_buttons = QtWidgets.QHBoxLayout()
         root_add = QtWidgets.QPushButton("Add folder...")

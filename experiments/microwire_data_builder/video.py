@@ -57,7 +57,7 @@ class VideoExtractionResult:
 
 def extract_video_metrics(
     video_path: Path,
-    frame_interval: float = 5.0,
+    frame_interval: float = 30.0,
     max_frames: int = 200,
     logger: Optional[logging.Logger] = None,
     frame_output_dir: Optional[Path] = None,
@@ -98,6 +98,7 @@ def extract_video_metrics(
     fps = capture.get(cv2.CAP_PROP_FPS) or 0.0
     if not fps or not math.isfinite(fps):
         fps = 25.0
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
     frame_step = max(int(round(frame_interval * fps)), 1)
 
     if frame_output_dir is None:
@@ -105,13 +106,27 @@ def extract_video_metrics(
         tmp_root.mkdir(parents=True, exist_ok=True)
         frame_output_dir = tmp_root
 
-    frame_index = 0
+    if total_frames > 0:
+        start_frame = min(int(total_frames * 0.5), max(total_frames - 1, 0))
+        end_frame = int(total_frames * 0.9)
+        if end_frame <= start_frame:
+            start_frame = 0
+            end_frame = total_frames
+        if start_frame:
+            capture.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+    else:
+        start_frame = 0
+        end_frame = None
+
+    frame_index = start_frame
     harvested = 0
     while True:
+        if end_frame is not None and frame_index >= end_frame:
+            break
         ret, frame = capture.read()
         if not ret:
             break
-        if frame_index % frame_step == 0:
+        if (frame_index - start_frame) % frame_step == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             enhanced = cv2.equalizeHist(gray)
             try:

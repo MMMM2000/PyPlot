@@ -342,16 +342,24 @@ plotting tools:
   the same draw/piece identifiers and the builder OCRs the red overlay labels to
   fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
   fabrication workbook is incomplete. The reader prioritises `*core*` images for
-  \(d\) and `*glass*` images for \(D\), falling back to any detected measurement
-  in the capture when no explicit variant is available.
+  \(d\) and `*glass*` images for \(D\) and only trusts measurements that start
+  with the `[1]` marker used in the overlays, ignoring the `[2]` annotations that
+  often describe a secondary feature in glass captures.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
   restored on launch so repeat builds are quick.
 * When you click **Run** the builder now searches for fabrication sheets,
   microscope captures, and draw videos on a background thread. The progress bar
-  stays responsive, showing **Preparing...** during the discovery phase before
-  switching to the standard percentage updates once the database build starts.
+  advances throughout the entire job: it steps through the preparation work
+  while directories are scanned and then continues smoothly through the
+  annealing files as the database is assembled, so you always know how far
+  through the run you are.
+* **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
+  the annealing data and the builder samples one frame every 30 seconds from the
+  steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
+  is applied to each sampled frame and the median temperature/underpressure is
+  used to back-fill any missing fabrication readings.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. Use the **Figure width/height**
@@ -389,7 +397,7 @@ The exported columns are:
 * Microwire (e.g. `4/1`)
 * d (µm)
 * D (µm)
-* d/D
+* d/D (rounded to three decimal places)
 * Length (m)
 * Production datetime
 * Mass (g)
