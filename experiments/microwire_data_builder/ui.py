@@ -6,8 +6,9 @@ import json
 import logging
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -26,6 +27,268 @@ from .core import (
 
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
+
+
+@dataclass
+class WorkerInputs:
+    """Configuration passed to :class:`BuildWorker`."""
+
+    annealing_files: list[Path]
+    manual_microscope_files: list[Path]
+    data_roots: list[Path]
+    output_dir: Path
+    output_name: str
+    export_formats: tuple[str, ...]
+    plot_backends: tuple[str, ...]
+    export_behaviour: dict[str, str]
+    matplotlib_figsize: tuple[float, float]
+
+
+def is_microscope_candidate(path: Path) -> bool:
+    """Return ``True`` when ``path`` looks like a microscope overlay image."""
+
+    if path.suffix.lower() not in MICROSCOPE_EXTENSIONS:
+        return False
+    stem = path.stem.lower()
+    return "core" in stem or "glass" in stem
+
+
+def collect_support_files(
+    annealing_files: Sequence[Path],
+    data_roots: Sequence[Path],
+) -> tuple[list[Path], list[Path], list[Path]]:
+    """Locate fabrication spreadsheets, microscope images and videos."""
+
+    if not annealing_files:
+        return [], [], []
+
+    unique_annealing = list(dict.fromkeys(Path(p) for p in annealing_files))
+    records: list[tuple[Path, object]] = []
+    for path in unique_annealing:
+        try:
+            meta = _metadata_from_path(path)
+        except Exception:
+            continue
+        composition = getattr(meta, "composition_token", None)
+        draw = getattr(meta, "draw_x", None)
+        if composition and draw is not None:
+            records.append((path, meta))
+    if not records:
+        return [], [], []
+
+    def _is_relative(path: Path, root: Path) -> bool:
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return False
+        return True
+
+    candidate_roots: list[Path] = []
+    for candidate in dict.fromkeys(data_roots):
+        root_path = Path(candidate).expanduser()
+        if root_path.is_dir():
+            candidate_roots.append(root_path)
+    primary_root: Path | None = None
+    for root_path in candidate_roots:
+        if any(_is_relative(path, root_path) for path, _ in records):
+            primary_root = root_path
+            break
+    if primary_root is None:
+        if candidate_roots:
+            primary_root = candidate_roots[0]
+        else:
+            common = Path(records[0][0]).resolve().parent
+            primary_root = common
+
+    def _resolve_subdir(root: Path | None, names: tuple[str, ...]) -> Path | None:
+        if root is None:
+            return None
+        for name in names:
+            candidate = root / name
+            if candidate.is_dir():
+                return candidate
+        return None
+
+    fabrication_root = (
+        _resolve_subdir(primary_root, ("microwire data", "Microwire data"))
+        or primary_root
+    )
+    microscope_root = _resolve_subdir(primary_root, ("microscope", "Microscope"))
+    video_root = _resolve_subdir(
+        primary_root,
+        ("microwire data", "Microwire data", "videos", "Videos", "Microscope", "microscope"),
+    )
+
+    fabrication: list[Path] = []
+    auto_micro: list[Path] = []
+    videos: list[Path] = []
+    seen_fabrication: set[Path] = set()
+    seen_micro: set[Path] = set()
+    seen_video: set[Path] = set()
+
+    def _append_unique(container: list[Path], seen: set[Path], candidate: Path | None) -> None:
+        if candidate is None:
+            return
+        resolved = candidate.expanduser()
+        try:
+            exists = resolved.exists()
+        except OSError:
+            exists = False
+        if not exists:
+            return
+        try:
+            key = resolved.resolve()
+        except OSError:
+            key = resolved
+        if key in seen:
+            return
+        seen.add(key)
+        container.append(resolved)
+
+    def _composition_dirs(base: Path | None, composition: str) -> list[Path]:
+        dirs: list[Path] = []
+        if base is None or not base.is_dir():
+            return dirs
+        exact = base / composition
+        if exact.is_dir():
+            dirs.append(exact)
+        try:
+            for child in base.iterdir():
+                if child.is_dir() and child.name.lower().startswith(composition.lower()):
+                    dirs.append(child)
+        except OSError:
+            pass
+        if not dirs:
+            dirs.append(base)
+        return dirs
+
+    def _piece_dirs(comp_dir: Path, draw: int) -> list[Path]:
+        dirs: list[Path] = []
+        draw_token = str(draw)
+        try:
+            for child in comp_dir.iterdir():
+                if child.is_dir() and draw_token in child.name:
+                    dirs.append(child)
+        except OSError:
+            pass
+        return dirs
+
+    def _iter_fragment_files(
+        root: Path,
+        fragment: str,
+        extensions: tuple[str, ...],
+        *,
+        max_depth: int = 4,
+        limit: int | None = None,
+    ) -> list[Path]:
+        if root is None or not root.exists():
+            return []
+        fragment_lower = fragment.lower()
+        stack: list[tuple[Path, int]] = [(root, 0)]
+        visited: set[Path] = set()
+        matches: list[Path] = []
+        keywords = ("microscope", "video", "videos")
+        while stack:
+            current_root, depth = stack.pop()
+            if current_root in visited:
+                continue
+            visited.add(current_root)
+            if depth > max_depth:
+                continue
+            try:
+                entries = list(current_root.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                try:
+                    if entry.is_dir():
+                        if entry.name.lower() in keywords:
+                            next_depth = depth
+                        else:
+                            next_depth = depth + 1
+                        stack.append((entry, next_depth))
+                    elif entry.is_file():
+                        if (
+                            entry.suffix.lower() in extensions
+                            and fragment_lower in entry.name.lower()
+                        ):
+                            matches.append(entry)
+                            if limit is not None and len(matches) >= limit:
+                                return matches
+                except OSError:
+                    continue
+        return matches
+
+    for _, meta in records:
+        composition = getattr(meta, "composition_token", None)
+        draw = getattr(meta, "draw_x", None)
+        piece = getattr(meta, "piece_y", None)
+        if composition is None or draw is None:
+            continue
+        composition_dirs = _composition_dirs(fabrication_root, composition)
+        for comp_dir in composition_dirs:
+            _append_unique(fabrication, seen_fabrication, comp_dir / f"{composition}.xlsx")
+            try:
+                for candidate in comp_dir.glob("*.xlsx"):
+                    if candidate.name.lower() == f"{composition.lower()}.xlsx":
+                        continue
+                    if candidate.stem.startswith(f"{draw}_"):
+                        _append_unique(fabrication, seen_fabrication, candidate)
+            except OSError:
+                pass
+            if piece is not None:
+                for piece_dir in _piece_dirs(comp_dir, draw):
+                    try:
+                        for candidate in piece_dir.glob("*.xlsx"):
+                            _append_unique(fabrication, seen_fabrication, candidate)
+                    except OSError:
+                        continue
+        if piece is None:
+            continue
+        search_dirs: list[Path] = []
+        if microscope_root is not None:
+            search_dirs.extend(_composition_dirs(microscope_root, composition))
+        if not search_dirs and microscope_root is not None:
+            search_dirs.append(microscope_root)
+        for comp_dir in composition_dirs:
+            for piece_dir in _piece_dirs(comp_dir, draw):
+                if piece_dir not in search_dirs:
+                    search_dirs.append(piece_dir)
+        fragment = f"{draw}_{piece}"
+        for search_dir in search_dirs:
+            if not search_dir.is_dir():
+                continue
+            try:
+                candidates = _iter_fragment_files(
+                    search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50
+                )
+            except Exception:
+                continue
+            for candidate in candidates:
+                if is_microscope_candidate(candidate):
+                    _append_unique(auto_micro, seen_micro, candidate)
+        video_dirs: list[Path] = []
+        if video_root is not None:
+            video_dirs.extend(_composition_dirs(video_root, composition))
+        for comp_dir in composition_dirs:
+            video_dirs.extend(_piece_dirs(comp_dir, draw))
+        for search_dir in video_dirs:
+            if not search_dir.is_dir():
+                continue
+            try:
+                candidates = _iter_fragment_files(
+                    search_dir, fragment, VIDEO_EXTENSIONS, limit=40
+                )
+            except Exception:
+                continue
+            for candidate in candidates:
+                _append_unique(videos, seen_video, candidate)
+
+    fabrication = list(dict.fromkeys(fabrication))
+    auto_micro = list(dict.fromkeys(auto_micro))
+    videos = list(dict.fromkeys(videos))
+    return fabrication, auto_micro, videos
+
 
 class QtLogHandler(logging.Handler):
     """Logging handler that forwards records to a Qt slot."""
@@ -46,17 +309,50 @@ class BuildWorker(QtCore.QObject):
     finished = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
 
-    def __init__(self, config: BuilderConfig, logger: logging.Logger) -> None:
+    def __init__(self, inputs: WorkerInputs, logger: logging.Logger) -> None:
         super().__init__()
-        self.config = config
+        self.inputs = inputs
         self.logger = logger
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - exercised via integration test
         try:
-            config = self.config
+            inputs = self.inputs
+            annealing_files = list(dict.fromkeys(inputs.annealing_files))
+            manual_microscope = list(dict.fromkeys(inputs.manual_microscope_files))
+            self.logger.info("Preparing support files...")
+            fabrication_files, auto_microscope, video_files = collect_support_files(
+                annealing_files,
+                inputs.data_roots,
+            )
+            microscope_files = list(dict.fromkeys(manual_microscope + auto_microscope))
+            config = BuilderConfig(
+                fabrication_files=fabrication_files,
+                annealing_files=annealing_files,
+                output_dir=inputs.output_dir,
+                microscope_files=microscope_files,
+                video_files=video_files,
+                make_plots=bool(inputs.plot_backends),
+                export_formats=inputs.export_formats,
+                output_name=inputs.output_name,
+                plot_backends=inputs.plot_backends,
+                export_behaviour=inputs.export_behaviour,
+                matplotlib_figsize=inputs.matplotlib_figsize,
+            )
             config.output_dir.mkdir(parents=True, exist_ok=True)
-            self.logger.info("Starting build with %s annealing file(s)", len(config.annealing_files))
+            self.logger.info(
+                "Starting build with %s annealing file(s)", len(config.annealing_files)
+            )
+            if fabrication_files:
+                self.logger.info(
+                    "Using %s fabrication spreadsheet(s)", len(fabrication_files)
+                )
+            if microscope_files:
+                self.logger.info(
+                    "Using %s microscope image(s)", len(microscope_files)
+                )
+            if video_files:
+                self.logger.info("Using %s video file(s)", len(video_files))
             result = build_database(
                 config,
                 logger=self.logger,
@@ -78,7 +374,7 @@ class BuildWorker(QtCore.QObject):
                     )
             stats = result.stats
             self.logger.info(
-                "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s Râ‰ˆV/I failures=%s",
+                "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R~=V/I failures=%s",
                 stats.parsed,
                 stats.skipped,
                 stats.rows_built,
@@ -150,7 +446,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.root_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         root_layout.addWidget(self.root_list)
         root_buttons = QtWidgets.QHBoxLayout()
-        root_add = QtWidgets.QPushButton("Add rootâ€¦")
+        root_add = QtWidgets.QPushButton("Add folder...")
         root_add.clicked.connect(self._add_data_root)
         root_buttons.addWidget(root_add)
         root_clear = QtWidgets.QPushButton("Clear")
@@ -168,10 +464,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         anneal_layout.addWidget(self.anneal_list)
 
         anneal_buttons = QtWidgets.QHBoxLayout()
-        anneal_add_files = QtWidgets.QPushButton("Add filesâ€¦")
+        anneal_add_files = QtWidgets.QPushButton("Add files...")
         anneal_add_files.clicked.connect(self._add_anneal_files)
         anneal_buttons.addWidget(anneal_add_files)
-        anneal_add_folder = QtWidgets.QPushButton("Add folderâ€¦")
+        anneal_add_folder = QtWidgets.QPushButton("Add folder...")
         anneal_add_folder.clicked.connect(self._add_anneal_folder)
         anneal_buttons.addWidget(anneal_add_folder)
         anneal_clear = QtWidgets.QPushButton("Clear")
@@ -192,10 +488,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.microscope_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         micro_layout.addWidget(self.microscope_list)
         micro_buttons = QtWidgets.QHBoxLayout()
-        micro_add_files = QtWidgets.QPushButton("Add filesâ€¦")
+        micro_add_files = QtWidgets.QPushButton("Add files...")
         micro_add_files.clicked.connect(self._add_microscope_files)
         micro_buttons.addWidget(micro_add_files)
-        micro_add_folder = QtWidgets.QPushButton("Add folderâ€¦")
+        micro_add_folder = QtWidgets.QPushButton("Add folder...")
         micro_add_folder.clicked.connect(self._add_microscope_folder)
         micro_buttons.addWidget(micro_add_folder)
         micro_clear = QtWidgets.QPushButton("Clear")
@@ -256,7 +552,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.output_edit = QtWidgets.QLineEdit(str(self._default_output_dir))
         self.output_edit.editingFinished.connect(self._save_settings)
         output_layout.addWidget(self.output_edit, 0, 1)
-        self.output_button = QtWidgets.QPushButton("Browseâ€¦")
+        self.output_button = QtWidgets.QPushButton("Browse...")
         self.output_button.clicked.connect(self._select_output_dir)
         output_layout.addWidget(self.output_button, 0, 2)
         name_label = QtWidgets.QLabel("File name:")
@@ -422,234 +718,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             widget.addItem(text)
 
     def _is_microscope_candidate(self, path: Path) -> bool:
-        if path.suffix.lower() not in MICROSCOPE_EXTENSIONS:
-            return False
-        stem = path.stem.lower()
-        return "core" in stem or "glass" in stem
+        return is_microscope_candidate(path)
 
     def _collect_support_files(
         self, annealing_files: list[Path]
     ) -> tuple[list[Path], list[Path], list[Path]]:
-        if not annealing_files:
-            return [], [], []
+        return collect_support_files(annealing_files, self.data_roots)
 
-        unique_annealing = list(dict.fromkeys(Path(p) for p in annealing_files))
-        records: list[tuple[Path, object]] = []
-        for path in unique_annealing:
-            try:
-                meta = _metadata_from_path(path)
-            except Exception:
-                continue
-            composition = getattr(meta, 'composition_token', None)
-            draw = getattr(meta, 'draw_x', None)
-            if composition and draw is not None:
-                records.append((path, meta))
-        if not records:
-            return [], [], []
-
-        def _is_relative(path: Path, root: Path) -> bool:
-            try:
-                path.relative_to(root)
-            except ValueError:
-                return False
-            return True
-
-        candidate_roots: list[Path] = []
-        for candidate in dict.fromkeys(self.data_roots):
-            root_path = Path(candidate).expanduser()
-            if root_path.is_dir():
-                candidate_roots.append(root_path)
-        primary_root: Path | None = None
-        for root_path in candidate_roots:
-            if any(_is_relative(path, root_path) for path, _ in records):
-                primary_root = root_path
-                break
-        if primary_root is None:
-            if candidate_roots:
-                primary_root = candidate_roots[0]
-            else:
-                common = Path(records[0][0]).resolve().parent
-                primary_root = common
-
-        def _resolve_subdir(root: Path | None, names: tuple[str, ...]) -> Path | None:
-            if root is None:
-                return None
-            for name in names:
-                candidate = root / name
-                if candidate.is_dir():
-                    return candidate
-            return None
-
-        fabrication_root = _resolve_subdir(primary_root, ('microwire data', 'Microwire data')) or primary_root
-        microscope_root = _resolve_subdir(primary_root, ('microscope', 'Microscope'))
-        video_root = _resolve_subdir(primary_root, ('microwire data', 'Microwire data', 'videos', 'Videos', 'Microscope', 'microscope'))
-
-        fabrication: list[Path] = []
-        auto_micro: list[Path] = []
-        videos: list[Path] = []
-        seen_fabrication: set[Path] = set()
-        seen_micro: set[Path] = set()
-        seen_video: set[Path] = set()
-
-        def _append_unique(container: list[Path], seen: set[Path], candidate: Path | None) -> None:
-            if candidate is None:
-                return
-            resolved = candidate.expanduser()
-            try:
-                exists = resolved.exists()
-            except OSError:
-                exists = False
-            if not exists:
-                return
-            try:
-                key = resolved.resolve()
-            except OSError:
-                key = resolved
-            if key in seen:
-                return
-            seen.add(key)
-            container.append(resolved)
-
-        def _composition_dirs(base: Path | None, composition: str) -> list[Path]:
-            dirs: list[Path] = []
-            if base is None or not base.is_dir():
-                return dirs
-            exact = base / composition
-            if exact.is_dir():
-                dirs.append(exact)
-            try:
-                for child in base.iterdir():
-                    if child.is_dir() and child.name.lower().startswith(composition.lower()):
-                        dirs.append(child)
-            except OSError:
-                pass
-            if not dirs:
-                dirs.append(base)
-            return dirs
-
-        def _piece_dirs(comp_dir: Path, draw: int) -> list[Path]:
-            dirs: list[Path] = []
-            draw_token = str(draw)
-            try:
-                for child in comp_dir.iterdir():
-                    if child.is_dir() and draw_token in child.name:
-                        dirs.append(child)
-            except OSError:
-                pass
-            return dirs
-
-        def _iter_fragment_files(
-            root: Path,
-            fragment: str,
-            extensions: tuple[str, ...],
-            *,
-            max_depth: int = 4,
-            limit: int | None = None,
-        ) -> list[Path]:
-            if root is None or not root.exists():
-                return []
-            fragment_lower = fragment.lower()
-            stack: list[tuple[Path, int]] = [(root, 0)]
-            visited: set[Path] = set()
-            matches: list[Path] = []
-            keywords = ("microscope", "video", "videos")
-            while stack:
-                current, depth = stack.pop()
-                try:
-                    entries = list(current.iterdir())
-                except OSError:
-                    continue
-                for entry in entries:
-                    try:
-                        if entry.is_dir():
-                            if depth >= max_depth:
-                                continue
-                            try:
-                                key = entry.resolve()
-                            except OSError:
-                                key = entry
-                            if key in visited:
-                                continue
-                            visited.add(key)
-                            name_lower = entry.name.lower()
-                            if depth < 1 or fragment_lower in name_lower or any(token in name_lower for token in keywords):
-                                stack.append((entry, depth + 1))
-                        elif entry.is_file():
-                            if entry.suffix.lower() in extensions and fragment_lower in entry.name.lower():
-                                matches.append(entry)
-                                if limit is not None and len(matches) >= limit:
-                                    return matches
-                    except OSError:
-                        continue
-            return matches
-
-
-
-        for _, meta in records:
-            composition = getattr(meta, 'composition_token', None)
-            draw = getattr(meta, 'draw_x', None)
-            piece = getattr(meta, 'piece_y', None)
-            if composition is None or draw is None:
-                continue
-            composition_dirs = _composition_dirs(fabrication_root, composition)
-            for comp_dir in composition_dirs:
-                _append_unique(fabrication, seen_fabrication, comp_dir / f"{composition}.xlsx")
-                try:
-                    for candidate in comp_dir.glob('*.xlsx'):
-                        if candidate.name.lower() == f"{composition.lower()}.xlsx":
-                            continue
-                        if candidate.stem.startswith(f"{draw}_"):
-                            _append_unique(fabrication, seen_fabrication, candidate)
-                except OSError:
-                    pass
-                if piece is not None:
-                    for piece_dir in _piece_dirs(comp_dir, draw):
-                        try:
-                            for candidate in piece_dir.glob('*.xlsx'):
-                                _append_unique(fabrication, seen_fabrication, candidate)
-                        except OSError:
-                            continue
-            if piece is None:
-                continue
-            search_dirs: list[Path] = []
-            if microscope_root is not None:
-                search_dirs.extend(_composition_dirs(microscope_root, composition))
-            if not search_dirs and microscope_root is not None:
-                search_dirs.append(microscope_root)
-            for comp_dir in composition_dirs:
-                for piece_dir in _piece_dirs(comp_dir, draw):
-                    if piece_dir not in search_dirs:
-                        search_dirs.append(piece_dir)
-            fragment = f"{draw}_{piece}"
-            for search_dir in search_dirs:
-                if not search_dir.is_dir():
-                    continue
-                try:
-                    candidates = _iter_fragment_files(search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50)
-                except Exception:
-                    continue
-                for candidate in candidates:
-                    if self._is_microscope_candidate(candidate):
-                        _append_unique(auto_micro, seen_micro, candidate)
-            video_dirs: list[Path] = []
-            if video_root is not None:
-                video_dirs.extend(_composition_dirs(video_root, composition))
-            for comp_dir in composition_dirs:
-                video_dirs.extend(_piece_dirs(comp_dir, draw))
-            for search_dir in video_dirs:
-                if not search_dir.is_dir():
-                    continue
-                try:
-                    candidates = _iter_fragment_files(search_dir, fragment, VIDEO_EXTENSIONS, limit=40)
-                except Exception:
-                    continue
-                for candidate in candidates:
-                    _append_unique(videos, seen_video, candidate)
-
-        fabrication = list(dict.fromkeys(fabrication))
-        auto_micro = list(dict.fromkeys(auto_micro))
-        videos = list(dict.fromkeys(videos))
-        return fabrication, auto_micro, videos
     def _add_anneal_files(self) -> None:
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
@@ -843,9 +918,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             widget.setEnabled(not running)
         self.run_button.setEnabled(not running)
         if running:
+            self.progress_bar.setRange(0, 0)
             self.progress_bar.setValue(0)
-            self.progress_label.setText("Runningâ€¦")
+            self.progress_label.setText("Preparing...")
         else:
+            if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
+                self.progress_bar.setRange(0, 100)
+                self.progress_bar.setValue(0)
             if self.progress_label.text() not in {"Complete", "Failed"}:
                 self.progress_label.setText("Idle")
 
@@ -914,18 +993,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 behaviours[fmt.lower()] = "replace"
 
         annealing_files = list(dict.fromkeys(self.annealing_paths))
-        fabrication_files, auto_microscope_files, video_files = self._collect_support_files(annealing_files)
-        microscope_files = list(dict.fromkeys(list(self.microscope_paths) + auto_microscope_files))
-
-        config = BuilderConfig(
-            fabrication_files=fabrication_files,
+        worker_inputs = WorkerInputs(
             annealing_files=annealing_files,
+            manual_microscope_files=list(dict.fromkeys(self.microscope_paths)),
+            data_roots=list(dict.fromkeys(self.data_roots)),
             output_dir=output_dir,
-            microscope_files=microscope_files,
-            video_files=video_files,
-            make_plots=bool(plot_backends),
-            export_formats=tuple(export_formats),
             output_name=output_name,
+            export_formats=tuple(export_formats),
             plot_backends=tuple(plot_backends),
             export_behaviour=behaviours,
             matplotlib_figsize=(
@@ -938,13 +1012,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_view.clear()
         self.logger.info(
             "Queued build for %s annealing measurement(s)",
-            len(config.annealing_files),
+            len(worker_inputs.annealing_files),
         )
-        self._start_worker(config)
+        self._start_worker(worker_inputs)
 
-    def _start_worker(self, config: BuilderConfig) -> None:
+    def _start_worker(self, inputs: WorkerInputs) -> None:
         self._thread = QtCore.QThread(self)
-        self._worker = BuildWorker(config, self.logger)
+        self._worker = BuildWorker(inputs, self.logger)
         self._worker.moveToThread(self._thread)
         self._thread.started.connect(self._worker.run)
         self._worker.progress.connect(self._update_progress)
@@ -958,6 +1032,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _update_progress(self, current: int, total: int) -> None:
         total = max(total, 1)
         percent = int(round(100 * current / total))
+        if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
+            self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(max(0, min(100, percent)))
         self.progress_label.setText(f"{current}/{total}")
 

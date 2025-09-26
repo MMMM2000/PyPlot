@@ -348,6 +348,10 @@ plotting tools:
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
   restored on launch so repeat builds are quick.
+* When you click **Run** the builder now searches for fabrication sheets,
+  microscope captures, and draw videos on a background thread. The progress bar
+  stays responsive, showing **Preparing...** during the discovery phase before
+  switching to the standard percentage updates once the database build starts.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. Use the **Figure width/height**
