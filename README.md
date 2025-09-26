@@ -344,7 +344,11 @@ plotting tools:
   fabrication workbook is incomplete. The reader prioritises `*core*` images for
   \(d\) and `*glass*` images for \(D\) and only trusts measurements that start
   with the `[1]` marker used in the overlays, ignoring the `[2]` annotations that
-  often describe a secondary feature in glass captures.
+  often describe a secondary feature in glass captures. Install Tesseract so the
+  OCR layer can run (`brew install tesseract` on macOS is sufficient); the
+  builder now searches the PATH as well as common Homebrew, MacPorts, and
+  Windows installation folders, and logs a single warning if the binary is still
+  missing.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
@@ -363,9 +367,10 @@ plotting tools:
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. Use the **Figure width/height**
-  controls to choose the Matplotlib canvas size in inches; the values are saved
-  between runs and the axis labels, ticks, markers, and line widths rescale so
-  the smaller figures stay legible. Matplotlib still trims the burn-through
+  controls to choose the Matplotlib canvas size in inches (the defaults are now
+  7.0 × 4.5 in to better fill the Excel slots); the values are saved between runs
+  and the axis labels, ticks, markers, and line widths rescale so the smaller
+  figures stay legible. Matplotlib still trims the burn-through
   sample that collapses to low current or spikes sharply in resistance and bridges
   the final increasing/decreasing points with a blue segment so the trace ends
   cleanly, and the measurement loader applies the same trimming so the exported

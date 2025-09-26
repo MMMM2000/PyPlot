@@ -16,6 +16,7 @@ from plotting.utils import ensure_app_theme, install_standard_menu
 
 from .core import (
     LOGGER_NAME,
+    DEFAULT_FIGSIZE,
     DEFAULT_OUTPUT_NAME,
     BuildResult,
     BuilderConfig,
@@ -42,6 +43,10 @@ class WorkerInputs:
     plot_backends: tuple[str, ...]
     export_behaviour: dict[str, str]
     matplotlib_figsize: tuple[float, float]
+
+
+FIGURE_WIDTH_DEFAULT_MM = round(DEFAULT_FIGSIZE[0] * 25.4, 1)
+FIGURE_HEIGHT_DEFAULT_MM = round(DEFAULT_FIGSIZE[1] * 25.4, 1)
 
 
 def is_microscope_candidate(path: Path) -> bool:
@@ -614,14 +619,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.figure_width_spin.setRange(20.0, 400.0)
         self.figure_width_spin.setDecimals(1)
         self.figure_width_spin.setSingleStep(5.0)
-        self.figure_width_spin.setValue(140.0)
+        self.figure_width_spin.setValue(FIGURE_WIDTH_DEFAULT_MM)
         self.figure_width_spin.valueChanged.connect(self._save_settings)
         figure_size_form.addRow("Figure width (mm)", self.figure_width_spin)
         self.figure_height_spin = QtWidgets.QDoubleSpinBox()
         self.figure_height_spin.setRange(20.0, 250.0)
         self.figure_height_spin.setDecimals(1)
         self.figure_height_spin.setSingleStep(5.0)
-        self.figure_height_spin.setValue(90.0)
+        self.figure_height_spin.setValue(FIGURE_HEIGHT_DEFAULT_MM)
         self.figure_height_spin.valueChanged.connect(self._save_settings)
         figure_size_form.addRow("Figure height (mm)", self.figure_height_spin)
         options_layout.addLayout(figure_size_form)
@@ -738,8 +743,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
             with QtCore.QSignalBlocker(self.microscope_recursive):
                 self.microscope_recursive.setChecked(_read_bool("microscope_recursive", True))
 
-        width_value = _read_float("figure_width", 140.0)
-        height_value = _read_float("figure_height", 90.0)
+        width_value = _read_float("figure_width", FIGURE_WIDTH_DEFAULT_MM)
+        height_value = _read_float("figure_height", FIGURE_HEIGHT_DEFAULT_MM)
         if width_value <= 20.0 and height_value <= 20.0:
             width_value *= 25.4
             height_value *= 25.4

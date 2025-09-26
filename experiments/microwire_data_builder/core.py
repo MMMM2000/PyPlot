@@ -215,8 +215,11 @@ KNOWN_TIMEZONE_TOKENS = {
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 
 
+DEFAULT_FIGSIZE: Tuple[float, float] = (7.0, 4.5)
+
+
 def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> Tuple[float, float]:
-    default = (4.0, 2.25)
+    default = DEFAULT_FIGSIZE
     if not value:
         return default
     try:
@@ -234,7 +237,7 @@ def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> T
         height_f = default[1]
     return (max(0.5, width_f), max(0.5, height_f))
 
-EXCEL_EMBED_DPI = 150.0
+EXCEL_EMBED_DPI = 120.0
 
 
 def _excel_pixel_limits(figure_size: Tuple[float, float]) -> Tuple[int, int]:
@@ -242,6 +245,10 @@ def _excel_pixel_limits(figure_size: Tuple[float, float]) -> Tuple[int, int]:
     width_px = max(int(round(width_in * EXCEL_EMBED_DPI)), 1)
     height_px = max(int(round(height_in * EXCEL_EMBED_DPI)), 1)
     return width_px, height_px
+
+
+def _pixels_to_points(pixels: float) -> float:
+    return max(pixels * 72.0 / EXCEL_EMBED_DPI, 0.0)
 
 
 def _excel_row_height(height_in: float) -> float:
@@ -268,7 +275,7 @@ class BuilderConfig:
     output_name: str = DEFAULT_OUTPUT_NAME
     plot_backends: Tuple[str, ...] = ()
     export_behaviour: Optional[Dict[str, str]] = None
-    matplotlib_figsize: Tuple[float, float] = (4.0, 2.25)
+    matplotlib_figsize: Tuple[float, float] = DEFAULT_FIGSIZE
 
 
 @dataclass
@@ -1507,8 +1514,7 @@ def _embed_plots_in_excel_openpyxl(
                     continue
 
                 # Downscale very large images so they fit within the worksheet cells.
-                max_width = max(int(round(figure_size[0] * 96)), 1)
-                max_height = max(int(round(figure_size[1] * 96)), 1)
+                max_width, max_height = _excel_pixel_limits(figure_size)
                 if image.width and image.height:
                     width_scale = max_width / image.width if image.width > max_width else 1.0
                     height_scale = max_height / image.height if image.height > max_height else 1.0
@@ -1528,7 +1534,7 @@ def _embed_plots_in_excel_openpyxl(
 
                 # Adjust the row height and column width to accommodate the scaled figure.
                 if image.height:
-                    target_height = image.height * 0.75  # approximate px→pt conversion
+                    target_height = _pixels_to_points(float(image.height))
                     current_height = worksheet.row_dimensions[row_number].height or 0
                     if target_height > current_height:
                         worksheet.row_dimensions[row_number].height = target_height
@@ -1584,8 +1590,7 @@ def _embed_assets_with_xlsxwriter(
 
     from PIL import Image as PILImage  # local import to avoid hard dependency elsewhere
 
-    max_width = max(int(round(figure_size[0] * 96)), 1)
-    max_height = max(int(round(figure_size[1] * 96)), 1)
+    max_width, max_height = _excel_pixel_limits(figure_size)
     row_heights: Dict[int, float] = {}
     column_widths: Dict[int, float] = {}
 
@@ -1625,7 +1630,10 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert plot image %s", image_path)
                 continue
-            target_height = (height_px * y_scale * 0.75) if height_px else max_height * 0.75
+            if height_px:
+                target_height = _pixels_to_points(height_px * y_scale)
+            else:
+                target_height = _pixels_to_points(float(max_height))
             if target_height > row_heights.get(row_number, 0.0):
                 worksheet.set_row(row_number, target_height)
                 row_heights[row_number] = target_height
@@ -1735,7 +1743,9 @@ def build_database(
     plot_name_to_path: Dict[str, Path] = {}
     origin_artifacts: Dict[str, OriginArtifact] = {}
     origin_cache: Dict[str, OriginArtifact] = {}
-    figure_size = _normalise_figsize(getattr(config, "matplotlib_figsize", (4.0, 2.25)))
+    figure_size = _normalise_figsize(
+        getattr(config, "matplotlib_figsize", DEFAULT_FIGSIZE)
+    )
     plot_dir = output_dir / config.plot_dir_name
     origin_dir = output_dir / config.origin_dir_name
     origin_enabled = wants_origin_requested
