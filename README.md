@@ -342,10 +342,13 @@ plotting tools:
   the same draw/piece identifiers and the builder OCRs the red overlay labels to
   fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
   fabrication workbook is incomplete. The reader prioritises `*core*` images for
-  \(d\) and `*glass*` images for \(D\) and only trusts measurements that start
-  with the `[1]` marker used in the overlays, ignoring the `[2]` annotations that
-  often describe a secondary feature in glass captures. Install Tesseract so the
-  OCR layer can run (`brew install tesseract` on macOS, `choco install
+  \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
+  markers without a closing bracket are still recognised, filters out the `[2]`
+  annotations that often describe a secondary feature in glass captures, and now
+  accepts draw/piece tokens written with spaces or hyphens (for example, `5-4`
+  or `5 4`) in addition to the original underscore format when matching images to
+  measurements.
+  Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS, `choco install
   tesseract` on Windows, or `apt install tesseract-ocr` on Ubuntu). The builder
   now searches PATH, Homebrew/MacPorts trees, Windows Program Files, Chocolatey,
   user-level installs, and even the `.app` bundles that ship a private copy of
@@ -359,7 +362,8 @@ plotting tools:
 * When you click **Run** the builder now searches for fabrication sheets,
   microscope captures, and draw videos on a background thread. The progress bar
   advances throughout the entire job: it steps through the preparation work
-  while directories are scanned and then continues smoothly through the
+  while directories are scanned, continues through microscope OCR and video
+  analysis with per-image updates, and then updates smoothly across the
   annealing files as the database is assembled, so you always know how far
   through the run you are.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
@@ -373,7 +377,9 @@ plotting tools:
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,
-  markers, and line widths rescale so larger canvases stay crisp. Matplotlib still trims the burn-through
+  markers, and line widths rescale so larger canvases stay crisp. Embedded Excel
+  rows and columns now use the exact figure dimensions, so the chart area fills
+  the allocated cells without leftover whitespace. Matplotlib still trims the burn-through
   sample that collapses to low current or spikes sharply in resistance and bridges
   the final increasing/decreasing points with a blue segment so the trace ends
   cleanly, and the measurement loader applies the same trimming so the exported

@@ -328,20 +328,35 @@ class _ProgressTracker:
         self._total_units = 1
         self._completed = 0
         self._prep_units = 0
+        self._analysis_units = 0
         self._build_units = 0
-        self._extra_units = 0
+        self._final_units = 0
 
-    def configure(self, prep_units: int, build_units: int, extra_units: int = 1) -> None:
+    def configure(
+        self, prep_units: int, analysis_units: int, build_units: int, final_units: int = 1
+    ) -> None:
         self._prep_units = max(prep_units, 0)
+        self._analysis_units = max(analysis_units, 0)
         self._build_units = max(build_units, 0)
-        self._extra_units = max(extra_units, 0)
-        total = self._prep_units + self._build_units + self._extra_units
+        self._final_units = max(final_units, 0)
+        total = self._prep_units + self._analysis_units + self._build_units + self._final_units
         self._total_units = total if total > 0 else 1
         self._completed = 0
         self._emit()
 
     def _emit(self) -> None:
         self._emit_fn(min(self._completed, self._total_units), self._total_units)
+
+    def set_analysis_units(self, units: int) -> None:
+        units = max(units, 0)
+        if units == self._analysis_units:
+            return
+        self._analysis_units = units
+        total = self._prep_units + self._analysis_units + self._build_units + self._final_units
+        self._total_units = total if total > 0 else 1
+        if self._completed > self._total_units:
+            self._completed = self._total_units
+        self._emit()
 
     def advance_prepare(self) -> None:
         if self._completed < self._prep_units:
@@ -354,17 +369,34 @@ class _ProgressTracker:
             self._completed = target
             self._emit()
 
+    def analysis_progress(self, current: int, total: int) -> None:
+        mapped_total = self._analysis_units if self._analysis_units else total
+        if mapped_total <= 0:
+            return
+        current_clamped = min(max(current, 0), mapped_total)
+        target = self._prep_units + current_clamped
+        if target > self._completed:
+            self._completed = target
+            self._emit()
+
+    def finish_analysis(self) -> None:
+        target = self._prep_units + self._analysis_units
+        if target > self._completed:
+            self._completed = target
+            self._emit()
+
     def build_progress(self, current: int, total: int) -> None:
         mapped_total = self._build_units if self._build_units else total
         if mapped_total <= 0:
             return
-        target = self._prep_units + min(max(current, 0), mapped_total)
+        offset = self._prep_units + self._analysis_units
+        target = offset + min(max(current, 0), mapped_total)
         if target > self._completed:
             self._completed = target
             self._emit()
 
     def finish_build(self) -> None:
-        target = self._prep_units + self._build_units
+        target = self._prep_units + self._analysis_units + self._build_units
         if target > self._completed:
             self._completed = target
             self._emit()
@@ -396,7 +428,7 @@ class BuildWorker(QtCore.QObject):
             manual_microscope = list(dict.fromkeys(inputs.manual_microscope_files))
             prep_units = len(annealing_files)
             build_units = len(annealing_files)
-            self._tracker.configure(prep_units, build_units, extra_units=1)
+            self._tracker.configure(prep_units, 0, build_units, final_units=1)
             self.logger.info("Preparing support files...")
             fabrication_files, auto_microscope, video_files = collect_support_files(
                 annealing_files,
@@ -405,6 +437,8 @@ class BuildWorker(QtCore.QObject):
             )
             self._tracker.finish_prepare()
             microscope_files = list(dict.fromkeys(manual_microscope + auto_microscope))
+            analysis_units = len(microscope_files) + len(video_files)
+            self._tracker.set_analysis_units(analysis_units)
             config = BuilderConfig(
                 fabrication_files=fabrication_files,
                 annealing_files=annealing_files,
@@ -436,12 +470,19 @@ class BuildWorker(QtCore.QObject):
             def _progress_bridge(current: int, total: int) -> None:
                 self._tracker.build_progress(current, total)
 
+            def _analysis_bridge(current: int, total: int) -> None:
+                self._tracker.set_analysis_units(total)
+                self._tracker.analysis_progress(current, total)
+
             result = build_database(
                 config,
                 logger=self.logger,
                 progress_callback=_progress_bridge,
+                analysis_progress_callback=_analysis_bridge,
+                analysis_total=analysis_units,
                 root_for_relpaths=Path.cwd(),
             )
+            self._tracker.finish_analysis()
             self._tracker.finish_build()
             if result.exports:
                 for fmt, path in result.exports.items():

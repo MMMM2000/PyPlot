@@ -205,12 +205,14 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
 
     monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
 
+    custom_figsize = (5.5, 3.5)
     config = BuilderConfig(
         fabrication_files=[],
         annealing_files=[high, low],
         output_dir=tmp_path / "out",
         make_plots=True,
         export_formats=("excel",),
+        matplotlib_figsize=custom_figsize,
     )
 
     result = build_database(config)
@@ -226,6 +228,11 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
     figure_col_idx = core.OUTPUT_COLUMNS.index("Figure — 1000 mA")
     col_letter = get_column_letter(figure_col_idx + 1)
     assert worksheet[f"{col_letter}2"].value is None
+
+    expected_row_height = core._excel_row_height(custom_figsize[1])
+    expected_col_width = core._excel_column_width(custom_figsize[0])
+    assert worksheet.row_dimensions[2].height == pytest.approx(expected_row_height, rel=0.01)
+    assert worksheet.column_dimensions[col_letter].width == pytest.approx(expected_col_width, rel=0.05)
 
     anchor = images[0].anchor
     if hasattr(anchor, "_from"):
@@ -269,7 +276,29 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
     ratio_col = core.OUTPUT_COLUMNS[4]
     assert float(row[d_col]) == pytest.approx(16.7)
     assert float(row[D_col]) == pytest.approx(212.4)
-    assert float(row[ratio_col]) == pytest.approx(16.7 / 212.4)
+    expected_ratio = round(16.7 / 212.4, 3)
+    assert float(row[ratio_col]) == pytest.approx(expected_ratio)
+
+
+def test_parse_microscope_candidates_prefers_primary_marker() -> None:
+    values = core._parse_microscope_candidates([
+        "2025/09/25 [116.7um extra [2] 20.0um",
+    ])
+    assert values == [pytest.approx(16.7)]
+
+
+def test_parse_microscope_candidates_ignores_secondary() -> None:
+    values = core._parse_microscope_candidates([
+        "[2] 44.1um 18.5um",
+    ])
+    assert values == [pytest.approx(18.5)]
+
+
+def test_microscope_key_handles_additional_delimiters() -> None:
+    dashed = Path("Ni50Fe27Ga23 5-4 core.jpg")
+    spaced = Path("Ni50Fe27Ga23 5 4 glass.png")
+    assert core._microscope_key(dashed) == ("Ni50Fe27Ga23", 5, 4)
+    assert core._microscope_key(spaced) == ("Ni50Fe27Ga23", 5, 4)
 
 
 def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

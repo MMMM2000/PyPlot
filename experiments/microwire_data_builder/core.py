@@ -177,18 +177,27 @@ ANNEALING_COLUMNS = ["I_A", "V_V", "R_ohm"]
 DRAW_PATTERN = re.compile(r"^(?P<draw>\d+)")
 PIECE_PATTERN = re.compile(r"^(?P<piece>\d+)")
 XY_PATTERN = re.compile(r"(\d+)_+(\d+)")
+MICROSCOPE_PAIR_PATTERNS: Tuple[re.Pattern[str], ...] = (
+    re.compile(r"(\d+)_+(\d+)"),
+    re.compile(r"(\d+)[/-](\d+)")
+)
+MICROSCOPE_WHITESPACE_PAIR = re.compile(r"\b(\d{1,3})\s+(\d{1,3})\b")
 SETPOINT_PATTERN = re.compile(r"(\d{1,4})mA", re.IGNORECASE)
 ALT_VARIANT_PATTERN = re.compile(r"(?:s\d+|\d+_\d+)a(?!\w)", re.IGNORECASE)
 DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
 SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
 MICROSCOPE_PRIMARY_PATTERN = re.compile(
-    rf"\[1\]\s*(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
+    rf"[\[(]\s*[1I]\s*[\])}}]?\s*(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
     re.IGNORECASE,
 )
 MICROSCOPE_VALUE_PATTERN = re.compile(
     rf"(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
     re.IGNORECASE,
+)
+MICROSCOPE_SECONDARY_PREFIX = re.compile(r"[\[(]?\s*2\s*[\])}]*$", re.IGNORECASE)
+MICROSCOPE_OCR_CONFIG = (
+    "--psm 6 -c tessedit_char_whitelist=0123456789[](){}Il" f"{MICRO_SIGN}umUM.,/ "
 )
 
 KNOWN_TIMEZONE_TOKENS = {
@@ -635,18 +644,49 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int]]:
     def _match(text: str) -> Optional[Tuple[str, int, int]]:
         if not text:
             return None
-        match = XY_PATTERN.search(text)
-        if not match:
-            return None
         composition = _extract_composition_token(text)
-        if not composition:
+        if not composition or not any(ch.isdigit() for ch in composition):
             return None
-        try:
-            draw_x = int(match.group(1))
-            piece_y = int(match.group(2))
-        except (TypeError, ValueError):
-            return None
-        return composition, draw_x, piece_y
+
+        def _to_pair(match: re.Match[str]) -> Optional[Tuple[str, int, int]]:
+            try:
+                draw_x = int(match.group(1))
+                piece_y = int(match.group(2))
+            except (TypeError, ValueError):
+                return None
+            return composition, draw_x, piece_y
+
+        for pattern in MICROSCOPE_PAIR_PATTERNS:
+            normalised = text
+            if pattern is MICROSCOPE_PAIR_PATTERNS[1]:
+                normalised = normalised.replace("-", "/")
+            match = pattern.search(normalised)
+            if match:
+                if pattern is MICROSCOPE_PAIR_PATTERNS[1]:
+                    following = normalised[match.end(): match.end() + 1]
+                    if following and following in "-/":
+                        continue
+                pair = _to_pair(match)
+                if pair is not None:
+                    return pair
+
+        for match in MICROSCOPE_WHITESPACE_PAIR.finditer(text):
+            pair = _to_pair(match)
+            if pair is not None:
+                return pair
+
+        tokens = re.split(r"\s+", text)
+        for token in tokens:
+            if not token:
+                continue
+            normalised = token.replace("-", "_").replace("/", "_")
+            match = XY_PATTERN.search(normalised)
+            if not match:
+                continue
+            pair = _to_pair(match)
+            if pair is not None:
+                return pair
+        return None
 
     for candidate in (path.stem, path.name):
         result = _match(candidate)
@@ -778,6 +818,56 @@ def _auto_discover_microscope_paths(
     return discovered
 
 
+def _normalise_microscope_text(text: str) -> str:
+    cleaned = unicodedata.normalize("NFKC", text or "")
+    cleaned = cleaned.replace("μ", MICRO_SIGN)
+    cleaned = cleaned.replace("[l", "[1").replace("[I", "[1").replace("(1", "[1")
+    cleaned = cleaned.replace("l]", "1]").replace("I]", "1]")
+    cleaned = cleaned.replace("{1", "[1").replace("{2", "[2")
+    return cleaned
+
+
+def _is_secondary_prefix(prefix: str) -> bool:
+    return bool(MICROSCOPE_SECONDARY_PREFIX.search(prefix.strip()))
+
+
+def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
+    preferred: Dict[float, float] = {}
+    fallback: Dict[float, float] = {}
+    for raw_text in texts:
+        if not raw_text:
+            continue
+        text = _normalise_microscope_text(raw_text)
+        for match in MICROSCOPE_PRIMARY_PATTERN.finditer(text):
+            raw_value = match.group("value").replace(",", ".")
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            if not math.isfinite(value) or value <= 0:
+                continue
+            key = round(value, 2)
+            preferred.setdefault(key, value)
+        if preferred:
+            break
+        for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
+            start = max(match.start() - 6, 0)
+            prefix = text[start:match.start()]
+            if _is_secondary_prefix(prefix):
+                continue
+            raw_value = match.group("value").replace(",", ".")
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            if not math.isfinite(value) or value <= 0:
+                continue
+            key = round(value, 2)
+            fallback.setdefault(key, value)
+    selected = preferred if preferred else fallback
+    return [float(v) for v in selected.values()]
+
+
 def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[float]:
     """Attempt to OCR diameter annotations from a microscope capture."""
 
@@ -809,10 +899,12 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
         width, height = image.size
         target = 1600
         longest = max(width, height)
-        if longest >= target:
+        if longest <= 0:
             return image
         scale = target / float(longest)
-        new_size = (int(width * scale), int(height * scale))
+        if math.isclose(scale, 1.0, rel_tol=1e-3):
+            return image
+        new_size = (max(int(round(width * scale)), 1), max(int(round(height * scale)), 1))
         resample_attr = getattr(Image, "Resampling", None)
         if resample_attr is not None:
             resample_filter = getattr(resample_attr, "LANCZOS", Image.BICUBIC)
@@ -825,12 +917,13 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
     resized = _resample(grayscale)
     enhanced = ImageEnhance.Contrast(resized).enhance(2.0)
     sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
-    variants = [resized, enhanced, sharpened, ImageOps.autocontrast(resized)]
+    autocontrasted = ImageOps.autocontrast(resized)
+    variants = [resized, enhanced, sharpened, autocontrasted]
 
     tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
     for variant in variants:
         try:
-            text = pytesseract.image_to_string(variant, config="--psm 6")
+            text = pytesseract.image_to_string(variant, config=MICROSCOPE_OCR_CONFIG)
         except tesseract_not_found:
             log.warning(
                 "Tesseract executable vanished while processing %s; aborting microscope OCR",
@@ -844,71 +937,65 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
             if MICROSCOPE_PRIMARY_PATTERN.search(text):
                 break
 
-    preferred: Dict[float, float] = {}
-    fallback: Dict[float, float] = {}
-    for text in candidates:
-        for match in MICROSCOPE_PRIMARY_PATTERN.finditer(text):
-            raw = match.group("value").replace(",", ".")
-            try:
-                value = float(raw)
-            except ValueError:
-                continue
-            if not math.isfinite(value) or value <= 0:
-                continue
-            key = round(value, 2)
-            preferred.setdefault(key, value)
-        if preferred:
-            break
-        for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
-            start = max(match.start() - 4, 0)
-            prefix = text[start:match.start()]
-            if "[2" in prefix:
-                continue
-            raw = match.group("value").replace(",", ".")
-            try:
-                value = float(raw)
-            except ValueError:
-                continue
-            if not math.isfinite(value) or value <= 0:
-                continue
-            key = round(value, 2)
-            fallback.setdefault(key, value)
-
-    selected = preferred if preferred else fallback
-    return [float(v) for v in selected.values()]
+    return _parse_microscope_candidates(candidates)
 
 
 def _group_microscope_measurements(
     microscope_files: Sequence[Path],
-    annealing_files: Sequence[Path],
     logger: Optional[logging.Logger],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
     log = _logger(logger)
-    auto_paths = _auto_discover_microscope_paths(annealing_files, log)
-    combined = list(dict.fromkeys([Path(p) for p in microscope_files] + auto_paths))
+    combined: List[Path] = []
+    seen: Set[Path] = set()
+    for raw_path in microscope_files:
+        path = Path(raw_path)
+        try:
+            resolved = path.resolve()
+        except OSError:
+            resolved = path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        combined.append(path)
+    total = len(combined)
+    processed = 0
     grouped: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
     for raw_path in combined:
         path = raw_path.expanduser()
+        processed += 1
+
+        def _notify() -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(processed, total)
+                except Exception:
+                    pass
+
         try:
             if not path.exists():
                 log.debug("Microscope image %s does not exist; skipping", path)
+                _notify()
                 continue
         except OSError:
+            _notify()
             continue
         key = _microscope_key(path)
         if key is None:
             log.debug("Unable to derive microwire key from microscope image %s", path)
+            _notify()
             continue
         category = _microscope_category(path)
         try:
             values = _extract_microscope_diameters(path, log)
         except Exception:
             log.exception("Microscope OCR failed for %s", path)
+            _notify()
             continue
-        if not values:
-            continue
-        record = grouped.setdefault(key, MicroscopeMeasurements())
-        record.extend(category, values)
+        if values:
+            record = grouped.setdefault(key, MicroscopeMeasurements())
+            record.extend(category, values)
+        _notify()
     return grouped
 
 
@@ -933,17 +1020,33 @@ def _draw_key(path: Path) -> Optional[Tuple[str, int]]:
 
 
 def _collect_video_metrics(
-    video_files: Sequence[Path], logger: Optional[logging.Logger]
+    video_files: Sequence[Path],
+    logger: Optional[logging.Logger],
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]:
     log = _logger(logger)
     aggregated: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
-    for raw_path in dict.fromkeys(Path(p) for p in video_files):
+    unique_files = list(dict.fromkeys(Path(p) for p in video_files))
+    total = len(unique_files)
+    processed = 0
+    for raw_path in unique_files:
         path = raw_path.expanduser()
+        processed += 1
+
+        def _notify() -> None:
+            if progress_callback is not None:
+                try:
+                    progress_callback(processed, total)
+                except Exception:
+                    pass
+
         try:
             if not path.exists():
                 log.debug("Video file %s does not exist; skipping", path)
+                _notify()
                 continue
         except OSError:
+            _notify()
             continue
         key = _microscope_key(path)
         if key is not None:
@@ -952,6 +1055,7 @@ def _collect_video_metrics(
             draw_key = _draw_key(path)
             if draw_key is None:
                 log.debug("Unable to derive microwire key from video %s", path)
+                _notify()
                 continue
             composition, draw_x = draw_key
             piece_y = None
@@ -959,9 +1063,11 @@ def _collect_video_metrics(
             result = extract_video_metrics(path, logger=log)
         except Exception:
             log.exception("Failed to analyse video %s", path)
+            _notify()
             continue
         summary = aggregated.setdefault((composition, draw_x, piece_y), VideoMetricsSummary())
         summary.record(result)
+        _notify()
     return aggregated
 
 
@@ -1494,6 +1600,9 @@ def _embed_plots_in_excel_openpyxl(
 
         inserted = False
         reset_df = dataframe.reset_index(drop=True)
+        target_width_px, target_height_px = _excel_pixel_limits(figure_size)
+        target_row_height = _excel_row_height(figure_size[1])
+        target_col_width = _excel_column_width(figure_size[0])
         for row_idx, row in reset_df.iterrows():
             for column in figure_columns:
                 value = row.get(column)
@@ -1515,15 +1624,10 @@ def _embed_plots_in_excel_openpyxl(
                     log.exception("Failed to load plot image %s for Excel export", image_path)
                     continue
 
-                # Downscale very large images so they fit within the worksheet cells.
-                max_width, max_height = _excel_pixel_limits(figure_size)
-                if image.width and image.height:
-                    width_scale = max_width / image.width if image.width > max_width else 1.0
-                    height_scale = max_height / image.height if image.height > max_height else 1.0
-                    scale = min(width_scale, height_scale)
-                    if scale < 1.0:
-                        image.width = int(image.width * scale)
-                        image.height = int(image.height * scale)
+                if target_width_px:
+                    image.width = int(target_width_px)
+                if target_height_px:
+                    image.height = int(target_height_px)
 
                 column_index = dataframe.columns.get_loc(column) + 1
                 row_number = row_idx + 2  # account for the header row
@@ -1536,14 +1640,12 @@ def _embed_plots_in_excel_openpyxl(
 
                 # Adjust the row height and column width to accommodate the scaled figure.
                 current_height = worksheet.row_dimensions[row_number].height or 0
-                target_height = _pixels_to_points(float(image.height)) if image.height else 0.0
-                desired_height = max(target_height, _excel_row_height(figure_size[1]))
+                desired_height = max(target_row_height, _pixels_to_points(float(image.height)))
                 if desired_height > current_height:
                     worksheet.row_dimensions[row_number].height = desired_height
 
                 current_width = worksheet.column_dimensions[column_letter].width or 0
-                approx_width = image.width / 7.0 if image.width else 0.0
-                desired_width = max(approx_width, _excel_column_width(figure_size[0]))
+                desired_width = max(target_col_width, current_width)
                 if desired_width > current_width:
                     worksheet.column_dimensions[column_letter].width = desired_width
 
@@ -1593,7 +1695,9 @@ def _embed_assets_with_xlsxwriter(
 
     from PIL import Image as PILImage  # local import to avoid hard dependency elsewhere
 
-    max_width, max_height = _excel_pixel_limits(figure_size)
+    target_width_px, target_height_px = _excel_pixel_limits(figure_size)
+    target_row_height = _excel_row_height(figure_size[1])
+    target_col_width = _excel_column_width(figure_size[0])
     row_heights: Dict[int, float] = {}
     column_widths: Dict[int, float] = {}
 
@@ -1619,12 +1723,12 @@ def _embed_assets_with_xlsxwriter(
                     width_px, height_px = pil_image.size
             except Exception:
                 width_px = height_px = 0
-            x_scale = min(1.0, max_width / width_px) if width_px else 1.0
-            y_scale = min(1.0, max_height / height_px) if height_px else 1.0
+            x_scale = (target_width_px / width_px) if width_px else 1.0
+            y_scale = (target_height_px / height_px) if height_px else 1.0
             options: Dict[str, float] = {}
-            if x_scale < 1.0:
+            if width_px and not math.isclose(x_scale, 1.0):
                 options["x_scale"] = x_scale
-            if y_scale < 1.0:
+            if height_px and not math.isclose(y_scale, 1.0):
                 options["y_scale"] = y_scale
             column_index = dataframe.columns.get_loc(column)
             worksheet.write_blank(row_number, column_index, None)
@@ -1633,14 +1737,13 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert plot image %s", image_path)
                 continue
-            scaled_height = _pixels_to_points(height_px * y_scale) if height_px else _pixels_to_points(float(max_height))
-            desired_height = max(scaled_height, _excel_row_height(figure_size[1]))
+            scaled_height = _pixels_to_points(target_height_px)
+            desired_height = max(scaled_height, target_row_height)
             if desired_height > row_heights.get(row_number, 0.0):
                 worksheet.set_row(row_number, desired_height)
                 row_heights[row_number] = desired_height
 
-            approx_width = (width_px * x_scale / 7.0) if width_px else (max_width / 7.0)
-            desired_width = max(approx_width, _excel_column_width(figure_size[0]))
+            desired_width = max(target_col_width, column_widths.get(column_index, 0.0))
             if desired_width > column_widths.get(column_index, 0.0):
                 worksheet.set_column(column_index, column_index, desired_width)
                 column_widths[column_index] = desired_width
@@ -1668,10 +1771,10 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert Origin object %s", artifact.object_path)
                 continue
-            desired_height = max(row_heights.get(row_number, 0.0), _excel_row_height(figure_size[1]))
+            desired_height = max(row_heights.get(row_number, 0.0), target_row_height)
             worksheet.set_row(row_number, desired_height)
             row_heights[row_number] = desired_height
-            desired_width = max(column_widths.get(column_index, 0.0), _excel_column_width(figure_size[0]))
+            desired_width = max(column_widths.get(column_index, 0.0), target_col_width)
             worksheet.set_column(column_index, column_index, desired_width)
             column_widths[column_index] = desired_width
 
@@ -1714,6 +1817,8 @@ def build_database(
     config: BuilderConfig,
     logger: Optional[logging.Logger] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    analysis_progress_callback: Optional[Callable[[int, int], None]] = None,
+    analysis_total: Optional[int] = None,
     root_for_relpaths: Optional[Path] = None,
 ) -> BuildResult:
     log = _logger(logger)
@@ -1753,8 +1858,61 @@ def build_database(
     origin_dir = output_dir / config.origin_dir_name
     origin_enabled = wants_origin_requested
     origin_disabled_reason: Optional[str] = None
-    microscope_index = _group_microscope_measurements(config.microscope_files, config.annealing_files, log)
-    video_index = _collect_video_metrics(config.video_files, log)
+    manual_microscope_files = [Path(p) for p in config.microscope_files]
+    auto_microscope_files = _auto_discover_microscope_paths(config.annealing_files, log)
+    microscope_sources = list(dict.fromkeys(manual_microscope_files + auto_microscope_files))
+    video_sources = list(dict.fromkeys(Path(p) for p in config.video_files))
+
+    analysis_total_local = analysis_total
+    if analysis_total_local is None:
+        analysis_total_local = len(microscope_sources) + len(video_sources)
+    analysis_done = 0
+
+    def _analysis_notify() -> None:
+        if analysis_progress_callback is not None and analysis_total_local > 0:
+            total_units = analysis_total_local
+            current_units = min(analysis_done, total_units)
+            analysis_progress_callback(current_units, total_units)
+
+    last_micro = 0
+
+    def _micro_progress(processed: int, _stage_total: int) -> None:
+        nonlocal analysis_done, last_micro
+        delta = max(processed - last_micro, 0)
+        if delta:
+            analysis_done += delta
+            _analysis_notify()
+        last_micro = processed
+
+    last_video = 0
+
+    def _video_progress(processed: int, _stage_total: int) -> None:
+        nonlocal analysis_done, last_video
+        delta = max(processed - last_video, 0)
+        if delta:
+            analysis_done += delta
+            _analysis_notify()
+        last_video = processed
+
+    micro_callback = _micro_progress if analysis_total_local else None
+    video_callback = _video_progress if analysis_total_local else None
+
+    if analysis_total_local:
+        _analysis_notify()
+
+    microscope_index = _group_microscope_measurements(
+        microscope_sources,
+        log,
+        progress_callback=micro_callback,
+    )
+    video_index = _collect_video_metrics(
+        video_sources,
+        log,
+        progress_callback=video_callback,
+    )
+    if analysis_total_local and analysis_done < analysis_total_local:
+        analysis_done = analysis_total_local
+        _analysis_notify()
     total = len(config.annealing_files)
     for idx, path in enumerate(config.annealing_files, start=1):
         try:
