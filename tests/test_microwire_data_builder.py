@@ -284,7 +284,7 @@ def test_parse_microscope_candidates_prefers_primary_marker() -> None:
     values = core._parse_microscope_candidates([
         "2025/09/25 [116.7um extra [2] 20.0um",
     ])
-    assert values == [pytest.approx(16.7)]
+    assert values == [pytest.approx(6.7)]
 
 
 def test_parse_microscope_candidates_ignores_secondary() -> None:

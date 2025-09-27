@@ -187,17 +187,20 @@ ALT_VARIANT_PATTERN = re.compile(r"(?:s\d+|\d+_\d+)a(?!\w)", re.IGNORECASE)
 DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
 SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
+MICROSCOPE_MARKER_PATTERN = re.compile(r"[\[{(]\s*(?P<digit>[12Il])\s*[\]})1Il]?")
 MICROSCOPE_PRIMARY_PATTERN = re.compile(
-    rf"[\[(]\s*[1I]\s*[\])}}]?\s*(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
+    rf"\[1]\s*(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
     re.IGNORECASE,
 )
 MICROSCOPE_VALUE_PATTERN = re.compile(
     rf"(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
     re.IGNORECASE,
 )
-MICROSCOPE_SECONDARY_PREFIX = re.compile(r"[\[(]?\s*2\s*[\])}]*$", re.IGNORECASE)
+MICROSCOPE_SECONDARY_PREFIX = re.compile(r"\[2]\s*$", re.IGNORECASE)
 MICROSCOPE_OCR_CONFIG = (
-    "--psm 6 -c tessedit_char_whitelist=0123456789[](){}Il" f"{MICRO_SIGN}umUM.,/ "
+    "--oem 1 --psm 6 "
+    "-c tessedit_char_whitelist=0123456789[](){}Il" f"{MICRO_SIGN}umUM.,/ "
+    "-c classify_bln_numeric_mode=1"
 )
 
 KNOWN_TIMEZONE_TOKENS = {
@@ -264,8 +267,17 @@ def _excel_row_height(height_in: float) -> float:
     return max(height_in * 72.0, 18.0)
 
 
+def _column_width_from_pixels(pixels: float) -> float:
+    if pixels <= 0:
+        return 0.0
+    if pixels <= 12.0:
+        return pixels / 12.0
+    return (pixels - 5.0) / 7.0
+
+
 def _excel_column_width(width_in: float) -> float:
-    return max(width_in * 7.0, 12.0)
+    pixels = max(width_in * EXCEL_EMBED_DPI, 1.0)
+    return max(_column_width_from_pixels(pixels), 8.43)
 
 
 @dataclass
@@ -821,9 +833,19 @@ def _auto_discover_microscope_paths(
 def _normalise_microscope_text(text: str) -> str:
     cleaned = unicodedata.normalize("NFKC", text or "")
     cleaned = cleaned.replace("μ", MICRO_SIGN)
-    cleaned = cleaned.replace("[l", "[1").replace("[I", "[1").replace("(1", "[1")
-    cleaned = cleaned.replace("l]", "1]").replace("I]", "1]")
-    cleaned = cleaned.replace("{1", "[1").replace("{2", "[2")
+    cleaned = cleaned.replace("|", "1")
+
+    def _marker_replacer(match: re.Match[str]) -> str:
+        digit = match.group("digit")
+        if digit in {"I", "l"}:
+            digit = "1"
+        if digit not in {"1", "2"}:
+            digit = "1"
+        return f"[{digit}]"
+
+    cleaned = MICROSCOPE_MARKER_PATTERN.sub(_marker_replacer, cleaned)
+    cleaned = re.sub(r"\[1(?=\s*\d)", "[1]", cleaned)
+    cleaned = re.sub(r"\[2(?=\s*\d)", "[2]", cleaned)
     return cleaned
 
 

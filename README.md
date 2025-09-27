@@ -343,18 +343,20 @@ plotting tools:
   fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
   fabrication workbook is incomplete. The reader prioritises `*core*` images for
   \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
-  markers without a closing bracket are still recognised, filters out the `[2]`
-  annotations that often describe a secondary feature in glass captures, and now
-  accepts draw/piece tokens written with spaces or hyphens (for example, `5-4`
-  or `5 4`) in addition to the original underscore format when matching images to
-  measurements.
-  Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS, `choco install
-  tesseract` on Windows, or `apt install tesseract-ocr` on Ubuntu). The builder
-  now searches PATH, Homebrew/MacPorts trees, Windows Program Files, Chocolatey,
-  user-level installs, and even the `.app` bundles that ship a private copy of
-  the binary before giving up with a single warning. Setting the `TESSERACT_CMD`
-  environment variable still overrides the autodetection when you have a custom
-  install location.
+  markers without a closing bracket (for example `"[116.7µm"`) are repaired to
+  `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
+  feature in glass captures, and now accepts draw/piece tokens written with
+  spaces or hyphens (for example, `5-4` or `5 4`) in addition to the original
+  underscore format when matching images to measurements.
+  Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,
+  `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
+  Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
+  `brew install tesseract-lang`). The OCR pass now forces Tesseract’s LSTM engine
+  in numeric mode to stabilise bracketed diameter readings. The builder now searches PATH, Homebrew/MacPorts trees,
+  Windows Program Files, Chocolatey, user-level installs, and even the `.app`
+  bundles that ship a private copy of the binary before giving up with a single
+  warning. Setting the `TESSERACT_CMD` environment variable still overrides the
+  autodetection when you have a custom install location.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
