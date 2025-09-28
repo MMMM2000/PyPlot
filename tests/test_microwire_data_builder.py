@@ -242,6 +242,54 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
     workbook.close()
 
 
+def test_excel_export_respects_high_dpi_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("openpyxl")
+    from PIL import Image as PILImage
+    from zipfile import ZipFile
+    from xml.etree import ElementTree as ET
+
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    def fake_plot(df, source: Path, plot_dir: Path, figsize: tuple[float, float]) -> Path:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plot_dir / f"{source.stem}.png"
+        PILImage.new("RGB", (1650, 1050), color=(0, 128, 0)).save(out_path, dpi=(300, 300))
+        return out_path
+
+    monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
+
+    custom_figsize = (5.5, 3.5)
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        make_plots=True,
+        export_formats=("excel",),
+        matplotlib_figsize=custom_figsize,
+    )
+
+    result = build_database(config)
+    excel_path = result.exports["excel"]
+
+    with ZipFile(excel_path, "r") as archive:
+        drawing_xml = archive.read("xl/drawings/drawing1.xml")
+
+    tree = ET.fromstring(drawing_xml)
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    ext = tree.find(".//a:ext", namespaces=ns)
+    assert ext is not None, "Expected drawing metadata for embedded figure"
+    width_emu = int(ext.get("cx"))
+    height_emu = int(ext.get("cy"))
+    emu_per_inch = 914400
+    width_in = width_emu / emu_per_inch
+    height_in = height_emu / emu_per_inch
+    assert width_in == pytest.approx(custom_figsize[0], rel=0.01)
+    assert height_in == pytest.approx(custom_figsize[1], rel=0.01)
+
+
 def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
     low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"

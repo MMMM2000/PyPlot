@@ -383,7 +383,10 @@ plotting tools:
   rows and columns now track the scaled PNG size exactly, so shrinking or growing
   the figure controls immediately resizes the worksheet cells to match on both
   the XlsxWriter and openpyxl export paths without leaving spare whitespace or
-  stale dimensions from previous runs. Matplotlib still trims the burn-through
+  stale dimensions from previous runs. High-DPI Matplotlib renders keep their
+  full resolution while Excel now honours the requested physical dimensions, so
+  exported figures stay 1:1 with the configured width/height on Windows and macOS
+  alike. Matplotlib still trims the burn-through
   sample that collapses to low current or spikes sharply in resistance and bridges
   the final increasing/decreasing points with a blue segment so the trace ends
   cleanly, and the measurement loader applies the same trimming so the exported

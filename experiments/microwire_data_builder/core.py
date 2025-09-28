@@ -252,17 +252,61 @@ def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> T
 EXCEL_EMBED_DPI = 96.0
 
 
+def _normalise_dpi(value: object) -> Tuple[float, float]:
+    """Return ``(x, y)`` DPI extracted from ``value``.
+
+    ``value`` may be a number, a 2-tuple, or ``None``.  When a component is
+    missing or non-finite the Excel embed DPI is used as a sensible default.
+    """
+
+    default = EXCEL_EMBED_DPI
+    if isinstance(value, (tuple, list)) and value:
+        try:
+            dpi_x = float(value[0])
+        except Exception:
+            dpi_x = default
+        try:
+            dpi_y = float(value[1]) if len(value) > 1 else float(value[0])
+        except Exception:
+            dpi_y = default
+    elif isinstance(value, (int, float)):
+        try:
+            dpi_x = dpi_y = float(value)
+        except Exception:
+            dpi_x = dpi_y = default
+    else:
+        dpi_x = dpi_y = default
+
+    if not math.isfinite(dpi_x) or dpi_x <= 0:
+        dpi_x = default
+    if not math.isfinite(dpi_y) or dpi_y <= 0:
+        dpi_y = default
+    return dpi_x, dpi_y
+
+
+def _image_metrics(image_path: Path) -> Tuple[int, int, float, float]:
+    """Return pixel dimensions and DPI metadata for ``image_path``."""
+
+    try:
+        from PIL import Image as PILImage
+    except Exception:
+        return 0, 0, EXCEL_EMBED_DPI, EXCEL_EMBED_DPI
+
+    try:
+        with PILImage.open(image_path) as pil_image:
+            width_px, height_px = pil_image.size
+            dpi_x, dpi_y = _normalise_dpi(pil_image.info.get("dpi"))
+    except Exception:
+        return 0, 0, EXCEL_EMBED_DPI, EXCEL_EMBED_DPI
+
+    return int(width_px or 0), int(height_px or 0), dpi_x, dpi_y
+
+
 def _excel_pixel_limits(figure_size: Tuple[float, float]) -> Tuple[int, int]:
     width_in, height_in = figure_size
     width_px = max(int(round(width_in * EXCEL_EMBED_DPI)), 1)
     height_px = max(int(round(height_in * EXCEL_EMBED_DPI)), 1)
     return width_px, height_px
-
-
-def _pixels_to_points(pixels: float) -> float:
-    return max(pixels * 72.0 / EXCEL_EMBED_DPI, 0.0)
-
-
 def _excel_row_height(height_in: float) -> float:
     return max(height_in * 72.0, 18.0)
 
@@ -1622,7 +1666,9 @@ def _embed_plots_in_excel_openpyxl(
 
         inserted = False
         reset_df = dataframe.reset_index(drop=True)
-        target_width_px, target_height_px = _excel_pixel_limits(figure_size)
+        target_width_in, target_height_in = figure_size
+        row_height_pts = _excel_row_height(target_height_in)
+        column_width_chars = _excel_column_width(target_width_in)
         for row_idx, row in reset_df.iterrows():
             for column in figure_columns:
                 value = row.get(column)
@@ -1638,16 +1684,30 @@ def _embed_plots_in_excel_openpyxl(
                         continue
                     available[name] = candidate
                     image_path = candidate
+                width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
+                actual_width_in = width_px / dpi_x if dpi_x and width_px else 0.0
+                actual_height_in = height_px / dpi_y if dpi_y and height_px else 0.0
+                scale_x = (
+                    (target_width_in / actual_width_in)
+                    if actual_width_in > 0
+                    else 1.0
+                )
+                scale_y = (
+                    (target_height_in / actual_height_in)
+                    if actual_height_in > 0
+                    else 1.0
+                )
+
                 try:
                     image = XLImage(str(image_path))
                 except Exception:
                     log.exception("Failed to load plot image %s for Excel export", image_path)
                     continue
 
-                if target_width_px:
-                    image.width = int(target_width_px)
-                if target_height_px:
-                    image.height = int(target_height_px)
+                if width_px and not math.isclose(scale_x, 1.0, rel_tol=1e-3):
+                    image.width = int(round(width_px * scale_x))
+                if height_px and not math.isclose(scale_y, 1.0, rel_tol=1e-3):
+                    image.height = int(round(height_px * scale_y))
 
                 column_index = dataframe.columns.get_loc(column) + 1
                 row_number = row_idx + 2  # account for the header row
@@ -1658,14 +1718,11 @@ def _embed_plots_in_excel_openpyxl(
                 worksheet[cell_reference].value = None
                 worksheet.add_image(image, cell_reference)
 
-                # Adjust the row height and column width to accommodate the scaled figure.
-                scaled_height_pts = _pixels_to_points(float(image.height))
-                if scaled_height_pts > 0:
-                    worksheet.row_dimensions[row_number].height = scaled_height_pts
+                if row_height_pts > 0:
+                    worksheet.row_dimensions[row_number].height = row_height_pts
 
-                scaled_width_chars = _column_width_from_pixels(float(image.width))
-                if scaled_width_chars > 0:
-                    worksheet.column_dimensions[column_letter].width = scaled_width_chars
+                if column_width_chars > 0:
+                    worksheet.column_dimensions[column_letter].width = column_width_chars
 
                 inserted = True
 
@@ -1713,6 +1770,7 @@ def _embed_assets_with_xlsxwriter(
 
     from PIL import Image as PILImage  # local import to avoid hard dependency elsewhere
 
+    target_width_in, target_height_in = figure_size
     target_width_px, target_height_px = _excel_pixel_limits(figure_size)
     row_heights_pts: Dict[int, float] = {}
     column_widths_chars: Dict[int, float] = {}
@@ -1782,17 +1840,23 @@ def _embed_assets_with_xlsxwriter(
                     image_path = candidate
             if image_path is None or not image_path.exists():
                 continue
-            try:
-                with PILImage.open(image_path) as pil_image:
-                    width_px, height_px = pil_image.size
-            except Exception:
-                width_px = height_px = 0
-            x_scale = (target_width_px / width_px) if width_px else 1.0
-            y_scale = (target_height_px / height_px) if height_px else 1.0
+            width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
+            actual_width_in = width_px / dpi_x if dpi_x and width_px else 0.0
+            actual_height_in = height_px / dpi_y if dpi_y and height_px else 0.0
+            x_scale = (
+                (target_width_in / actual_width_in)
+                if actual_width_in > 0
+                else 1.0
+            )
+            y_scale = (
+                (target_height_in / actual_height_in)
+                if actual_height_in > 0
+                else 1.0
+            )
             options: Dict[str, float] = {}
-            if width_px and not math.isclose(x_scale, 1.0):
+            if width_px and not math.isclose(x_scale, 1.0, rel_tol=1e-3):
                 options["x_scale"] = x_scale
-            if height_px and not math.isclose(y_scale, 1.0):
+            if height_px and not math.isclose(y_scale, 1.0, rel_tol=1e-3):
                 options["y_scale"] = y_scale
             column_index = dataframe.columns.get_loc(column)
             worksheet.write_blank(row_number, column_index, None)
@@ -1801,25 +1865,16 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert plot image %s", image_path)
                 continue
-            if width_px:
-                scaled_width_px = int(round(width_px * options.get("x_scale", 1.0)))
-            else:
-                scaled_width_px = int(target_width_px)
-            if height_px:
-                scaled_height_px = int(round(height_px * options.get("y_scale", 1.0)))
-            else:
-                scaled_height_px = int(target_height_px)
-
             ensure_row_height(
                 row_number,
-                scaled_height_px,
-                _pixels_to_points(float(scaled_height_px)),
+                int(round(target_height_in * EXCEL_EMBED_DPI)),
+                _excel_row_height(target_height_in),
             )
 
             ensure_column_width(
                 column_index,
-                scaled_width_px,
-                _column_width_from_pixels(float(scaled_width_px)),
+                int(round(target_width_in * EXCEL_EMBED_DPI)),
+                _excel_column_width(target_width_in),
             )
 
         for column in origin_columns:
@@ -1848,12 +1903,12 @@ def _embed_assets_with_xlsxwriter(
             ensure_row_height(
                 row_number,
                 int(target_height_px),
-                _pixels_to_points(float(target_height_px)),
+                _excel_row_height(target_height_in),
             )
             ensure_column_width(
                 column_index,
                 int(target_width_px),
-                _column_width_from_pixels(float(target_width_px)),
+                _excel_column_width(target_width_in),
             )
 
 def _origin_object_name(obj: object) -> Optional[str]:
