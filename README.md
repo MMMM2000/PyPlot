@@ -345,7 +345,8 @@ plotting tools:
   \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
   markers without a closing bracket (for example `"[116.7µm"`) are repaired to
   `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
-  feature in glass captures, and now accepts draw/piece tokens written with
+  feature in glass captures, ignores stray scale-bar values and other
+  unrealistic measurements that lack the `[1]` marker, and now accepts draw/piece tokens written with
   spaces or hyphens (for example, `5-4` or `5 4`) in addition to the original
   underscore format when matching images to measurements.
   Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,

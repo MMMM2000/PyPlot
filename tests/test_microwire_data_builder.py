@@ -342,6 +342,12 @@ def test_parse_microscope_candidates_ignores_secondary() -> None:
     assert values == [pytest.approx(18.5)]
 
 
+def test_parse_microscope_candidates_filters_outliers() -> None:
+    sample_text = """5001000 . 7235.0um\n11]65.1um .\n25.0um"""
+    values = core._parse_microscope_candidates([sample_text])
+    assert values == [pytest.approx(65.1)]
+
+
 def test_microscope_key_handles_additional_delimiters() -> None:
     dashed = Path("Ni50Fe27Ga23 5-4 core.jpg")
     spaced = Path("Ni50Fe27Ga23 5 4 glass.png")

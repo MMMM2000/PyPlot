@@ -188,6 +188,7 @@ DOT_DATE_PATTERN = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2,4}")
 SLASH_DATE_PATTERN = re.compile(r"\d{1,2}/\d{1,2}/\d{2,4}")
 
 MICROSCOPE_MARKER_PATTERN = re.compile(r"[\[{(]\s*(?P<digit>[12Il])\s*[\]})1Il]?")
+MICROSCOPE_PRIMARY_HINT = re.compile(r"(\[\s*[1Il]|[1Il]\])$")
 MICROSCOPE_PRIMARY_PATTERN = re.compile(
     rf"\[1]\s*(?P<value>\d+(?:[.,]\d+)?)\s*(?:u?m|{MICRO_SIGN}m)",
     re.IGNORECASE,
@@ -878,6 +879,8 @@ def _normalise_microscope_text(text: str) -> str:
     cleaned = unicodedata.normalize("NFKC", text or "")
     cleaned = cleaned.replace("μ", MICRO_SIGN)
     cleaned = cleaned.replace("|", "1")
+    cleaned = re.sub(r"(^|\s)(?:1|I|l){1,2}\]", lambda m: f"{m.group(1)}[1]", cleaned)
+    cleaned = re.sub(r"(^|\s)(?:2|Z)\]", lambda m: f"{m.group(1)}[2]", cleaned)
 
     def _marker_replacer(match: re.Match[str]) -> str:
         digit = match.group("digit")
@@ -897,9 +900,28 @@ def _is_secondary_prefix(prefix: str) -> bool:
     return bool(MICROSCOPE_SECONDARY_PREFIX.search(prefix.strip()))
 
 
+def _has_primary_marker(prefix: str) -> bool:
+    snippet = unicodedata.normalize("NFKC", prefix[-8:] if prefix else "")
+    if not snippet:
+        return False
+    snippet = snippet.replace("μ", MICRO_SIGN)
+    snippet = snippet.replace("|", "1").replace("I", "1").replace("l", "1")
+    snippet = snippet.replace("{", "[").replace("(", "[")
+    snippet = snippet.replace("}", "]").replace(")", "]")
+    snippet = snippet.strip()
+    if not snippet:
+        return False
+    if "[1" in snippet:
+        return True
+    if "1]" in snippet:
+        return True
+    return bool(MICROSCOPE_PRIMARY_HINT.search(snippet))
+
+
 def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
     preferred: Dict[float, float] = {}
-    fallback: Dict[float, float] = {}
+    fallback_with_marker: Dict[float, float] = {}
+    fallback_loose: Dict[float, float] = {}
     for raw_text in texts:
         if not raw_text:
             continue
@@ -928,9 +950,19 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
                 continue
             if not math.isfinite(value) or value <= 0:
                 continue
+            if value > 1000:
+                continue
             key = round(value, 2)
-            fallback.setdefault(key, value)
-    selected = preferred if preferred else fallback
+            if _has_primary_marker(prefix):
+                fallback_with_marker.setdefault(key, value)
+            else:
+                fallback_loose.setdefault(key, value)
+    if preferred:
+        selected = preferred
+    elif fallback_with_marker:
+        selected = fallback_with_marker
+    else:
+        selected = fallback_loose
     return [float(v) for v in selected.values()]
 
 
