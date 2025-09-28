@@ -1623,8 +1623,6 @@ def _embed_plots_in_excel_openpyxl(
         inserted = False
         reset_df = dataframe.reset_index(drop=True)
         target_width_px, target_height_px = _excel_pixel_limits(figure_size)
-        target_row_height = _excel_row_height(figure_size[1])
-        target_col_width = _excel_column_width(figure_size[0])
         for row_idx, row in reset_df.iterrows():
             for column in figure_columns:
                 value = row.get(column)
@@ -1661,15 +1659,13 @@ def _embed_plots_in_excel_openpyxl(
                 worksheet.add_image(image, cell_reference)
 
                 # Adjust the row height and column width to accommodate the scaled figure.
-                current_height = worksheet.row_dimensions[row_number].height or 0
-                desired_height = max(target_row_height, _pixels_to_points(float(image.height)))
-                if desired_height > current_height:
-                    worksheet.row_dimensions[row_number].height = desired_height
+                scaled_height_pts = _pixels_to_points(float(image.height))
+                if scaled_height_pts > 0:
+                    worksheet.row_dimensions[row_number].height = scaled_height_pts
 
-                current_width = worksheet.column_dimensions[column_letter].width or 0
-                desired_width = max(target_col_width, current_width)
-                if desired_width > current_width:
-                    worksheet.column_dimensions[column_letter].width = desired_width
+                scaled_width_chars = _column_width_from_pixels(float(image.width))
+                if scaled_width_chars > 0:
+                    worksheet.column_dimensions[column_letter].width = scaled_width_chars
 
                 inserted = True
 
@@ -1718,8 +1714,6 @@ def _embed_assets_with_xlsxwriter(
     from PIL import Image as PILImage  # local import to avoid hard dependency elsewhere
 
     target_width_px, target_height_px = _excel_pixel_limits(figure_size)
-    target_row_height = _excel_row_height(figure_size[1])
-    target_col_width = _excel_column_width(figure_size[0])
     row_heights_pts: Dict[int, float] = {}
     column_widths_chars: Dict[int, float] = {}
     row_heights_px: Dict[int, int] = {}
@@ -1733,25 +1727,21 @@ def _embed_assets_with_xlsxwriter(
         if minimum_pts < 0:
             minimum_pts = 0.0
 
-        updated = False
         if callable(set_row_pixels):
-            current_px = row_heights_px.get(row_idx, 0)
-            if minimum_px > current_px:
-                try:
-                    set_row_pixels(row_idx, minimum_px)
-                except Exception:
-                    pass
-                else:
-                    row_heights_px[row_idx] = minimum_px
-                    updated = True
-        if updated:
-            return
+            try:
+                set_row_pixels(row_idx, minimum_px)
+            except Exception:
+                pass
+            else:
+                row_heights_px[row_idx] = minimum_px
+                row_heights_pts[row_idx] = minimum_pts
+                return
 
-        current_pts = row_heights_pts.get(row_idx, 0.0)
-        desired_pts = max(current_pts, minimum_pts)
-        if desired_pts > current_pts:
-            worksheet.set_row(row_idx, desired_pts)
-            row_heights_pts[row_idx] = desired_pts
+        try:
+            worksheet.set_row(row_idx, minimum_pts)
+        except Exception:
+            return
+        row_heights_pts[row_idx] = minimum_pts
 
     def ensure_column_width(col_idx: int, minimum_px: int, minimum_chars: float) -> None:
         if minimum_px < 0:
@@ -1759,25 +1749,21 @@ def _embed_assets_with_xlsxwriter(
         if minimum_chars < 0:
             minimum_chars = 0.0
 
-        updated = False
         if callable(set_column_pixels):
-            current_px = column_widths_px.get(col_idx, 0)
-            if minimum_px > current_px:
-                try:
-                    set_column_pixels(col_idx, col_idx, minimum_px)
-                except Exception:
-                    pass
-                else:
-                    column_widths_px[col_idx] = minimum_px
-                    updated = True
-        if updated:
-            return
+            try:
+                set_column_pixels(col_idx, col_idx, minimum_px)
+            except Exception:
+                pass
+            else:
+                column_widths_px[col_idx] = minimum_px
+                column_widths_chars[col_idx] = minimum_chars
+                return
 
-        current_chars = column_widths_chars.get(col_idx, 0.0)
-        desired_chars = max(current_chars, minimum_chars)
-        if desired_chars > current_chars:
-            worksheet.set_column(col_idx, col_idx, desired_chars)
-            column_widths_chars[col_idx] = desired_chars
+        try:
+            worksheet.set_column(col_idx, col_idx, minimum_chars)
+        except Exception:
+            return
+        column_widths_chars[col_idx] = minimum_chars
 
     for row_idx, row in reset_df.iterrows():
         row_number = row_idx + 1
@@ -1815,16 +1801,25 @@ def _embed_assets_with_xlsxwriter(
             except Exception:
                 log.exception("Failed to insert plot image %s", image_path)
                 continue
+            if width_px:
+                scaled_width_px = int(round(width_px * options.get("x_scale", 1.0)))
+            else:
+                scaled_width_px = int(target_width_px)
+            if height_px:
+                scaled_height_px = int(round(height_px * options.get("y_scale", 1.0)))
+            else:
+                scaled_height_px = int(target_height_px)
+
             ensure_row_height(
                 row_number,
-                int(target_height_px),
-                max(_pixels_to_points(target_height_px), target_row_height),
+                scaled_height_px,
+                _pixels_to_points(float(scaled_height_px)),
             )
 
             ensure_column_width(
                 column_index,
-                int(target_width_px),
-                target_col_width,
+                scaled_width_px,
+                _column_width_from_pixels(float(scaled_width_px)),
             )
 
         for column in origin_columns:
@@ -1853,12 +1848,12 @@ def _embed_assets_with_xlsxwriter(
             ensure_row_height(
                 row_number,
                 int(target_height_px),
-                target_row_height,
+                _pixels_to_points(float(target_height_px)),
             )
             ensure_column_width(
                 column_index,
                 int(target_width_px),
-                target_col_width,
+                _column_width_from_pixels(float(target_width_px)),
             )
 
 def _origin_object_name(obj: object) -> Optional[str]:

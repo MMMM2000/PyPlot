@@ -380,11 +380,10 @@ plotting tools:
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,
   markers, and line widths rescale so larger canvases stay crisp. Embedded Excel
-  rows and columns now use the exact figure dimensions, so the chart area fills
-  the allocated cells without leftover whitespace, and the XlsxWriter path now
-  sets row heights and column widths directly in pixels (calibrated to Excel’s
-  96 dpi rendering) so the PNGs match the worksheet bounds exactly on every
-  platform. Matplotlib still trims the burn-through
+  rows and columns now track the scaled PNG size exactly, so shrinking or growing
+  the figure controls immediately resizes the worksheet cells to match on both
+  the XlsxWriter and openpyxl export paths without leaving spare whitespace or
+  stale dimensions from previous runs. Matplotlib still trims the burn-through
   sample that collapses to low current or spikes sharply in resistance and bridges
   the final increasing/decreasing points with a blue segment so the trace ends
   cleanly, and the measurement loader applies the same trimming so the exported
