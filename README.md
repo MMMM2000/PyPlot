@@ -401,12 +401,14 @@ plotting tools:
   control the output formats; every toggle, folder, and size preference is
   remembered between runs.
 * **Output** – pick a destination directory and supply a base file name. The
-  builder writes `<name>.csv`, `<name>.xlsx` when requested, PNG plots under
-  `plots/`, and Origin project snippets under `origin_objects/` whenever that
-  backend is enabled. CSV exports continue to hold the plot file names while the
-  Excel workbook replaces those cells with embedded media. If a file already
-  exists you can **Replace** it, **Continue** appending new rows, or **Cancel**
-  the build. The completion dialog now includes an **Open** button for quick
+  builder writes `<name>.csv`, `<name>.xlsx` when requested, stages the
+  Matplotlib PNGs in a temporary `plots/` folder while embedding them, and then
+  removes that directory so the workbook is the only place the images live.
+  Origin project snippets remain under `origin_objects/` whenever that backend
+  is enabled. CSV exports continue to hold the plot file names while the Excel
+  workbook replaces those cells with embedded media. If a file already exists
+  you can **Replace** it, **Continue** appending new rows, or **Cancel** the
+  build. The completion dialog now includes an **Open** button for quick
   inspection of the freshly generated dataset.
 
 Each microwire (composition + draw/piece) becomes a single row with English
@@ -435,11 +437,13 @@ The exported columns are:
 * Figure — low mA (Origin)
 * Low mA value (mA)
 
-The log pane summarises skipped files, missing joins, and cases where a 1000 mA
-or low-current measurement is absent so you can investigate without re-running
-the whole build. The exported table keeps just the source and plot filenames,
-so combine them with the chosen output directory (and `plots/` sub-folder for
-PNGs) when you want to open the artefacts later.
+ The log pane summarises skipped files, missing joins, and cases where a 1000 mA
+ or low-current measurement is absent so you can investigate without re-running
+ the whole build. The exported table keeps just the source and plot filenames,
+ so combine them with the chosen output directory when you want to re-open the
+ artefacts later. Matplotlib figures are embedded directly into the Excel sheet
+ and the temporary `plots/` staging folder is deleted once the workbook is
+ written.
 
 ## 7. Repository maintenance
 

@@ -10,6 +10,7 @@ import logging
 import math
 import os
 import re
+import shutil
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -376,7 +377,7 @@ class BuildResult:
 
     dataframe: pd.DataFrame
     exports: Dict[str, Path]
-    plot_paths: List[Path]
+    plot_paths: List[str]
     origin_artifacts: Dict[str, OriginArtifact]
     stats: BuildStats
 
@@ -1011,14 +1012,37 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
         return image.resize(new_size, resample_filter)
 
     candidates: List[str] = []
+    seen_candidates: Set[str] = set()
+
+    def _append_candidate(text: Optional[str]) -> None:
+        if not text:
+            return
+        cleaned = text.strip()
+        if not cleaned or cleaned in seen_candidates:
+            return
+        candidates.append(cleaned)
+        seen_candidates.add(cleaned)
+
     grayscale = ImageOps.grayscale(base)
     resized = _resample(grayscale)
     enhanced = ImageEnhance.Contrast(resized).enhance(2.0)
     sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
     autocontrasted = ImageOps.autocontrast(resized)
-    variants = [resized, enhanced, sharpened, autocontrasted]
+    inverted = ImageOps.invert(resized)
+    binary = resized.point(lambda p: 255 if p > 160 else 0, mode="1")
+    binary_gray = ImageOps.autocontrast(binary.convert("L"))
+    variants = [
+        resized,
+        enhanced,
+        sharpened,
+        autocontrasted,
+        inverted,
+        binary_gray,
+        ImageOps.invert(binary_gray),
+    ]
 
     tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
+    output_enum = getattr(pytesseract, "Output", None)
     for variant in variants:
         try:
             text = pytesseract.image_to_string(variant, config=MICROSCOPE_OCR_CONFIG)
@@ -1030,10 +1054,59 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
             return []
         except Exception:
             continue
-        if text:
-            candidates.append(text)
-            if MICROSCOPE_PRIMARY_PATTERN.search(text):
-                break
+        _append_candidate(text)
+
+        if output_enum is not None:
+            try:
+                data = pytesseract.image_to_data(
+                    variant,
+                    config=MICROSCOPE_OCR_CONFIG,
+                    output_type=output_enum.DICT,
+                )
+            except tesseract_not_found:
+                log.warning(
+                    "Tesseract executable vanished while processing %s; aborting microscope OCR",
+                    path,
+                )
+                return []
+            except Exception:
+                data = None
+            if isinstance(data, dict) and data.get("text"):
+                current_tokens: List[str] = []
+                last_key: Optional[Tuple[int, int, int, int]] = None
+                text_entries = data.get("text", [])
+                page_nums = data.get("page_num", [])
+                block_nums = data.get("block_num", [])
+                par_nums = data.get("par_num", [])
+                line_nums = data.get("line_num", [])
+                for idx, raw in enumerate(text_entries):
+                    token = (raw or "").strip()
+                    if not token:
+                        continue
+                    key = (
+                        page_nums[idx] if idx < len(page_nums) else 0,
+                        block_nums[idx] if idx < len(block_nums) else 0,
+                        par_nums[idx] if idx < len(par_nums) else 0,
+                        line_nums[idx] if idx < len(line_nums) else 0,
+                    )
+                    if last_key is None:
+                        current_tokens = [token]
+                        last_key = key
+                        continue
+                    if key != last_key and current_tokens:
+                        _append_candidate(" ".join(current_tokens))
+                        current_tokens = [token]
+                        last_key = key
+                        continue
+                    current_tokens.append(token)
+                    last_key = key
+                if current_tokens:
+                    _append_candidate(" ".join(current_tokens))
+
+        if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
+            values = _parse_microscope_candidates(candidates)
+            if values:
+                return values
 
     return _parse_microscope_candidates(candidates)
 
@@ -2011,7 +2084,7 @@ def build_database(
     fabrication_index = build_fabrication_index(config.fabrication_files, log)
     stats = BuildStats()
     grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
-    plot_paths: List[Path] = []
+    plot_records: List[str] = []
     plot_cache: Dict[str, Path] = {}
     plot_name_to_path: Dict[str, Path] = {}
     origin_artifacts: Dict[str, OriginArtifact] = {}
@@ -2215,7 +2288,6 @@ def build_database(
                             figure_size,
                         )
                         plot_cache[high_record.metadata.measurement_id] = cached
-                        plot_paths.append(cached)
                     except Exception:
                         log.exception("Failed to generate plot for %s", high_record.path)
                         cached = None
@@ -2223,6 +2295,8 @@ def build_database(
                     figure_name = Path(cached).name
                     row["Figure — 1000 mA"] = figure_name
                     plot_name_to_path.setdefault(figure_name, cached)
+                    if figure_name not in plot_records:
+                        plot_records.append(figure_name)
             if low_record:
                 cached = plot_cache.get(low_record.metadata.measurement_id)
                 if cached is None:
@@ -2234,8 +2308,6 @@ def build_database(
                             figure_size,
                         )
                         plot_cache[low_record.metadata.measurement_id] = cached
-                        if cached not in plot_paths:
-                            plot_paths.append(cached)
                     except Exception:
                         log.exception("Failed to generate plot for %s", low_record.path)
                         cached = None
@@ -2243,6 +2315,8 @@ def build_database(
                     figure_name = Path(cached).name
                     row["Figure — low mA"] = figure_name
                     plot_name_to_path.setdefault(figure_name, cached)
+                    if figure_name not in plot_records:
+                        plot_records.append(figure_name)
         if origin_enabled:
             if high_record:
                 cached_origin = origin_cache.get(high_record.metadata.measurement_id)
@@ -2384,10 +2458,17 @@ def build_database(
         stats.missing_low_measurement,
         stats.resistance_checks_failed,
     )
+
+    if wants_matplotlib:
+        try:
+            shutil.rmtree(plot_dir, ignore_errors=True)
+        except Exception:
+            pass
+
     return BuildResult(
         dataframe=df_out,
         exports=exports,
-        plot_paths=plot_paths,
+        plot_paths=plot_records,
         origin_artifacts=origin_artifacts,
         stats=stats,
     )

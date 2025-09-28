@@ -78,7 +78,9 @@ def _iter_candidate_paths() -> Iterable[Path]:
         Path("/usr/local/bin"),
         Path("/usr/local/opt/tesseract/bin"),
         Path("/opt/homebrew/bin"),
+        Path("/opt/homebrew/opt/tesseract/bin"),
         Path.home() / "opt" / "homebrew" / "bin",
+        Path.home() / "opt" / "homebrew" / "opt" / "tesseract" / "bin",
         Path("/opt/local/bin"),
         Path.home() / ".local" / "bin",
     )

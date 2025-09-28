@@ -148,7 +148,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
     assert row["Figure — low mA"] == produced[low.name].name
     assert pd.isna(row["Figure — 1000 mA (Origin)"])
     assert pd.isna(row["Figure — low mA (Origin)"])
-    assert set(result.plot_paths) == {produced[high.name], produced[low.name]}
+    assert set(result.plot_paths) == {produced[high.name].name, produced[low.name].name}
     assert row["Low mA value (mA)"] == 120
 
 
