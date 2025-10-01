@@ -199,8 +199,31 @@ class PlotWindow(QtWidgets.QMainWindow):
         self._base_dpi = self.fig.dpi
         self.canvas.setMinimumSize(0, 0)
         self.canvas.resize(wpx, hpx)
+
         if resize_window:
-            self.resize(self.sizeHint())
+            extra_w = 0
+            extra_h = 0
+            central = self.centralWidget()
+            if central is not None:
+                layout = central.layout()
+                if layout is not None:
+                    margins = layout.contentsMargins()
+                    extra_w += margins.left() + margins.right()
+                    extra_h += margins.top() + margins.bottom()
+                extra_h += self.toolbar.sizeHint().height()
+
+            frame_w = self.frameGeometry().width() - self.geometry().width()
+            frame_h = self.frameGeometry().height() - self.geometry().height()
+            if frame_w <= 0:
+                style = self.style()
+                frame_w = 2 * style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_DefaultFrameWidth)
+            if frame_h <= 0:
+                style = self.style()
+                frame_h = style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_TitleBarHeight)
+
+            target_w = int(round(wpx + extra_w + max(frame_w, 0)))
+            target_h = int(round(hpx + extra_h + max(frame_h, 0)))
+            self.resize(target_w, target_h)
         else:
             self.updateGeometry()
 
