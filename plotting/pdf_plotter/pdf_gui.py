@@ -421,7 +421,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         self.save_cb = QtWidgets.QCheckBox("Save on plot")
         self.save_cb.setChecked(False)
 
-        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd(), key="pdf_plotter"))
+        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(key="pdf_plotter"))
         self.browse_out_btn = QtWidgets.QPushButton("Browse")
         self.browse_out_btn.clicked.connect(self._browse_out)
 
@@ -452,23 +452,24 @@ class PdfPlotterWindow(QtWidgets.QDialog):
 
         # Figure sizing
         self.fig_w = _NoWheelDoubleSpinBox()
-        self.fig_w.setRange(1.0, 100.0)
-        self.fig_w.setSingleStep(0.25)
-        self.fig_w.setDecimals(2)
-        self.fig_w.setValue(6.0)
         self.fig_h = _NoWheelDoubleSpinBox()
-        self.fig_h.setRange(1.0, 100.0)
-        self.fig_h.setSingleStep(0.25)
-        self.fig_h.setDecimals(2)
-        self.fig_h.setValue(4.5)
         self.fig_units = QtWidgets.QComboBox()
-        self.fig_units.addItems(["in", "cm", "mm"])
-        self.fig_units.setCurrentIndex(0)
+        self.fig_units.addItems(["mm", "cm", "in"])
         self.lock_aspect_cb = QtWidgets.QCheckBox("Lock aspect ratio")
         self.lock_aspect_cb.setChecked(True)
-        self._current_units = self.fig_units.currentText()
-        self._aspect_ratio = self.fig_w.value() / max(self.fig_h.value(), 1e-9)
+        self._fig_limits_mm = {
+            "w": (60.0, 1600.0),
+            "h": (45.0, 1200.0),
+        }
         self._updating_size = False
+        self._current_units = "mm"
+        self.fig_units.setCurrentText(self._current_units)
+        self._current_units = self.fig_units.currentText()
+        self._update_fig_ranges(self._current_units)
+        self._configure_size_spinboxes(self._current_units)
+        self.fig_w.setValue(160.0)
+        self.fig_h.setValue(120.0)
+        self._aspect_ratio = self.fig_w.value() / max(self.fig_h.value(), 1e-9)
 
         self.fig_units.currentTextChanged.connect(self._on_units_changed)
         self.lock_aspect_cb.toggled.connect(self._on_lock_toggled)
@@ -580,18 +581,56 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         w = float(self.fig_w.value())
         h = float(self.fig_h.value())
         unit = self.fig_units.currentText()
-        if unit == "cm":
-            return w / 2.54, h / 2.54
-        if unit == "mm":
-            return w / 25.4, h / 25.4
-        return w, h
+        mm_per_unit = self._unit_to_mm(unit)
+        if mm_per_unit <= 0:
+            return w, h
+        return (w * mm_per_unit) / 25.4, (h * mm_per_unit) / 25.4
 
     def _convert_units(self, value: float, from_unit: str, to_unit: str) -> float:
-        to_mm = {"mm": 1.0, "cm": 10.0, "in": 25.4}
-        if from_unit not in to_mm or to_unit not in to_mm:
+        from_mm = self._unit_to_mm(from_unit)
+        to_mm = self._unit_to_mm(to_unit)
+        if from_mm <= 0 or to_mm <= 0:
             return value
-        mm = value * to_mm[from_unit]
-        return mm / to_mm[to_unit]
+        mm = value * from_mm
+        return mm / to_mm
+
+    def _unit_to_mm(self, unit: str) -> float:
+        return {"mm": 1.0, "cm": 10.0, "in": 25.4}.get(unit, 25.4)
+
+    def _update_fig_ranges(self, unit: str) -> None:
+        factor = self._unit_to_mm(unit)
+        if factor <= 0:
+            factor = 25.4
+        limits = [
+            (self.fig_w, self._fig_limits_mm.get("w", (60.0, 1600.0))),
+            (self.fig_h, self._fig_limits_mm.get("h", (45.0, 1200.0))),
+        ]
+        for spin, (min_mm, max_mm) in limits:
+            min_val = min_mm / factor
+            max_val = max_mm / factor
+            block = spin.blockSignals(True)
+            try:
+                spin.setRange(min_val, max_val)
+            finally:
+                spin.blockSignals(block)
+
+    def _configure_size_spinboxes(self, unit: str) -> None:
+        if unit == "mm":
+            step = 5.0
+            decimals = 1
+        elif unit == "cm":
+            step = 0.5
+            decimals = 2
+        else:
+            step = 0.25
+            decimals = 2
+        for spin in (self.fig_w, self.fig_h):
+            block = spin.blockSignals(True)
+            try:
+                spin.setSingleStep(step)
+                spin.setDecimals(decimals)
+            finally:
+                spin.blockSignals(block)
 
     def _apply_dark_global(self, on: bool) -> None:
         # Dark mode is applied when creating new plots
@@ -668,6 +707,8 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             h_old = float(self.fig_h.value())
             w_new = self._convert_units(w_old, old_unit, new_unit)
             h_new = self._convert_units(h_old, old_unit, new_unit)
+            self._update_fig_ranges(new_unit)
+            self._configure_size_spinboxes(new_unit)
             self.fig_w.setValue(w_new)
             self.fig_h.setValue(h_new)
             if self.lock_aspect_cb.isChecked():
@@ -708,7 +749,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir.text())
         if d:
             self.out_dir.setText(d)
-            set_last_output_dir(d)
+            set_last_output_dir(d, key="pdf_plotter")
 
     def _maybe_auto_plot(self) -> None:
         if self.auto_cb.isChecked():
