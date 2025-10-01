@@ -338,16 +338,56 @@ plotting tools:
   program maps Slovak headers to English fields, keeps a raw text copy for
   ambiguous numeric cells, and joins draw/piece data by composition and draw X /
   piece Y. Added paths are remembered between runs.
+* **Microscope images (.jpg/.png)** – drop calibrated microscope captures for
+  the same draw/piece identifiers and the builder OCRs the red overlay labels to
+  fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
+  fabrication workbook is incomplete. The reader prioritises `*core*` images for
+  \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
+  markers without a closing bracket (for example `"[116.7µm"`) are repaired to
+  `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
+  feature in glass captures, ignores stray scale-bar values and other
+  unrealistic measurements that lack the `[1]` marker, and now accepts draw/piece tokens written with
+  spaces or hyphens (for example, `5-4` or `5 4`) in addition to the original
+  underscore format when matching images to measurements.
+  Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,
+  `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
+  Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
+  `brew install tesseract-lang`). The OCR pass now forces Tesseract’s LSTM engine
+  in numeric mode to stabilise bracketed diameter readings. The builder now searches PATH, Homebrew/MacPorts trees,
+  Windows Program Files, Chocolatey, user-level installs, and even the `.app`
+  bundles that ship a private copy of the binary before giving up with a single
+  warning. Setting the `TESSERACT_CMD` environment variable still overrides the
+  autodetection when you have a custom install location.
 * **Current-annealing files (.txt)** – add one or more three-column annealing
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
   restored on launch so repeat builds are quick.
+* When you click **Run** the builder now searches for fabrication sheets,
+  microscope captures, and draw videos on a background thread. The progress bar
+  advances throughout the entire job: it steps through the preparation work
+  while directories are scanned, continues through microscope OCR and video
+  analysis with per-image updates, and then updates smoothly across the
+  annealing files as the database is assembled, so you always know how far
+  through the run you are.
+* **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
+  the annealing data and the builder samples one frame every 30 seconds from the
+  steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
+  is applied to each sampled frame and the median temperature/underpressure is
+  used to back-fill any missing fabrication readings.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. Use the **Figure width/height**
-  controls to choose the Matplotlib canvas size in inches; the values are saved
-  between runs and the axis labels, ticks, markers, and line widths rescale so
-  the smaller figures stay legible. Matplotlib still trims the burn-through
+  controls to choose the Matplotlib canvas size in inches (the defaults are now
+  10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
+  resizing); the values are saved between runs and the axis labels, ticks,
+  markers, and line widths rescale so larger canvases stay crisp. Embedded Excel
+  rows and columns now track the scaled PNG size exactly, so shrinking or growing
+  the figure controls immediately resizes the worksheet cells to match on both
+  the XlsxWriter and openpyxl export paths without leaving spare whitespace or
+  stale dimensions from previous runs. High-DPI Matplotlib renders keep their
+  full resolution while Excel now honours the requested physical dimensions, so
+  exported figures stay 1:1 with the configured width/height on Windows and macOS
+  alike. Matplotlib still trims the burn-through
   sample that collapses to low current or spikes sharply in resistance and bridges
   the final increasing/decreasing points with a blue segment so the trace ends
   cleanly, and the measurement loader applies the same trimming so the exported
@@ -361,12 +401,14 @@ plotting tools:
   control the output formats; every toggle, folder, and size preference is
   remembered between runs.
 * **Output** – pick a destination directory and supply a base file name. The
-  builder writes `<name>.csv`, `<name>.xlsx` when requested, PNG plots under
-  `plots/`, and Origin project snippets under `origin_objects/` whenever that
-  backend is enabled. CSV exports continue to hold the plot file names while the
-  Excel workbook replaces those cells with embedded media. If a file already
-  exists you can **Replace** it, **Continue** appending new rows, or **Cancel**
-  the build. The completion dialog now includes an **Open** button for quick
+  builder writes `<name>.csv`, `<name>.xlsx` when requested, stages the
+  Matplotlib PNGs in a temporary `plots/` folder while embedding them, and then
+  removes that directory so the workbook is the only place the images live.
+  Origin project snippets remain under `origin_objects/` whenever that backend
+  is enabled. CSV exports continue to hold the plot file names while the Excel
+  workbook replaces those cells with embedded media. If a file already exists
+  you can **Replace** it, **Continue** appending new rows, or **Cancel** the
+  build. The completion dialog now includes an **Open** button for quick
   inspection of the freshly generated dataset.
 
 Each microwire (composition + draw/piece) becomes a single row with English
@@ -379,7 +421,7 @@ The exported columns are:
 * Microwire (e.g. `4/1`)
 * d (µm)
 * D (µm)
-* d/D
+* d/D (rounded to three decimal places)
 * Length (m)
 * Production datetime
 * Mass (g)
@@ -395,11 +437,13 @@ The exported columns are:
 * Figure — low mA (Origin)
 * Low mA value (mA)
 
-The log pane summarises skipped files, missing joins, and cases where a 1000 mA
-or low-current measurement is absent so you can investigate without re-running
-the whole build. The exported table keeps just the source and plot filenames,
-so combine them with the chosen output directory (and `plots/` sub-folder for
-PNGs) when you want to open the artefacts later.
+ The log pane summarises skipped files, missing joins, and cases where a 1000 mA
+ or low-current measurement is absent so you can investigate without re-running
+ the whole build. The exported table keeps just the source and plot filenames,
+ so combine them with the chosen output directory when you want to re-open the
+ artefacts later. Matplotlib figures are embedded directly into the Excel sheet
+ and the temporary `plots/` staging folder is deleted once the workbook is
+ written.
 
 ## 7. Repository maintenance
 

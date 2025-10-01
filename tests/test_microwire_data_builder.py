@@ -148,7 +148,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
     assert row["Figure — low mA"] == produced[low.name].name
     assert pd.isna(row["Figure — 1000 mA (Origin)"])
     assert pd.isna(row["Figure — low mA (Origin)"])
-    assert set(result.plot_paths) == {produced[high.name], produced[low.name]}
+    assert set(result.plot_paths) == {produced[high.name].name, produced[low.name].name}
     assert row["Low mA value (mA)"] == 120
 
 
@@ -205,12 +205,14 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
 
     monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
 
+    custom_figsize = (5.5, 3.5)
     config = BuilderConfig(
         fabrication_files=[],
         annealing_files=[high, low],
         output_dir=tmp_path / "out",
         make_plots=True,
         export_formats=("excel",),
+        matplotlib_figsize=custom_figsize,
     )
 
     result = build_database(config)
@@ -227,12 +229,65 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
     col_letter = get_column_letter(figure_col_idx + 1)
     assert worksheet[f"{col_letter}2"].value is None
 
+    expected_row_height = core._excel_row_height(custom_figsize[1])
+    expected_col_width = core._excel_column_width(custom_figsize[0])
+    assert worksheet.row_dimensions[2].height == pytest.approx(expected_row_height, rel=0.01)
+    assert worksheet.column_dimensions[col_letter].width == pytest.approx(expected_col_width, rel=0.05)
+
     anchor = images[0].anchor
     if hasattr(anchor, "_from"):
         assert anchor._from.col == figure_col_idx
         assert anchor._from.row == 1
 
     workbook.close()
+
+
+def test_excel_export_respects_high_dpi_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    pytest.importorskip("openpyxl")
+    from PIL import Image as PILImage
+    from zipfile import ZipFile
+    from xml.etree import ElementTree as ET
+
+    high = tmp_path / "Ni55Fe18Ga27 1_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 1_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+
+    def fake_plot(df, source: Path, plot_dir: Path, figsize: tuple[float, float]) -> Path:
+        plot_dir.mkdir(parents=True, exist_ok=True)
+        out_path = plot_dir / f"{source.stem}.png"
+        PILImage.new("RGB", (1650, 1050), color=(0, 128, 0)).save(out_path, dpi=(300, 300))
+        return out_path
+
+    monkeypatch.setattr(core, "_plot_measurement_matplotlib", fake_plot)
+
+    custom_figsize = (5.5, 3.5)
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        make_plots=True,
+        export_formats=("excel",),
+        matplotlib_figsize=custom_figsize,
+    )
+
+    result = build_database(config)
+    excel_path = result.exports["excel"]
+
+    with ZipFile(excel_path, "r") as archive:
+        drawing_xml = archive.read("xl/drawings/drawing1.xml")
+
+    tree = ET.fromstring(drawing_xml)
+    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
+    ext = tree.find(".//a:ext", namespaces=ns)
+    assert ext is not None, "Expected drawing metadata for embedded figure"
+    width_emu = int(ext.get("cx"))
+    height_emu = int(ext.get("cy"))
+    emu_per_inch = 914400
+    width_in = width_emu / emu_per_inch
+    height_in = height_emu / emu_per_inch
+    assert width_in == pytest.approx(custom_figsize[0], rel=0.01)
+    assert height_in == pytest.approx(custom_figsize[1], rel=0.01)
 
 
 def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -269,7 +324,35 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
     ratio_col = core.OUTPUT_COLUMNS[4]
     assert float(row[d_col]) == pytest.approx(16.7)
     assert float(row[D_col]) == pytest.approx(212.4)
-    assert float(row[ratio_col]) == pytest.approx(16.7 / 212.4)
+    expected_ratio = round(16.7 / 212.4, 3)
+    assert float(row[ratio_col]) == pytest.approx(expected_ratio)
+
+
+def test_parse_microscope_candidates_prefers_primary_marker() -> None:
+    values = core._parse_microscope_candidates([
+        "2025/09/25 [116.7um extra [2] 20.0um",
+    ])
+    assert values == [pytest.approx(6.7)]
+
+
+def test_parse_microscope_candidates_ignores_secondary() -> None:
+    values = core._parse_microscope_candidates([
+        "[2] 44.1um 18.5um",
+    ])
+    assert values == [pytest.approx(18.5)]
+
+
+def test_parse_microscope_candidates_filters_outliers() -> None:
+    sample_text = """5001000 . 7235.0um\n11]65.1um .\n25.0um"""
+    values = core._parse_microscope_candidates([sample_text])
+    assert values == [pytest.approx(65.1)]
+
+
+def test_microscope_key_handles_additional_delimiters() -> None:
+    dashed = Path("Ni50Fe27Ga23 5-4 core.jpg")
+    spaced = Path("Ni50Fe27Ga23 5 4 glass.png")
+    assert core._microscope_key(dashed) == ("Ni50Fe27Ga23", 5, 4)
+    assert core._microscope_key(spaced) == ("Ni50Fe27Ga23", 5, 4)
 
 
 def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
