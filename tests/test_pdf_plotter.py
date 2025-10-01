@@ -1,4 +1,5 @@
 import os
+import math
 
 # Use an offscreen platform for headless testing environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -23,3 +24,12 @@ def test_plot_creates_top_level_window():
         # Ensure windows and application are cleaned up
         win.close()
         app.quit()
+
+def test_parse_handles_six_column_format():
+    rows = parse_pdf_to_rows('sample_data/pdf_data/189_2_c2 1000hz.pdf')
+    assert rows, 'Expected rows from six-column pdf sample'
+    t1, t2, force, strain = rows[0]
+    assert all(isinstance(value, float) for value in (t1, t2, force, strain))
+    # Force column is distinct from the derived T2-T1 column
+    assert not math.isclose(force, t2 - t1, rel_tol=1e-3)
+

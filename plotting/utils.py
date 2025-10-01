@@ -492,6 +492,7 @@ def create_file_widget(
     *,
     key: str | None = None,
     on_outlier_toggle: Callable[[bool, list[str]], bool | None] | None = None,
+    on_change: Callable[[list[str]], None] | None = None,
 ) -> tuple[list[str], QtWidgets.QWidget]:
     """Return a widget managing a list of input files and the backing list."""
 
@@ -513,6 +514,14 @@ def create_file_widget(
     prefs = _settings()
     dev_opts = developer_options()
     storage_key = f"{key}_remembered_files" if key else None
+
+    def _notify_change() -> None:
+        if on_change is None:
+            return
+        try:
+            on_change(list(files))
+        except Exception as exc:
+            print(f"file change callback failed: {exc}")
 
     def _refresh_items() -> None:
         file_list.clear()
@@ -549,6 +558,7 @@ def create_file_widget(
                 changed = True
         if changed or files:
             _refresh_items()
+            _notify_change()
 
     def add_files() -> None:
         new = select_files_or_folder(parent, ext, key=key)
@@ -560,6 +570,7 @@ def create_file_widget(
         if changed:
             _refresh_items()
             _store_files()
+            _notify_change()
 
     def remove_selected() -> None:
         removed = False
@@ -573,6 +584,7 @@ def create_file_widget(
         if removed:
             _refresh_items()
             _store_files()
+            _notify_change()
 
     def remove_all() -> None:
         if not files:
@@ -580,6 +592,7 @@ def create_file_widget(
         files.clear()
         _refresh_items()
         _store_files()
+        _notify_change()
 
     def open_item(item: QtWidgets.QListWidgetItem) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
@@ -664,6 +677,7 @@ def create_file_widget(
     layout.addWidget(file_list)
 
     _load_persisted_files()
+    _notify_change()
 
     def _toggle_keep_files(enabled: bool) -> None:
         if storage_key is None:

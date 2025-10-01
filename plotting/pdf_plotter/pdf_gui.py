@@ -25,12 +25,12 @@ except Exception:  # pragma: no cover
 
 from ..utils import (
     ensure_app_theme,
-    select_files_or_folder,
     save_figure,
     prepare_output_dir,
     get_last_output_dir,
     set_last_output_dir,
     run_with_console,
+    arrange_top_layout,
     set_readability,
     apply_readability_fonts,
     restore_backend_choice,
@@ -40,10 +40,42 @@ from ..utils import (
     store_png_dpi,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
-from app_help import show_help
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
+_LINE_SANITIZE_RE = re.compile(r"[^\d;.,\-\+\s]")
+_TOKEN_TRANSLATION = str.maketrans({
+    chr(0x2212): '-',  # minus sign
+    chr(0x2012): '-',
+    chr(0x2013): '-',
+    chr(0x2014): '-',
+    chr(0x2015): '-',
+    chr(0xFF0D): '-',
+    chr(0xFE63): '-',
+    chr(0x00A0): ' ',  # non-breaking space
+    chr(0x202F): ' ',  # narrow no-break space
+    chr(0x2009): ' ',  # thin space
+    chr(0x200A): ' ',
+    chr(0x2007): ' ',
+    "'": '',
+    '`': '',
+})
+
+
+def _normalize_numeric_token(token: str) -> float:
+    token = token.strip()
+    if not token:
+        raise ValueError('empty token')
+    if token.count(',') and token.count('.'):
+        if token.rfind(',') > token.rfind('.'):
+            token = token.replace('.', '')
+            token = token.replace(',', '.')
+        else:
+            token = token.replace(',', '')
+    elif token.count(','):
+        token = token.replace(',', '.')
+    token = token.replace(' ', '')
+    return float(token)
 
 class _NoWheelSpinBox(QtWidgets.QSpinBox):
     """A QSpinBox that ignores wheel events unless focused."""
@@ -71,35 +103,37 @@ class _NoWheelDoubleSpinBox(QtWidgets.QDoubleSpinBox):
 def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     """Extract numeric rows from a PDF.
 
-    Each valid line contains 4 semicolon-separated values: T1; T2; Force; Strain.
-    Comma decimal separators are accepted, spaces ignored.
+    Supports legacy ``T1;T2;Force;Strain`` rows and the newer
+    ``T1;T2;T2-T1;T1+T2;Force;Strain`` layout. Comma or dot decimal separators
+    are accepted and stray characters are stripped before parsing.
     """
     if PdfReader is None:
         raise RuntimeError("PyPDF2 not installed. Install with: pip install PyPDF2")
     rows: List[NumberRow] = []
     reader = PdfReader(path)
-    num = r"-?\d+(?:[.,]\d+)?"
-    pat = re.compile(rf"\s*({num})\s*;\s*({num})\s*;\s*({num})\s*;\s*({num})\s*")
     for page in reader.pages:
         text = page.extract_text() or ""
         for raw in text.splitlines():
-            s = raw.strip()
-            m = pat.fullmatch(s)
-            if not m:
-                # scrub garbage characters and try again
-                s2 = re.sub(r"[^\d;,.\-\s]", "", s)
-                m = pat.fullmatch(s2)
-            if m:
-                try:
-                    t1 = float(m.group(1).replace(",", "."))
-                    t2 = float(m.group(2).replace(",", "."))
-                    force = float(m.group(3).replace(",", "."))
-                    strain = float(m.group(4).replace(",", "."))
-                    rows.append((t1, t2, force, strain))
-                except ValueError:
-                    pass
+            line = raw.translate(_TOKEN_TRANSLATION).strip()
+            if not line:
+                continue
+            sanitized = _LINE_SANITIZE_RE.sub('', line)
+            parts = [segment.strip() for segment in sanitized.split(';') if segment.strip()]
+            if len(parts) < 4:
+                continue
+            try:
+                numbers = [_normalize_numeric_token(part) for part in parts]
+            except ValueError:
+                continue
+            if len(numbers) >= 6:
+                t1, t2 = numbers[0], numbers[1]
+                force, strain = numbers[-2], numbers[-1]
+            elif len(numbers) == 4:
+                t1, t2, force, strain = numbers
+            else:
+                continue
+            rows.append((t1, t2, force, strain))
     return rows
-
 
 # -----------------------------------------------------------------------------
 # A single plot window using Matplotlib for display
@@ -129,9 +163,36 @@ class PlotWindow(QtWidgets.QMainWindow):
         self._base_dpi = self.fig.dpi
 
     def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
-        dpi = self.logicalDpiX() or 100.0
-        wpx = int(round(fig_w_in * dpi))
-        hpx = int(round(fig_h_in * dpi))
+        dpi = float(self.logicalDpiX() or 96.0)
+        try:
+            scale = float(self.devicePixelRatioF())
+            if scale > 0:
+                dpi /= scale
+        except Exception:
+            pass
+        dpi = min(max(dpi, 72.0), 160.0)
+
+        wpx = int(round(max(fig_w_in, 0.1) * dpi))
+        hpx = int(round(max(fig_h_in, 0.1) * dpi))
+        wpx = max(wpx, 1)
+        hpx = max(hpx, 1)
+
+        min_w, min_h = 320, 220
+        scale_up = 1.0
+        if wpx < min_w:
+            scale_up = max(scale_up, min_w / wpx)
+        if hpx < min_h:
+            scale_up = max(scale_up, min_h / hpx)
+        if scale_up != 1.0:
+            wpx = int(round(wpx * scale_up))
+            hpx = int(round(hpx * scale_up))
+
+        max_w, max_h = 1400, 900
+        scale_down = min(1.0, max_w / wpx, max_h / hpx)
+        if scale_down < 1.0:
+            wpx = int(round(wpx * scale_down))
+            hpx = int(round(hpx * scale_down))
+
         self._aspect_ratio = wpx / max(hpx, 1)
         self._base_width = wpx
         self._base_dpi = self.fig.dpi
@@ -162,19 +223,22 @@ class PlotWindow(QtWidgets.QMainWindow):
 # -----------------------------------------------------------------------------
 # Main settings window
 # -----------------------------------------------------------------------------
-class PdfPlotterWindow(QtWidgets.QWidget):
+class PdfPlotterWindow(QtWidgets.QDialog):
     """Settings window for plotting data extracted from PDFs."""
+
 
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("PDF T1/T2 Plotter")
-        self.resize(560, 760)
 
-        # Loaded data: list of (path, rows)
+        self._initialising = True
+
+        # Loaded data caches
         self.data: List[Tuple[str, List[NumberRow]]] = []
+        self._data_cache: Dict[str, List[NumberRow]] = {}
+        self._data_mtime: Dict[str, float] = {}
 
-        # Track plot windows and last plotted data. ``plot_win`` is kept for
-        # backward compatibility with older code expecting a single window.
+        # Track plot windows and last plotted data
         self.plot_wins: List[PlotWindow] = []
         self.plot_win: PlotWindow | None = None
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
@@ -182,227 +246,305 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self._last_x_label: str = ""
         self._last_y_label: str = ""
 
-        # Make the settings UI scrollable
-        outer = QtWidgets.QVBoxLayout(self)
-        menu_bar = QtWidgets.QMenuBar(self)
-        help_menu = menu_bar.addMenu("&Help")
-        if help_menu is None:
-            help_menu = QtWidgets.QMenu("&Help", self)
-            menu_bar.addMenu(help_menu)
-        help_action = help_menu.addAction("View Help")
-        if help_action is None:
-            help_action = QtGui.QAction("View Help", help_menu)
-            help_menu.addAction(help_action)
-        try:
-            help_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.HelpContents))
-        except Exception:
-            pass
-        help_action.triggered.connect(lambda: show_help("plot_pdf", self))
-        outer.setMenuBar(menu_bar)
-        scroll = QtWidgets.QScrollArea(self)
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-        scroll.setHorizontalScrollBarPolicy(
-            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        self.files, file_widget = create_file_widget(
+            self,
+            ext=".pdf",
+            key="pdf_plotter",
+            on_change=self._on_files_changed,
         )
-        outer.addWidget(scroll)
+        self.console = QtWidgets.QPlainTextEdit()
+        self.console.setReadOnly(True)
+        self.console.setMaximumHeight(140)
 
-        content = QtWidgets.QWidget()
-        content.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Ignored,
-            QtWidgets.QSizePolicy.Policy.Preferred,
-        )
-        form = QtWidgets.QFormLayout(content)
-        scroll.setWidget(content)
+        left = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(12)
 
-        # Files
-        self.file_edit = QtWidgets.QLineEdit()
-        self.browse_btn = QtWidgets.QPushButton("Open PDF(s)…")
-        self.browse_btn.clicked.connect(self._load_files)
-        file_box = self._hbox(self.file_edit, self.browse_btn)
-        form.addRow("Files", file_box)
-
-        # Variables
+        # Y variables
+        variables_group = QtWidgets.QGroupBox("Y Variables")
+        var_layout = QtWidgets.QVBoxLayout(variables_group)
         self.y_checks: List[QtWidgets.QCheckBox] = []
-        y_box = QtWidgets.QWidget()
-        y_layout = QtWidgets.QHBoxLayout(y_box)
-        for name in ["T1+T2", "T1", "T2", "T2–T1"]:
+        for name in ["T1+T2", "T1", "T2", "T2-T1"]:
             cb = QtWidgets.QCheckBox(name)
             cb.setChecked(name == "T1+T2")
             cb.stateChanged.connect(self._maybe_auto_plot)
-            y_layout.addWidget(cb)
+            var_layout.addWidget(cb)
             self.y_checks.append(cb)
+        var_layout.addStretch(1)
+        left_layout.addWidget(variables_group)
+
+        # Axes and mode
         self.x_combo = QtWidgets.QComboBox()
         self.x_combo.addItems(["Force (N)", "Strain (mm)", "Force & Strain"])
         self.x_combo.currentIndexChanged.connect(self._maybe_auto_plot)
-        form.addRow("Y variables", y_box)
-        form.addRow("X variable", self.x_combo)
 
-        # Plot mode and options
         self.mode_combo = QtWidgets.QComboBox()
         self.mode_combo.addItems(["Combined", "Separate"])
         self.mode_combo.currentIndexChanged.connect(self._maybe_auto_plot)
-        self.backend_combo = QtWidgets.QComboBox()
-        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])  # output backend
-        restore_backend_choice("pdf_plotter", self.backend_combo, "matplotlib")
-        self.backend_combo.currentIndexChanged.connect(self._maybe_auto_plot)
+
         self.zero_cb = QtWidgets.QCheckBox("First point at zero")
         self.zero_cb.setChecked(True)
         self.zero_cb.stateChanged.connect(self._maybe_auto_plot)
-        form.addRow("Plot mode", self.mode_combo)
-        form.addRow("Backend", self.backend_combo)
-        form.addRow("Zero first", self.zero_cb)
 
-        # Styling
+        axes_group = QtWidgets.QGroupBox("Axes & Mode")
+        axes_form = QtWidgets.QFormLayout(axes_group)
+        axes_form.addRow("X axis", self.x_combo)
+        axes_form.addRow("Plot mode", self.mode_combo)
+        axes_form.addRow("Zero first point", self.zero_cb)
+        left_layout.addWidget(axes_group)
+
+        # Series styling
         self.line_style = QtWidgets.QComboBox()
         self.line_style.addItems(["-", "--", ":", "-.", "None"])
         self.line_style.setCurrentIndex(0)
+        self.line_style.currentIndexChanged.connect(self._maybe_auto_plot)
+
         self.marker_style = QtWidgets.QComboBox()
         self.marker_style.addItems(["o", "s", "d", "^", "v", "x", "+", ".", "None"])
         self.marker_style.setCurrentIndex(0)
+        self.marker_style.currentIndexChanged.connect(self._maybe_auto_plot)
+
         self.line_width = _NoWheelDoubleSpinBox()
         self.line_width.setRange(0.1, 10.0)
         self.line_width.setSingleStep(0.1)
         self.line_width.setValue(1.5)
+        self.line_width.valueChanged.connect(self._maybe_auto_plot)
+
         self.marker_size = _NoWheelDoubleSpinBox()
         self.marker_size.setRange(0.5, 30.0)
         self.marker_size.setSingleStep(0.5)
         self.marker_size.setValue(5.0)
+        self.marker_size.valueChanged.connect(self._maybe_auto_plot)
+
         self.grid_cb = QtWidgets.QCheckBox()
         self.grid_cb.setChecked(True)
-        for w in [self.line_style, self.marker_style]:
-            w.currentIndexChanged.connect(self._maybe_auto_plot)
-        for w in [self.line_width, self.marker_size, self.grid_cb]:
-            (w.valueChanged if hasattr(w, "valueChanged") else w.stateChanged).connect(self._maybe_auto_plot)
-        form.addRow("Line style", self.line_style)
-        form.addRow("Marker", self.marker_style)
-        form.addRow("Line width", self.line_width)
-        form.addRow("Marker size", self.marker_size)
-        form.addRow("Grid", self.grid_cb)
+        self.grid_cb.stateChanged.connect(self._maybe_auto_plot)
 
         self.dark_cb = QtWidgets.QCheckBox("Dark background")
         self.dark_cb.setChecked(False)
         self.dark_cb.toggled.connect(self._apply_dark_global)
-        form.addRow("", self.dark_cb)
 
-        # Legend
-        self.legend_cb = QtWidgets.QCheckBox()
+        style_group = QtWidgets.QGroupBox("Series Style")
+        style_form = QtWidgets.QFormLayout(style_group)
+        style_form.addRow("Line style", self.line_style)
+        style_form.addRow("Marker", self.marker_style)
+        style_form.addRow("Line width", self.line_width)
+        style_form.addRow("Marker size", self.marker_size)
+        style_form.addRow("Grid", self.grid_cb)
+        style_form.addRow(self.dark_cb)
+        left_layout.addWidget(style_group)
+
+        # Legend options
+        self.legend_cb = QtWidgets.QCheckBox("Show legend")
         self.legend_cb.setChecked(True)
+        self.legend_cb.stateChanged.connect(self._maybe_auto_plot)
+
         self.legend_loc = QtWidgets.QComboBox()
-        self.legend_loc.addItems(
-            [
-                "best",
-                "upper right",
-                "upper left",
-                "lower left",
-                "lower right",
-                "right",
-                "center left",
-                "center right",
-                "lower center",
-                "upper center",
-                "center",
-            ]
-        )
+        self.legend_loc.addItems([
+            "best",
+            "upper right",
+            "upper left",
+            "lower left",
+            "lower right",
+            "right",
+            "center left",
+            "center right",
+            "lower center",
+            "upper center",
+            "center",
+        ])
         self.legend_loc.setCurrentIndex(0)
+        self.legend_loc.currentIndexChanged.connect(self._maybe_auto_plot)
+
         self.legend_fs = _NoWheelSpinBox()
         self.legend_fs.setRange(6, 48)
         self.legend_fs.setValue(10)
-        self.legend_cb.stateChanged.connect(self._maybe_auto_plot)
-        self.legend_loc.currentIndexChanged.connect(self._maybe_auto_plot)
         self.legend_fs.valueChanged.connect(self._maybe_auto_plot)
-        form.addRow("Legend", self.legend_cb)
-        form.addRow("Legend loc", self.legend_loc)
-        form.addRow("Legend size", self.legend_fs)
 
-        # Fonts
+        legend_group = QtWidgets.QGroupBox("Legend")
+        legend_form = QtWidgets.QFormLayout(legend_group)
+        legend_form.addRow(self.legend_cb)
+        legend_form.addRow("Location", self.legend_loc)
+        legend_form.addRow("Font size", self.legend_fs)
+        left_layout.addWidget(legend_group)
+
+        # Font sizes
         self.title_fs = _NoWheelSpinBox()
         self.title_fs.setRange(6, 72)
         self.title_fs.setValue(12)
+        self.title_fs.valueChanged.connect(self._maybe_auto_plot)
+
         self.label_fs = _NoWheelSpinBox()
         self.label_fs.setRange(6, 72)
         self.label_fs.setValue(11)
+        self.label_fs.valueChanged.connect(self._maybe_auto_plot)
+
         self.tick_fs = _NoWheelSpinBox()
         self.tick_fs.setRange(6, 48)
         self.tick_fs.setValue(10)
-        for w in [self.title_fs, self.label_fs, self.tick_fs]:
-            w.valueChanged.connect(self._maybe_auto_plot)
-        form.addRow("Title size", self.title_fs)
-        form.addRow("Label size", self.label_fs)
-        form.addRow("Tick size", self.tick_fs)
+        self.tick_fs.valueChanged.connect(self._maybe_auto_plot)
 
-        # Save options
-        self.save_cb = QtWidgets.QCheckBox()
+        fonts_group = QtWidgets.QGroupBox("Fonts")
+        fonts_form = QtWidgets.QFormLayout(fonts_group)
+        fonts_form.addRow("Title size", self.title_fs)
+        fonts_form.addRow("Label size", self.label_fs)
+        fonts_form.addRow("Tick size", self.tick_fs)
+        left_layout.addWidget(fonts_group)
+
+        # Output and saving
+        self.save_cb = QtWidgets.QCheckBox("Save on plot")
         self.save_cb.setChecked(False)
+
         self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd(), key="pdf_plotter"))
-        self.browse_out_btn = QtWidgets.QPushButton("Browse…")
+        self.browse_out_btn = QtWidgets.QPushButton("Browse")
         self.browse_out_btn.clicked.connect(self._browse_out)
-        out_box = self._hbox(self.out_dir, self.browse_out_btn)
+
         self.subdir_cb = QtWidgets.QCheckBox("Create subfolder")
+        self.subdir_cb.setChecked(False)
+
         self.format_combo = QtWidgets.QComboBox()
         self.format_combo.addItems(["png", "pdf", "svg"])
-        fmt_box = self._hbox(self.format_combo)
+
         self.dpi_spin = _NoWheelSpinBox()
         self.dpi_spin.setRange(72, 3000)
         restore_png_dpi("pdf_plotter", self.dpi_spin, 1200)
+
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        restore_backend_choice("pdf_plotter", self.backend_combo, "matplotlib")
+        self.backend_combo.currentIndexChanged.connect(self._maybe_auto_plot)
+
+        output_group = QtWidgets.QGroupBox("Output")
+        out_form = QtWidgets.QFormLayout(output_group)
+        out_form.addRow("Backend", self.backend_combo)
+        out_form.addRow(self.save_cb)
+        out_form.addRow("Format", self.format_combo)
+        out_form.addRow("PNG dpi", self.dpi_spin)
+        out_form.addRow(self.subdir_cb)
+        out_form.addRow("Output dir", self._hbox(self.out_dir, self.browse_out_btn))
+        left_layout.addWidget(output_group)
+
+        # Figure sizing
         self.fig_w = _NoWheelDoubleSpinBox()
         self.fig_w.setRange(1.0, 1000.0)
-        self.fig_w.setValue(180.0)  # default in mm
+        self.fig_w.setValue(120.0)
         self.fig_h = _NoWheelDoubleSpinBox()
         self.fig_h.setRange(1.0, 1000.0)
-        self.fig_h.setValue(120.0)  # default in mm
+        self.fig_h.setValue(90.0)
         self.fig_units = QtWidgets.QComboBox()
         self.fig_units.addItems(["in", "cm", "mm"])
-        self.fig_units.setCurrentIndex(2)  # default to mm
+        self.fig_units.setCurrentIndex(2)
         self.lock_aspect_cb = QtWidgets.QCheckBox("Lock aspect ratio")
         self.lock_aspect_cb.setChecked(True)
         self._current_units = self.fig_units.currentText()
         self._aspect_ratio = self.fig_w.value() / max(self.fig_h.value(), 1e-9)
         self._updating_size = False
 
-        # Wire unit/size behavior
         self.fig_units.currentTextChanged.connect(self._on_units_changed)
         self.lock_aspect_cb.toggled.connect(self._on_lock_toggled)
         self.fig_w.valueChanged.connect(self._on_width_changed)
         self.fig_h.valueChanged.connect(self._on_height_changed)
-        self.save_now_btn = QtWidgets.QPushButton("Save Now")
-        self.save_now_btn.clicked.connect(self.save_current)
-        form.addRow("Save on plot", self.save_cb)
-        form.addRow("Output dir", out_box)
-        form.addRow("Create subfolder", self.subdir_cb)
-        form.addRow("Format", fmt_box)
-        form.addRow("DPI", self.dpi_spin)
-        form.addRow("Figure size", self._hbox(self.fig_w, self.fig_h, self.fig_units, self.lock_aspect_cb))
-        form.addRow("", self.save_now_btn)
 
-        # Actions
+        figure_group = QtWidgets.QGroupBox("Figure Size")
+        fig_form = QtWidgets.QFormLayout(figure_group)
+        mult_label = QtWidgets.QLabel("x")
+        mult_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        fig_form.addRow("Size", self._hbox(self.fig_w, mult_label, self.fig_h, self.fig_units, self.lock_aspect_cb))
+        left_layout.addWidget(figure_group)
+
+        left_layout.addStretch(1)
+
+        # Action buttons
         self.auto_cb = QtWidgets.QCheckBox("Auto update on change")
         self.auto_cb.setChecked(True)
+        self.auto_cb.stateChanged.connect(self._maybe_auto_plot)
+
         self.plot_btn = QtWidgets.QPushButton("Plot")
-        self.clear_btn = QtWidgets.QPushButton("Clear")
-        self.console = QtWidgets.QPlainTextEdit(); self.console.setReadOnly(True); self.console.setMaximumHeight(120)
         self.plot_btn.clicked.connect(lambda: run_with_console(self.plot, self.console))
+        self.plot_btn.setDefault(True)
+
+        self.clear_btn = QtWidgets.QPushButton("Clear")
         self.clear_btn.clicked.connect(self.clear_plot)
-        btn_box = QtWidgets.QWidget()
-        btn_layout = QtWidgets.QHBoxLayout(btn_box)
-        btn_layout.setContentsMargins(0, 0, 0, 0)
-        btn_layout.addWidget(self.auto_cb)
-        btn_layout.addStretch(1)
-        btn_layout.addWidget(self.plot_btn)
-        btn_layout.addWidget(self.clear_btn)
 
-        # Ensure the plot controls are always visible without scrolling by placing the
-        # button row outside the scrollable area.
-        outer.addWidget(btn_box)
-        outer.addWidget(self.console)
+        self.save_now_btn = QtWidgets.QPushButton("Save Now")
+        self.save_now_btn.clicked.connect(self.save_current)
 
-    # --- Helpers ---------------------------------------------------------------
+        footer_row = QtWidgets.QHBoxLayout()
+        footer_row.addWidget(self.auto_cb)
+        footer_row.addStretch(1)
+        footer_row.addWidget(self.save_now_btn)
+        footer_row.addWidget(self.clear_btn)
+        footer_row.addWidget(self.plot_btn)
+
+        arrange_top_layout(
+            self,
+            file_widget,
+            left,
+            self.console,
+            footer=footer_row,
+            help_topic="plot_pdf",
+        )
+
+        self._initialising = False
+        self._reload_selected_files(show_feedback=False)
     def _hbox(self, *widgets: QtWidgets.QWidget) -> QtWidgets.QWidget:
         w = QtWidgets.QWidget()
         l = QtWidgets.QHBoxLayout(w)
         for x in widgets:
             l.addWidget(x)
         return w
+
+    def _on_files_changed(self, _: List[str]) -> None:
+        if getattr(self, "_initialising", False):
+            return
+        self._reload_selected_files(show_feedback=True)
+        self._maybe_auto_plot()
+
+    def _reload_selected_files(self, *, show_feedback: bool) -> None:
+        current = [path for path in self.files if path]
+        cached_paths = set(self._data_cache)
+        for path in cached_paths - set(current):
+            self._data_cache.pop(path, None)
+            self._data_mtime.pop(path, None)
+
+        errors: List[str] = []
+        new_data: List[Tuple[str, List[NumberRow]]] = []
+        total_rows = 0
+        updated = False
+
+        for path in current:
+            rows = self._data_cache.get(path)
+            try:
+                mtime = os.path.getmtime(path)
+            except OSError:
+                mtime = -1.0
+            if rows is None or self._data_mtime.get(path) != mtime:
+                try:
+                    rows = parse_pdf_to_rows(path)
+                except Exception as exc:
+                    errors.append(f"{os.path.basename(path)}: {exc}")
+                    rows = []
+                self._data_cache[path] = rows
+                self._data_mtime[path] = mtime
+                updated = True
+            new_data.append((path, rows or []))
+            total_rows += len(rows or [])
+
+        self.data = new_data
+
+        if errors and updated:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Parse error",
+                "\n".join(errors),
+            )
+        if show_feedback and updated and current and total_rows == 0 and not errors:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No data",
+                "No numeric rows found. Check the PDF contents.",
+            )
 
     def _figure_size_inches(self) -> Tuple[float, float]:
         w = float(self.fig_w.value())
@@ -542,23 +684,6 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         if self.auto_cb.isChecked():
             self.plot()
 
-    def _load_files(self) -> None:
-        paths = select_files_or_folder(self, ext=".pdf", key="pdf_plotter")
-        if not paths:
-            return
-        self.file_edit.setText(" ; ".join(paths))
-        self.data.clear()
-        total = 0
-        for p in paths:
-            try:
-                r = parse_pdf_to_rows(p)
-                self.data.append((p, r))
-                total += len(r)
-            except Exception as e:
-                QtWidgets.QMessageBox.critical(self, "Error", f"Failed to parse {p}:\n{e}")
-        if total == 0:
-            QtWidgets.QMessageBox.information(self, "No data", "No numeric rows found. Check the PDF contents.")
-
     # --- Plotting --------------------------------------------------------------
     def _collect_lines_by_file(self, x_name: str) -> Dict[str, List[Tuple[str, np.ndarray, np.ndarray]]]:
         lines_by_file: Dict[str, List[Tuple[str, np.ndarray, np.ndarray]]] = {}
@@ -576,7 +701,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                         y = t1
                     elif y_name == "T2":
                         y = t2
-                    elif y_name == "T2–T1":
+                    elif y_name == "T2-T1":
                         y = t2 - t1
                     else:
                         y = t1 + t2
@@ -618,9 +743,9 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                     lines.append((label, xs, ys))
             if len(lines_by_file) == 1:
                 base_title = os.path.splitext(os.path.basename(next(iter(lines_by_file))))[0]
-                title = f"{y_label} vs {x_label} — {base_title}"
+                title = f"{y_label} vs {x_label} - {base_title}"
             else:
-                title = f"{y_label} vs {x_label} — {len(lines_by_file)} files"
+                title = f"{y_label} vs {x_label} - {len(lines_by_file)} files"
             if wants_matplotlib(backend):
                 win = PlotWindow(None, controller=self)
                 self._plot_to_window(win, lines, title, x_label, y_label)
@@ -645,7 +770,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
                 for y_name, xs, ys in sets:
                     label = f"{base} {y_name}"
                     lines.append((label, xs, ys))
-                title = f"{y_label} vs {x_label} — {base}"
+                title = f"{y_label} vs {x_label} - {base}"
                 if wants_matplotlib(backend):
                     win = PlotWindow(None, controller=self)
                     self._plot_to_window(win, lines, title, x_label, y_label)
@@ -763,6 +888,7 @@ class PdfPlotterWindow(QtWidgets.QWidget):
         self._save_lines(self._last_lines, self._last_title, self._last_x_label, self._last_y_label)
 
     def plot(self) -> None:
+        self._reload_selected_files(show_feedback=False)
         if not self.data:
             QtWidgets.QMessageBox.information(self, "No data", "Load PDF files first.")
             return
@@ -795,3 +921,4 @@ if __name__ == "__main__":  # pragma: no cover - manual execution
     ensure_app_theme(app)
     _w = main()
     app.exec()
+
