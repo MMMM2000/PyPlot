@@ -38,6 +38,7 @@ from ..utils import (
     selected_backend,
     restore_png_dpi,
     store_png_dpi,
+    create_file_widget,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
 
@@ -254,12 +255,13 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         )
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMaximumHeight(140)
+        self.console.setMaximumHeight(120)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout = QtWidgets.QGridLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
+        left_layout.setHorizontalSpacing(12)
+        left_layout.setVerticalSpacing(12)
 
         # Y variables
         variables_group = QtWidgets.QGroupBox("Y Variables")
@@ -272,7 +274,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             var_layout.addWidget(cb)
             self.y_checks.append(cb)
         var_layout.addStretch(1)
-        left_layout.addWidget(variables_group)
+        left_layout.addWidget(variables_group, 0, 0)
 
         # Axes and mode
         self.x_combo = QtWidgets.QComboBox()
@@ -292,7 +294,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         axes_form.addRow("X axis", self.x_combo)
         axes_form.addRow("Plot mode", self.mode_combo)
         axes_form.addRow("Zero first point", self.zero_cb)
-        left_layout.addWidget(axes_group)
+        left_layout.addWidget(axes_group, 0, 1)
 
         # Series styling
         self.line_style = QtWidgets.QComboBox()
@@ -333,7 +335,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         style_form.addRow("Marker size", self.marker_size)
         style_form.addRow("Grid", self.grid_cb)
         style_form.addRow(self.dark_cb)
-        left_layout.addWidget(style_group)
+        left_layout.addWidget(style_group, 1, 0)
 
         # Legend options
         self.legend_cb = QtWidgets.QCheckBox("Show legend")
@@ -367,7 +369,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         legend_form.addRow(self.legend_cb)
         legend_form.addRow("Location", self.legend_loc)
         legend_form.addRow("Font size", self.legend_fs)
-        left_layout.addWidget(legend_group)
+        left_layout.addWidget(legend_group, 1, 1)
 
         # Font sizes
         self.title_fs = _NoWheelSpinBox()
@@ -390,7 +392,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         fonts_form.addRow("Title size", self.title_fs)
         fonts_form.addRow("Label size", self.label_fs)
         fonts_form.addRow("Tick size", self.tick_fs)
-        left_layout.addWidget(fonts_group)
+        left_layout.addWidget(fonts_group, 2, 0)
 
         # Output and saving
         self.save_cb = QtWidgets.QCheckBox("Save on plot")
@@ -423,18 +425,22 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         out_form.addRow("PNG dpi", self.dpi_spin)
         out_form.addRow(self.subdir_cb)
         out_form.addRow("Output dir", self._hbox(self.out_dir, self.browse_out_btn))
-        left_layout.addWidget(output_group)
+        left_layout.addWidget(output_group, 3, 0, 1, 2)
 
         # Figure sizing
         self.fig_w = _NoWheelDoubleSpinBox()
-        self.fig_w.setRange(1.0, 1000.0)
-        self.fig_w.setValue(120.0)
+        self.fig_w.setRange(1.0, 100.0)
+        self.fig_w.setSingleStep(0.25)
+        self.fig_w.setDecimals(2)
+        self.fig_w.setValue(6.0)
         self.fig_h = _NoWheelDoubleSpinBox()
-        self.fig_h.setRange(1.0, 1000.0)
-        self.fig_h.setValue(90.0)
+        self.fig_h.setRange(1.0, 100.0)
+        self.fig_h.setSingleStep(0.25)
+        self.fig_h.setDecimals(2)
+        self.fig_h.setValue(4.5)
         self.fig_units = QtWidgets.QComboBox()
         self.fig_units.addItems(["in", "cm", "mm"])
-        self.fig_units.setCurrentIndex(2)
+        self.fig_units.setCurrentIndex(0)
         self.lock_aspect_cb = QtWidgets.QCheckBox("Lock aspect ratio")
         self.lock_aspect_cb.setChecked(True)
         self._current_units = self.fig_units.currentText()
@@ -451,9 +457,10 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         mult_label = QtWidgets.QLabel("x")
         mult_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         fig_form.addRow("Size", self._hbox(self.fig_w, mult_label, self.fig_h, self.fig_units, self.lock_aspect_cb))
-        left_layout.addWidget(figure_group)
-
-        left_layout.addStretch(1)
+        left_layout.addWidget(figure_group, 2, 1)
+        left_layout.setRowStretch(4, 1)
+        left_layout.setColumnStretch(0, 1)
+        left_layout.setColumnStretch(1, 1)
 
         # Action buttons
         self.auto_cb = QtWidgets.QCheckBox("Auto update on change")
