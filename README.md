@@ -123,6 +123,15 @@ Plotting dialogs keep their
 windows open after running and display settings, file list and console side by
 side within a single resizable window.
 
+The **PDF T1/T2 plotter** now adopts the same two-column control layout as the
+other plotting scripts so its settings feel familiar, and its Matplotlib preview
+opens at a modest 160 × 120 mm canvas by default (with centimetre and inch
+options on demand) while using Matplotlib’s standard window so it matches the
+rest of the plotting tools.  The figure size controls remain available for
+larger exports, and new unit-aware ranges keep adjustments in practical bounds.
+Saving defaults to the user’s `Downloads` folder yet still remembers the most
+recent directory you chose for subsequent sessions.
+
 Outlier detection remains opt-in.  Toggling **Remove automatically** no longer
 forces the outlier check to start immediately, and the preference is remembered
 per plotting script so each tool can keep its own automatic-removal default.

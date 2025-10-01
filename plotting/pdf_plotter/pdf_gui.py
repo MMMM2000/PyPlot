@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import weakref
 from typing import Any, Dict, Iterable, List, Tuple, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -12,11 +11,6 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-try:  # Matplotlib >= 3.7 exposes NavigationToolbar2QT from backend_qt
-    from matplotlib.backends.backend_qt import NavigationToolbar2QT  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - fallback for older Matplotlib builds
-    from matplotlib.backends.backend_qtagg import NavigationToolbar2QT  # type: ignore[attr-defined]
 
 try:  # optional dependency
     from PyPDF2 import PdfReader
@@ -38,6 +32,8 @@ from ..utils import (
     selected_backend,
     restore_png_dpi,
     store_png_dpi,
+    create_file_widget,
+    show_plots,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
 
@@ -136,91 +132,6 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     return rows
 
 # -----------------------------------------------------------------------------
-# A single plot window using Matplotlib for display
-# -----------------------------------------------------------------------------
-class PlotWindow(QtWidgets.QMainWindow):
-    """Top level window holding a Matplotlib plot."""
-
-    instances: weakref.WeakSet[PlotWindow] = weakref.WeakSet()
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: PdfPlotterWindow | None = None) -> None:
-        super().__init__(parent)
-        PlotWindow.instances.add(self)
-        self.controller = controller
-        self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
-        self._last_title: str = ""
-        self.fig = Figure()
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        self.toolbar = NavigationToolbar2QT(self.canvas, self)
-        central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
-        self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-        self.setCentralWidget(central)
-        self._aspect_ratio = 1.0
-        self._base_width = 1
-        self._base_dpi = self.fig.dpi
-
-    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
-        dpi = float(self.logicalDpiX() or 96.0)
-        try:
-            scale = float(self.devicePixelRatioF())
-            if scale > 0:
-                dpi /= scale
-        except Exception:
-            pass
-        dpi = min(max(dpi, 72.0), 160.0)
-
-        wpx = int(round(max(fig_w_in, 0.1) * dpi))
-        hpx = int(round(max(fig_h_in, 0.1) * dpi))
-        wpx = max(wpx, 1)
-        hpx = max(hpx, 1)
-
-        min_w, min_h = 320, 220
-        scale_up = 1.0
-        if wpx < min_w:
-            scale_up = max(scale_up, min_w / wpx)
-        if hpx < min_h:
-            scale_up = max(scale_up, min_h / hpx)
-        if scale_up != 1.0:
-            wpx = int(round(wpx * scale_up))
-            hpx = int(round(hpx * scale_up))
-
-        max_w, max_h = 1400, 900
-        scale_down = min(1.0, max_w / wpx, max_h / hpx)
-        if scale_down < 1.0:
-            wpx = int(round(wpx * scale_down))
-            hpx = int(round(hpx * scale_down))
-
-        self._aspect_ratio = wpx / max(hpx, 1)
-        self._base_width = wpx
-        self._base_dpi = self.fig.dpi
-        self.canvas.setMinimumSize(0, 0)
-        self.canvas.resize(wpx, hpx)
-        if resize_window:
-            self.resize(self.sizeHint())
-        else:
-            self.updateGeometry()
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        w = self.canvas.width()
-        h = int(round(w / self._aspect_ratio))
-        self.canvas.setFixedHeight(h)
-        scale = w / self._base_width if self._base_width else 1
-        self.fig.set_dpi(self._base_dpi * scale)
-        self.canvas.draw_idle()
-
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        try:
-            PlotWindow.instances.discard(self)
-        except Exception:
-            pass
-        super().closeEvent(event)
-
-
-# -----------------------------------------------------------------------------
 # Main settings window
 # -----------------------------------------------------------------------------
 class PdfPlotterWindow(QtWidgets.QDialog):
@@ -238,9 +149,8 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         self._data_cache: Dict[str, List[NumberRow]] = {}
         self._data_mtime: Dict[str, float] = {}
 
-        # Track plot windows and last plotted data
-        self.plot_wins: List[PlotWindow] = []
-        self.plot_win: PlotWindow | None = None
+        # Track Matplotlib figures and last plotted data
+        self.matplotlib_figures: List[Figure] = []
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
         self._last_x_label: str = ""
@@ -254,12 +164,13 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         )
         self.console = QtWidgets.QPlainTextEdit()
         self.console.setReadOnly(True)
-        self.console.setMaximumHeight(140)
+        self.console.setMaximumHeight(120)
 
         left = QtWidgets.QWidget()
-        left_layout = QtWidgets.QVBoxLayout(left)
+        left_layout = QtWidgets.QGridLayout(left)
         left_layout.setContentsMargins(0, 0, 0, 0)
-        left_layout.setSpacing(12)
+        left_layout.setHorizontalSpacing(12)
+        left_layout.setVerticalSpacing(12)
 
         # Y variables
         variables_group = QtWidgets.QGroupBox("Y Variables")
@@ -272,7 +183,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             var_layout.addWidget(cb)
             self.y_checks.append(cb)
         var_layout.addStretch(1)
-        left_layout.addWidget(variables_group)
+        left_layout.addWidget(variables_group, 0, 0)
 
         # Axes and mode
         self.x_combo = QtWidgets.QComboBox()
@@ -292,7 +203,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         axes_form.addRow("X axis", self.x_combo)
         axes_form.addRow("Plot mode", self.mode_combo)
         axes_form.addRow("Zero first point", self.zero_cb)
-        left_layout.addWidget(axes_group)
+        left_layout.addWidget(axes_group, 0, 1)
 
         # Series styling
         self.line_style = QtWidgets.QComboBox()
@@ -333,7 +244,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         style_form.addRow("Marker size", self.marker_size)
         style_form.addRow("Grid", self.grid_cb)
         style_form.addRow(self.dark_cb)
-        left_layout.addWidget(style_group)
+        left_layout.addWidget(style_group, 1, 0)
 
         # Legend options
         self.legend_cb = QtWidgets.QCheckBox("Show legend")
@@ -367,7 +278,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         legend_form.addRow(self.legend_cb)
         legend_form.addRow("Location", self.legend_loc)
         legend_form.addRow("Font size", self.legend_fs)
-        left_layout.addWidget(legend_group)
+        left_layout.addWidget(legend_group, 1, 1)
 
         # Font sizes
         self.title_fs = _NoWheelSpinBox()
@@ -390,13 +301,13 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         fonts_form.addRow("Title size", self.title_fs)
         fonts_form.addRow("Label size", self.label_fs)
         fonts_form.addRow("Tick size", self.tick_fs)
-        left_layout.addWidget(fonts_group)
+        left_layout.addWidget(fonts_group, 2, 0)
 
         # Output and saving
         self.save_cb = QtWidgets.QCheckBox("Save on plot")
         self.save_cb.setChecked(False)
 
-        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(os.getcwd(), key="pdf_plotter"))
+        self.out_dir = QtWidgets.QLineEdit(get_last_output_dir(key="pdf_plotter"))
         self.browse_out_btn = QtWidgets.QPushButton("Browse")
         self.browse_out_btn.clicked.connect(self._browse_out)
 
@@ -423,23 +334,28 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         out_form.addRow("PNG dpi", self.dpi_spin)
         out_form.addRow(self.subdir_cb)
         out_form.addRow("Output dir", self._hbox(self.out_dir, self.browse_out_btn))
-        left_layout.addWidget(output_group)
+        left_layout.addWidget(output_group, 3, 0, 1, 2)
 
         # Figure sizing
         self.fig_w = _NoWheelDoubleSpinBox()
-        self.fig_w.setRange(1.0, 1000.0)
-        self.fig_w.setValue(120.0)
         self.fig_h = _NoWheelDoubleSpinBox()
-        self.fig_h.setRange(1.0, 1000.0)
-        self.fig_h.setValue(90.0)
         self.fig_units = QtWidgets.QComboBox()
-        self.fig_units.addItems(["in", "cm", "mm"])
-        self.fig_units.setCurrentIndex(2)
+        self.fig_units.addItems(["mm", "cm", "in"])
         self.lock_aspect_cb = QtWidgets.QCheckBox("Lock aspect ratio")
         self.lock_aspect_cb.setChecked(True)
-        self._current_units = self.fig_units.currentText()
-        self._aspect_ratio = self.fig_w.value() / max(self.fig_h.value(), 1e-9)
+        self._fig_limits_mm = {
+            "w": (60.0, 1600.0),
+            "h": (45.0, 1200.0),
+        }
         self._updating_size = False
+        self._current_units = "mm"
+        self.fig_units.setCurrentText(self._current_units)
+        self._current_units = self.fig_units.currentText()
+        self._update_fig_ranges(self._current_units)
+        self._configure_size_spinboxes(self._current_units)
+        self.fig_w.setValue(160.0)
+        self.fig_h.setValue(120.0)
+        self._aspect_ratio = self.fig_w.value() / max(self.fig_h.value(), 1e-9)
 
         self.fig_units.currentTextChanged.connect(self._on_units_changed)
         self.lock_aspect_cb.toggled.connect(self._on_lock_toggled)
@@ -451,9 +367,10 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         mult_label = QtWidgets.QLabel("x")
         mult_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         fig_form.addRow("Size", self._hbox(self.fig_w, mult_label, self.fig_h, self.fig_units, self.lock_aspect_cb))
-        left_layout.addWidget(figure_group)
-
-        left_layout.addStretch(1)
+        left_layout.addWidget(figure_group, 2, 1)
+        left_layout.setRowStretch(4, 1)
+        left_layout.setColumnStretch(0, 1)
+        left_layout.setColumnStretch(1, 1)
 
         # Action buttons
         self.auto_cb = QtWidgets.QCheckBox("Auto update on change")
@@ -550,18 +467,56 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         w = float(self.fig_w.value())
         h = float(self.fig_h.value())
         unit = self.fig_units.currentText()
-        if unit == "cm":
-            return w / 2.54, h / 2.54
-        if unit == "mm":
-            return w / 25.4, h / 25.4
-        return w, h
+        mm_per_unit = self._unit_to_mm(unit)
+        if mm_per_unit <= 0:
+            return w, h
+        return (w * mm_per_unit) / 25.4, (h * mm_per_unit) / 25.4
 
     def _convert_units(self, value: float, from_unit: str, to_unit: str) -> float:
-        to_mm = {"mm": 1.0, "cm": 10.0, "in": 25.4}
-        if from_unit not in to_mm or to_unit not in to_mm:
+        from_mm = self._unit_to_mm(from_unit)
+        to_mm = self._unit_to_mm(to_unit)
+        if from_mm <= 0 or to_mm <= 0:
             return value
-        mm = value * to_mm[from_unit]
-        return mm / to_mm[to_unit]
+        mm = value * from_mm
+        return mm / to_mm
+
+    def _unit_to_mm(self, unit: str) -> float:
+        return {"mm": 1.0, "cm": 10.0, "in": 25.4}.get(unit, 25.4)
+
+    def _update_fig_ranges(self, unit: str) -> None:
+        factor = self._unit_to_mm(unit)
+        if factor <= 0:
+            factor = 25.4
+        limits = [
+            (self.fig_w, self._fig_limits_mm.get("w", (60.0, 1600.0))),
+            (self.fig_h, self._fig_limits_mm.get("h", (45.0, 1200.0))),
+        ]
+        for spin, (min_mm, max_mm) in limits:
+            min_val = min_mm / factor
+            max_val = max_mm / factor
+            block = spin.blockSignals(True)
+            try:
+                spin.setRange(min_val, max_val)
+            finally:
+                spin.blockSignals(block)
+
+    def _configure_size_spinboxes(self, unit: str) -> None:
+        if unit == "mm":
+            step = 5.0
+            decimals = 1
+        elif unit == "cm":
+            step = 0.5
+            decimals = 2
+        else:
+            step = 0.25
+            decimals = 2
+        for spin in (self.fig_w, self.fig_h):
+            block = spin.blockSignals(True)
+            try:
+                spin.setSingleStep(step)
+                spin.setDecimals(decimals)
+            finally:
+                spin.blockSignals(block)
 
     def _apply_dark_global(self, on: bool) -> None:
         # Dark mode is applied when creating new plots
@@ -638,6 +593,8 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             h_old = float(self.fig_h.value())
             w_new = self._convert_units(w_old, old_unit, new_unit)
             h_new = self._convert_units(h_old, old_unit, new_unit)
+            self._update_fig_ranges(new_unit)
+            self._configure_size_spinboxes(new_unit)
             self.fig_w.setValue(w_new)
             self.fig_h.setValue(h_new)
             if self.lock_aspect_cb.isChecked():
@@ -678,7 +635,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         d = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory", self.out_dir.text())
         if d:
             self.out_dir.setText(d)
-            set_last_output_dir(d)
+            set_last_output_dir(d, key="pdf_plotter")
 
     def _maybe_auto_plot(self) -> None:
         if self.auto_cb.isChecked():
@@ -747,15 +704,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             else:
                 title = f"{y_label} vs {x_label} - {len(lines_by_file)} files"
             if wants_matplotlib(backend):
-                win = PlotWindow(None, controller=self)
-                self._plot_to_window(win, lines, title, x_label, y_label)
-                win.show()
-                self.plot_wins.append(win)
-                self.plot_win = win
-                self._last_lines = win._last_lines
-                self._last_title = title
-                self._last_x_label = x_label
-                self._last_y_label = y_label
+                self._plot_with_matplotlib(lines, title, x_label, y_label)
                 if self.save_cb.isChecked():
                     self._save_lines(self._last_lines, self._last_title, x_label, y_label)
             if wants_origin(backend):
@@ -772,15 +721,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
                     lines.append((label, xs, ys))
                 title = f"{y_label} vs {x_label} - {base}"
                 if wants_matplotlib(backend):
-                    win = PlotWindow(None, controller=self)
-                    self._plot_to_window(win, lines, title, x_label, y_label)
-                    win.show()
-                    self.plot_wins.append(win)
-                    self.plot_win = win
-                    self._last_lines = win._last_lines
-                    self._last_title = title
-                    self._last_x_label = x_label
-                    self._last_y_label = y_label
+                    self._plot_with_matplotlib(lines, title, x_label, y_label)
                     if self.save_cb.isChecked():
                         self._save_lines(self._last_lines, self._last_title, x_label, y_label)
                 if wants_origin(backend):
@@ -789,22 +730,36 @@ class PdfPlotterWindow(QtWidgets.QDialog):
                     except Exception as e:
                         print(f"Origin plot failed: {e}")
 
-    def _plot_to_window(
+    def _plot_with_matplotlib(
         self,
-        win: PlotWindow,
         lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
         title: str,
         x_label: str,
         y_label: str,
-    ) -> None:
+    ) -> Figure:
         fig_w, fig_h = self._figure_size_inches()
-        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=True)
-        win.fig.clf()
-        ax = win.fig.add_subplot(111)
-        self._draw_on_axes(ax, lines, title, x_label, y_label)
-        win.canvas.draw()
-        win._last_lines = [(lbl, np.asarray(x, dtype=float), np.asarray(y, dtype=float)) for (lbl, x, y) in lines]
-        win._last_title = title
+        prepared = [
+            (lbl, np.asarray(xs, dtype=float), np.asarray(ys, dtype=float))
+            for (lbl, xs, ys) in lines
+        ]
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        self._draw_on_axes(ax, prepared, title, x_label, y_label)
+        try:
+            manager = fig.canvas.manager
+        except Exception:
+            manager = None
+        if manager is not None:
+            try:
+                manager.set_window_title(title)
+            except Exception:
+                pass
+        self.matplotlib_figures.append(fig)
+        self._last_lines = prepared
+        self._last_title = title
+        self._last_x_label = x_label
+        self._last_y_label = y_label
+        show_plots()
+        return fig
 
     def _create_matplotlib_fig(
         self,
@@ -899,10 +854,12 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             self._plot_single(x_name)
 
     def clear_plot(self) -> None:
-        for w in self.plot_wins:
-            w.close()
-        self.plot_wins = []
-        self.plot_win = None
+        for fig in self.matplotlib_figures:
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
+        self.matplotlib_figures.clear()
         self._last_lines = []
         self._last_title = ""
         self._last_x_label = ""
