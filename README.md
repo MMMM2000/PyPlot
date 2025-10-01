@@ -126,12 +126,11 @@ side within a single resizable window.
 The **PDF T1/T2 plotter** now adopts the same two-column control layout as the
 other plotting scripts so its settings feel familiar, and its Matplotlib preview
 opens at a modest 160 × 120 mm canvas by default (with centimetre and inch
-options on demand).  The preview window now factors in toolbar and frame chrome
-when resizing so even high-DPI setups no longer launch a wall-sized plot, while
-still leaving room for legends and annotations; the figure size controls remain
-available for larger exports, and new unit-aware ranges keep adjustments in
-practical bounds.  Saving defaults to the user’s `Downloads` folder yet still
-remembers the most recent directory you chose for subsequent sessions.
+options on demand) while using Matplotlib’s standard window so it matches the
+rest of the plotting tools.  The figure size controls remain available for
+larger exports, and new unit-aware ranges keep adjustments in practical bounds.
+Saving defaults to the user’s `Downloads` folder yet still remembers the most
+recent directory you chose for subsequent sessions.
 
 Outlier detection remains opt-in.  Toggling **Remove automatically** no longer
 forces the outlier check to start immediately, and the preference is remembered

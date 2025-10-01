@@ -4,7 +4,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import weakref
 from typing import Any, Dict, Iterable, List, Tuple, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -12,11 +11,6 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
-try:  # Matplotlib >= 3.7 exposes NavigationToolbar2QT from backend_qt
-    from matplotlib.backends.backend_qt import NavigationToolbar2QT  # type: ignore[attr-defined]
-except Exception:  # pragma: no cover - fallback for older Matplotlib builds
-    from matplotlib.backends.backend_qtagg import NavigationToolbar2QT  # type: ignore[attr-defined]
 
 try:  # optional dependency
     from PyPDF2 import PdfReader
@@ -39,6 +33,7 @@ from ..utils import (
     restore_png_dpi,
     store_png_dpi,
     create_file_widget,
+    show_plots,
 )  # type: ignore
 from ..backends import wants_matplotlib, wants_origin
 
@@ -137,114 +132,6 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     return rows
 
 # -----------------------------------------------------------------------------
-# A single plot window using Matplotlib for display
-# -----------------------------------------------------------------------------
-class PlotWindow(QtWidgets.QMainWindow):
-    """Top level window holding a Matplotlib plot."""
-
-    instances: weakref.WeakSet[PlotWindow] = weakref.WeakSet()
-
-    def __init__(self, parent: QtWidgets.QWidget | None = None, *, controller: PdfPlotterWindow | None = None) -> None:
-        super().__init__(parent)
-        PlotWindow.instances.add(self)
-        self.controller = controller
-        self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
-        self._last_title: str = ""
-        self.fig = Figure()
-        self.canvas = FigureCanvasQTAgg(self.fig)
-        self.toolbar = NavigationToolbar2QT(self.canvas, self)
-        central = QtWidgets.QWidget()
-        layout = QtWidgets.QVBoxLayout(central)
-        layout.addWidget(self.toolbar)
-        layout.addWidget(self.canvas)
-        self.canvas.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
-        self.setCentralWidget(central)
-        self._aspect_ratio = 1.0
-        self._base_width = 1
-        self._base_dpi = self.fig.dpi
-
-    def apply_fixed_plot_size(self, fig_w_in: float, fig_h_in: float, *, resize_window: bool = False) -> None:
-        dpi = float(self.logicalDpiX() or 96.0)
-        try:
-            scale = float(self.devicePixelRatioF())
-            if scale > 0:
-                dpi /= scale
-        except Exception:
-            pass
-        dpi = min(max(dpi, 72.0), 160.0)
-
-        wpx = int(round(max(fig_w_in, 0.1) * dpi))
-        hpx = int(round(max(fig_h_in, 0.1) * dpi))
-        wpx = max(wpx, 1)
-        hpx = max(hpx, 1)
-
-        min_w, min_h = 320, 220
-        scale_up = 1.0
-        if wpx < min_w:
-            scale_up = max(scale_up, min_w / wpx)
-        if hpx < min_h:
-            scale_up = max(scale_up, min_h / hpx)
-        if scale_up != 1.0:
-            wpx = int(round(wpx * scale_up))
-            hpx = int(round(hpx * scale_up))
-
-        max_w, max_h = 1400, 900
-        scale_down = min(1.0, max_w / wpx, max_h / hpx)
-        if scale_down < 1.0:
-            wpx = int(round(wpx * scale_down))
-            hpx = int(round(hpx * scale_down))
-
-        self._aspect_ratio = wpx / max(hpx, 1)
-        self._base_width = wpx
-        self._base_dpi = self.fig.dpi
-        self.canvas.setMinimumSize(0, 0)
-        self.canvas.resize(wpx, hpx)
-
-        if resize_window:
-            extra_w = 0
-            extra_h = 0
-            central = self.centralWidget()
-            if central is not None:
-                layout = central.layout()
-                if layout is not None:
-                    margins = layout.contentsMargins()
-                    extra_w += margins.left() + margins.right()
-                    extra_h += margins.top() + margins.bottom()
-                extra_h += self.toolbar.sizeHint().height()
-
-            frame_w = self.frameGeometry().width() - self.geometry().width()
-            frame_h = self.frameGeometry().height() - self.geometry().height()
-            if frame_w <= 0:
-                style = self.style()
-                frame_w = 2 * style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_DefaultFrameWidth)
-            if frame_h <= 0:
-                style = self.style()
-                frame_h = style.pixelMetric(QtWidgets.QStyle.PixelMetric.PM_TitleBarHeight)
-
-            target_w = int(round(wpx + extra_w + max(frame_w, 0)))
-            target_h = int(round(hpx + extra_h + max(frame_h, 0)))
-            self.resize(target_w, target_h)
-        else:
-            self.updateGeometry()
-
-    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
-        super().resizeEvent(event)
-        w = self.canvas.width()
-        h = int(round(w / self._aspect_ratio))
-        self.canvas.setFixedHeight(h)
-        scale = w / self._base_width if self._base_width else 1
-        self.fig.set_dpi(self._base_dpi * scale)
-        self.canvas.draw_idle()
-
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        try:
-            PlotWindow.instances.discard(self)
-        except Exception:
-            pass
-        super().closeEvent(event)
-
-
-# -----------------------------------------------------------------------------
 # Main settings window
 # -----------------------------------------------------------------------------
 class PdfPlotterWindow(QtWidgets.QDialog):
@@ -262,9 +149,8 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         self._data_cache: Dict[str, List[NumberRow]] = {}
         self._data_mtime: Dict[str, float] = {}
 
-        # Track plot windows and last plotted data
-        self.plot_wins: List[PlotWindow] = []
-        self.plot_win: PlotWindow | None = None
+        # Track Matplotlib figures and last plotted data
+        self.matplotlib_figures: List[Figure] = []
         self._last_lines: List[Tuple[str, np.ndarray, np.ndarray]] = []
         self._last_title: str = ""
         self._last_x_label: str = ""
@@ -818,15 +704,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             else:
                 title = f"{y_label} vs {x_label} - {len(lines_by_file)} files"
             if wants_matplotlib(backend):
-                win = PlotWindow(None, controller=self)
-                self._plot_to_window(win, lines, title, x_label, y_label)
-                win.show()
-                self.plot_wins.append(win)
-                self.plot_win = win
-                self._last_lines = win._last_lines
-                self._last_title = title
-                self._last_x_label = x_label
-                self._last_y_label = y_label
+                self._plot_with_matplotlib(lines, title, x_label, y_label)
                 if self.save_cb.isChecked():
                     self._save_lines(self._last_lines, self._last_title, x_label, y_label)
             if wants_origin(backend):
@@ -843,15 +721,7 @@ class PdfPlotterWindow(QtWidgets.QDialog):
                     lines.append((label, xs, ys))
                 title = f"{y_label} vs {x_label} - {base}"
                 if wants_matplotlib(backend):
-                    win = PlotWindow(None, controller=self)
-                    self._plot_to_window(win, lines, title, x_label, y_label)
-                    win.show()
-                    self.plot_wins.append(win)
-                    self.plot_win = win
-                    self._last_lines = win._last_lines
-                    self._last_title = title
-                    self._last_x_label = x_label
-                    self._last_y_label = y_label
+                    self._plot_with_matplotlib(lines, title, x_label, y_label)
                     if self.save_cb.isChecked():
                         self._save_lines(self._last_lines, self._last_title, x_label, y_label)
                 if wants_origin(backend):
@@ -860,22 +730,36 @@ class PdfPlotterWindow(QtWidgets.QDialog):
                     except Exception as e:
                         print(f"Origin plot failed: {e}")
 
-    def _plot_to_window(
+    def _plot_with_matplotlib(
         self,
-        win: PlotWindow,
         lines: Iterable[Tuple[str, np.ndarray, np.ndarray]],
         title: str,
         x_label: str,
         y_label: str,
-    ) -> None:
+    ) -> Figure:
         fig_w, fig_h = self._figure_size_inches()
-        win.apply_fixed_plot_size(fig_w, fig_h, resize_window=True)
-        win.fig.clf()
-        ax = win.fig.add_subplot(111)
-        self._draw_on_axes(ax, lines, title, x_label, y_label)
-        win.canvas.draw()
-        win._last_lines = [(lbl, np.asarray(x, dtype=float), np.asarray(y, dtype=float)) for (lbl, x, y) in lines]
-        win._last_title = title
+        prepared = [
+            (lbl, np.asarray(xs, dtype=float), np.asarray(ys, dtype=float))
+            for (lbl, xs, ys) in lines
+        ]
+        fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+        self._draw_on_axes(ax, prepared, title, x_label, y_label)
+        try:
+            manager = fig.canvas.manager
+        except Exception:
+            manager = None
+        if manager is not None:
+            try:
+                manager.set_window_title(title)
+            except Exception:
+                pass
+        self.matplotlib_figures.append(fig)
+        self._last_lines = prepared
+        self._last_title = title
+        self._last_x_label = x_label
+        self._last_y_label = y_label
+        show_plots()
+        return fig
 
     def _create_matplotlib_fig(
         self,
@@ -970,10 +854,12 @@ class PdfPlotterWindow(QtWidgets.QDialog):
             self._plot_single(x_name)
 
     def clear_plot(self) -> None:
-        for w in self.plot_wins:
-            w.close()
-        self.plot_wins = []
-        self.plot_win = None
+        for fig in self.matplotlib_figures:
+            try:
+                plt.close(fig)
+            except Exception:
+                pass
+        self.matplotlib_figures.clear()
         self._last_lines = []
         self._last_title = ""
         self._last_x_label = ""
