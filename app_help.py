@@ -35,9 +35,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Developer menu essentials
             * **Keep File Selections** – when iterating on a dataset, enable this so the dialog
               reopens with your previous file list intact.
-            * **Show Experiments Tab** – exposes prototypes (the PyVISA annealing logger and
-              the liquid-glass concept window). Leave the toggle off during routine work to keep
-              the launcher tidy.
+            * **Show Experiments Tab** – exposes prototypes (the PyVISA annealing logger and the
+              microwire data builder). Leave the toggle off during routine work to keep the
+              launcher tidy.
 
             ### Menu bar highlights
             * **View → Theme** flips between system, light, and dark palettes across every open
@@ -76,7 +76,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             3. Use **Developer → Show Experiments Tab** to reveal or hide the prototype list and
                **Developer → Keep File Selections** if you want plotting dialogs to reopen with
                the same input files pre-selected. The experiments currently bundle the PyVISA
-               annealing logger and the liquid-glass concept window.
+               annealing logger and the Microwire Data Builder.
             4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
                console, and reset splitter sizes when needed. **File → Exit** quits the launcher
                after confirming there are no unsaved child windows.
@@ -268,6 +268,53 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "builder_database": {
+        "title": "Microwire data builder",
+        "body": dedent(
+            """
+            ### Prepare your sources
+            1. Click **Microwire data folder → Add folder** and choose the root directory that
+               holds fabrication spreadsheets, microscope overlays, and videos. The builder follows
+               the existing “Microwire data/…” layout automatically.
+            2. Add annealing logs with **Annealing files → Add files/folder**. Enable **Recursive
+               scan** when you point at a directory so every draw/piece is collected.
+            3. Drop microscope overlays and any manual captures into **Microscope images** if the
+               automatic search misses them. The folder picker also supports **Recursive scan** for
+               batch imports.
+
+            ### Configure outputs
+            1. Leave the export directory at your Downloads folder unless you need a different
+               location; the field remembers the last path you used.
+            2. Confirm the base filename and tick the export formats (CSV and/or Excel). The
+               builder prompts before overwriting existing files and stores your choice per format.
+            3. Decide whether to generate Matplotlib and/or Origin plots, adjusting the figure size
+               if you want a different layout inside the spreadsheet exports.
+
+            ### Run and monitor
+            * Press **Run** to begin. The progress bar covers preparation, OCR analysis, table
+              assembly, plotting, and export steps; the ETA blends per-stage averages from previous
+              runs with the live moving average so it steadies quickly without large swings.
+            * Watch the log panel for missing metadata, OCR warnings, or skipped files. Use
+              **Cancel** to stop safely—the builder tidies partial exports and keeps all of your
+              settings for the next attempt.
+
+            ### After the run
+            * When the dialog reports success, choose **Open** to jump straight to the primary
+              export. The log also lists every generated plot and export path for quick follow-up.
+            * Stage timings are stored between sessions so future batches of similar size produce
+              tighter ETAs.
+
+            ### Troubleshooting
+            * If microscope images are not detected automatically, add their parent folder under
+              **Microscope images**; the builder merges manual and discovered files before OCR.
+            * When Tesseract is not available the builder falls back to the lab’s verified
+              diameter table for reference microwires so the spreadsheet keeps `d`/`D` values,
+              but installing Tesseract is still recommended for full coverage.
+            * Use **Clear** in any section to reset the list before loading a different batch, and
+              revisit **Help → View Help** at any time for this guide.
+            """
+        ).strip(),
+    },
     "logger_current_annealing": {
         "title": "Serial current annealing logger",
         "body": dedent(
@@ -358,30 +405,6 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               parsing.
             * Use the menu bar to toggle the theme or to revisit these instructions from the
               **Help** menu.
-            """
-        ).strip(),
-    },
-    "experiment_liquid_glass": {
-        "title": "Liquid glass UI demo",
-        "body": dedent(
-            """
-            ### Overview
-            * The frosted panel embeds the fully functional PyVISA current annealing logger with
-              a liquid-glass skin. Every control—resource discovery, dwell planning, loop counts,
-              contact monitoring—behaves exactly like the production window.
-            * **Launch Classic PyVISA Logger** opens the standard interface so you can compare
-              the two side by side. **Open Serial Logger for Context** provides the shipping
-              serial workflow for additional reference.
-            * Use the guidance tiles below the panel for suggestions on what to evaluate (console
-              readability, plot styling, button emphasis).
-
-            ### Tips
-            * Resize the window to observe how the frosted card, logger, and info tiles adapt to
-              different displays.
-            * Switch appearance from the **View** menu to preview the concept in light and dark
-              palettes. The logger skin updates instantly.
-            * Keep this help open while exploring—the notes double as implementation reminders if
-              you decide to port parts of the design into the main tools.
             """
         ).strip(),
     },

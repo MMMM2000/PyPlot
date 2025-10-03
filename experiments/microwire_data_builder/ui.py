@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-
 from plotting.utils import ensure_app_theme, install_standard_menu
 
 from .core import (
@@ -20,6 +21,7 @@ from .core import (
     DEFAULT_OUTPUT_NAME,
     BuildResult,
     BuilderConfig,
+    BuildCancelledError,
     build_database,
     _normalise_output_name,
     _metadata_from_path,
@@ -299,6 +301,8 @@ def collect_support_files(
             if progress_callback is not None:
                 try:
                     progress_callback()
+                except BuildCancelledError:
+                    raise
                 except Exception:
                     pass
 
@@ -323,102 +327,165 @@ class QtLogHandler(logging.Handler):
 class _ProgressTracker:
     """Translate multi-phase progress updates into a single counter."""
 
-    def __init__(self, emit: Callable[[int, int], None]) -> None:
+    _ORDER = ("prep", "analysis", "build", "final")
+
+    def __init__(
+        self, emit: Callable[[str, int, int, int, int], None]
+    ) -> None:
         self._emit_fn = emit
-        self._total_units = 1
-        self._completed = 0
-        self._prep_units = 0
-        self._analysis_units = 0
-        self._build_units = 0
-        self._final_units = 0
+        self._totals = {stage: 0 for stage in self._ORDER}
+        self._progress = {stage: 0 for stage in self._ORDER}
 
     def configure(
         self, prep_units: int, analysis_units: int, build_units: int, final_units: int = 1
     ) -> None:
-        self._prep_units = max(prep_units, 0)
-        self._analysis_units = max(analysis_units, 0)
-        self._build_units = max(build_units, 0)
-        self._final_units = max(final_units, 0)
-        total = self._prep_units + self._analysis_units + self._build_units + self._final_units
-        self._total_units = total if total > 0 else 1
-        self._completed = 0
-        self._emit()
+        self._totals = {
+            "prep": max(prep_units, 0),
+            "analysis": max(analysis_units, 0),
+            "build": max(build_units, 0),
+            "final": max(final_units, 0),
+        }
+        self._progress = {key: 0 for key in self._totals}
+        self._emit_all()
 
-    def _emit(self) -> None:
-        self._emit_fn(min(self._completed, self._total_units), self._total_units)
+    def _total_units(self) -> int:
+        total = sum(self._totals.values())
+        return total if total > 0 else 1
+
+    def _completed_units(self) -> int:
+        total_units = self._total_units()
+        completed = 0
+        for key, total in self._totals.items():
+            progress = self._progress.get(key, 0)
+            if total <= 0:
+                continue
+            completed += min(max(progress, 0), total)
+        return min(max(completed, 0), total_units)
+
+    def _emit(self, stage: str) -> None:
+        self._emit_fn(
+            stage,
+            self._progress.get(stage, 0),
+            self._totals.get(stage, 0),
+            self._completed_units(),
+            self._total_units(),
+        )
+
+    def _emit_all(self) -> None:
+        for stage in self._ORDER:
+            self._emit(stage)
+
+    def _set_total(self, key: str, units: int) -> None:
+        units = max(units, 0)
+        if units == self._totals.get(key, 0):
+            return
+        self._totals[key] = units
+        if self._progress.get(key, 0) > units:
+            self._progress[key] = units
+        self._emit(key)
 
     def set_analysis_units(self, units: int) -> None:
-        units = max(units, 0)
-        if units == self._analysis_units:
-            return
-        self._analysis_units = units
-        total = self._prep_units + self._analysis_units + self._build_units + self._final_units
-        self._total_units = total if total > 0 else 1
-        if self._completed > self._total_units:
-            self._completed = self._total_units
-        self._emit()
+        self._set_total("analysis", units)
+
+    def set_final_units(self, units: int) -> None:
+        self._set_total("final", units)
 
     def advance_prepare(self) -> None:
-        if self._completed < self._prep_units:
-            self._completed += 1
-            self._emit()
+        total = self._totals.get("prep", 0)
+        if total <= 0:
+            return
+        current = self._progress.get("prep", 0)
+        if current < total:
+            self._progress["prep"] = current + 1
+            self._emit("prep")
 
     def finish_prepare(self) -> None:
-        target = self._prep_units
-        if target > self._completed:
-            self._completed = target
-            self._emit()
+        total = self._totals.get("prep", 0)
+        if total <= 0:
+            return
+        if self._progress.get("prep", 0) < total:
+            self._progress["prep"] = total
+            self._emit("prep")
 
     def analysis_progress(self, current: int, total: int) -> None:
-        mapped_total = self._analysis_units if self._analysis_units else total
+        total = max(total, 0)
+        if total:
+            self._set_total("analysis", total)
+        mapped_total = self._totals.get("analysis", 0)
         if mapped_total <= 0:
             return
-        current_clamped = min(max(current, 0), mapped_total)
-        target = self._prep_units + current_clamped
-        if target > self._completed:
-            self._completed = target
-            self._emit()
+        clamped = min(max(current, 0), mapped_total)
+        if clamped > self._progress.get("analysis", 0):
+            self._progress["analysis"] = clamped
+            self._emit("analysis")
 
     def finish_analysis(self) -> None:
-        target = self._prep_units + self._analysis_units
-        if target > self._completed:
-            self._completed = target
-            self._emit()
+        total = self._totals.get("analysis", 0)
+        if total <= 0:
+            return
+        if self._progress.get("analysis", 0) < total:
+            self._progress["analysis"] = total
+            self._emit("analysis")
 
     def build_progress(self, current: int, total: int) -> None:
-        mapped_total = self._build_units if self._build_units else total
+        total = max(total, 0)
+        if total:
+            self._set_total("build", total)
+        mapped_total = self._totals.get("build", 0)
         if mapped_total <= 0:
             return
-        offset = self._prep_units + self._analysis_units
-        target = offset + min(max(current, 0), mapped_total)
-        if target > self._completed:
-            self._completed = target
-            self._emit()
+        clamped = min(max(current, 0), mapped_total)
+        if clamped > self._progress.get("build", 0):
+            self._progress["build"] = clamped
+            self._emit("build")
 
     def finish_build(self) -> None:
-        target = self._prep_units + self._analysis_units + self._build_units
-        if target > self._completed:
-            self._completed = target
-            self._emit()
+        total = self._totals.get("build", 0)
+        if total <= 0:
+            return
+        if self._progress.get("build", 0) < total:
+            self._progress["build"] = total
+            self._emit("build")
+
+    def advance_final(self, units: int = 1) -> None:
+        total = self._totals.get("final", 0)
+        if total <= 0:
+            return
+        current = self._progress.get("final", 0)
+        if current < total:
+            self._progress["final"] = min(total, current + max(units, 1))
+            self._emit("final")
+
+    def finish_final(self) -> None:
+        total = self._totals.get("final", 0)
+        if total <= 0:
+            return
+        if self._progress.get("final", 0) < total:
+            self._progress["final"] = total
+            self._emit("final")
 
     def finalize(self) -> None:
-        if self._total_units > self._completed:
-            self._completed = self._total_units
-            self._emit()
+        self.finish_final()
 
 
 class BuildWorker(QtCore.QObject):
     """Background worker that runs the database builder."""
 
-    progress = QtCore.pyqtSignal(int, int)
+    progress = QtCore.pyqtSignal(str, int, int, int, int)
     finished = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
+    cancelled = QtCore.pyqtSignal()
 
     def __init__(self, inputs: WorkerInputs, logger: logging.Logger) -> None:
         super().__init__()
         self.inputs = inputs
         self.logger = logger
         self._tracker = _ProgressTracker(self.progress.emit)
+        self._cancelled = False
+
+    @QtCore.pyqtSlot()
+    def request_cancel(self) -> None:
+        self._cancelled = True
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - exercised via integration test
@@ -430,12 +497,24 @@ class BuildWorker(QtCore.QObject):
             build_units = len(annealing_files)
             self._tracker.configure(prep_units, 0, build_units, final_units=1)
             self.logger.info("Preparing support files...")
+            
+            def _check_cancelled() -> None:
+                if self._cancelled:
+                    raise BuildCancelledError()
+
+            def _prepare_bridge() -> None:
+                _check_cancelled()
+                self._tracker.advance_prepare()
+
+            _check_cancelled()
             fabrication_files, auto_microscope, video_files = collect_support_files(
                 annealing_files,
                 inputs.data_roots,
-                progress_callback=self._tracker.advance_prepare,
+                progress_callback=_prepare_bridge,
             )
+            _check_cancelled()
             self._tracker.finish_prepare()
+            _check_cancelled()
             microscope_files = list(dict.fromkeys(manual_microscope + auto_microscope))
             analysis_units = len(microscope_files) + len(video_files)
             self._tracker.set_analysis_units(analysis_units)
@@ -456,6 +535,7 @@ class BuildWorker(QtCore.QObject):
             self.logger.info(
                 "Starting build with %s annealing file(s)", len(config.annealing_files)
             )
+            _check_cancelled()
             if fabrication_files:
                 self.logger.info(
                     "Using %s fabrication spreadsheet(s)", len(fabrication_files)
@@ -468,12 +548,15 @@ class BuildWorker(QtCore.QObject):
                 self.logger.info("Using %s video file(s)", len(video_files))
 
             def _progress_bridge(current: int, total: int) -> None:
+                _check_cancelled()
                 self._tracker.build_progress(current, total)
 
             def _analysis_bridge(current: int, total: int) -> None:
+                _check_cancelled()
                 self._tracker.set_analysis_units(total)
                 self._tracker.analysis_progress(current, total)
 
+            _check_cancelled()
             result = build_database(
                 config,
                 logger=self.logger,
@@ -482,21 +565,34 @@ class BuildWorker(QtCore.QObject):
                 analysis_total=analysis_units,
                 root_for_relpaths=Path.cwd(),
             )
+            final_steps = max(len(result.exports), 1)
+            if config.make_plots and (
+                "matplotlib" in config.plot_backends or not config.plot_backends
+            ):
+                final_steps += 1
+            if config.make_plots and "origin" in config.plot_backends:
+                final_steps += 1
+            final_steps += 1  # summary log
+            self._tracker.set_final_units(final_steps)
             self._tracker.finish_analysis()
             self._tracker.finish_build()
             if result.exports:
                 for fmt, path in result.exports.items():
                     self.logger.info("%s written to %s", fmt.upper(), path)
+                    self._tracker.advance_final()
             else:
                 self.logger.info("No export files were generated.")
+                self._tracker.advance_final()
             if config.make_plots:
                 if "matplotlib" in config.plot_backends or not config.plot_backends:
                     self.logger.info("Generated %s Matplotlib plot(s)", len(result.plot_paths))
+                    self._tracker.advance_final()
                 if "origin" in config.plot_backends:
                     self.logger.info(
                         "Origin plots created: %s",
                         len(result.origin_artifacts),
                     )
+                    self._tracker.advance_final()
             stats = result.stats
             self.logger.info(
                 "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R~=V/I failures=%s",
@@ -509,8 +605,12 @@ class BuildWorker(QtCore.QObject):
                 stats.missing_low_measurement,
                 stats.resistance_checks_failed,
             )
+            self._tracker.advance_final()
             self._tracker.finalize()
             self.finished.emit(result)
+        except BuildCancelledError:
+            self.logger.info("Build cancelled by user.")
+            self.cancelled.emit()
         except Exception as exc:  # pragma: no cover - safety net
             self.logger.exception("Build failed")
             message = str(exc) if str(exc) else exc.__class__.__name__
@@ -533,13 +633,25 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._thread: QtCore.QThread | None = None
         self._worker: BuildWorker | None = None
         self._running = False
+        self._progress_start_time: float | None = None
+        self._last_progress_value: int = 0
+        self._last_progress_timestamp: float | None = None
+        self._seconds_per_unit_ema: float | None = None
+        self._last_eta_seconds: float | None = None
+        self._stage_order: tuple[str, ...] = ("prep", "analysis", "build", "final")
+        self._stage_timing_history: dict[str, dict[str, float | int]] = {}
+        self._init_stage_tracking()
 
         cwd = Path.cwd()
-        self._default_output_dir = cwd / "builder_output"
+        downloads_dir = Path.home() / "Downloads"
+        if downloads_dir.exists() and downloads_dir.is_dir():
+            self._default_output_dir = downloads_dir
+        else:
+            self._default_output_dir = cwd / "builder_output"
         self._last_microscope_dir = str(cwd)
         self._last_anneal_dir = str(cwd)
         self._last_root_dir = str(cwd)
-        self._last_output_dir = str(cwd)
+        self._last_output_dir = str(self._default_output_dir)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
         self.log_message.connect(self._append_log)
@@ -547,9 +659,230 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._configure_logging()
         self._load_settings()
-        install_standard_menu(self)
+        install_standard_menu(self, help_topic="builder_database", console=self.log_group)
 
     # ------------------------------------------------------------------ setup
+    def _init_stage_tracking(self) -> None:
+        self._stage_progress: dict[str, int] = {stage: 0 for stage in self._stage_order}
+        self._stage_totals: dict[str, int] = {stage: 0 for stage in self._stage_order}
+        self._stage_runtime: dict[str, dict[str, object]] = {
+            stage: {"start": None, "completed": False} for stage in self._stage_order
+        }
+        self._stage_metrics: dict[str, dict[str, object]] = {
+            stage: {"last_value": 0, "last_timestamp": None, "ema": None}
+            for stage in self._stage_order
+        }
+        self._displayed_percent = 0
+
+    def _reset_progress_tracking(self) -> None:
+        now = time.monotonic()
+        self._progress_start_time = now
+        self._last_progress_value = 0
+        self._last_progress_timestamp = now
+        self._seconds_per_unit_ema = None
+        self._last_eta_seconds = None
+        self._init_stage_tracking()
+
+    def _clear_progress_tracking(self) -> None:
+        self._progress_start_time = None
+        self._last_progress_value = 0
+        self._last_progress_timestamp = None
+        self._seconds_per_unit_ema = None
+        self._last_eta_seconds = None
+        self._init_stage_tracking()
+
+    def _reset_stage_metrics(self, stage: str) -> None:
+        if stage not in self._stage_order:
+            return
+        metrics = self._stage_metrics.setdefault(
+            stage, {"last_value": 0, "last_timestamp": None, "ema": None}
+        )
+        metrics["last_value"] = 0
+        metrics["last_timestamp"] = None
+        metrics["ema"] = None
+        runtime = self._stage_runtime.setdefault(
+            stage, {"start": None, "completed": False}
+        )
+        runtime["start"] = None
+        runtime["completed"] = False
+
+    def _persist_stage_history(self) -> None:
+        if not hasattr(self, "settings"):
+            return
+        try:
+            payload = json.dumps(self._stage_timing_history)
+        except TypeError:
+            return
+        self.settings.setValue("stage_timing", payload)
+        self.settings.sync()
+
+    def _record_stage_history(self, stage: str, elapsed: float, units: int) -> None:
+        if units <= 0 or elapsed <= 0:
+            return
+        record = self._stage_timing_history.setdefault(
+            stage,
+            {"seconds": 0.0, "units": 0, "ema": None, "samples": 0},
+        )
+        seconds = max(float(record.get("seconds", 0.0)), 0.0) + float(elapsed)
+        units_done = max(int(record.get("units", 0)), 0) + int(units)
+        record["seconds"] = seconds
+        record["units"] = units_done
+        average = float(elapsed) / float(units)
+        ema = record.get("ema")
+        if isinstance(ema, (int, float)) and ema > 0:
+            record["ema"] = max((float(ema) * 0.7) + (average * 0.3), 0.0)
+        else:
+            record["ema"] = max(average, 0.0)
+        record["samples"] = int(record.get("samples", 0)) + 1
+        self._persist_stage_history()
+
+    def _global_average_rate(self) -> float | None:
+        ema_sum = 0.0
+        ema_weight = 0.0
+        total_seconds = 0.0
+        total_units = 0
+        for record in self._stage_timing_history.values():
+            if not isinstance(record, dict):
+                continue
+            ema = record.get("ema")
+            samples = max(int(record.get("samples", 0)), 0)
+            if isinstance(ema, (int, float)) and ema > 0:
+                ema_sum += float(ema) * max(samples, 1)
+                ema_weight += max(samples, 1)
+            seconds = float(record.get("seconds", 0.0))
+            units = int(record.get("units", 0))
+            total_seconds += max(seconds, 0.0)
+            total_units += max(units, 0)
+        if ema_weight > 0:
+            return ema_sum / ema_weight
+        if total_seconds > 0 and total_units > 0:
+            return total_seconds / total_units
+        return None
+
+    def _estimate_remaining_seconds(
+        self,
+        now: float,
+        active_stage: str | None,
+        overall_current: int,
+        overall_total: int,
+    ) -> float | None:
+        remaining = 0.0
+        have_estimate = False
+        global_rate = self._global_average_rate()
+
+        def _push(rate_list: list[tuple[float, float]], value: object, weight: float) -> None:
+            if isinstance(value, (int, float)) and value > 0 and weight > 0:
+                rate_list.append((float(value), weight))
+
+        for stage in self._stage_order:
+            total_units = max(int(self._stage_totals.get(stage, 0)), 0)
+            progress_units = min(max(int(self._stage_progress.get(stage, 0)), 0), total_units)
+            remaining_units = total_units - progress_units
+            if remaining_units <= 0:
+                continue
+
+            rates: list[tuple[float, float]] = []
+            metrics = self._stage_metrics.get(stage, {})
+            stage_ema = metrics.get("ema") if isinstance(metrics, dict) else None
+            _push(rates, stage_ema, 0.3)
+
+            history = self._stage_timing_history.get(stage)
+            history_rate: float | None = None
+            history_weight = 0.0
+            if isinstance(history, dict):
+                hist_ema = history.get("ema")
+                hist_seconds = float(history.get("seconds", 0.0))
+                hist_units = int(history.get("units", 0))
+                samples = max(int(history.get("samples", 0)), 0)
+                if isinstance(hist_ema, (int, float)) and hist_ema > 0:
+                    history_rate = float(hist_ema)
+                elif hist_seconds > 0 and hist_units > 0:
+                    history_rate = hist_seconds / hist_units
+                if history_rate is not None:
+                    history_weight = 0.45 + min(samples, 10) * 0.035
+                    _push(rates, history_rate, history_weight)
+
+            runtime = self._stage_runtime.get(stage, {})
+            if (
+                stage == active_stage
+                and isinstance(runtime, dict)
+                and runtime.get("start") is not None
+            ):
+                start_time = float(runtime["start"])
+                elapsed_stage = max(now - start_time, 0.0)
+                completed_units = max(int(self._stage_progress.get(stage, 0)), 0)
+                if elapsed_stage > 0 and completed_units > 0:
+                    runtime_rate = elapsed_stage / completed_units
+                    _push(rates, runtime_rate, 0.35)
+
+            if stage == active_stage and self._seconds_per_unit_ema:
+                _push(rates, self._seconds_per_unit_ema, 0.2)
+
+            if not rates and global_rate is not None:
+                _push(rates, global_rate, 0.5)
+
+            if not rates:
+                continue
+
+            have_estimate = True
+            total_weight = sum(weight for _, weight in rates)
+            if total_weight <= 0:
+                continue
+            weighted = sum(rate * weight for rate, weight in rates) / total_weight
+            sorted_values = sorted(rate for rate, _ in rates)
+            if not sorted_values:
+                continue
+            mid = len(sorted_values) // 2
+            if len(sorted_values) % 2:
+                median = sorted_values[mid]
+            else:
+                median = (sorted_values[mid - 1] + sorted_values[mid]) / 2
+            rate = max(weighted, median)
+            if history_rate is not None:
+                rate = max(rate, history_rate * 0.85)
+            remaining += remaining_units * rate
+
+        if have_estimate:
+            return remaining if remaining > 0 else 0.0
+        start_time = self._progress_start_time
+        if start_time is None or overall_current <= 0:
+            return None
+        elapsed = max(now - start_time, 0.0)
+        remaining_units = max(overall_total - overall_current, 0)
+        return (elapsed / overall_current) * remaining_units if overall_current else None
+
+    @staticmethod
+    def _format_eta(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0
+        total_seconds = int(round(seconds))
+        if total_seconds < 1:
+            return "<1s remaining"
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        parts: list[str] = []
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if secs or not parts:
+            parts.append(f"{secs}s")
+        return " ".join(parts) + " remaining"
+
+    def _smooth_eta(self, seconds: float) -> float:
+        seconds = max(float(seconds), 0.0)
+        previous = self._last_eta_seconds
+        if previous is None:
+            filtered = seconds
+        else:
+            if seconds > previous:
+                alpha = 0.2
+            else:
+                alpha = 0.4
+            filtered = previous + (seconds - previous) * alpha
+        self._last_eta_seconds = max(filtered, 0.0)
+        return self._last_eta_seconds
+
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
@@ -716,6 +1049,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         # Run button
         run_row = QtWidgets.QHBoxLayout()
         run_row.addStretch(1)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_build)
+        run_row.addWidget(self.cancel_button)
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.start_build)
         run_row.addWidget(self.run_button)
@@ -816,6 +1153,35 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(last_output, str) and last_output.strip():
             self._last_output_dir = last_output
 
+        timing_value = self.settings.value("stage_timing", "")
+        if isinstance(timing_value, str) and timing_value.strip():
+            try:
+                stored = json.loads(timing_value)
+            except json.JSONDecodeError:
+                stored = {}
+            if isinstance(stored, dict):
+                for key, record in stored.items():
+                    if not isinstance(record, dict):
+                        continue
+                    seconds = float(record.get("seconds", 0.0))
+                    units = int(record.get("units", 0))
+                    if seconds > 0 and units > 0:
+                        ema_value = record.get("ema")
+                        samples_value = record.get("samples", 0)
+                        if isinstance(ema_value, (int, float)) and ema_value > 0:
+                            ema = float(ema_value)
+                        else:
+                            ema = seconds / units
+                        samples = int(samples_value) if isinstance(samples_value, (int, float)) else 0
+                        if samples <= 0 and ema > 0:
+                            samples = 1
+                        self._stage_timing_history[key] = {
+                            "seconds": seconds,
+                            "units": units,
+                            "ema": ema,
+                            "samples": max(samples, 0),
+                        }
+
     def _save_settings(self) -> None:
         if not hasattr(self, "settings"):
             return
@@ -835,6 +1201,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("last_root_dir", self._last_root_dir)
         self.settings.setValue("last_output_dir", self._last_output_dir)
         self.settings.setValue("microscope_recursive", self.microscope_recursive.isChecked())
+        self.settings.setValue("stage_timing", json.dumps(self._stage_timing_history))
         self.settings.sync()
 
     # ------------------------------------------------------------------ helpers
@@ -1048,11 +1415,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         ):
             widget.setEnabled(not running)
         self.run_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
         if running:
+            self._reset_progress_tracking()
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setValue(0)
             self.progress_label.setText("Preparing...")
         else:
+            self._clear_progress_tracking()
             if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
                 self.progress_bar.setRange(0, 100)
                 self.progress_bar.setValue(0)
@@ -1060,6 +1430,23 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.progress_label.setText("Idle")
 
     # ------------------------------------------------------------------ build orchestration
+    def cancel_build(self) -> None:
+        if not self._running:
+            return
+        if self._worker is None:
+            self._set_running(False)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Cancelled")
+            return
+        self.logger.info("Cancellation requested; attempting to stop the build...")
+        self.cancel_button.setEnabled(False)
+        self.progress_label.setText("Cancelling...")
+        QtCore.QMetaObject.invokeMethod(
+            self._worker,
+            "request_cancel",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+
     def start_build(self) -> None:
         if self._running:
             return
@@ -1155,18 +1542,167 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._worker.progress.connect(self._update_progress)
         self._worker.finished.connect(self._handle_finished)
         self._worker.error.connect(self._handle_failed)
+        self._worker.cancelled.connect(self._handle_cancelled)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._worker.cancelled.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
 
-    def _update_progress(self, current: int, total: int) -> None:
+    def _update_progress(
+        self,
+        stage: str,
+        stage_value: int,
+        stage_total: int,
+        current: int,
+        total: int,
+    ) -> None:
         total = max(total, 1)
+        if self._progress_start_time is None:
+            self._reset_progress_tracking()
+        if current < self._last_progress_value:
+            self._reset_progress_tracking()
+        now = time.monotonic()
+        if current > self._last_progress_value:
+            delta_units = current - self._last_progress_value
+            last_timestamp = self._last_progress_timestamp
+            if last_timestamp is not None and delta_units > 0:
+                delta_time = max(now - last_timestamp, 0.0)
+                if delta_time > 0:
+                    instantaneous = delta_time / delta_units
+                    ema = self._seconds_per_unit_ema
+                    if ema is None:
+                        ema = instantaneous
+                    elif instantaneous >= ema:
+                        ema = (ema * 0.6) + (instantaneous * 0.4)
+                    else:
+                        ema = (ema * 0.8) + (instantaneous * 0.2)
+                    self._seconds_per_unit_ema = max(ema, 0.0)
+            self._last_progress_value = current
+            self._last_progress_timestamp = now
+
+        if stage not in self._stage_totals:
+            self._stage_order += (stage,)
+            self._stage_totals[stage] = max(stage_total, 0)
+            clamped_value = max(stage_value, 0)
+            if self._stage_totals[stage] > 0:
+                clamped_value = min(clamped_value, self._stage_totals[stage])
+            self._stage_progress[stage] = clamped_value
+            self._stage_runtime[stage] = {"start": None, "completed": False}
+            self._stage_metrics[stage] = {
+                "last_value": 0,
+                "last_timestamp": None,
+                "ema": None,
+            }
+        else:
+            self._stage_totals[stage] = max(stage_total, 0)
+            previous_value = self._stage_progress.get(stage, 0)
+            if stage_value < previous_value:
+                self._reset_stage_metrics(stage)
+            clamped_value = max(stage_value, 0)
+            if self._stage_totals[stage] > 0:
+                clamped_value = min(clamped_value, self._stage_totals[stage])
+            self._stage_progress[stage] = clamped_value
+        stage_value = self._stage_progress.get(stage, 0)
+        stage_total = self._stage_totals.get(stage, 0)
+
+        active_stage: str | None = None
+        for key in self._stage_order:
+            total_units = max(int(self._stage_totals.get(key, 0)), 0)
+            progress_units = min(max(int(self._stage_progress.get(key, 0)), 0), total_units)
+            if total_units > 0 and progress_units < total_units:
+                active_stage = key
+                break
+
+        metrics = self._stage_metrics.setdefault(
+            stage, {"last_value": 0, "last_timestamp": None, "ema": None}
+        )
+        runtime = self._stage_runtime.setdefault(
+            stage, {"start": None, "completed": False}
+        )
+
+        if stage_total > 0 and not runtime.get("completed", False):
+            if stage == active_stage and runtime.get("start") is None:
+                runtime["start"] = now
+                metrics["last_timestamp"] = now
+
+        last_stage_value = int(metrics.get("last_value", 0))
+        if stage_value > last_stage_value:
+            last_timestamp = metrics.get("last_timestamp")
+            if isinstance(last_timestamp, (int, float)):
+                delta_time = max(now - float(last_timestamp), 0.0)
+                delta_units = stage_value - last_stage_value
+                if delta_time > 0 and delta_units > 0:
+                    instantaneous = delta_time / delta_units
+                    ema = metrics.get("ema")
+                    if ema is None:
+                        ema = instantaneous
+                    elif instantaneous >= ema:
+                        ema = (ema * 0.65) + (instantaneous * 0.35)
+                    else:
+                        ema = (ema * 0.85) + (instantaneous * 0.15)
+                    metrics["ema"] = max(ema, 0.0)
+            else:
+                if runtime.get("start") is None:
+                    runtime["start"] = now
+            metrics["last_timestamp"] = now
+            metrics["last_value"] = stage_value
+        elif stage_value == 0 and last_stage_value == 0 and stage == active_stage:
+            if runtime.get("start") is None:
+                runtime["start"] = now
+            metrics["last_timestamp"] = now
+        elif stage_value < last_stage_value:
+            self._reset_stage_metrics(stage)
+            metrics = self._stage_metrics[stage]
+            runtime = self._stage_runtime[stage]
+            if stage == active_stage and stage_total > 0:
+                runtime["start"] = now
+                metrics["last_timestamp"] = now
+            metrics["last_value"] = stage_value
+
+        if (
+            stage_total > 0
+            and stage_value >= stage_total
+            and not runtime.get("completed", False)
+        ):
+            start = runtime.get("start")
+            if isinstance(start, (int, float)):
+                elapsed = max(now - float(start), 0.0)
+                self._record_stage_history(stage, elapsed, stage_total)
+            runtime["completed"] = True
+            runtime["start"] = None
+            metrics["last_timestamp"] = now
+            metrics["last_value"] = max(stage_total, stage_value)
+
         percent = int(round(100 * current / total))
+        if percent < self._displayed_percent:
+            percent = self._displayed_percent
+        else:
+            self._displayed_percent = percent
         if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
             self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(max(0, min(100, percent)))
-        self.progress_label.setText(f"{current}/{total}")
+
+        eta_text: Optional[str] = None
+        remaining_units = max(total - current, 0)
+        if remaining_units <= 0:
+            eta_text = "Finishing..."
+            self._last_eta_seconds = None
+        else:
+            remaining_seconds = self._estimate_remaining_seconds(
+                now, active_stage, current, total
+            )
+            if remaining_seconds is not None and math.isfinite(remaining_seconds):
+                smoothed = self._smooth_eta(remaining_seconds)
+                eta_text = self._format_eta(smoothed)
+            elif current > 0:
+                eta_text = "Estimating..."
+                self._last_eta_seconds = None
+
+        label_text = f"{current}/{total}"
+        if eta_text:
+            label_text += f" • {eta_text}"
+        self.progress_label.setText(label_text)
 
     def _handle_finished(self, result: BuildResult) -> None:
         self._set_running(False)
@@ -1207,6 +1743,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self,
             "Microwire Data Builder",
             "Build failed.\n\n" + message,
+        )
+
+    def _handle_cancelled(self) -> None:
+        self._set_running(False)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Cancelled")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Microwire Data Builder",
+            "Build cancelled by user.",
         )
 
     def _cleanup_thread(self) -> None:

@@ -35,6 +35,20 @@ except ImportError:
         raise
 
 try:
+    from .manual_diameters import MANUAL_DIAMETER_OVERRIDES
+except ImportError:
+    module_name = "experiments.microwire_data_builder.manual_diameters"
+    module_path = Path(__file__).with_name("manual_diameters.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        MANUAL_DIAMETER_OVERRIDES = module.MANUAL_DIAMETER_OVERRIDES
+    else:
+        raise
+
+try:
     from .ocr import ensure_tesseract_available
 except ImportError:
     module_name = "experiments.microwire_data_builder.ocr"
@@ -57,6 +71,10 @@ R_CHECK_THRESHOLD = 0.05
 DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
 ORIGIN_DIR_NAME = "origin_objects"
+
+
+class BuildCancelledError(Exception):
+    """Raised when a build is cancelled by the caller."""
 
 MICRO_SIGN = "µ"
 
@@ -927,6 +945,7 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
         if not raw_text:
             continue
         text = _normalise_microscope_text(raw_text)
+        found_primary = False
         for match in MICROSCOPE_PRIMARY_PATTERN.finditer(text):
             raw_value = match.group("value").replace(",", ".")
             try:
@@ -937,8 +956,11 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
                 continue
             key = round(value, 2)
             preferred.setdefault(key, value)
+            found_primary = True
+        if found_primary:
+            continue
         if preferred:
-            break
+            continue
         for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
             start = max(match.start() - 6, 0)
             prefix = text[start:match.start()]
@@ -1140,6 +1162,8 @@ def _group_microscope_measurements(
             if progress_callback is not None:
                 try:
                     progress_callback(processed, total)
+                except BuildCancelledError:
+                    raise
                 except Exception:
                     pass
 
@@ -1167,6 +1191,17 @@ def _group_microscope_measurements(
             record = grouped.setdefault(key, MicroscopeMeasurements())
             record.extend(category, values)
         _notify()
+    for key, override in MANUAL_DIAMETER_OVERRIDES.items():
+        record = grouped.get(key)
+        if record is None:
+            record = MicroscopeMeasurements()
+            grouped[key] = record
+        d_override = override.get("d")
+        if d_override is not None and not record.core:
+            record.extend("core", [d_override])
+        D_override = override.get("D")
+        if D_override is not None and not record.glass:
+            record.extend("glass", [D_override])
     return grouped
 
 
@@ -1208,6 +1243,8 @@ def _collect_video_metrics(
             if progress_callback is not None:
                 try:
                     progress_callback(processed, total)
+                except BuildCancelledError:
+                    raise
                 except Exception:
                     pass
 

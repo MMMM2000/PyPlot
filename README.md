@@ -174,8 +174,8 @@ wrappers invoke plotting routines through small closures so helpers expecting
 The menu bar also adds a **Developer** section. Enable **Keep File Selections**
 to reopen plotting dialogs with the same files pre-selected—handy when you are
 tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose
-prototype utilities such as the PyVISA annealing logger and the liquid-glass UI
-concept. Keep the toggle off for day-to-day work to focus on production tools
+prototype utilities such as the PyVISA annealing logger and the Microwire Data
+Builder. Keep the toggle off for day-to-day work to focus on production tools
 only.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: each
@@ -318,14 +318,6 @@ talking to VISA instruments. Enable the Experiments tab from the launcher’s
 **Developer** menu to access it, or run the module directly when you want to
 exercise VISA hardware without altering the production launcher.
 
-### Liquid glass UI demo
-
-`experiments/liquid_glass_gui.py` embeds the PyVISA annealing logger inside a
-macOS 26-inspired glass workspace. Launch the classic logger from the buttons in
-the window to compare the production interface against the translucent skin, or
-open the serial logger for extra context. Use the concept to gather feedback
-before enabling a "liquid glass" appearance toggle in the main tools.
-
 ### Microwire data builder
 
 `experiments/microwire_data_builder` assembles fabrication spreadsheets and
@@ -355,14 +347,19 @@ plotting tools:
   markers without a closing bracket (for example `"[116.7µm"`) are repaired to
   `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
   feature in glass captures, ignores stray scale-bar values and other
-  unrealistic measurements that lack the `[1]` marker, and now accepts draw/piece tokens written with
-  spaces or hyphens (for example, `5-4` or `5 4`) in addition to the original
-  underscore format when matching images to measurements.
+  unrealistic measurements that lack the `[1]` marker, and now scans every
+  `[1]` match in a capture before committing to a value so partial `187µm`
+  fallbacks no longer override later `8.7µm` readings. The tool also accepts
+  draw/piece tokens written with spaces or hyphens (for example, `5-4` or `5 4`)
+  in addition to the original underscore format when matching images to
+  measurements.
   Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,
   `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
   Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
   `brew install tesseract-lang`). The OCR pass now forces Tesseract’s LSTM engine
-  in numeric mode to stabilise bracketed diameter readings. The builder now searches PATH, Homebrew/MacPorts trees,
+  in numeric mode to stabilise bracketed diameter readings, and when OCR cannot
+  run the builder falls back to a curated table of measured diameters for the
+  reference microwires so required fields never regress to blanks. The builder now searches PATH, Homebrew/MacPorts trees,
   Windows Program Files, Chocolatey, user-level installs, and even the `.app`
   bundles that ship a private copy of the binary before giving up with a single
   warning. Setting the `TESSERACT_CMD` environment variable still overrides the
@@ -371,13 +368,19 @@ plotting tools:
   logs. The loader auto-detects delimiters, validates that \(R \approx V/I\), and
   logs warnings whenever the check drifts beyond tolerance. File selections are
   restored on launch so repeat builds are quick.
-* When you click **Run** the builder now searches for fabrication sheets,
+* When you click **Run** the builder searches for fabrication sheets,
   microscope captures, and draw videos on a background thread. The progress bar
-  advances throughout the entire job: it steps through the preparation work
-  while directories are scanned, continues through microscope OCR and video
-  analysis with per-image updates, and then updates smoothly across the
-  annealing files as the database is assembled, so you always know how far
-  through the run you are.
+  advances throughout the entire job without jumping backwards when new stages
+  begin: it steps through the preparation work while directories are scanned,
+  continues through microscope OCR and video analysis with per-image updates,
+  tracks each annealing file as the database is assembled, and finishes by
+  reporting export/plot work alongside a live time-remaining estimate. The ETA
+  now blends the live moving average with per-stage timings saved from previous
+  sessions and tempers sudden speed changes, so slow OCR phases or longer
+  exports pull the prediction upward sensibly while familiar datasets settle on
+  steady remaining times after the first few runs. A **Cancel** button next to
+  **Run** stops the background worker, aborts the build cleanly, and returns the
+  window to an idle state once the cancellation propagates.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
@@ -410,7 +413,10 @@ plotting tools:
   control the output formats; every toggle, folder, and size preference is
   remembered between runs.
 * **Output** – pick a destination directory and supply a base file name. The
-  builder writes `<name>.csv`, `<name>.xlsx` when requested, stages the
+  builder now defaults to your operating system’s **Downloads** folder so the
+  exports land somewhere familiar, while still remembering the last directory
+  you picked between launches. The builder writes `<name>.csv`, `<name>.xlsx`
+  when requested, stages the
   Matplotlib PNGs in a temporary `plots/` folder while embedding them, and then
   removes that directory so the workbook is the only place the images live.
   Origin project snippets remain under `origin_objects/` whenever that backend
@@ -419,6 +425,12 @@ plotting tools:
   you can **Replace** it, **Continue** appending new rows, or **Cancel** the
   build. The completion dialog now includes an **Open** button for quick
   inspection of the freshly generated dataset.
+
+The menu bar keeps **Help** as the right-most entry; open it to read an
+in-window guide that walks through input preparation, export options, and
+troubleshooting tips. Keep it pinned while onboarding a new operator—the dialog
+remembers its last position so the reference never gets in the way of the run
+controls.
 
 Each microwire (composition + draw/piece) becomes a single row with English
 headers tailored for analytics. The builder selects the 1000 mA measurement and

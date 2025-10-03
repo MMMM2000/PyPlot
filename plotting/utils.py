@@ -948,6 +948,16 @@ def install_standard_menu(
     else:
         help_menu.setEnabled(False)
 
+    _ensure_help_last(menu_bar)
+    if not hasattr(menu_bar, "_mw_help_order_sync"):
+        sync = _HelpMenuOrderSync(menu_bar)
+        menu_bar.installEventFilter(sync)
+        setattr(menu_bar, "_mw_help_order_sync", sync)
+    else:
+        helper = getattr(menu_bar, "_mw_help_order_sync")
+        if isinstance(helper, _HelpMenuOrderSync):
+            helper.sync_soon()
+
     return menu_bar
 
 
@@ -972,6 +982,52 @@ class _VisibilitySync(QtCore.QObject):
         }:
             self._sync()
         return False
+
+
+def _ensure_help_last(menu_bar: QtWidgets.QMenuBar) -> None:
+    help_action: QtGui.QAction | None = None
+    for action in menu_bar.actions():
+        menu = action.menu()
+        if menu is not None and menu.objectName() == "mw_shared_help":
+            help_action = action
+    if help_action is None:
+        return
+    actions = menu_bar.actions()
+    if actions and actions[-1] is help_action:
+        return
+    menu_bar.removeAction(help_action)
+    menu_bar.addAction(help_action)
+
+
+class _HelpMenuOrderSync(QtCore.QObject):
+    """Keep the shared Help menu anchored to the far right."""
+
+    def __init__(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        super().__init__(menu_bar)
+        self._menu_bar = menu_bar
+        self._pending = False
+
+    def eventFilter(
+        self, watched: QtCore.QObject | None, event: QtCore.QEvent | None
+    ) -> bool:  # noqa: D401
+        if watched is self._menu_bar and event is not None:
+            if event.type() in {
+                QtCore.QEvent.Type.ActionAdded,
+                QtCore.QEvent.Type.ActionRemoved,
+            }:
+                self.sync_soon()
+        return super().eventFilter(watched, event)
+
+    def sync_soon(self) -> None:
+        if self._pending:
+            return
+        self._pending = True
+
+        def _sync() -> None:
+            self._pending = False
+            _ensure_help_last(self._menu_bar)
+
+        QtCore.QTimer.singleShot(0, _sync)
 
 
 class _ThemeManager(QtCore.QObject):
