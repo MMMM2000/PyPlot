@@ -927,6 +927,7 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
         if not raw_text:
             continue
         text = _normalise_microscope_text(raw_text)
+        found_primary = False
         for match in MICROSCOPE_PRIMARY_PATTERN.finditer(text):
             raw_value = match.group("value").replace(",", ".")
             try:
@@ -937,8 +938,11 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
                 continue
             key = round(value, 2)
             preferred.setdefault(key, value)
+            found_primary = True
+        if found_primary:
+            continue
         if preferred:
-            break
+            continue
         for match in MICROSCOPE_VALUE_PATTERN.finditer(text):
             start = max(match.start() - 6, 0)
             prefix = text[start:match.start()]
