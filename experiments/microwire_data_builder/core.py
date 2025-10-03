@@ -58,6 +58,10 @@ DEFAULT_OUTPUT_NAME = "microwire_database"
 PLOT_DIR_NAME = "plots"
 ORIGIN_DIR_NAME = "origin_objects"
 
+
+class BuildCancelledError(Exception):
+    """Raised when a build is cancelled by the caller."""
+
 MICRO_SIGN = "µ"
 
 OUTPUT_COLUMNS = [
@@ -1144,6 +1148,8 @@ def _group_microscope_measurements(
             if progress_callback is not None:
                 try:
                     progress_callback(processed, total)
+                except BuildCancelledError:
+                    raise
                 except Exception:
                     pass
 
@@ -1212,6 +1218,8 @@ def _collect_video_metrics(
             if progress_callback is not None:
                 try:
                     progress_callback(processed, total)
+                except BuildCancelledError:
+                    raise
                 except Exception:
                     pass
 

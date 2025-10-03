@@ -20,6 +20,7 @@ from .core import (
     DEFAULT_OUTPUT_NAME,
     BuildResult,
     BuilderConfig,
+    BuildCancelledError,
     build_database,
     _normalise_output_name,
     _metadata_from_path,
@@ -299,6 +300,8 @@ def collect_support_files(
             if progress_callback is not None:
                 try:
                     progress_callback()
+                except BuildCancelledError:
+                    raise
                 except Exception:
                     pass
 
@@ -413,12 +416,18 @@ class BuildWorker(QtCore.QObject):
     progress = QtCore.pyqtSignal(int, int)
     finished = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
+    cancelled = QtCore.pyqtSignal()
 
     def __init__(self, inputs: WorkerInputs, logger: logging.Logger) -> None:
         super().__init__()
         self.inputs = inputs
         self.logger = logger
         self._tracker = _ProgressTracker(self.progress.emit)
+        self._cancelled = False
+
+    @QtCore.pyqtSlot()
+    def request_cancel(self) -> None:
+        self._cancelled = True
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - exercised via integration test
@@ -430,12 +439,24 @@ class BuildWorker(QtCore.QObject):
             build_units = len(annealing_files)
             self._tracker.configure(prep_units, 0, build_units, final_units=1)
             self.logger.info("Preparing support files...")
+            
+            def _check_cancelled() -> None:
+                if self._cancelled:
+                    raise BuildCancelledError()
+
+            def _prepare_bridge() -> None:
+                _check_cancelled()
+                self._tracker.advance_prepare()
+
+            _check_cancelled()
             fabrication_files, auto_microscope, video_files = collect_support_files(
                 annealing_files,
                 inputs.data_roots,
-                progress_callback=self._tracker.advance_prepare,
+                progress_callback=_prepare_bridge,
             )
+            _check_cancelled()
             self._tracker.finish_prepare()
+            _check_cancelled()
             microscope_files = list(dict.fromkeys(manual_microscope + auto_microscope))
             analysis_units = len(microscope_files) + len(video_files)
             self._tracker.set_analysis_units(analysis_units)
@@ -456,6 +477,7 @@ class BuildWorker(QtCore.QObject):
             self.logger.info(
                 "Starting build with %s annealing file(s)", len(config.annealing_files)
             )
+            _check_cancelled()
             if fabrication_files:
                 self.logger.info(
                     "Using %s fabrication spreadsheet(s)", len(fabrication_files)
@@ -468,12 +490,15 @@ class BuildWorker(QtCore.QObject):
                 self.logger.info("Using %s video file(s)", len(video_files))
 
             def _progress_bridge(current: int, total: int) -> None:
+                _check_cancelled()
                 self._tracker.build_progress(current, total)
 
             def _analysis_bridge(current: int, total: int) -> None:
+                _check_cancelled()
                 self._tracker.set_analysis_units(total)
                 self._tracker.analysis_progress(current, total)
 
+            _check_cancelled()
             result = build_database(
                 config,
                 logger=self.logger,
@@ -511,6 +536,9 @@ class BuildWorker(QtCore.QObject):
             )
             self._tracker.finalize()
             self.finished.emit(result)
+        except BuildCancelledError:
+            self.logger.info("Build cancelled by user.")
+            self.cancelled.emit()
         except Exception as exc:  # pragma: no cover - safety net
             self.logger.exception("Build failed")
             message = str(exc) if str(exc) else exc.__class__.__name__
@@ -535,11 +563,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._running = False
 
         cwd = Path.cwd()
-        self._default_output_dir = cwd / "builder_output"
+        downloads_dir = Path.home() / "Downloads"
+        if downloads_dir.exists() and downloads_dir.is_dir():
+            self._default_output_dir = downloads_dir
+        else:
+            self._default_output_dir = cwd / "builder_output"
         self._last_microscope_dir = str(cwd)
         self._last_anneal_dir = str(cwd)
         self._last_root_dir = str(cwd)
-        self._last_output_dir = str(cwd)
+        self._last_output_dir = str(self._default_output_dir)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
         self.log_message.connect(self._append_log)
@@ -716,6 +748,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         # Run button
         run_row = QtWidgets.QHBoxLayout()
         run_row.addStretch(1)
+        self.cancel_button = QtWidgets.QPushButton("Cancel")
+        self.cancel_button.setEnabled(False)
+        self.cancel_button.clicked.connect(self.cancel_build)
+        run_row.addWidget(self.cancel_button)
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.start_build)
         run_row.addWidget(self.run_button)
@@ -1048,6 +1084,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         ):
             widget.setEnabled(not running)
         self.run_button.setEnabled(not running)
+        self.cancel_button.setEnabled(running)
         if running:
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setValue(0)
@@ -1060,6 +1097,23 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self.progress_label.setText("Idle")
 
     # ------------------------------------------------------------------ build orchestration
+    def cancel_build(self) -> None:
+        if not self._running:
+            return
+        if self._worker is None:
+            self._set_running(False)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Cancelled")
+            return
+        self.logger.info("Cancellation requested; attempting to stop the build...")
+        self.cancel_button.setEnabled(False)
+        self.progress_label.setText("Cancelling...")
+        QtCore.QMetaObject.invokeMethod(
+            self._worker,
+            "request_cancel",
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
+
     def start_build(self) -> None:
         if self._running:
             return
@@ -1155,8 +1209,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._worker.progress.connect(self._update_progress)
         self._worker.finished.connect(self._handle_finished)
         self._worker.error.connect(self._handle_failed)
+        self._worker.cancelled.connect(self._handle_cancelled)
         self._worker.finished.connect(self._thread.quit)
         self._worker.error.connect(self._thread.quit)
+        self._worker.cancelled.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
 
@@ -1207,6 +1263,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self,
             "Microwire Data Builder",
             "Build failed.\n\n" + message,
+        )
+
+    def _handle_cancelled(self) -> None:
+        self._set_running(False)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Cancelled")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Microwire Data Builder",
+            "Build cancelled by user.",
         )
 
     def _cleanup_thread(self) -> None:

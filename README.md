@@ -380,7 +380,9 @@ plotting tools:
   while directories are scanned, continues through microscope OCR and video
   analysis with per-image updates, and then updates smoothly across the
   annealing files as the database is assembled, so you always know how far
-  through the run you are.
+  through the run you are. A **Cancel** button next to **Run** stops the
+  background worker, aborts the build cleanly, and returns the window to an
+  idle state once the cancellation propagates.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
@@ -413,7 +415,10 @@ plotting tools:
   control the output formats; every toggle, folder, and size preference is
   remembered between runs.
 * **Output** – pick a destination directory and supply a base file name. The
-  builder writes `<name>.csv`, `<name>.xlsx` when requested, stages the
+  builder now defaults to your operating system’s **Downloads** folder so the
+  exports land somewhere familiar, while still remembering the last directory
+  you picked between launches. The builder writes `<name>.csv`, `<name>.xlsx`
+  when requested, stages the
   Matplotlib PNGs in a temporary `plots/` folder while embedding them, and then
   removes that directory so the workbook is the only place the images live.
   Origin project snippets remain under `origin_objects/` whenever that backend
