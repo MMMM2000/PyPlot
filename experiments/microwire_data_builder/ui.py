@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
@@ -328,86 +330,139 @@ class _ProgressTracker:
 
     def __init__(self, emit: Callable[[int, int], None]) -> None:
         self._emit_fn = emit
-        self._total_units = 1
-        self._completed = 0
-        self._prep_units = 0
-        self._analysis_units = 0
-        self._build_units = 0
-        self._final_units = 0
+        self._totals = {
+            "prep": 0,
+            "analysis": 0,
+            "build": 0,
+            "final": 0,
+        }
+        self._progress = {
+            "prep": 0,
+            "analysis": 0,
+            "build": 0,
+            "final": 0,
+        }
 
     def configure(
         self, prep_units: int, analysis_units: int, build_units: int, final_units: int = 1
     ) -> None:
-        self._prep_units = max(prep_units, 0)
-        self._analysis_units = max(analysis_units, 0)
-        self._build_units = max(build_units, 0)
-        self._final_units = max(final_units, 0)
-        total = self._prep_units + self._analysis_units + self._build_units + self._final_units
-        self._total_units = total if total > 0 else 1
-        self._completed = 0
+        self._totals = {
+            "prep": max(prep_units, 0),
+            "analysis": max(analysis_units, 0),
+            "build": max(build_units, 0),
+            "final": max(final_units, 0),
+        }
+        self._progress = {key: 0 for key in self._totals}
         self._emit()
+
+    def _total_units(self) -> int:
+        total = sum(self._totals.values())
+        return total if total > 0 else 1
+
+    def _completed_units(self) -> int:
+        total_units = self._total_units()
+        completed = 0
+        for key, total in self._totals.items():
+            progress = self._progress.get(key, 0)
+            if total <= 0:
+                continue
+            completed += min(max(progress, 0), total)
+        return min(max(completed, 0), total_units)
 
     def _emit(self) -> None:
-        self._emit_fn(min(self._completed, self._total_units), self._total_units)
+        self._emit_fn(self._completed_units(), self._total_units())
 
-    def set_analysis_units(self, units: int) -> None:
+    def _set_total(self, key: str, units: int) -> None:
         units = max(units, 0)
-        if units == self._analysis_units:
+        if units == self._totals.get(key, 0):
             return
-        self._analysis_units = units
-        total = self._prep_units + self._analysis_units + self._build_units + self._final_units
-        self._total_units = total if total > 0 else 1
-        if self._completed > self._total_units:
-            self._completed = self._total_units
+        self._totals[key] = units
+        if self._progress.get(key, 0) > units:
+            self._progress[key] = units
         self._emit()
 
+    def set_analysis_units(self, units: int) -> None:
+        self._set_total("analysis", units)
+
+    def set_final_units(self, units: int) -> None:
+        self._set_total("final", units)
+
     def advance_prepare(self) -> None:
-        if self._completed < self._prep_units:
-            self._completed += 1
+        total = self._totals.get("prep", 0)
+        if total <= 0:
+            return
+        current = self._progress.get("prep", 0)
+        if current < total:
+            self._progress["prep"] = current + 1
             self._emit()
 
     def finish_prepare(self) -> None:
-        target = self._prep_units
-        if target > self._completed:
-            self._completed = target
+        total = self._totals.get("prep", 0)
+        if total <= 0:
+            return
+        if self._progress.get("prep", 0) < total:
+            self._progress["prep"] = total
             self._emit()
 
     def analysis_progress(self, current: int, total: int) -> None:
-        mapped_total = self._analysis_units if self._analysis_units else total
+        total = max(total, 0)
+        if total:
+            self._set_total("analysis", total)
+        mapped_total = self._totals.get("analysis", 0)
         if mapped_total <= 0:
             return
-        current_clamped = min(max(current, 0), mapped_total)
-        target = self._prep_units + current_clamped
-        if target > self._completed:
-            self._completed = target
+        clamped = min(max(current, 0), mapped_total)
+        if clamped > self._progress.get("analysis", 0):
+            self._progress["analysis"] = clamped
             self._emit()
 
     def finish_analysis(self) -> None:
-        target = self._prep_units + self._analysis_units
-        if target > self._completed:
-            self._completed = target
+        total = self._totals.get("analysis", 0)
+        if total <= 0:
+            return
+        if self._progress.get("analysis", 0) < total:
+            self._progress["analysis"] = total
             self._emit()
 
     def build_progress(self, current: int, total: int) -> None:
-        mapped_total = self._build_units if self._build_units else total
+        total = max(total, 0)
+        if total:
+            self._set_total("build", total)
+        mapped_total = self._totals.get("build", 0)
         if mapped_total <= 0:
             return
-        offset = self._prep_units + self._analysis_units
-        target = offset + min(max(current, 0), mapped_total)
-        if target > self._completed:
-            self._completed = target
+        clamped = min(max(current, 0), mapped_total)
+        if clamped > self._progress.get("build", 0):
+            self._progress["build"] = clamped
             self._emit()
 
     def finish_build(self) -> None:
-        target = self._prep_units + self._analysis_units + self._build_units
-        if target > self._completed:
-            self._completed = target
+        total = self._totals.get("build", 0)
+        if total <= 0:
+            return
+        if self._progress.get("build", 0) < total:
+            self._progress["build"] = total
+            self._emit()
+
+    def advance_final(self, units: int = 1) -> None:
+        total = self._totals.get("final", 0)
+        if total <= 0:
+            return
+        current = self._progress.get("final", 0)
+        if current < total:
+            self._progress["final"] = min(total, current + max(units, 1))
+            self._emit()
+
+    def finish_final(self) -> None:
+        total = self._totals.get("final", 0)
+        if total <= 0:
+            return
+        if self._progress.get("final", 0) < total:
+            self._progress["final"] = total
             self._emit()
 
     def finalize(self) -> None:
-        if self._total_units > self._completed:
-            self._completed = self._total_units
-            self._emit()
+        self.finish_final()
 
 
 class BuildWorker(QtCore.QObject):
@@ -507,21 +562,34 @@ class BuildWorker(QtCore.QObject):
                 analysis_total=analysis_units,
                 root_for_relpaths=Path.cwd(),
             )
+            final_steps = max(len(result.exports), 1)
+            if config.make_plots and (
+                "matplotlib" in config.plot_backends or not config.plot_backends
+            ):
+                final_steps += 1
+            if config.make_plots and "origin" in config.plot_backends:
+                final_steps += 1
+            final_steps += 1  # summary log
+            self._tracker.set_final_units(final_steps)
             self._tracker.finish_analysis()
             self._tracker.finish_build()
             if result.exports:
                 for fmt, path in result.exports.items():
                     self.logger.info("%s written to %s", fmt.upper(), path)
+                    self._tracker.advance_final()
             else:
                 self.logger.info("No export files were generated.")
+                self._tracker.advance_final()
             if config.make_plots:
                 if "matplotlib" in config.plot_backends or not config.plot_backends:
                     self.logger.info("Generated %s Matplotlib plot(s)", len(result.plot_paths))
+                    self._tracker.advance_final()
                 if "origin" in config.plot_backends:
                     self.logger.info(
                         "Origin plots created: %s",
                         len(result.origin_artifacts),
                     )
+                    self._tracker.advance_final()
             stats = result.stats
             self.logger.info(
                 "Summary: parsed=%s skipped=%s rows=%s missing_draw=%s missing_piece=%s missing_1000mA=%s missing_low_mA=%s R~=V/I failures=%s",
@@ -534,6 +602,7 @@ class BuildWorker(QtCore.QObject):
                 stats.missing_low_measurement,
                 stats.resistance_checks_failed,
             )
+            self._tracker.advance_final()
             self._tracker.finalize()
             self.finished.emit(result)
         except BuildCancelledError:
@@ -561,6 +630,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._thread: QtCore.QThread | None = None
         self._worker: BuildWorker | None = None
         self._running = False
+        self._progress_start_time: float | None = None
+        self._last_progress_value: int = 0
 
         cwd = Path.cwd()
         downloads_dir = Path.home() / "Downloads"
@@ -582,6 +653,33 @@ class BuilderWindow(QtWidgets.QMainWindow):
         install_standard_menu(self)
 
     # ------------------------------------------------------------------ setup
+    def _reset_progress_tracking(self) -> None:
+        now = time.monotonic()
+        self._progress_start_time = now
+        self._last_progress_value = 0
+
+    def _clear_progress_tracking(self) -> None:
+        self._progress_start_time = None
+        self._last_progress_value = 0
+
+    @staticmethod
+    def _format_eta(seconds: float) -> str:
+        if seconds < 0:
+            seconds = 0
+        total_seconds = int(round(seconds))
+        if total_seconds < 1:
+            return "<1s remaining"
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, secs = divmod(remainder, 60)
+        parts: list[str] = []
+        if hours:
+            parts.append(f"{hours}h")
+        if minutes:
+            parts.append(f"{minutes}m")
+        if secs or not parts:
+            parts.append(f"{secs}s")
+        return " ".join(parts) + " remaining"
+
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
         self.setCentralWidget(central)
@@ -1086,10 +1184,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.run_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
         if running:
+            self._reset_progress_tracking()
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setValue(0)
             self.progress_label.setText("Preparing...")
         else:
+            self._clear_progress_tracking()
             if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
                 self.progress_bar.setRange(0, 100)
                 self.progress_bar.setValue(0)
@@ -1218,11 +1318,36 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _update_progress(self, current: int, total: int) -> None:
         total = max(total, 1)
+        if self._progress_start_time is None:
+            self._reset_progress_tracking()
+        if current < self._last_progress_value:
+            self._reset_progress_tracking()
+        now = time.monotonic()
+        if current > self._last_progress_value:
+            self._last_progress_value = current
         percent = int(round(100 * current / total))
         if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
             self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(max(0, min(100, percent)))
-        self.progress_label.setText(f"{current}/{total}")
+
+        eta_text: Optional[str] = None
+        start_time = self._progress_start_time
+        remaining_units = max(total - current, 0)
+        if start_time is not None and current > 0:
+            elapsed = max(now - start_time, 0.0)
+            if remaining_units <= 0:
+                eta_text = "Finishing..."
+            elif elapsed >= 0.5:
+                seconds_per_unit = elapsed / current if current else 0
+                remaining_seconds = remaining_units * seconds_per_unit if seconds_per_unit else 0
+                if seconds_per_unit and math.isfinite(remaining_seconds):
+                    eta_text = self._format_eta(remaining_seconds)
+        label_text = f"{current}/{total}"
+        if eta_text:
+            label_text += f" • {eta_text}"
+        elif current > 0 and remaining_units > 0:
+            label_text += " • Estimating..."
+        self.progress_label.setText(label_text)
 
     def _handle_finished(self, result: BuildResult) -> None:
         self._set_running(False)

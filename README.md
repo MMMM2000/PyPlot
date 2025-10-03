@@ -378,11 +378,12 @@ plotting tools:
   microscope captures, and draw videos on a background thread. The progress bar
   advances throughout the entire job: it steps through the preparation work
   while directories are scanned, continues through microscope OCR and video
-  analysis with per-image updates, and then updates smoothly across the
-  annealing files as the database is assembled, so you always know how far
-  through the run you are. A **Cancel** button next to **Run** stops the
-  background worker, aborts the build cleanly, and returns the window to an
-  idle state once the cancellation propagates.
+  analysis with per-image updates, tracks each annealing file as the database is
+  assembled, and now finishes by reporting export/plot work alongside a live
+  time-remaining estimate so you always know how far through the run you are.
+  A **Cancel** button next to **Run** stops the background worker, aborts the
+  build cleanly, and returns the window to an idle state once the cancellation
+  propagates.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
