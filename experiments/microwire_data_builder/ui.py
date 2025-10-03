@@ -14,6 +14,7 @@ from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
+from app_help import make_help_button
 from plotting.utils import ensure_app_theme, install_standard_menu
 
 from .core import (
@@ -328,20 +329,14 @@ class QtLogHandler(logging.Handler):
 class _ProgressTracker:
     """Translate multi-phase progress updates into a single counter."""
 
-    def __init__(self, emit: Callable[[int, int], None]) -> None:
+    _ORDER = ("prep", "analysis", "build", "final")
+
+    def __init__(
+        self, emit: Callable[[str, int, int, int, int], None]
+    ) -> None:
         self._emit_fn = emit
-        self._totals = {
-            "prep": 0,
-            "analysis": 0,
-            "build": 0,
-            "final": 0,
-        }
-        self._progress = {
-            "prep": 0,
-            "analysis": 0,
-            "build": 0,
-            "final": 0,
-        }
+        self._totals = {stage: 0 for stage in self._ORDER}
+        self._progress = {stage: 0 for stage in self._ORDER}
 
     def configure(
         self, prep_units: int, analysis_units: int, build_units: int, final_units: int = 1
@@ -353,7 +348,7 @@ class _ProgressTracker:
             "final": max(final_units, 0),
         }
         self._progress = {key: 0 for key in self._totals}
-        self._emit()
+        self._emit_all()
 
     def _total_units(self) -> int:
         total = sum(self._totals.values())
@@ -369,8 +364,18 @@ class _ProgressTracker:
             completed += min(max(progress, 0), total)
         return min(max(completed, 0), total_units)
 
-    def _emit(self) -> None:
-        self._emit_fn(self._completed_units(), self._total_units())
+    def _emit(self, stage: str) -> None:
+        self._emit_fn(
+            stage,
+            self._progress.get(stage, 0),
+            self._totals.get(stage, 0),
+            self._completed_units(),
+            self._total_units(),
+        )
+
+    def _emit_all(self) -> None:
+        for stage in self._ORDER:
+            self._emit(stage)
 
     def _set_total(self, key: str, units: int) -> None:
         units = max(units, 0)
@@ -379,7 +384,7 @@ class _ProgressTracker:
         self._totals[key] = units
         if self._progress.get(key, 0) > units:
             self._progress[key] = units
-        self._emit()
+        self._emit(key)
 
     def set_analysis_units(self, units: int) -> None:
         self._set_total("analysis", units)
@@ -394,7 +399,7 @@ class _ProgressTracker:
         current = self._progress.get("prep", 0)
         if current < total:
             self._progress["prep"] = current + 1
-            self._emit()
+            self._emit("prep")
 
     def finish_prepare(self) -> None:
         total = self._totals.get("prep", 0)
@@ -402,7 +407,7 @@ class _ProgressTracker:
             return
         if self._progress.get("prep", 0) < total:
             self._progress["prep"] = total
-            self._emit()
+            self._emit("prep")
 
     def analysis_progress(self, current: int, total: int) -> None:
         total = max(total, 0)
@@ -414,7 +419,7 @@ class _ProgressTracker:
         clamped = min(max(current, 0), mapped_total)
         if clamped > self._progress.get("analysis", 0):
             self._progress["analysis"] = clamped
-            self._emit()
+            self._emit("analysis")
 
     def finish_analysis(self) -> None:
         total = self._totals.get("analysis", 0)
@@ -422,7 +427,7 @@ class _ProgressTracker:
             return
         if self._progress.get("analysis", 0) < total:
             self._progress["analysis"] = total
-            self._emit()
+            self._emit("analysis")
 
     def build_progress(self, current: int, total: int) -> None:
         total = max(total, 0)
@@ -434,7 +439,7 @@ class _ProgressTracker:
         clamped = min(max(current, 0), mapped_total)
         if clamped > self._progress.get("build", 0):
             self._progress["build"] = clamped
-            self._emit()
+            self._emit("build")
 
     def finish_build(self) -> None:
         total = self._totals.get("build", 0)
@@ -442,7 +447,7 @@ class _ProgressTracker:
             return
         if self._progress.get("build", 0) < total:
             self._progress["build"] = total
-            self._emit()
+            self._emit("build")
 
     def advance_final(self, units: int = 1) -> None:
         total = self._totals.get("final", 0)
@@ -451,7 +456,7 @@ class _ProgressTracker:
         current = self._progress.get("final", 0)
         if current < total:
             self._progress["final"] = min(total, current + max(units, 1))
-            self._emit()
+            self._emit("final")
 
     def finish_final(self) -> None:
         total = self._totals.get("final", 0)
@@ -459,7 +464,7 @@ class _ProgressTracker:
             return
         if self._progress.get("final", 0) < total:
             self._progress["final"] = total
-            self._emit()
+            self._emit("final")
 
     def finalize(self) -> None:
         self.finish_final()
@@ -468,7 +473,7 @@ class _ProgressTracker:
 class BuildWorker(QtCore.QObject):
     """Background worker that runs the database builder."""
 
-    progress = QtCore.pyqtSignal(int, int)
+    progress = QtCore.pyqtSignal(str, int, int, int, int)
     finished = QtCore.pyqtSignal(object)
     error = QtCore.pyqtSignal(str)
     cancelled = QtCore.pyqtSignal()
@@ -634,6 +639,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_value: int = 0
         self._last_progress_timestamp: float | None = None
         self._seconds_per_unit_ema: float | None = None
+        self._stage_order: tuple[str, ...] = ("prep", "analysis", "build", "final")
+        self._stage_timing_history: dict[str, dict[str, float | int]] = {}
+        self._init_stage_tracking()
 
         cwd = Path.cwd()
         downloads_dir = Path.home() / "Downloads"
@@ -652,21 +660,140 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._configure_logging()
         self._load_settings()
-        install_standard_menu(self)
+        install_standard_menu(self, help_topic="builder_database", console=self.log_group)
 
     # ------------------------------------------------------------------ setup
+    def _init_stage_tracking(self) -> None:
+        self._stage_progress: dict[str, int] = {stage: 0 for stage in self._stage_order}
+        self._stage_totals: dict[str, int] = {stage: 0 for stage in self._stage_order}
+        self._stage_runtime: dict[str, dict[str, object]] = {
+            stage: {"start": None, "completed": False} for stage in self._stage_order
+        }
+        self._stage_metrics: dict[str, dict[str, object]] = {
+            stage: {"last_value": 0, "last_timestamp": None, "ema": None}
+            for stage in self._stage_order
+        }
+        self._displayed_percent = 0
+
     def _reset_progress_tracking(self) -> None:
         now = time.monotonic()
         self._progress_start_time = now
         self._last_progress_value = 0
         self._last_progress_timestamp = now
         self._seconds_per_unit_ema = None
+        self._init_stage_tracking()
 
     def _clear_progress_tracking(self) -> None:
         self._progress_start_time = None
         self._last_progress_value = 0
         self._last_progress_timestamp = None
         self._seconds_per_unit_ema = None
+        self._init_stage_tracking()
+
+    def _reset_stage_metrics(self, stage: str) -> None:
+        if stage not in self._stage_order:
+            return
+        metrics = self._stage_metrics.setdefault(
+            stage, {"last_value": 0, "last_timestamp": None, "ema": None}
+        )
+        metrics["last_value"] = 0
+        metrics["last_timestamp"] = None
+        metrics["ema"] = None
+        runtime = self._stage_runtime.setdefault(
+            stage, {"start": None, "completed": False}
+        )
+        runtime["start"] = None
+        runtime["completed"] = False
+
+    def _persist_stage_history(self) -> None:
+        if not hasattr(self, "settings"):
+            return
+        try:
+            payload = json.dumps(self._stage_timing_history)
+        except TypeError:
+            return
+        self.settings.setValue("stage_timing", payload)
+        self.settings.sync()
+
+    def _record_stage_history(self, stage: str, elapsed: float, units: int) -> None:
+        if units <= 0 or elapsed <= 0:
+            return
+        record = self._stage_timing_history.setdefault(
+            stage, {"seconds": 0.0, "units": 0}
+        )
+        seconds = float(record.get("seconds", 0.0)) + float(elapsed)
+        units_done = int(record.get("units", 0)) + int(units)
+        record["seconds"] = seconds
+        record["units"] = units_done
+        self._persist_stage_history()
+
+    def _global_average_rate(self) -> float | None:
+        total_seconds = 0.0
+        total_units = 0
+        for record in self._stage_timing_history.values():
+            seconds = float(record.get("seconds", 0.0))
+            units = int(record.get("units", 0))
+            total_seconds += max(seconds, 0.0)
+            total_units += max(units, 0)
+        if total_seconds > 0 and total_units > 0:
+            return total_seconds / total_units
+        return None
+
+    def _estimate_remaining_seconds(
+        self,
+        now: float,
+        active_stage: str | None,
+        overall_current: int,
+        overall_total: int,
+    ) -> float | None:
+        remaining = 0.0
+        have_estimate = False
+        global_rate = self._global_average_rate()
+        for stage in self._stage_order:
+            total_units = max(int(self._stage_totals.get(stage, 0)), 0)
+            progress_units = min(max(int(self._stage_progress.get(stage, 0)), 0), total_units)
+            remaining_units = total_units - progress_units
+            if remaining_units <= 0:
+                continue
+            rate_candidates: list[float] = []
+            metrics = self._stage_metrics.get(stage, {})
+            ema = metrics.get("ema") if isinstance(metrics, dict) else None
+            if isinstance(ema, (int, float)) and ema > 0:
+                rate_candidates.append(float(ema))
+            history = self._stage_timing_history.get(stage)
+            if isinstance(history, dict):
+                hist_seconds = float(history.get("seconds", 0.0))
+                hist_units = int(history.get("units", 0))
+                if hist_seconds > 0 and hist_units > 0:
+                    rate_candidates.append(hist_seconds / hist_units)
+            runtime = self._stage_runtime.get(stage, {})
+            if (
+                stage == active_stage
+                and isinstance(runtime, dict)
+                and runtime.get("start") is not None
+            ):
+                start_time = float(runtime["start"])
+                elapsed_stage = max(now - start_time, 0.0)
+                completed_units = max(int(metrics.get("last_value", 0)), 0)
+                if elapsed_stage > 0 and completed_units > 0:
+                    rate_candidates.append(elapsed_stage / completed_units)
+            if stage == active_stage and self._seconds_per_unit_ema:
+                rate_candidates.append(self._seconds_per_unit_ema)
+            if not rate_candidates and global_rate is not None:
+                rate_candidates.append(global_rate)
+            if not rate_candidates:
+                continue
+            have_estimate = True
+            rate = max(rate_candidates)
+            remaining += remaining_units * rate
+        if have_estimate:
+            return remaining
+        start_time = self._progress_start_time
+        if start_time is None or overall_current <= 0:
+            return None
+        elapsed = max(now - start_time, 0.0)
+        remaining_units = max(overall_total - overall_current, 0)
+        return (elapsed / overall_current) * remaining_units if overall_current else None
 
     @staticmethod
     def _format_eta(seconds: float) -> str:
@@ -851,6 +978,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         # Run button
         run_row = QtWidgets.QHBoxLayout()
+        help_button = make_help_button("builder_database", self)
+        help_button.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Fixed,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        run_row.addWidget(help_button)
         run_row.addStretch(1)
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
@@ -956,6 +1089,24 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(last_output, str) and last_output.strip():
             self._last_output_dir = last_output
 
+        timing_value = self.settings.value("stage_timing", "")
+        if isinstance(timing_value, str) and timing_value.strip():
+            try:
+                stored = json.loads(timing_value)
+            except json.JSONDecodeError:
+                stored = {}
+            if isinstance(stored, dict):
+                for key, record in stored.items():
+                    if not isinstance(record, dict):
+                        continue
+                    seconds = float(record.get("seconds", 0.0))
+                    units = int(record.get("units", 0))
+                    if seconds > 0 and units > 0:
+                        self._stage_timing_history[key] = {
+                            "seconds": seconds,
+                            "units": units,
+                        }
+
     def _save_settings(self) -> None:
         if not hasattr(self, "settings"):
             return
@@ -975,6 +1126,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("last_root_dir", self._last_root_dir)
         self.settings.setValue("last_output_dir", self._last_output_dir)
         self.settings.setValue("microscope_recursive", self.microscope_recursive.isChecked())
+        self.settings.setValue("stage_timing", json.dumps(self._stage_timing_history))
         self.settings.sync()
 
     # ------------------------------------------------------------------ helpers
@@ -1322,7 +1474,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._thread.finished.connect(self._cleanup_thread)
         self._thread.start()
 
-    def _update_progress(self, current: int, total: int) -> None:
+    def _update_progress(
+        self,
+        stage: str,
+        stage_value: int,
+        stage_total: int,
+        current: int,
+        total: int,
+    ) -> None:
         total = max(total, 1)
         if self._progress_start_time is None:
             self._reset_progress_tracking()
@@ -1340,43 +1499,131 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if ema is None:
                         ema = instantaneous
                     elif instantaneous >= ema:
-                        ema = instantaneous
+                        ema = (ema * 0.6) + (instantaneous * 0.4)
                     else:
-                        ema = (ema * 0.65) + (instantaneous * 0.35)
+                        ema = (ema * 0.8) + (instantaneous * 0.2)
                     self._seconds_per_unit_ema = max(ema, 0.0)
             self._last_progress_value = current
             self._last_progress_timestamp = now
+
+        if stage not in self._stage_totals:
+            self._stage_order += (stage,)
+            self._stage_totals[stage] = max(stage_total, 0)
+            clamped_value = max(stage_value, 0)
+            if self._stage_totals[stage] > 0:
+                clamped_value = min(clamped_value, self._stage_totals[stage])
+            self._stage_progress[stage] = clamped_value
+            self._stage_runtime[stage] = {"start": None, "completed": False}
+            self._stage_metrics[stage] = {
+                "last_value": 0,
+                "last_timestamp": None,
+                "ema": None,
+            }
+        else:
+            self._stage_totals[stage] = max(stage_total, 0)
+            previous_value = self._stage_progress.get(stage, 0)
+            if stage_value < previous_value:
+                self._reset_stage_metrics(stage)
+            clamped_value = max(stage_value, 0)
+            if self._stage_totals[stage] > 0:
+                clamped_value = min(clamped_value, self._stage_totals[stage])
+            self._stage_progress[stage] = clamped_value
+        stage_value = self._stage_progress.get(stage, 0)
+        stage_total = self._stage_totals.get(stage, 0)
+
+        active_stage: str | None = None
+        for key in self._stage_order:
+            total_units = max(int(self._stage_totals.get(key, 0)), 0)
+            progress_units = min(max(int(self._stage_progress.get(key, 0)), 0), total_units)
+            if total_units > 0 and progress_units < total_units:
+                active_stage = key
+                break
+
+        metrics = self._stage_metrics.setdefault(
+            stage, {"last_value": 0, "last_timestamp": None, "ema": None}
+        )
+        runtime = self._stage_runtime.setdefault(
+            stage, {"start": None, "completed": False}
+        )
+
+        if stage_total > 0 and not runtime.get("completed", False):
+            if stage == active_stage and runtime.get("start") is None:
+                runtime["start"] = now
+                metrics["last_timestamp"] = now
+
+        last_stage_value = int(metrics.get("last_value", 0))
+        if stage_value > last_stage_value:
+            last_timestamp = metrics.get("last_timestamp")
+            if isinstance(last_timestamp, (int, float)):
+                delta_time = max(now - float(last_timestamp), 0.0)
+                delta_units = stage_value - last_stage_value
+                if delta_time > 0 and delta_units > 0:
+                    instantaneous = delta_time / delta_units
+                    ema = metrics.get("ema")
+                    if ema is None:
+                        ema = instantaneous
+                    elif instantaneous >= ema:
+                        ema = (ema * 0.65) + (instantaneous * 0.35)
+                    else:
+                        ema = (ema * 0.85) + (instantaneous * 0.15)
+                    metrics["ema"] = max(ema, 0.0)
+            else:
+                if runtime.get("start") is None:
+                    runtime["start"] = now
+            metrics["last_timestamp"] = now
+            metrics["last_value"] = stage_value
+        elif stage_value == 0 and last_stage_value == 0 and stage == active_stage:
+            if runtime.get("start") is None:
+                runtime["start"] = now
+            metrics["last_timestamp"] = now
+        elif stage_value < last_stage_value:
+            self._reset_stage_metrics(stage)
+            metrics = self._stage_metrics[stage]
+            runtime = self._stage_runtime[stage]
+            if stage == active_stage and stage_total > 0:
+                runtime["start"] = now
+                metrics["last_timestamp"] = now
+            metrics["last_value"] = stage_value
+
+        if (
+            stage_total > 0
+            and stage_value >= stage_total
+            and not runtime.get("completed", False)
+        ):
+            start = runtime.get("start")
+            if isinstance(start, (int, float)):
+                elapsed = max(now - float(start), 0.0)
+                self._record_stage_history(stage, elapsed, stage_total)
+            runtime["completed"] = True
+            runtime["start"] = None
+            metrics["last_timestamp"] = now
+            metrics["last_value"] = max(stage_total, stage_value)
+
         percent = int(round(100 * current / total))
+        if percent < self._displayed_percent:
+            percent = self._displayed_percent
+        else:
+            self._displayed_percent = percent
         if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
             self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(max(0, min(100, percent)))
 
         eta_text: Optional[str] = None
-        start_time = self._progress_start_time
         remaining_units = max(total - current, 0)
-        if start_time is not None and current > 0:
-            elapsed = max(now - start_time, 0.0)
-            if remaining_units <= 0:
-                eta_text = "Finishing..."
-            elif elapsed >= 0.5:
-                candidates: list[float] = []
-                average_rate = elapsed / current if current else 0
-                if average_rate > 0:
-                    candidates.append(average_rate)
-                if self._seconds_per_unit_ema is not None and self._seconds_per_unit_ema > 0:
-                    candidates.append(self._seconds_per_unit_ema)
-                if candidates:
-                    seconds_per_unit = max(candidates)
-                    remaining_seconds = remaining_units * seconds_per_unit
-                else:
-                    remaining_seconds = 0
-                if candidates and math.isfinite(remaining_seconds):
-                    eta_text = self._format_eta(remaining_seconds)
+        if remaining_units <= 0:
+            eta_text = "Finishing..."
+        else:
+            remaining_seconds = self._estimate_remaining_seconds(
+                now, active_stage, current, total
+            )
+            if remaining_seconds is not None and math.isfinite(remaining_seconds):
+                eta_text = self._format_eta(remaining_seconds)
+            elif current > 0:
+                eta_text = "Estimating..."
+
         label_text = f"{current}/{total}"
         if eta_text:
             label_text += f" • {eta_text}"
-        elif current > 0 and remaining_units > 0:
-            label_text += " • Estimating..."
         self.progress_label.setText(label_text)
 
     def _handle_finished(self, result: BuildResult) -> None:
