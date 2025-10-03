@@ -381,6 +381,9 @@ plotting tools:
   analysis with per-image updates, tracks each annealing file as the database is
   assembled, and now finishes by reporting export/plot work alongside a live
   time-remaining estimate so you always know how far through the run you are.
+  The ETA blends overall progress with a recent moving average, so slow OCR and
+  analysis phases pull the remaining-time prediction upward instead of
+  clinging to optimistic early-run timings.
   A **Cancel** button next to **Run** stops the background worker, aborts the
   build cleanly, and returns the window to an idle state once the cancellation
   propagates.

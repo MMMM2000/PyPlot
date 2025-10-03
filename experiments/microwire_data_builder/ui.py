@@ -632,6 +632,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._running = False
         self._progress_start_time: float | None = None
         self._last_progress_value: int = 0
+        self._last_progress_timestamp: float | None = None
+        self._seconds_per_unit_ema: float | None = None
 
         cwd = Path.cwd()
         downloads_dir = Path.home() / "Downloads"
@@ -657,10 +659,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         now = time.monotonic()
         self._progress_start_time = now
         self._last_progress_value = 0
+        self._last_progress_timestamp = now
+        self._seconds_per_unit_ema = None
 
     def _clear_progress_tracking(self) -> None:
         self._progress_start_time = None
         self._last_progress_value = 0
+        self._last_progress_timestamp = None
+        self._seconds_per_unit_ema = None
 
     @staticmethod
     def _format_eta(seconds: float) -> str:
@@ -1324,7 +1330,22 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._reset_progress_tracking()
         now = time.monotonic()
         if current > self._last_progress_value:
+            delta_units = current - self._last_progress_value
+            last_timestamp = self._last_progress_timestamp
+            if last_timestamp is not None and delta_units > 0:
+                delta_time = max(now - last_timestamp, 0.0)
+                if delta_time > 0:
+                    instantaneous = delta_time / delta_units
+                    ema = self._seconds_per_unit_ema
+                    if ema is None:
+                        ema = instantaneous
+                    elif instantaneous >= ema:
+                        ema = instantaneous
+                    else:
+                        ema = (ema * 0.65) + (instantaneous * 0.35)
+                    self._seconds_per_unit_ema = max(ema, 0.0)
             self._last_progress_value = current
+            self._last_progress_timestamp = now
         percent = int(round(100 * current / total))
         if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
             self.progress_bar.setRange(0, 100)
@@ -1338,9 +1359,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if remaining_units <= 0:
                 eta_text = "Finishing..."
             elif elapsed >= 0.5:
-                seconds_per_unit = elapsed / current if current else 0
-                remaining_seconds = remaining_units * seconds_per_unit if seconds_per_unit else 0
-                if seconds_per_unit and math.isfinite(remaining_seconds):
+                candidates: list[float] = []
+                average_rate = elapsed / current if current else 0
+                if average_rate > 0:
+                    candidates.append(average_rate)
+                if self._seconds_per_unit_ema is not None and self._seconds_per_unit_ema > 0:
+                    candidates.append(self._seconds_per_unit_ema)
+                if candidates:
+                    seconds_per_unit = max(candidates)
+                    remaining_seconds = remaining_units * seconds_per_unit
+                else:
+                    remaining_seconds = 0
+                if candidates and math.isfinite(remaining_seconds):
                     eta_text = self._format_eta(remaining_seconds)
         label_text = f"{current}/{total}"
         if eta_text:
