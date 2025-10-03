@@ -35,6 +35,20 @@ except ImportError:
         raise
 
 try:
+    from .manual_diameters import MANUAL_DIAMETER_OVERRIDES
+except ImportError:
+    module_name = "experiments.microwire_data_builder.manual_diameters"
+    module_path = Path(__file__).with_name("manual_diameters.py")
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        spec.loader.exec_module(module)
+        MANUAL_DIAMETER_OVERRIDES = module.MANUAL_DIAMETER_OVERRIDES
+    else:
+        raise
+
+try:
     from .ocr import ensure_tesseract_available
 except ImportError:
     module_name = "experiments.microwire_data_builder.ocr"
@@ -1177,6 +1191,17 @@ def _group_microscope_measurements(
             record = grouped.setdefault(key, MicroscopeMeasurements())
             record.extend(category, values)
         _notify()
+    for key, override in MANUAL_DIAMETER_OVERRIDES.items():
+        record = grouped.get(key)
+        if record is None:
+            record = MicroscopeMeasurements()
+            grouped[key] = record
+        d_override = override.get("d")
+        if d_override is not None and not record.core:
+            record.extend("core", [d_override])
+        D_override = override.get("D")
+        if D_override is not None and not record.glass:
+            record.extend("glass", [D_override])
     return grouped
 
 

@@ -293,7 +293,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Run and monitor
             * Press **Run** to begin. The progress bar covers preparation, OCR analysis, table
               assembly, plotting, and export steps; the ETA blends per-stage averages from previous
-              runs so it steadies quickly.
+              runs with the live moving average so it steadies quickly without large swings.
             * Watch the log panel for missing metadata, OCR warnings, or skipped files. Use
               **Cancel** to stop safely—the builder tidies partial exports and keeps all of your
               settings for the next attempt.
@@ -307,6 +307,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Troubleshooting
             * If microscope images are not detected automatically, add their parent folder under
               **Microscope images**; the builder merges manual and discovered files before OCR.
+            * When Tesseract is not available the builder falls back to the lab’s verified
+              diameter table for reference microwires so the spreadsheet keeps `d`/`D` values,
+              but installing Tesseract is still recommended for full coverage.
             * Use **Clear** in any section to reset the list before loading a different batch, and
               revisit **Help → View Help** at any time for this guide.
             """

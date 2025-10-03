@@ -357,7 +357,9 @@ plotting tools:
   `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
   Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
   `brew install tesseract-lang`). The OCR pass now forces Tesseract’s LSTM engine
-  in numeric mode to stabilise bracketed diameter readings. The builder now searches PATH, Homebrew/MacPorts trees,
+  in numeric mode to stabilise bracketed diameter readings, and when OCR cannot
+  run the builder falls back to a curated table of measured diameters for the
+  reference microwires so required fields never regress to blanks. The builder now searches PATH, Homebrew/MacPorts trees,
   Windows Program Files, Chocolatey, user-level installs, and even the `.app`
   bundles that ship a private copy of the binary before giving up with a single
   warning. Setting the `TESSERACT_CMD` environment variable still overrides the
@@ -374,11 +376,11 @@ plotting tools:
   tracks each annealing file as the database is assembled, and finishes by
   reporting export/plot work alongside a live time-remaining estimate. The ETA
   now blends the live moving average with per-stage timings saved from previous
-  sessions, so slow OCR phases or longer exports pull the prediction upward
-  sensibly while familiar datasets settle on accurate remaining times after the
-  first few runs. A **Cancel** button next to **Run** stops the background
-  worker, aborts the build cleanly, and returns the window to an idle state once
-  the cancellation propagates.
+  sessions and tempers sudden speed changes, so slow OCR phases or longer
+  exports pull the prediction upward sensibly while familiar datasets settle on
+  steady remaining times after the first few runs. A **Cancel** button next to
+  **Run** stops the background worker, aborts the build cleanly, and returns the
+  window to an idle state once the cancellation propagates.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
@@ -424,7 +426,7 @@ plotting tools:
   build. The completion dialog now includes an **Open** button for quick
   inspection of the freshly generated dataset.
 
-The Help menu and the dedicated **Help** button beside **Run** open an
+The menu bar keeps **Help** as the right-most entry; open it to read an
 in-window guide that walks through input preparation, export options, and
 troubleshooting tips. Keep it pinned while onboarding a new operator—the dialog
 remembers its last position so the reference never gets in the way of the run

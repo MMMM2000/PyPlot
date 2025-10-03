@@ -13,8 +13,6 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-
-from app_help import make_help_button
 from plotting.utils import ensure_app_theme, install_standard_menu
 
 from .core import (
@@ -639,6 +637,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_value: int = 0
         self._last_progress_timestamp: float | None = None
         self._seconds_per_unit_ema: float | None = None
+        self._last_eta_seconds: float | None = None
         self._stage_order: tuple[str, ...] = ("prep", "analysis", "build", "final")
         self._stage_timing_history: dict[str, dict[str, float | int]] = {}
         self._init_stage_tracking()
@@ -681,6 +680,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_value = 0
         self._last_progress_timestamp = now
         self._seconds_per_unit_ema = None
+        self._last_eta_seconds = None
         self._init_stage_tracking()
 
     def _clear_progress_tracking(self) -> None:
@@ -688,6 +688,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_value = 0
         self._last_progress_timestamp = None
         self._seconds_per_unit_ema = None
+        self._last_eta_seconds = None
         self._init_stage_tracking()
 
     def _reset_stage_metrics(self, stage: str) -> None:
@@ -719,22 +720,41 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if units <= 0 or elapsed <= 0:
             return
         record = self._stage_timing_history.setdefault(
-            stage, {"seconds": 0.0, "units": 0}
+            stage,
+            {"seconds": 0.0, "units": 0, "ema": None, "samples": 0},
         )
-        seconds = float(record.get("seconds", 0.0)) + float(elapsed)
-        units_done = int(record.get("units", 0)) + int(units)
+        seconds = max(float(record.get("seconds", 0.0)), 0.0) + float(elapsed)
+        units_done = max(int(record.get("units", 0)), 0) + int(units)
         record["seconds"] = seconds
         record["units"] = units_done
+        average = float(elapsed) / float(units)
+        ema = record.get("ema")
+        if isinstance(ema, (int, float)) and ema > 0:
+            record["ema"] = max((float(ema) * 0.7) + (average * 0.3), 0.0)
+        else:
+            record["ema"] = max(average, 0.0)
+        record["samples"] = int(record.get("samples", 0)) + 1
         self._persist_stage_history()
 
     def _global_average_rate(self) -> float | None:
+        ema_sum = 0.0
+        ema_weight = 0.0
         total_seconds = 0.0
         total_units = 0
         for record in self._stage_timing_history.values():
+            if not isinstance(record, dict):
+                continue
+            ema = record.get("ema")
+            samples = max(int(record.get("samples", 0)), 0)
+            if isinstance(ema, (int, float)) and ema > 0:
+                ema_sum += float(ema) * max(samples, 1)
+                ema_weight += max(samples, 1)
             seconds = float(record.get("seconds", 0.0))
             units = int(record.get("units", 0))
             total_seconds += max(seconds, 0.0)
             total_units += max(units, 0)
+        if ema_weight > 0:
+            return ema_sum / ema_weight
         if total_seconds > 0 and total_units > 0:
             return total_seconds / total_units
         return None
@@ -749,23 +769,39 @@ class BuilderWindow(QtWidgets.QMainWindow):
         remaining = 0.0
         have_estimate = False
         global_rate = self._global_average_rate()
+
+        def _push(rate_list: list[tuple[float, float]], value: object, weight: float) -> None:
+            if isinstance(value, (int, float)) and value > 0 and weight > 0:
+                rate_list.append((float(value), weight))
+
         for stage in self._stage_order:
             total_units = max(int(self._stage_totals.get(stage, 0)), 0)
             progress_units = min(max(int(self._stage_progress.get(stage, 0)), 0), total_units)
             remaining_units = total_units - progress_units
             if remaining_units <= 0:
                 continue
-            rate_candidates: list[float] = []
+
+            rates: list[tuple[float, float]] = []
             metrics = self._stage_metrics.get(stage, {})
-            ema = metrics.get("ema") if isinstance(metrics, dict) else None
-            if isinstance(ema, (int, float)) and ema > 0:
-                rate_candidates.append(float(ema))
+            stage_ema = metrics.get("ema") if isinstance(metrics, dict) else None
+            _push(rates, stage_ema, 0.3)
+
             history = self._stage_timing_history.get(stage)
+            history_rate: float | None = None
+            history_weight = 0.0
             if isinstance(history, dict):
+                hist_ema = history.get("ema")
                 hist_seconds = float(history.get("seconds", 0.0))
                 hist_units = int(history.get("units", 0))
-                if hist_seconds > 0 and hist_units > 0:
-                    rate_candidates.append(hist_seconds / hist_units)
+                samples = max(int(history.get("samples", 0)), 0)
+                if isinstance(hist_ema, (int, float)) and hist_ema > 0:
+                    history_rate = float(hist_ema)
+                elif hist_seconds > 0 and hist_units > 0:
+                    history_rate = hist_seconds / hist_units
+                if history_rate is not None:
+                    history_weight = 0.45 + min(samples, 10) * 0.035
+                    _push(rates, history_rate, history_weight)
+
             runtime = self._stage_runtime.get(stage, {})
             if (
                 stage == active_stage
@@ -774,20 +810,40 @@ class BuilderWindow(QtWidgets.QMainWindow):
             ):
                 start_time = float(runtime["start"])
                 elapsed_stage = max(now - start_time, 0.0)
-                completed_units = max(int(metrics.get("last_value", 0)), 0)
+                completed_units = max(int(self._stage_progress.get(stage, 0)), 0)
                 if elapsed_stage > 0 and completed_units > 0:
-                    rate_candidates.append(elapsed_stage / completed_units)
+                    runtime_rate = elapsed_stage / completed_units
+                    _push(rates, runtime_rate, 0.35)
+
             if stage == active_stage and self._seconds_per_unit_ema:
-                rate_candidates.append(self._seconds_per_unit_ema)
-            if not rate_candidates and global_rate is not None:
-                rate_candidates.append(global_rate)
-            if not rate_candidates:
+                _push(rates, self._seconds_per_unit_ema, 0.2)
+
+            if not rates and global_rate is not None:
+                _push(rates, global_rate, 0.5)
+
+            if not rates:
                 continue
+
             have_estimate = True
-            rate = max(rate_candidates)
+            total_weight = sum(weight for _, weight in rates)
+            if total_weight <= 0:
+                continue
+            weighted = sum(rate * weight for rate, weight in rates) / total_weight
+            sorted_values = sorted(rate for rate, _ in rates)
+            if not sorted_values:
+                continue
+            mid = len(sorted_values) // 2
+            if len(sorted_values) % 2:
+                median = sorted_values[mid]
+            else:
+                median = (sorted_values[mid - 1] + sorted_values[mid]) / 2
+            rate = max(weighted, median)
+            if history_rate is not None:
+                rate = max(rate, history_rate * 0.85)
             remaining += remaining_units * rate
+
         if have_estimate:
-            return remaining
+            return remaining if remaining > 0 else 0.0
         start_time = self._progress_start_time
         if start_time is None or overall_current <= 0:
             return None
@@ -812,6 +868,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if secs or not parts:
             parts.append(f"{secs}s")
         return " ".join(parts) + " remaining"
+
+    def _smooth_eta(self, seconds: float) -> float:
+        seconds = max(float(seconds), 0.0)
+        previous = self._last_eta_seconds
+        if previous is None:
+            filtered = seconds
+        else:
+            if seconds > previous:
+                alpha = 0.2
+            else:
+                alpha = 0.4
+            filtered = previous + (seconds - previous) * alpha
+        self._last_eta_seconds = max(filtered, 0.0)
+        return self._last_eta_seconds
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -978,12 +1048,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         # Run button
         run_row = QtWidgets.QHBoxLayout()
-        help_button = make_help_button("builder_database", self)
-        help_button.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Fixed,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        run_row.addWidget(help_button)
         run_row.addStretch(1)
         self.cancel_button = QtWidgets.QPushButton("Cancel")
         self.cancel_button.setEnabled(False)
@@ -1102,9 +1166,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     seconds = float(record.get("seconds", 0.0))
                     units = int(record.get("units", 0))
                     if seconds > 0 and units > 0:
+                        ema_value = record.get("ema")
+                        samples_value = record.get("samples", 0)
+                        if isinstance(ema_value, (int, float)) and ema_value > 0:
+                            ema = float(ema_value)
+                        else:
+                            ema = seconds / units
+                        samples = int(samples_value) if isinstance(samples_value, (int, float)) else 0
+                        if samples <= 0 and ema > 0:
+                            samples = 1
                         self._stage_timing_history[key] = {
                             "seconds": seconds,
                             "units": units,
+                            "ema": ema,
+                            "samples": max(samples, 0),
                         }
 
     def _save_settings(self) -> None:
@@ -1612,14 +1687,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
         remaining_units = max(total - current, 0)
         if remaining_units <= 0:
             eta_text = "Finishing..."
+            self._last_eta_seconds = None
         else:
             remaining_seconds = self._estimate_remaining_seconds(
                 now, active_stage, current, total
             )
             if remaining_seconds is not None and math.isfinite(remaining_seconds):
-                eta_text = self._format_eta(remaining_seconds)
+                smoothed = self._smooth_eta(remaining_seconds)
+                eta_text = self._format_eta(smoothed)
             elif current > 0:
                 eta_text = "Estimating..."
+                self._last_eta_seconds = None
 
         label_text = f"{current}/{total}"
         if eta_text:
