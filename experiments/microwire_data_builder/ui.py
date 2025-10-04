@@ -45,6 +45,8 @@ class WorkerInputs:
     plot_backends: tuple[str, ...]
     export_behaviour: dict[str, str]
     matplotlib_figsize: tuple[float, float]
+    include_microscope_crops: bool = False
+    highlight_ocr_values: bool = False
 
 
 FIGURE_WIDTH_DEFAULT_MM = round(DEFAULT_FIGSIZE[0] * 25.4, 1)
@@ -530,6 +532,8 @@ class BuildWorker(QtCore.QObject):
                 plot_backends=inputs.plot_backends,
                 export_behaviour=inputs.export_behaviour,
                 matplotlib_figsize=inputs.matplotlib_figsize,
+                include_microscope_crops=inputs.include_microscope_crops,
+                highlight_ocr_values=inputs.highlight_ocr_values,
             )
             config.output_dir.mkdir(parents=True, exist_ok=True)
             self.logger.info(
@@ -985,6 +989,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.export_excel_check = QtWidgets.QCheckBox("Export Excel")
         self.export_excel_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.export_excel_check)
+        self.include_crops_check = QtWidgets.QCheckBox("Include microscope crops")
+        self.include_crops_check.stateChanged.connect(self._save_settings)
+        self.include_crops_check.setToolTip("Add cropped microscope images next to the d and D columns")
+        options_layout.addWidget(self.include_crops_check)
+        self.highlight_ocr_check = QtWidgets.QCheckBox("Highlight OCR-sourced values")
+        self.highlight_ocr_check.stateChanged.connect(self._save_settings)
+        self.highlight_ocr_check.setToolTip(
+            "Tint cells when the value was filled from OCR instead of fabrication spreadsheets"
+        )
+        options_layout.addWidget(self.highlight_ocr_check)
 
         figure_size_form = QtWidgets.QFormLayout()
         figure_size_form.setHorizontalSpacing(8)
@@ -1117,6 +1131,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.export_csv_check.setChecked(_read_bool("export_csv", True))
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
+        with QtCore.QSignalBlocker(self.include_crops_check):
+            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", False))
+        with QtCore.QSignalBlocker(self.highlight_ocr_check):
+            self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", False))
         if hasattr(self, "microscope_recursive"):
             with QtCore.QSignalBlocker(self.microscope_recursive):
                 self.microscope_recursive.setChecked(_read_bool("microscope_recursive", True))
@@ -1193,6 +1211,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("plot_origin", self.plot_origin_check.isChecked())
         self.settings.setValue("export_csv", self.export_csv_check.isChecked())
         self.settings.setValue("export_excel", self.export_excel_check.isChecked())
+        self.settings.setValue("include_microscope_crops", self.include_crops_check.isChecked())
+        self.settings.setValue("highlight_ocr_values", self.highlight_ocr_check.isChecked())
         self.settings.setValue("figure_width", self.figure_width_spin.value())
         self.settings.setValue("figure_height", self.figure_height_spin.value())
         self.settings.setValue("output_name", self.output_name_edit.text())
@@ -1524,6 +1544,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 float(self.figure_width_spin.value()) / 25.4,
                 float(self.figure_height_spin.value()) / 25.4,
             ),
+            include_microscope_crops=self.include_crops_check.isChecked(),
+            highlight_ocr_values=self.highlight_ocr_check.isChecked(),
         )
         self._save_settings()
         self._set_running(True)

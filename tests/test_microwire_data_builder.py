@@ -300,13 +300,18 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
     core_img.write_bytes(b"core")
     glass_img.write_bytes(b"glass")
 
-    def fake_extract(path: Path, logger: logging.Logger) -> list[float]:
+    def fake_extract(path: Path, logger: logging.Logger) -> core.MicroscopeOCRResult:
+        result = core.MicroscopeOCRResult()
         name = path.name.lower()
         if 'core' in name:
-            return [16.7]
-        if 'glass' in name:
-            return [134.4, 212.4]
-        return []
+            result.append_value(16.7)
+            result.detections.append(core.MicroscopeDetection(value=16.7, image_path=core_img))
+        elif 'glass' in name:
+            result.append_value(134.4)
+            result.append_value(212.4)
+            result.detections.append(core.MicroscopeDetection(value=134.4, image_path=glass_img))
+            result.detections.append(core.MicroscopeDetection(value=212.4, image_path=glass_img))
+        return result
 
     monkeypatch.setattr(core, "_extract_microscope_diameters", fake_extract)
 
@@ -372,6 +377,12 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
         def median_underpressure(self) -> float | None:
             return -0.85
 
+        def median_winding_speed(self) -> float | None:
+            return 12.5
+
+        def median_glass_feed(self) -> float | None:
+            return 37.2
+
     monkeypatch.setattr(core, "extract_video_metrics", lambda *args, **kwargs: FakeVideoResult())
 
     config = BuilderConfig(
@@ -387,3 +398,60 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
     underpressure_column = core.OUTPUT_COLUMNS[12]
     assert float(row[temperature_column]) == pytest.approx(382.5)
     assert float(row[underpressure_column]) == pytest.approx(-0.85)
+    assert float(row[core.OUTPUT_COLUMNS[10]]) == pytest.approx(12.5)
+    assert float(row[core.OUTPUT_COLUMNS[11]]) == pytest.approx(37.2)
+
+
+def test_highlight_and_crop_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    high = tmp_path / "Ni55Fe18Ga27 4_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 4_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.1\n0.1 0.2 2.1\n")
+    core_img = tmp_path / "Ni55Fe18Ga27 4_1 core.png"
+    glass_img = tmp_path / "Ni55Fe18Ga27 4_1 glass.png"
+
+    from PIL import Image
+
+    Image.new("RGB", (40, 40), color="white").save(core_img)
+    Image.new("RGB", (40, 40), color="white").save(glass_img)
+
+    def fake_extract(path: Path, logger: logging.Logger) -> core.MicroscopeOCRResult:
+        result = core.MicroscopeOCRResult()
+        name = path.name.lower()
+        if "core" in name:
+            detection = core.MicroscopeDetection(
+                value=10.0,
+                image_path=core_img,
+                bbox=(5, 5, 25, 25),
+            )
+            result.append_value(10.0)
+            result.detections.append(detection)
+        elif "glass" in name:
+            detection = core.MicroscopeDetection(
+                value=50.0,
+                image_path=glass_img,
+                bbox=(4, 4, 30, 30),
+            )
+            result.append_value(50.0)
+            result.detections.append(detection)
+        return result
+
+    monkeypatch.setattr(core, "_extract_microscope_diameters", fake_extract)
+
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        microscope_files=[core_img, glass_img],
+        include_microscope_crops=True,
+        highlight_ocr_values=True,
+    )
+
+    result = build_database(config)
+    row = result.dataframe.iloc[0]
+    assert "d (µm) image" in result.dataframe.columns
+    assert "D (µm) image" in result.dataframe.columns
+    crop_key = row["d (µm) image"]
+    assert isinstance(crop_key, str) and crop_key in result.microscope_crops
+    assert "d (µm)" in result.ocr_highlights
+    assert 0 in result.ocr_highlights["d (µm)"]

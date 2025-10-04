@@ -43,6 +43,8 @@ class VideoExtractionResult:
     texts: List[str] = field(default_factory=list)
     temperatures_c: List[float] = field(default_factory=list)
     underpressures: List[float] = field(default_factory=list)
+    winding_speeds_m_per_min: List[float] = field(default_factory=list)
+    glass_feed_mm_per_min: List[float] = field(default_factory=list)
 
     def median_temperature(self) -> Optional[float]:
         if not self.temperatures_c:
@@ -53,6 +55,16 @@ class VideoExtractionResult:
         if not self.underpressures:
             return None
         return float(np.median(self.underpressures))
+
+    def median_winding_speed(self) -> Optional[float]:
+        if not self.winding_speeds_m_per_min:
+            return None
+        return float(np.median(self.winding_speeds_m_per_min))
+
+    def median_glass_feed(self) -> Optional[float]:
+        if not self.glass_feed_mm_per_min:
+            return None
+        return float(np.median(self.glass_feed_mm_per_min))
 
 
 def extract_video_metrics(
@@ -143,6 +155,12 @@ def extract_video_metrics(
             )
             result.underpressures.extend(
                 _extract_metric_candidates(text, ("underpressure", "vacuum", "under pres", "podtlak"))
+            )
+            result.winding_speeds_m_per_min.extend(
+                _extract_metric_candidates(text, ("winding speed",), ("m/min", "mmin"))
+            )
+            result.glass_feed_mm_per_min.extend(
+                _extract_metric_candidates(text, ("glass feed", "glass feeding"), ("mm/min", "mmmin"))
             )
             out_path = frame_output_dir / f"{video_path.stem}_{frame_index:06d}.png"
             try:

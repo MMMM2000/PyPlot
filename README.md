@@ -349,10 +349,13 @@ plotting tools:
   feature in glass captures, ignores stray scale-bar values and other
   unrealistic measurements that lack the `[1]` marker, and now scans every
   `[1]` match in a capture before committing to a value so partial `187µm`
-  fallbacks no longer override later `8.7µm` readings. The tool also accepts
-  draw/piece tokens written with spaces or hyphens (for example, `5-4` or `5 4`)
-  in addition to the original underscore format when matching images to
-  measurements.
+  fallbacks no longer override later `8.7µm` readings. The OCR pass runs a
+  multi-pass sweep that resizes, sharpens, binarises, and inverts captures while
+  trying several page-segmentation modes, capturing bounding boxes for each
+  candidate measurement so the source overlay can be cropped automatically.
+  The tool also accepts draw/piece tokens written with spaces or hyphens (for
+  example, `5-4` or `5 4`) in addition to the original underscore format when
+  matching images to measurements.
   Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,
   `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
   Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
@@ -385,10 +388,17 @@ plotting tools:
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
   is applied to each sampled frame and the median temperature/underpressure is
-  used to back-fill any missing fabrication readings.
+  used to back-fill any missing fabrication readings. The video pass now also
+  extracts winding speed and glass-feeding rates when the on-screen overlays
+  advertise them, so the spreadsheet columns for those metrics can be populated
+  directly from footage even when the fabrication sheet is incomplete.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
-  session using the simple single-trace template. Use the **Figure width/height**
+  session using the simple single-trace template. Toggle **Include microscope
+  crops** to inject new columns immediately after \(d\) and \(D\) that embed the
+  cropped microscope overlays corresponding to each measurement, and enable
+  **Highlight OCR-sourced values** to tint any cells where OCR (microscope or
+  video) provided the measurement instead of the fabrication spreadsheets. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,

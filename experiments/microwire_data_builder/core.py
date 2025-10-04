@@ -15,7 +15,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -101,6 +101,11 @@ OUTPUT_COLUMNS = [
     "File 1000 mA",
     "File low mA",
 ]
+
+MICROSCOPE_IMAGE_COLUMNS = (
+    "d (µm) image",
+    "D (µm) image",
+)
 
 FIGURE_COLUMNS = (
     "Figure — 1000 mA",
@@ -222,6 +227,8 @@ MICROSCOPE_OCR_CONFIG = (
     "-c tessedit_char_whitelist=0123456789[](){}Il" f"{MICRO_SIGN}umUM.,/ "
     "-c classify_bln_numeric_mode=1"
 )
+MICROSCOPE_NUMBER_TOKEN = re.compile(r"^\d+(?:[.,]\d+)?$")
+MICROSCOPE_UNIT_HINTS = ("µm", "um", "μm")
 
 KNOWN_TIMEZONE_TOKENS = {
     "UTC",
@@ -361,6 +368,8 @@ class BuilderConfig:
     plot_backends: Tuple[str, ...] = ()
     export_behaviour: Optional[Dict[str, str]] = None
     matplotlib_figsize: Tuple[float, float] = DEFAULT_FIGSIZE
+    include_microscope_crops: bool = False
+    highlight_ocr_values: bool = False
 
 
 @dataclass
@@ -398,6 +407,8 @@ class BuildResult:
     plot_paths: List[str]
     origin_artifacts: Dict[str, OriginArtifact]
     stats: BuildStats
+    microscope_crops: Dict[str, Path] = field(default_factory=dict)
+    ocr_highlights: Dict[str, Set[int]] = field(default_factory=dict)
 
 
 class FabricationIndex:
@@ -431,38 +442,180 @@ class FabricationIndex:
 
 
 @dataclass
+class MicroscopeDetection:
+    """OCR evidence extracted from a microscope image."""
+
+    value: float
+    image_path: Optional[Path]
+    bbox: Optional[Tuple[int, int, int, int]] = None  # (left, top, right, bottom)
+    text: Optional[str] = None
+    source: str = "ocr"
+    confidence: Optional[float] = None
+    marker: Optional[int] = None
+    crop_path: Optional[Path] = None
+    category: Optional[str] = None
+
+    def matches(self, value: float, *, tol: float = 0.25) -> bool:
+        try:
+            delta = abs(float(self.value) - float(value))
+        except Exception:
+            return False
+        return delta <= tol
+
+    def ensure_crop(self, output_dir: Path, prefix: str) -> Optional[Path]:
+        """Persist a cropped preview of the detection region."""
+
+        if self.crop_path is not None and self.crop_path.exists():
+            return self.crop_path
+        if self.image_path is None or self.bbox is None:
+            return None
+        try:
+            from PIL import Image  # type: ignore[import-not-found]
+        except ImportError:
+            return None
+
+        left, top, right, bottom = self.bbox
+        if right <= left or bottom <= top:
+            return None
+        try:
+            with Image.open(self.image_path) as img:
+                width = img.width
+                height = img.height
+                pad = int(round(max(right - left, bottom - top) * 0.25))
+                if pad > 0:
+                    left = max(left - pad, 0)
+                    top = max(top - pad, 0)
+                    right = min(right + pad, width)
+                    bottom = min(bottom + pad, height)
+                if right <= left or bottom <= top:
+                    return None
+                output_dir.mkdir(parents=True, exist_ok=True)
+                safe_prefix = _safe_plot_stem(prefix)
+                stem = f"{safe_prefix}_{self.value:.2f}"
+                candidate = output_dir / f"{stem}.png"
+                counter = 1
+                while candidate.exists():
+                    candidate = output_dir / f"{stem}_{counter}.png"
+                    counter += 1
+                region = img.crop((left, top, right, bottom))
+                region.save(candidate)
+                self.crop_path = candidate
+                return candidate
+        except Exception:
+            return None
+        return None
+
+
+@dataclass
+class MicroscopeOCRResult:
+    """Container of raw OCR candidates extracted from an image."""
+
+    values: List[float] = field(default_factory=list)
+    detections: List[MicroscopeDetection] = field(default_factory=list)
+    texts: List[str] = field(default_factory=list)
+
+    def __iter__(self) -> Iterator[float]:  # pragma: no cover - convenience shim
+        return iter(self.values)
+
+    def append_value(self, value: float) -> None:
+        if not isinstance(value, (int, float)):
+            return
+        numeric = float(value)
+        if not math.isfinite(numeric) or numeric <= 0:
+            return
+        self.values.append(numeric)
+
+
+@dataclass
 class MicroscopeMeasurements:
     """Diameter samples gathered from microscope images."""
 
-    core: List[float] = field(default_factory=list)
-    glass: List[float] = field(default_factory=list)
-    other: List[float] = field(default_factory=list)
+    core: List[MicroscopeDetection] = field(default_factory=list)
+    glass: List[MicroscopeDetection] = field(default_factory=list)
+    other: List[MicroscopeDetection] = field(default_factory=list)
 
-    def extend(self, category: str, values: Iterable[float]) -> None:
-        target: List[float]
+    def _target(self, category: str) -> List[MicroscopeDetection]:
         if category == "core":
-            target = self.core
-        elif category == "glass":
-            target = self.glass
-        else:
-            target = self.other
+            return self.core
+        if category == "glass":
+            return self.glass
+        return self.other
+
+    def extend(
+        self,
+        category: str,
+        values: Iterable[float],
+        detections: Iterable[MicroscopeDetection] | None = None,
+    ) -> None:
+        target = self._target(category)
+        evidence = list(detections or [])
+        for detection in evidence:
+            detection.category = category
         for value in values:
-            if isinstance(value, (int, float)) and math.isfinite(value) and value > 0:
-                target.append(float(value))
+            if not isinstance(value, (int, float)):
+                continue
+            numeric = float(value)
+            if not math.isfinite(numeric) or numeric <= 0:
+                continue
+            match = None
+            for candidate in list(evidence):
+                if candidate.matches(numeric):
+                    match = candidate
+                    evidence.remove(candidate)
+                    break
+            if match is None:
+                match = MicroscopeDetection(
+                    value=numeric,
+                    image_path=None,
+                    source="manual" if not detections else "ocr",
+                )
+                match.category = category
+            target.append(match)
+
+    def _best_detection_sequence(
+        self, categories: Sequence[str], prefer: str
+    ) -> Optional[MicroscopeDetection]:
+        for category in categories:
+            target = self._target(category)
+            if not target:
+                continue
+            value = _select_microscope_value([entry.value for entry in target], prefer)
+            if value is None:
+                continue
+            chosen = self._match_detection(target, value)
+            if chosen is not None:
+                return chosen
+        return None
+
+    @staticmethod
+    def _match_detection(
+        candidates: Sequence[MicroscopeDetection], value: float
+    ) -> Optional[MicroscopeDetection]:
+        best: MicroscopeDetection | None = None
+        best_delta: float | None = None
+        for detection in candidates:
+            try:
+                delta = abs(float(detection.value) - float(value))
+            except Exception:
+                continue
+            if best is None or (best_delta is not None and delta < best_delta) or best_delta is None:
+                best = detection
+                best_delta = delta
+        return best
 
     def best_core(self) -> Optional[float]:
-        for pool in (self.core, self.other, self.glass):
-            candidate = _select_microscope_value(pool, prefer="min")
-            if candidate is not None:
-                return candidate
-        return None
+        detection = self.best_core_detection()
+        return detection.value if detection is not None else None
+
+    def best_core_detection(self) -> Optional[MicroscopeDetection]:
+        return self._best_detection_sequence(("core", "other", "glass"), "min")
 
     def best_glass(self) -> Optional[float]:
-        for pool in (self.glass, self.other, self.core):
-            candidate = _select_microscope_value(pool, prefer="max")
-            if candidate is not None:
-                return candidate
-        return None
+        detection = self.best_glass_detection()
+        return detection.value if detection is not None else None
+
+    def best_glass_detection(self) -> Optional[MicroscopeDetection]:
+        return self._best_detection_sequence(("glass", "other", "core"), "max")
 
 
 @dataclass
@@ -471,6 +624,8 @@ class VideoMetricsSummary:
 
     temperatures: List[float] = field(default_factory=list)
     underpressures: List[float] = field(default_factory=list)
+    winding_speeds: List[float] = field(default_factory=list)
+    glass_feeds: List[float] = field(default_factory=list)
 
     def record(self, result) -> None:
         temp = getattr(result, "median_temperature", None)
@@ -487,12 +642,32 @@ class VideoMetricsSummary:
             under_value = None
         if under_value is not None and isinstance(under_value, (int, float)) and math.isfinite(float(under_value)):
             self.underpressures.append(float(under_value))
+        speed_fn = getattr(result, "median_winding_speed", None)
+        if callable(speed_fn):
+            speed_value = speed_fn()
+        else:
+            speed_value = None
+        if speed_value is not None and isinstance(speed_value, (int, float)) and math.isfinite(float(speed_value)):
+            self.winding_speeds.append(float(speed_value))
+        feed_fn = getattr(result, "median_glass_feed", None)
+        if callable(feed_fn):
+            feed_value = feed_fn()
+        else:
+            feed_value = None
+        if feed_value is not None and isinstance(feed_value, (int, float)) and math.isfinite(float(feed_value)):
+            self.glass_feeds.append(float(feed_value))
 
     def temperature(self) -> Optional[float]:
         return _select_microscope_value(self.temperatures, "median", allow_negative=True)
 
     def underpressure(self) -> Optional[float]:
         return _select_microscope_value(self.underpressures, "median", allow_negative=True)
+
+    def winding_speed(self) -> Optional[float]:
+        return _select_microscope_value(self.winding_speeds, "median")
+
+    def glass_feed(self) -> Optional[float]:
+        return _select_microscope_value(self.glass_feeds, "median")
 
 
 def _logger(logger: Optional[logging.Logger]) -> logging.Logger:
@@ -989,7 +1164,7 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
     return [float(v) for v in selected.values()]
 
 
-def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[float]:
+def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> MicroscopeOCRResult:
     """Attempt to OCR diameter annotations from a microscope capture."""
 
     log = logger or logging.getLogger(LOGGER_NAME)
@@ -997,24 +1172,27 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
         import pytesseract  # type: ignore[import-not-found]
     except ImportError:
         log.debug("pytesseract is not installed; skipping microscope OCR for %s", path)
-        return []
+        return MicroscopeOCRResult()
 
     if not ensure_tesseract_available(pytesseract, log):
         log.debug("Tesseract executable unavailable; skipping microscope OCR for %s", path)
-        return []
+        return MicroscopeOCRResult()
 
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
     except ImportError:
         log.debug("Pillow is not installed; skipping microscope OCR for %s", path)
-        return []
+        return MicroscopeOCRResult()
 
     try:
         with Image.open(path) as img:
             base = img.convert("RGB")
     except Exception:
         log.warning("Failed to open microscope image %s", path, exc_info=True)
-        return []
+        return MicroscopeOCRResult()
+
+    result = MicroscopeOCRResult()
+    base_width, base_height = base.size
 
     def _resample(image):
         width, height = image.size
@@ -1063,74 +1241,243 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> List[fl
         ImageOps.invert(binary_gray),
     ]
 
+    configs: List[str] = []
+    for psm in (6, 7, 8, 11):
+        configs.append(MICROSCOPE_OCR_CONFIG.replace("--psm 6", f"--psm {psm}", 1))
+
     tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
     output_enum = getattr(pytesseract, "Output", None)
-    for variant in variants:
-        try:
-            text = pytesseract.image_to_string(variant, config=MICROSCOPE_OCR_CONFIG)
-        except tesseract_not_found:
-            log.warning(
-                "Tesseract executable vanished while processing %s; aborting microscope OCR",
-                path,
-            )
-            return []
-        except Exception:
-            continue
-        _append_candidate(text)
 
-        if output_enum is not None:
+    @dataclass
+    class _OCRWord:
+        text: str
+        left: int
+        top: int
+        width: int
+        height: int
+        conf: Optional[float]
+
+    def _group_words(data_dict: dict) -> List[List[_OCRWord]]:
+        words: Dict[Tuple[int, int, int, int], List[_OCRWord]] = {}
+        texts = data_dict.get("text", [])
+        lefts = data_dict.get("left", [])
+        tops = data_dict.get("top", [])
+        widths = data_dict.get("width", [])
+        heights = data_dict.get("height", [])
+        confs = data_dict.get("conf", [])
+        page_nums = data_dict.get("page_num", [])
+        block_nums = data_dict.get("block_num", [])
+        par_nums = data_dict.get("par_num", [])
+        line_nums = data_dict.get("line_num", [])
+
+        def _item(seq: Sequence[object], index: int, default: int = 0) -> int:
             try:
-                data = pytesseract.image_to_data(
-                    variant,
-                    config=MICROSCOPE_OCR_CONFIG,
-                    output_type=output_enum.DICT,
-                )
+                value = seq[index]
+            except Exception:
+                return default
+            try:
+                return int(value)
+            except Exception:
+                return default
+
+        def _float_item(seq: Sequence[object], index: int) -> Optional[float]:
+            try:
+                value = seq[index]
+            except Exception:
+                return None
+            try:
+                numeric = float(value)
+            except Exception:
+                return None
+            if not math.isfinite(numeric):
+                return None
+            return numeric
+
+        for idx, raw in enumerate(texts):
+            token = (raw or "").strip()
+            if not token:
+                continue
+            key = (
+                _item(page_nums, idx),
+                _item(block_nums, idx),
+                _item(par_nums, idx),
+                _item(line_nums, idx),
+            )
+            word = _OCRWord(
+                text=token,
+                left=_item(lefts, idx),
+                top=_item(tops, idx),
+                width=max(_item(widths, idx), 0),
+                height=max(_item(heights, idx), 0),
+                conf=_float_item(confs, idx),
+            )
+            words.setdefault(key, []).append(word)
+
+        lines = []
+        for entries in words.values():
+            entries.sort(key=lambda w: w.left)
+            lines.append(entries)
+        return lines
+
+    seen_detections: Set[Tuple[float, int, int, int, int]] = set()
+
+    def _extract_line_detections(
+        words: Sequence[_OCRWord], variant_size: Tuple[int, int]
+    ) -> List[MicroscopeDetection]:
+        detections: List[MicroscopeDetection] = []
+        vw, vh = variant_size
+        if vw <= 0 or vh <= 0:
+            return detections
+        scale_x = base_width / float(vw)
+        scale_y = base_height / float(vh)
+        for idx, word in enumerate(words):
+            token = word.text
+            if not MICROSCOPE_NUMBER_TOKEN.match(token):
+                continue
+            raw_value = token.replace(",", ".")
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            if not math.isfinite(value) or value <= 0:
+                continue
+            unit_idx: Optional[int] = None
+            for offset in range(1, 4):
+                probe_idx = idx + offset
+                if probe_idx >= len(words):
+                    break
+                probe_text = words[probe_idx].text.lower().replace("μ", "µ")
+                if any(hint in probe_text for hint in MICROSCOPE_UNIT_HINTS):
+                    unit_idx = probe_idx
+                    break
+            if unit_idx is None:
+                continue
+            marker: Optional[int] = None
+            start_idx = idx
+            for offset in range(1, 3):
+                prev_idx = idx - offset
+                if prev_idx < 0:
+                    break
+                prev_text = words[prev_idx].text.strip().replace("μ", MICRO_SIGN)
+                if any(hint in prev_text for hint in ("[1", "1]", "[1]", "1", "[1")):
+                    marker = 1
+                    start_idx = min(start_idx, prev_idx)
+                    break
+                if any(hint in prev_text for hint in ("[2", "2]", "[2]", "2", "[2")):
+                    marker = 2
+                    start_idx = min(start_idx, prev_idx)
+                    break
+            tokens = words[start_idx : unit_idx + 1]
+            left = min(entry.left for entry in tokens)
+            top = min(entry.top for entry in tokens)
+            right = max(entry.left + entry.width for entry in tokens)
+            bottom = max(entry.top + entry.height for entry in tokens)
+            left_base = max(int(round(left * scale_x)), 0)
+            top_base = max(int(round(top * scale_y)), 0)
+            right_base = min(int(round(right * scale_x)), base_width)
+            bottom_base = min(int(round(bottom * scale_y)), base_height)
+            if right_base <= left_base or bottom_base <= top_base:
+                continue
+            confidences = [
+                entry.conf
+                for entry in tokens
+                if isinstance(entry.conf, (int, float)) and entry.conf >= 0
+            ]
+            confidence = None
+            if confidences:
+                confidence = float(sum(confidences) / len(confidences))
+            detection = MicroscopeDetection(
+                value=value,
+                image_path=path,
+                bbox=(left_base, top_base, right_base, bottom_base),
+                text=" ".join(entry.text for entry in tokens),
+                source="ocr",
+                confidence=confidence,
+                marker=marker,
+            )
+            detections.append(detection)
+        return detections
+
+    for variant in variants:
+        variant_size = variant.size
+        for config in configs:
+            try:
+                text = pytesseract.image_to_string(variant, config=config)
             except tesseract_not_found:
                 log.warning(
                     "Tesseract executable vanished while processing %s; aborting microscope OCR",
                     path,
                 )
-                return []
+                return result
             except Exception:
-                data = None
-            if isinstance(data, dict) and data.get("text"):
-                current_tokens: List[str] = []
-                last_key: Optional[Tuple[int, int, int, int]] = None
-                text_entries = data.get("text", [])
-                page_nums = data.get("page_num", [])
-                block_nums = data.get("block_num", [])
-                par_nums = data.get("par_num", [])
-                line_nums = data.get("line_num", [])
-                for idx, raw in enumerate(text_entries):
-                    token = (raw or "").strip()
-                    if not token:
-                        continue
-                    key = (
-                        page_nums[idx] if idx < len(page_nums) else 0,
-                        block_nums[idx] if idx < len(block_nums) else 0,
-                        par_nums[idx] if idx < len(par_nums) else 0,
-                        line_nums[idx] if idx < len(line_nums) else 0,
+                continue
+            _append_candidate(text)
+
+            if output_enum is not None:
+                try:
+                    data = pytesseract.image_to_data(
+                        variant,
+                        config=config,
+                        output_type=output_enum.DICT,
                     )
-                    if last_key is None:
-                        current_tokens = [token]
-                        last_key = key
-                        continue
-                    if key != last_key and current_tokens:
-                        _append_candidate(" ".join(current_tokens))
-                        current_tokens = [token]
-                        last_key = key
-                        continue
-                    current_tokens.append(token)
-                    last_key = key
-                if current_tokens:
-                    _append_candidate(" ".join(current_tokens))
+                except tesseract_not_found:
+                    log.warning(
+                        "Tesseract executable vanished while processing %s; aborting microscope OCR",
+                        path,
+                    )
+                    return result
+                except Exception:
+                    data = None
+                if isinstance(data, dict) and data.get("text"):
+                    for line in _group_words(data):
+                        if not line:
+                            continue
+                        line_text = " ".join(word.text for word in line)
+                        _append_candidate(line_text)
+                        for detection in _extract_line_detections(line, variant_size):
+                            bbox = detection.bbox or (0, 0, 0, 0)
+                            key = (
+                                round(detection.value, 2),
+                                bbox[0],
+                                bbox[1],
+                                bbox[2],
+                                bbox[3],
+                            )
+                            if key in seen_detections:
+                                continue
+                            result.detections.append(detection)
+                            seen_detections.add(key)
+                            result.texts.append(line_text)
 
-        if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
-            values = _parse_microscope_candidates(candidates)
-            if values:
-                return values
+            if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
+                values = _parse_microscope_candidates(candidates)
+                if values:
+                    for value in values:
+                        result.append_value(value)
+                    break
+        if result.values:
+            break
 
-    return _parse_microscope_candidates(candidates)
+    if not result.values:
+        parsed = _parse_microscope_candidates(candidates)
+        for value in parsed:
+            result.append_value(value)
+
+    if not result.values and result.detections:
+        seen_keys: Dict[float, float] = {}
+        for detection in result.detections:
+            key = round(detection.value, 2)
+            seen_keys.setdefault(key, detection.value)
+        result.values.extend(seen_keys.values())
+
+    if result.values:
+        deduped: Dict[float, float] = {}
+        for value in result.values:
+            key = round(float(value), 2)
+            deduped.setdefault(key, float(value))
+        result.values = list(deduped.values())
+
+    return result
 
 
 def _group_microscope_measurements(
@@ -1182,14 +1529,24 @@ def _group_microscope_measurements(
             continue
         category = _microscope_category(path)
         try:
-            values = _extract_microscope_diameters(path, log)
+            extracted = _extract_microscope_diameters(path, log)
         except Exception:
             log.exception("Microscope OCR failed for %s", path)
             _notify()
             continue
-        if values:
+        if isinstance(extracted, MicroscopeOCRResult):
+            values = list(extracted.values)
+            detections = list(extracted.detections)
+        else:
+            values = [
+                float(v)
+                for v in extracted
+                if isinstance(v, (int, float)) and math.isfinite(float(v)) and float(v) > 0
+            ]
+            detections = []
+        if values or detections:
             record = grouped.setdefault(key, MicroscopeMeasurements())
-            record.extend(category, values)
+            record.extend(category, values, detections)
         _notify()
     for key, override in MANUAL_DIAMETER_OVERRIDES.items():
         record = grouped.get(key)
@@ -1198,10 +1555,32 @@ def _group_microscope_measurements(
             grouped[key] = record
         d_override = override.get("d")
         if d_override is not None and not record.core:
-            record.extend("core", [d_override])
+            record.extend(
+                "core",
+                [d_override],
+                [
+                    MicroscopeDetection(
+                        value=float(d_override),
+                        image_path=None,
+                        source="manual",
+                        category="core",
+                    )
+                ],
+            )
         D_override = override.get("D")
         if D_override is not None and not record.glass:
-            record.extend("glass", [D_override])
+            record.extend(
+                "glass",
+                [D_override],
+                [
+                    MicroscopeDetection(
+                        value=float(D_override),
+                        image_path=None,
+                        source="manual",
+                        category="glass",
+                    )
+                ],
+            )
     return grouped
 
 
@@ -1773,6 +2152,10 @@ def _embed_plots_in_excel_openpyxl(
     plot_dir: Path,
     log: logging.Logger,
     figure_size: Tuple[float, float],
+    *,
+    microscope_columns: Sequence[str] = (),
+    microscope_crops: Optional[Dict[str, Path]] = None,
+    highlight_map: Optional[Dict[str, Set[int]]] = None,
 ) -> None:
     """Insert Matplotlib plot images directly into the Excel export."""
 
@@ -1781,13 +2164,17 @@ def _embed_plots_in_excel_openpyxl(
     if dataframe.empty:
         return
     figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
-    if not figure_columns:
+    microscope_columns = [
+        column for column in microscope_columns if column in dataframe.columns
+    ]
+    if not figure_columns and not microscope_columns:
         return
 
     try:
         from openpyxl import load_workbook
         from openpyxl.drawing.image import Image as XLImage
         from openpyxl.utils import get_column_letter
+        from openpyxl.styles import PatternFill
     except ImportError:  # pragma: no cover - optional dependency guard
         log.warning("openpyxl is required to embed plots into Excel workbooks")
         return
@@ -1868,6 +2255,63 @@ def _embed_plots_in_excel_openpyxl(
 
                 inserted = True
 
+            for column in microscope_columns:
+                value = row.get(column)
+                if not isinstance(value, str):
+                    continue
+                key = value.strip()
+                if not key:
+                    continue
+                image_path = None
+                if microscope_crops:
+                    image_path = microscope_crops.get(key)
+                if image_path is None:
+                    candidate = Path(key)
+                    if candidate.exists():
+                        image_path = candidate
+                if image_path is None or not image_path.exists():
+                    continue
+                try:
+                    image = XLImage(str(image_path))
+                except Exception:
+                    log.exception(
+                        "Failed to load microscope image %s for Excel export", image_path
+                    )
+                    continue
+                column_index = dataframe.columns.get_loc(column) + 1
+                row_number = row_idx + 2
+                column_letter = get_column_letter(column_index)
+                cell_reference = f"{column_letter}{row_number}"
+                worksheet[cell_reference].value = None
+                worksheet.add_image(image, cell_reference)
+                width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
+                if height_px:
+                    height_in = height_px / (dpi_y or EXCEL_EMBED_DPI)
+                    required_height = _excel_row_height(height_in)
+                    existing = worksheet.row_dimensions[row_number].height or 0.0
+                    worksheet.row_dimensions[row_number].height = max(existing, required_height)
+                if width_px:
+                    width_in = width_px / (dpi_x or EXCEL_EMBED_DPI)
+                    required_width = _excel_column_width(width_in)
+                    existing_width = worksheet.column_dimensions[column_letter].width or 0.0
+                    worksheet.column_dimensions[column_letter].width = max(
+                        existing_width, required_width
+                    )
+                inserted = True
+
+        if highlight_map:
+            fill = PatternFill(fill_type="solid", start_color="FFF4B5", end_color="FFF4B5")
+            for column, rows in highlight_map.items():
+                if column not in dataframe.columns:
+                    continue
+                column_index = dataframe.columns.get_loc(column) + 1
+                column_letter = get_column_letter(column_index)
+                for row_idx in rows:
+                    if row_idx < 0 or row_idx >= len(reset_df):
+                        continue
+                    row_number = row_idx + 2
+                    worksheet[f"{column_letter}{row_number}"].fill = fill
+
         if inserted:
             workbook.save(excel_path)
     finally:
@@ -1882,6 +2326,10 @@ def _embed_assets_with_xlsxwriter(
     origin_artifacts: Dict[str, OriginArtifact],
     figure_size: Tuple[float, float],
     log: logging.Logger,
+    *,
+    microscope_crops: Optional[Dict[str, Path]] = None,
+    microscope_columns: Sequence[str] = (),
+    highlight_map: Optional[Dict[str, Set[int]]] = None,
 ) -> None:
     try:
         workbook = writer.book
@@ -1898,7 +2346,10 @@ def _embed_assets_with_xlsxwriter(
         for column in ("Figure — 1000 mA (Origin)", "Figure — low mA (Origin)")
         if column in dataframe.columns
     ]
-    if not figure_columns and not origin_columns:
+    microscope_columns = [
+        column for column in microscope_columns if column in dataframe.columns
+    ]
+    if not figure_columns and not origin_columns and not microscope_columns:
         return
 
     reset_df = dataframe.reset_index(drop=True)
@@ -2019,6 +2470,47 @@ def _embed_assets_with_xlsxwriter(
                 _excel_column_width(target_width_in),
             )
 
+        for column in microscope_columns:
+            value = row.get(column)
+            if not isinstance(value, str):
+                continue
+            key = value.strip()
+            if not key:
+                continue
+            image_path = None
+            if microscope_crops:
+                image_path = microscope_crops.get(key)
+            if image_path is None:
+                candidate = Path(key)
+                if candidate.exists():
+                    image_path = candidate
+            if image_path is None or not image_path.exists():
+                continue
+            width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
+            if not width_px:
+                width_px = 180
+            if not height_px:
+                height_px = 140
+            width_in = width_px / (dpi_x or EXCEL_EMBED_DPI)
+            height_in = height_px / (dpi_y or EXCEL_EMBED_DPI)
+            column_index = dataframe.columns.get_loc(column)
+            worksheet.write_blank(row_number, column_index, None)
+            try:
+                worksheet.insert_image(row_number, column_index, str(image_path))
+            except Exception:
+                log.exception("Failed to insert microscope image %s", image_path)
+                continue
+            ensure_row_height(
+                row_number,
+                int(round(height_in * EXCEL_EMBED_DPI)),
+                _excel_row_height(height_in),
+            )
+            ensure_column_width(
+                column_index,
+                int(round(width_in * EXCEL_EMBED_DPI)),
+                _excel_column_width(width_in),
+            )
+
         for column in origin_columns:
             value = row.get(column)
             if not isinstance(value, str):
@@ -2052,6 +2544,24 @@ def _embed_assets_with_xlsxwriter(
                 int(target_width_px),
                 _excel_column_width(target_width_in),
             )
+
+    if highlight_map:
+        highlight_format = workbook.add_format({"bg_color": "#FFF4B5"})
+        for column, rows in highlight_map.items():
+            if column not in dataframe.columns:
+                continue
+            column_index = dataframe.columns.get_loc(column)
+            for row_idx in rows:
+                if row_idx < 0 or row_idx >= len(reset_df):
+                    continue
+                value = reset_df.iloc[row_idx, column_index]
+                excel_row = row_idx + 1
+                if pd.isna(value):
+                    worksheet.write_blank(excel_row, column_index, None, highlight_format)
+                elif isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    worksheet.write_number(excel_row, column_index, float(value), highlight_format)
+                else:
+                    worksheet.write(excel_row, column_index, value, highlight_format)
 
 def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
@@ -2100,6 +2610,19 @@ def build_database(
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     output_name = _normalise_output_name(getattr(config, "output_name", DEFAULT_OUTPUT_NAME))
+
+    include_crops = bool(getattr(config, "include_microscope_crops", False))
+    highlight_ocr = bool(getattr(config, "highlight_ocr_values", False))
+    output_columns = list(OUTPUT_COLUMNS)
+    microscope_image_columns: Tuple[str, ...] = ()
+    if include_crops:
+        microscope_image_columns = MICROSCOPE_IMAGE_COLUMNS
+        if "d (µm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[0] not in output_columns:
+            d_index = output_columns.index("d (µm)")
+            output_columns.insert(d_index + 1, MICROSCOPE_IMAGE_COLUMNS[0])
+        if "D (µm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[1] not in output_columns:
+            D_index = output_columns.index("D (µm)")
+            output_columns.insert(D_index + 1, MICROSCOPE_IMAGE_COLUMNS[1])
 
     raw_backends = tuple(config.plot_backends) if config.plot_backends else ()
     cleaned_backends = []
@@ -2185,6 +2708,9 @@ def build_database(
         log,
         progress_callback=video_callback,
     )
+    microscope_crop_dir = output_dir / "microscope_crops"
+    microscope_crop_map: Dict[str, Path] = {}
+    ocr_highlights: Dict[str, Set[int]] = {}
     if analysis_total_local and analysis_done < analysis_total_local:
         analysis_done = analysis_total_local
         _analysis_notify()
@@ -2235,7 +2761,7 @@ def build_database(
     for (composition, draw_x, piece_y), records in sorted(grouped.items()):
         draw_info = fabrication_index.get_draw(composition, draw_x)
         piece_info = fabrication_index.get_piece(composition, draw_x, piece_y)
-        row: Dict[str, object] = {column: None for column in OUTPUT_COLUMNS}
+        row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
         row["Microwire"] = _microwire_label(draw_x, piece_y)
         row["d (µm)"] = _value_for_output(piece_info, "d_um")
@@ -2250,21 +2776,28 @@ def build_database(
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
         row["Notes"] = _compose_notes(draw_info, piece_info)
+        row_highlights: Set[str] = set()
+        d_detection: Optional[MicroscopeDetection] = None
+        D_detection: Optional[MicroscopeDetection] = None
+        d_numeric = _parse_numeric(row["d (µm)"])
+        D_numeric = _parse_numeric(row["D (µm)"])
+        ratio_numeric = _parse_numeric(row["d/D"])
         microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
-            d_numeric = _parse_numeric(row["d (µm)"])
             if d_numeric is None:
-                d_from_micro = microscope_data.best_core()
-                if d_from_micro is not None:
-                    row["d (µm)"] = d_from_micro
-                    d_numeric = d_from_micro
-            D_numeric = _parse_numeric(row["D (µm)"])
+                d_detection = microscope_data.best_core_detection()
+                if d_detection is not None:
+                    row["d (µm)"] = d_detection.value
+                    d_numeric = d_detection.value
+                    if highlight_ocr and d_detection.source == "ocr":
+                        row_highlights.add("d (µm)")
             if D_numeric is None:
-                D_from_micro = microscope_data.best_glass()
-                if D_from_micro is not None:
-                    row["D (µm)"] = D_from_micro
-                    D_numeric = D_from_micro
-            ratio_numeric = _parse_numeric(row["d/D"])
+                D_detection = microscope_data.best_glass_detection()
+                if D_detection is not None:
+                    row["D (µm)"] = D_detection.value
+                    D_numeric = D_detection.value
+                    if highlight_ocr and D_detection.source == "ocr":
+                        row_highlights.add("D (µm)")
             if ratio_numeric is None and d_numeric is not None and D_numeric not in (None, 0):
                 try:
                     ratio = d_numeric / D_numeric
@@ -2272,6 +2805,38 @@ def build_database(
                     ratio = None
                 if ratio is not None and math.isfinite(ratio):
                     row["d/D"] = ratio
+                    ratio_numeric = ratio
+        if include_crops:
+            if MICROSCOPE_IMAGE_COLUMNS[0] in row:
+                row[MICROSCOPE_IMAGE_COLUMNS[0]] = row.get(MICROSCOPE_IMAGE_COLUMNS[0])
+            if MICROSCOPE_IMAGE_COLUMNS[1] in row:
+                row[MICROSCOPE_IMAGE_COLUMNS[1]] = row.get(MICROSCOPE_IMAGE_COLUMNS[1])
+            if d_detection and d_detection.image_path is not None:
+                crop_path = d_detection.ensure_crop(
+                    microscope_crop_dir,
+                    f"{composition}_{draw_x}_{piece_y}_d",
+                )
+                if crop_path is not None:
+                    try:
+                        rel_path = crop_path.relative_to(output_dir)
+                        rel_text = str(rel_path).replace(os.sep, "/")
+                    except ValueError:
+                        rel_text = str(crop_path)
+                    row[MICROSCOPE_IMAGE_COLUMNS[0]] = rel_text
+                    microscope_crop_map[rel_text] = crop_path
+            if D_detection and D_detection.image_path is not None:
+                crop_path = D_detection.ensure_crop(
+                    microscope_crop_dir,
+                    f"{composition}_{draw_x}_{piece_y}_D",
+                )
+                if crop_path is not None:
+                    try:
+                        rel_path = crop_path.relative_to(output_dir)
+                        rel_text = str(rel_path).replace(os.sep, "/")
+                    except ValueError:
+                        rel_text = str(crop_path)
+                    row[MICROSCOPE_IMAGE_COLUMNS[1]] = rel_text
+                    microscope_crop_map[rel_text] = crop_path
         video_data = video_index.get((composition, draw_x, piece_y))
         if video_data is None:
             video_data = video_index.get((composition, draw_x, None))
@@ -2281,11 +2846,29 @@ def build_database(
                 temp = video_data.temperature()
                 if temp is not None:
                     row["Temperature (°C)"] = temp
+                    if highlight_ocr:
+                        row_highlights.add("Temperature (°C)")
             under_numeric = _parse_numeric(row["Underpressure"])
             if under_numeric is None:
                 under_value = video_data.underpressure()
                 if under_value is not None:
                     row["Underpressure"] = under_value
+                    if highlight_ocr:
+                        row_highlights.add("Underpressure")
+            wind_numeric = _parse_numeric(row["Winding speed (m/min)"])
+            if wind_numeric is None:
+                wind = video_data.winding_speed()
+                if wind is not None:
+                    row["Winding speed (m/min)"] = wind
+                    if highlight_ocr:
+                        row_highlights.add("Winding speed (m/min)")
+            glass_numeric = _parse_numeric(row["Glass feeding (mm/min)"])
+            if glass_numeric is None:
+                glass = video_data.glass_feed()
+                if glass is not None:
+                    row["Glass feeding (mm/min)"] = glass
+                    if highlight_ocr:
+                        row_highlights.add("Glass feeding (mm/min)")
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
@@ -2405,12 +2988,17 @@ def build_database(
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
                     row["Figure — low mA (Origin)"] = cached_origin.descriptor
+        row_index = len(rows)
         rows.append(row)
+        if row_highlights:
+            for column in row_highlights:
+                if column in output_columns:
+                    ocr_highlights.setdefault(column, set()).add(row_index)
         stats.rows_built += 1
     if rows:
-        df_out = pd.DataFrame(rows, columns=OUTPUT_COLUMNS)
+        df_out = pd.DataFrame(rows, columns=output_columns)
     else:
-        df_out = pd.DataFrame(columns=OUTPUT_COLUMNS)
+        df_out = pd.DataFrame(columns=output_columns)
     exports: Dict[str, Path] = {}
     requested_formats = tuple(dict.fromkeys(config.export_formats)) if config.export_formats else ("csv",)
     behaviours = {
@@ -2449,6 +3037,10 @@ def build_database(
             columns_to_blank = [
                 column for column in (FIGURE_COLUMNS + ORIGIN_FIGURE_COLUMNS) if column in excel_frame.columns
             ]
+            if microscope_image_columns:
+                columns_to_blank.extend(
+                    column for column in microscope_image_columns if column in excel_frame.columns
+                )
             for column in columns_to_blank:
                 excel_frame[column] = None
             try:
@@ -2465,6 +3057,9 @@ def build_database(
                             origin_artifacts,
                             figure_size,
                             log,
+                            microscope_crops=microscope_crop_map if include_crops else None,
+                            microscope_columns=microscope_image_columns,
+                            highlight_map=ocr_highlights if highlight_ocr else None,
                         )
                     except Exception:
                         log.exception("Failed to embed figures into %s", excel_path)
@@ -2478,6 +3073,9 @@ def build_database(
                         plot_dir,
                         log,
                         figure_size,
+                        microscope_columns=microscope_image_columns,
+                        microscope_crops=microscope_crop_map if include_crops else None,
+                        highlight_map=ocr_highlights if highlight_ocr else None,
                     )
                 except Exception:
                     log.exception("Failed to embed figure images into %s", excel_path)
@@ -2508,6 +3106,8 @@ def build_database(
         plot_paths=plot_records,
         origin_artifacts=origin_artifacts,
         stats=stats,
+        microscope_crops=microscope_crop_map if include_crops else {},
+        ocr_highlights=ocr_highlights if highlight_ocr else {},
     )
 
 
