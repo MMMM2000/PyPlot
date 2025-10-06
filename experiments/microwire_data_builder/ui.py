@@ -642,9 +642,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_timestamp: float | None = None
         self._seconds_per_unit_ema: float | None = None
         self._last_eta_seconds: float | None = None
+        self._overall_progress_current: int = 0
+        self._overall_progress_total: int = 0
+        self._progress_counts_text: str = ""
         self._stage_order: tuple[str, ...] = ("prep", "analysis", "build", "final")
         self._stage_timing_history: dict[str, dict[str, float | int]] = {}
         self._init_stage_tracking()
+
+        self._eta_timer = QtCore.QTimer(self)
+        self._eta_timer.setInterval(1000)
+        self._eta_timer.timeout.connect(self._on_eta_timer)
 
         cwd = Path.cwd()
         downloads_dir = Path.home() / "Downloads"
@@ -685,6 +692,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_timestamp = now
         self._seconds_per_unit_ema = None
         self._last_eta_seconds = None
+        self._overall_progress_current = 0
+        self._overall_progress_total = 0
+        self._progress_counts_text = ""
         self._init_stage_tracking()
 
     def _clear_progress_tracking(self) -> None:
@@ -693,6 +703,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_timestamp = None
         self._seconds_per_unit_ema = None
         self._last_eta_seconds = None
+        self._overall_progress_current = 0
+        self._overall_progress_total = 0
+        self._progress_counts_text = ""
         self._init_stage_tracking()
 
     def _reset_stage_metrics(self, stage: str) -> None:
@@ -817,10 +830,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 completed_units = max(int(self._stage_progress.get(stage, 0)), 0)
                 if elapsed_stage > 0 and completed_units > 0:
                     runtime_rate = elapsed_stage / completed_units
-                    _push(rates, runtime_rate, 0.35)
+                    _push(rates, runtime_rate, 0.5)
 
             if stage == active_stage and self._seconds_per_unit_ema:
-                _push(rates, self._seconds_per_unit_ema, 0.2)
+                _push(rates, self._seconds_per_unit_ema, 0.3)
 
             if not rates and global_rate is not None:
                 _push(rates, global_rate, 0.5)
@@ -880,12 +893,54 @@ class BuilderWindow(QtWidgets.QMainWindow):
             filtered = seconds
         else:
             if seconds > previous:
-                alpha = 0.2
+                alpha = 0.65
             else:
-                alpha = 0.4
+                alpha = 0.2
             filtered = previous + (seconds - previous) * alpha
         self._last_eta_seconds = max(filtered, 0.0)
         return self._last_eta_seconds
+
+    def _on_eta_timer(self) -> None:
+        self._update_eta_display()
+
+    def _resolve_active_stage(self) -> str | None:
+        for key in self._stage_order:
+            total_units = max(int(self._stage_totals.get(key, 0)), 0)
+            progress_units = min(max(int(self._stage_progress.get(key, 0)), 0), total_units)
+            if total_units > 0 and progress_units < total_units:
+                return key
+        return None
+
+    def _update_eta_display(self, now: Optional[float] = None) -> None:
+        if not self._running:
+            return
+        if not self._progress_counts_text:
+            return
+        if now is None:
+            now = time.monotonic()
+        current = max(int(self._overall_progress_current), 0)
+        total = max(int(self._overall_progress_total), 1)
+        remaining_units = max(total - current, 0)
+        eta_text: Optional[str] = None
+        if remaining_units <= 0:
+            self._last_eta_seconds = None
+            if current:
+                eta_text = "Finishing..."
+        else:
+            active_stage = self._resolve_active_stage()
+            remaining_seconds = self._estimate_remaining_seconds(now, active_stage, current, total)
+            if remaining_seconds is not None and math.isfinite(remaining_seconds):
+                smoothed = self._smooth_eta(remaining_seconds)
+                eta_text = self._format_eta(smoothed)
+            elif current > 0:
+                eta_text = "Estimating..."
+                self._last_eta_seconds = None
+
+        label_text = self._progress_counts_text
+        if eta_text:
+            label_text += f" • {eta_text}"
+        if label_text != self.progress_label.text():
+            self.progress_label.setText(label_text)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -1437,11 +1492,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.run_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
         if running:
+            if not self._eta_timer.isActive():
+                self._eta_timer.start()
             self._reset_progress_tracking()
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setValue(0)
             self.progress_label.setText("Preparing...")
         else:
+            self._eta_timer.stop()
             self._clear_progress_tracking()
             if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
                 self.progress_bar.setRange(0, 100)
@@ -1596,9 +1654,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if ema is None:
                         ema = instantaneous
                     elif instantaneous >= ema:
-                        ema = (ema * 0.6) + (instantaneous * 0.4)
+                        ema = (ema * 0.35) + (instantaneous * 0.65)
                     else:
-                        ema = (ema * 0.8) + (instantaneous * 0.2)
+                        ema = (ema * 0.9) + (instantaneous * 0.1)
                     self._seconds_per_unit_ema = max(ema, 0.0)
             self._last_progress_value = current
             self._last_progress_timestamp = now
@@ -1660,9 +1718,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if ema is None:
                         ema = instantaneous
                     elif instantaneous >= ema:
-                        ema = (ema * 0.65) + (instantaneous * 0.35)
+                        ema = (ema * 0.35) + (instantaneous * 0.65)
                     else:
-                        ema = (ema * 0.85) + (instantaneous * 0.15)
+                        ema = (ema * 0.9) + (instantaneous * 0.1)
                     metrics["ema"] = max(ema, 0.0)
             else:
                 if runtime.get("start") is None:
@@ -1704,27 +1762,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
             self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(max(0, min(100, percent)))
-
-        eta_text: Optional[str] = None
-        remaining_units = max(total - current, 0)
-        if remaining_units <= 0:
-            eta_text = "Finishing..."
-            self._last_eta_seconds = None
-        else:
-            remaining_seconds = self._estimate_remaining_seconds(
-                now, active_stage, current, total
-            )
-            if remaining_seconds is not None and math.isfinite(remaining_seconds):
-                smoothed = self._smooth_eta(remaining_seconds)
-                eta_text = self._format_eta(smoothed)
-            elif current > 0:
-                eta_text = "Estimating..."
-                self._last_eta_seconds = None
-
-        label_text = f"{current}/{total}"
-        if eta_text:
-            label_text += f" • {eta_text}"
-        self.progress_label.setText(label_text)
+        self._overall_progress_current = current
+        self._overall_progress_total = total
+        self._progress_counts_text = f"{current}/{total}"
+        self._update_eta_display(now=now)
 
     def _handle_finished(self, result: BuildResult) -> None:
         self._set_running(False)

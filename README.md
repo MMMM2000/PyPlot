@@ -378,9 +378,10 @@ plotting tools:
   continues through microscope OCR and video analysis with per-image updates,
   tracks each annealing file as the database is assembled, and finishes by
   reporting export/plot work alongside a live time-remaining estimate. The ETA
-  now blends the live moving average with per-stage timings saved from previous
-  sessions and tempers sudden speed changes, so slow OCR phases or longer
-  exports pull the prediction upward sensibly while familiar datasets settle on
+  now refreshes once per second, blends the live moving average with per-stage
+  timings saved from previous sessions, and treats sudden slowdowns as sticky so
+  brief OCR pauses or long exports immediately push the remaining time upward
+  while later speed-ups bleed in gradually. Familiar datasets still settle on
   steady remaining times after the first few runs. A **Cancel** button next to
   **Run** stops the background worker, aborts the build cleanly, and returns the
   window to an idle state once the cancellation propagates.
