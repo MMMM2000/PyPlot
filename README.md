@@ -346,7 +346,10 @@ plotting tools:
   therefore sourced directly from microscope evidence: when OCR fails the
   spreadsheet is left blank so questionable measurements stand out, and when a
   value is produced the Excel export highlights it (with the toggle enabled) and
-  links the cropped overlay automatically. The reader prioritises `*core*` images for
+  links the microscope overlay automatically. Crops focus on the recognised
+  overlay region when Tesseract reports bounding boxes and gracefully fall back
+  to the full capture whenever the bounding box is missing so there is always a
+  picture beside the diameter. The reader prioritises `*core*` images for
   \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
   markers without a closing bracket (for example `"[116.7µm"`) are repaired to
   `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
@@ -359,14 +362,16 @@ plotting tools:
   candidate measurement so the source overlay can be cropped automatically.
   The tool also accepts draw/piece tokens written with spaces or hyphens (for
   example, `5-4` or `5 4`) in addition to the original underscore format when
-  matching images to measurements.
+  matching images to measurements and records how close each OCR result is to a
+  manually verified reference list. Those references now stay in the log — if a
+  capture is missing or the OCR value drifts beyond tolerance the builder emits
+  a summary so you know which microscope passes still need attention without
+  back-filling the spreadsheet with manual numbers.
   Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,
   `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
   Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
   `brew install tesseract-lang`). The OCR pass now forces Tesseract’s LSTM engine
-  in numeric mode to stabilise bracketed diameter readings, and when OCR cannot
-  run the builder falls back to a curated table of measured diameters for the
-  reference microwires so required fields never regress to blanks. The builder now searches PATH, Homebrew/MacPorts trees,
+  in numeric mode to stabilise bracketed diameter readings. The builder now searches PATH, Homebrew/MacPorts trees,
   Windows Program Files, Chocolatey, user-level installs, and even the `.app`
   bundles that ship a private copy of the binary before giving up with a single
   warning. Setting the `TESSERACT_CMD` environment variable still overrides the
@@ -402,14 +407,14 @@ plotting tools:
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. The **Microscope review** box
-  underneath defaults to **Attach microscope crops to Excel**, which inserts two
-  columns immediately after \(d\) and \(D\) and embeds the cropped microscope
-  overlays beside each measurement so you can validate or correct them in-place.
-  Disable the checkbox when you only need the numeric values. **Highlight
-  OCR-sourced values** keeps its companion toggle so the spreadsheet tints any
-  cells where OCR (microscope or video) provided the measurement instead of the
-  fabrication spreadsheets, covering both diameter readings and fabrication
-  metrics harvested from draw videos. Use the **Figure width/height**
+  underneath keeps both toggles enabled by default: **Attach microscope crops to
+  Excel** inserts two columns immediately after \(d\) and \(D\) and embeds the
+  microscope evidence beside each measurement so you can validate or correct
+  them in-place, and **Highlight OCR-sourced values** tints any cells where OCR
+  (microscope or video) provided the measurement instead of the fabrication
+  spreadsheets, covering both diameter readings and fabrication metrics harvested
+  from draw videos. Disable either checkbox when you only need the numeric
+  values. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,

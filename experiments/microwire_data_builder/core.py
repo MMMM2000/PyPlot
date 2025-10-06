@@ -368,8 +368,8 @@ class BuilderConfig:
     plot_backends: Tuple[str, ...] = ()
     export_behaviour: Optional[Dict[str, str]] = None
     matplotlib_figsize: Tuple[float, float] = DEFAULT_FIGSIZE
-    include_microscope_crops: bool = False
-    highlight_ocr_values: bool = False
+    include_microscope_crops: bool = True
+    highlight_ocr_values: bool = True
 
 
 @dataclass
@@ -467,28 +467,30 @@ class MicroscopeDetection:
 
         if self.crop_path is not None and self.crop_path.exists():
             return self.crop_path
-        if self.image_path is None or self.bbox is None:
+        if self.image_path is None:
             return None
         try:
             from PIL import Image  # type: ignore[import-not-found]
         except ImportError:
             return None
 
-        left, top, right, bottom = self.bbox
-        if right <= left or bottom <= top:
-            return None
+        crop_bbox = self.bbox
         try:
             with Image.open(self.image_path) as img:
                 width = img.width
                 height = img.height
-                pad = int(round(max(right - left, bottom - top) * 0.25))
-                if pad > 0:
-                    left = max(left - pad, 0)
-                    top = max(top - pad, 0)
-                    right = min(right + pad, width)
-                    bottom = min(bottom + pad, height)
-                if right <= left or bottom <= top:
-                    return None
+                if crop_bbox is not None:
+                    left, top, right, bottom = crop_bbox
+                    pad = int(round(max(right - left, bottom - top) * 0.25))
+                    if pad > 0:
+                        left = max(left - pad, 0)
+                        top = max(top - pad, 0)
+                        right = min(right + pad, width)
+                        bottom = min(bottom + pad, height)
+                    if right <= left or bottom <= top:
+                        crop_bbox = None
+                if crop_bbox is None:
+                    left, top, right, bottom = 0, 0, width, height
                 output_dir.mkdir(parents=True, exist_ok=True)
                 safe_prefix = _safe_plot_stem(prefix)
                 stem = f"{safe_prefix}_{self.value:.2f}"
@@ -1551,39 +1553,46 @@ def _group_microscope_measurements(
             record = grouped.setdefault(key, MicroscopeMeasurements())
             record.extend(category, values, detections)
         _notify()
+    missing_references: List[str] = []
+    mismatched_references: List[str] = []
     for key, override in MANUAL_DIAMETER_OVERRIDES.items():
         record = grouped.get(key)
-        if record is None:
-            record = MicroscopeMeasurements()
-            grouped[key] = record
-        d_override = override.get("d")
-        if d_override is not None and not record.core:
-            record.extend(
-                "core",
-                [d_override],
-                [
-                    MicroscopeDetection(
-                        value=float(d_override),
-                        image_path=None,
-                        source="manual",
-                        category="core",
-                    )
-                ],
-            )
-        D_override = override.get("D")
-        if D_override is not None and not record.glass:
-            record.extend(
-                "glass",
-                [D_override],
-                [
-                    MicroscopeDetection(
-                        value=float(D_override),
-                        image_path=None,
-                        source="manual",
-                        category="glass",
-                    )
-                ],
-            )
+        d_expected = override.get("d")
+        D_expected = override.get("D")
+        d_actual = record.best_core() if record else None
+        D_actual = record.best_glass() if record else None
+        comp, draw, piece = key
+        label = f"{comp} {draw}/{piece}" if piece is not None else f"{comp} {draw}"
+        if d_expected is not None:
+            if d_actual is None:
+                missing_references.append(f"{label} d={d_expected}")
+            elif abs(d_actual - d_expected) > 0.5:
+                mismatched_references.append(
+                    f"{label} d expected {d_expected:.2f}µm got {d_actual:.2f}µm"
+                )
+        if D_expected is not None:
+            if D_actual is None:
+                missing_references.append(f"{label} D={D_expected}")
+            elif abs(D_actual - D_expected) > 0.5:
+                mismatched_references.append(
+                    f"{label} D expected {D_expected:.2f}µm got {D_actual:.2f}µm"
+                )
+    if missing_references:
+        preview = ", ".join(missing_references[:6])
+        if len(missing_references) > 6:
+            preview += ", …"
+        log.info(
+            "Microscope OCR is still missing %s manual reference(s): %s",
+            len(missing_references),
+            preview,
+        )
+    if mismatched_references:
+        preview = ", ".join(mismatched_references[:6])
+        if len(mismatched_references) > 6:
+            preview += ", …"
+        log.warning(
+            "Microscope OCR deviates from manual references: %s", preview
+        )
     return grouped
 
 
@@ -2614,8 +2623,8 @@ def build_database(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_name = _normalise_output_name(getattr(config, "output_name", DEFAULT_OUTPUT_NAME))
 
-    include_crops = bool(getattr(config, "include_microscope_crops", False))
-    highlight_ocr = bool(getattr(config, "highlight_ocr_values", False))
+    include_crops = bool(getattr(config, "include_microscope_crops", True))
+    highlight_ocr = bool(getattr(config, "highlight_ocr_values", True))
     output_columns = list(OUTPUT_COLUMNS)
     microscope_image_columns: Tuple[str, ...] = ()
     if include_crops:

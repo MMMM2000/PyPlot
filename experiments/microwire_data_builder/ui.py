@@ -25,6 +25,8 @@ from .core import (
     build_database,
     _normalise_output_name,
     _metadata_from_path,
+    _microscope_key,
+    _draw_key,
 )
 
 
@@ -45,8 +47,8 @@ class WorkerInputs:
     plot_backends: tuple[str, ...]
     export_behaviour: dict[str, str]
     matplotlib_figsize: tuple[float, float]
-    include_microscope_crops: bool = False
-    highlight_ocr_values: bool = False
+    include_microscope_crops: bool = True
+    highlight_ocr_values: bool = True
 
 
 FIGURE_WIDTH_DEFAULT_MM = round(DEFAULT_FIGSIZE[0] * 25.4, 1)
@@ -270,18 +272,41 @@ def collect_support_files(
                 for piece_dir in _piece_dirs(comp_dir, draw):
                     if piece_dir not in search_dirs:
                         search_dirs.append(piece_dir)
-            fragment = f"{draw}_{piece}"
+            fragment_tokens = {
+                f"{draw}_{piece}",
+                f"{draw}-{piece}",
+                f"{draw}{piece}",
+                f"{draw} {piece}",
+                f"{draw}.{piece}",
+            }
             for search_dir in search_dirs:
                 if not search_dir.is_dir():
                     continue
                 try:
-                    candidates = _iter_fragment_files(
-                        search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50
-                    )
+                    candidates: list[Path] = []
+                    for fragment in fragment_tokens:
+                        candidates.extend(
+                            _iter_fragment_files(
+                                search_dir,
+                                fragment,
+                                MICROSCOPE_EXTENSIONS,
+                                limit=50,
+                            )
+                        )
                 except Exception:
                     continue
-                for candidate in candidates:
-                    if is_microscope_candidate(candidate):
+                if not candidates:
+                    try:
+                        candidates = _iter_fragment_files(
+                            search_dir, "", MICROSCOPE_EXTENSIONS, limit=100
+                        )
+                    except Exception:
+                        continue
+                for candidate in dict.fromkeys(candidates):
+                    if not is_microscope_candidate(candidate):
+                        continue
+                    key = _microscope_key(candidate)
+                    if key == (composition, draw, piece):
                         _append_unique(auto_micro, seen_micro, candidate)
             video_dirs: list[Path] = []
             if video_root is not None:
@@ -292,13 +317,30 @@ def collect_support_files(
                 if not search_dir.is_dir():
                     continue
                 try:
-                    candidates = _iter_fragment_files(
-                        search_dir, fragment, VIDEO_EXTENSIONS, limit=40
-                    )
+                    video_candidates: list[Path] = []
+                    for fragment in fragment_tokens:
+                        video_candidates.extend(
+                            _iter_fragment_files(
+                                search_dir, fragment, VIDEO_EXTENSIONS, limit=60
+                            )
+                        )
                 except Exception:
                     continue
-                for candidate in candidates:
-                    _append_unique(videos, seen_video, candidate)
+                if not video_candidates:
+                    try:
+                        video_candidates = _iter_fragment_files(
+                            search_dir, "", VIDEO_EXTENSIONS, limit=120
+                        )
+                    except Exception:
+                        continue
+                for candidate in dict.fromkeys(video_candidates):
+                    key = _microscope_key(candidate)
+                    if key == (composition, draw, piece):
+                        _append_unique(videos, seen_video, candidate)
+                        continue
+                    draw_key = _draw_key(candidate)
+                    if draw_key == (composition, draw):
+                        _append_unique(videos, seen_video, candidate)
         finally:
             if progress_callback is not None:
                 try:
@@ -1053,12 +1095,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.include_crops_check.setToolTip(
             "Add cropped microscope images in new columns next to the d and D values"
         )
+        with QtCore.QSignalBlocker(self.include_crops_check):
+            self.include_crops_check.setChecked(True)
         microscope_layout.addWidget(self.include_crops_check)
         self.highlight_ocr_check = QtWidgets.QCheckBox("Highlight OCR-sourced values")
         self.highlight_ocr_check.stateChanged.connect(self._save_settings)
         self.highlight_ocr_check.setToolTip(
             "Tint spreadsheet cells where the value was filled from OCR instead of fabrication spreadsheets"
         )
+        with QtCore.QSignalBlocker(self.highlight_ocr_check):
+            self.highlight_ocr_check.setChecked(True)
         microscope_layout.addWidget(self.highlight_ocr_check)
         options_layout.addWidget(microscope_group)
 
@@ -1196,7 +1242,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         with QtCore.QSignalBlocker(self.include_crops_check):
             self.include_crops_check.setChecked(_read_bool("include_microscope_crops", True))
         with QtCore.QSignalBlocker(self.highlight_ocr_check):
-            self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", False))
+            self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", True))
         if hasattr(self, "microscope_recursive"):
             with QtCore.QSignalBlocker(self.microscope_recursive):
                 self.microscope_recursive.setChecked(_read_bool("microscope_recursive", True))
