@@ -341,8 +341,12 @@ plotting tools:
   piece Y. Added paths are remembered between runs.
 * **Microscope images (.jpg/.png)** – drop calibrated microscope captures for
   the same draw/piece identifiers and the builder OCRs the red overlay labels to
-  fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
-  fabrication workbook is incomplete. The reader prioritises `*core*` images for
+  fill the core diameter \(d\), glass diameter \(D\), and their ratio instead of
+  trusting fabrication spreadsheet entries. Every diameter cell in the export is
+  therefore sourced directly from microscope evidence: when OCR fails the
+  spreadsheet is left blank so questionable measurements stand out, and when a
+  value is produced the Excel export highlights it (with the toggle enabled) and
+  links the cropped overlay automatically. The reader prioritises `*core*` images for
   \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
   markers without a closing bracket (for example `"[116.7µm"`) are repaired to
   `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
@@ -392,7 +396,9 @@ plotting tools:
   used to back-fill any missing fabrication readings. The video pass now also
   extracts winding speed and glass-feeding rates when the on-screen overlays
   advertise them, so the spreadsheet columns for those metrics can be populated
-  directly from footage even when the fabrication sheet is incomplete.
+  directly from footage even when the fabrication sheet is incomplete. Fields
+  sourced from video OCR are tracked alongside the microscope highlights so you
+  can instantly see which values originated outside the fabrication workbook.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. The **Microscope review** box
@@ -402,7 +408,8 @@ plotting tools:
   Disable the checkbox when you only need the numeric values. **Highlight
   OCR-sourced values** keeps its companion toggle so the spreadsheet tints any
   cells where OCR (microscope or video) provided the measurement instead of the
-  fabrication spreadsheets. Use the **Figure width/height**
+  fabrication spreadsheets, covering both diameter readings and fabrication
+  metrics harvested from draw videos. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,

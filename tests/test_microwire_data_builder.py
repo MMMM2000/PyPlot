@@ -110,7 +110,8 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert row["File 1000 mA"] == anneal_files[0].name
     assert row["File low mA"] == anneal_files[1].name
     assert row["Low mA value (mA)"] == 100
-    assert float(row["d (µm)"]) > 0.0
+    assert pd.isna(row["d (µm)"])
+    assert pd.isna(row["D (µm)"])
     assert row["Production datetime"] == "2024-11-26 08:50:00"
     assert "csv" in result.exports
     assert Path(result.exports["csv"]).exists()
@@ -390,6 +391,7 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
         annealing_files=[high, low],
         output_dir=tmp_path / "out",
         video_files=[video_path],
+        highlight_ocr_values=True,
     )
 
     result = build_database(config)
@@ -400,6 +402,15 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
     assert float(row[underpressure_column]) == pytest.approx(-0.85)
     assert float(row[core.OUTPUT_COLUMNS[10]]) == pytest.approx(12.5)
     assert float(row[core.OUTPUT_COLUMNS[11]]) == pytest.approx(37.2)
+    highlights = result.ocr_highlights
+    for column in (
+        "Temperature (°C)",
+        "Underpressure",
+        "Winding speed (m/min)",
+        "Glass feeding (mm/min)",
+    ):
+        assert column in highlights
+        assert 0 in highlights[column]
 
 
 def test_highlight_and_crop_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -455,3 +466,5 @@ def test_highlight_and_crop_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert isinstance(crop_key, str) and crop_key in result.microscope_crops
     assert "d (µm)" in result.ocr_highlights
     assert 0 in result.ocr_highlights["d (µm)"]
+    assert "D (µm)" in result.ocr_highlights
+    assert 0 in result.ocr_highlights["D (µm)"]

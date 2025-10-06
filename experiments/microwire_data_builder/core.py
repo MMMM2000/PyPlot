@@ -551,6 +551,9 @@ class MicroscopeMeasurements:
         evidence = list(detections or [])
         for detection in evidence:
             detection.category = category
+        source = "manual"
+        if detections is not None:
+            source = "ocr"
         for value in values:
             if not isinstance(value, (int, float)):
                 continue
@@ -567,7 +570,7 @@ class MicroscopeMeasurements:
                 match = MicroscopeDetection(
                     value=numeric,
                     image_path=None,
-                    source="manual" if not detections else "ocr",
+                    source=source,
                 )
                 match.category = category
             target.append(match)
@@ -2764,9 +2767,9 @@ def build_database(
         row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
         row["Microwire"] = _microwire_label(draw_x, piece_y)
-        row["d (µm)"] = _value_for_output(piece_info, "d_um")
-        row["D (µm)"] = _value_for_output(piece_info, "D_um")
-        row["d/D"] = _value_for_output(piece_info, "d_over_D")
+        row["d (µm)"] = None
+        row["D (µm)"] = None
+        row["d/D"] = None
         row["Length (m)"] = _value_for_output(piece_info, "length_m")
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
@@ -2786,17 +2789,17 @@ def build_database(
         if microscope_data:
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
-                if d_detection is not None:
-                    row["d (µm)"] = d_detection.value
-                    d_numeric = d_detection.value
-                    if highlight_ocr and d_detection.source == "ocr":
-                        row_highlights.add("d (µm)")
+            if d_detection is not None:
+                row["d (µm)"] = d_detection.value
+                d_numeric = d_detection.value
+                if d_detection.source == "ocr":
+                    row_highlights.add("d (µm)")
             if D_numeric is None:
                 D_detection = microscope_data.best_glass_detection()
                 if D_detection is not None:
                     row["D (µm)"] = D_detection.value
                     D_numeric = D_detection.value
-                    if highlight_ocr and D_detection.source == "ocr":
+                    if D_detection.source == "ocr":
                         row_highlights.add("D (µm)")
             if ratio_numeric is None and d_numeric is not None and D_numeric not in (None, 0):
                 try:
@@ -2846,29 +2849,25 @@ def build_database(
                 temp = video_data.temperature()
                 if temp is not None:
                     row["Temperature (°C)"] = temp
-                    if highlight_ocr:
-                        row_highlights.add("Temperature (°C)")
+                    row_highlights.add("Temperature (°C)")
             under_numeric = _parse_numeric(row["Underpressure"])
             if under_numeric is None:
                 under_value = video_data.underpressure()
                 if under_value is not None:
                     row["Underpressure"] = under_value
-                    if highlight_ocr:
-                        row_highlights.add("Underpressure")
+                    row_highlights.add("Underpressure")
             wind_numeric = _parse_numeric(row["Winding speed (m/min)"])
             if wind_numeric is None:
                 wind = video_data.winding_speed()
                 if wind is not None:
                     row["Winding speed (m/min)"] = wind
-                    if highlight_ocr:
-                        row_highlights.add("Winding speed (m/min)")
+                    row_highlights.add("Winding speed (m/min)")
             glass_numeric = _parse_numeric(row["Glass feeding (mm/min)"])
             if glass_numeric is None:
                 glass = video_data.glass_feed()
                 if glass is not None:
                     row["Glass feeding (mm/min)"] = glass
-                    if highlight_ocr:
-                        row_highlights.add("Glass feeding (mm/min)")
+                    row_highlights.add("Glass feeding (mm/min)")
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
