@@ -1044,16 +1044,23 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.export_excel_check = QtWidgets.QCheckBox("Export Excel")
         self.export_excel_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.export_excel_check)
-        self.include_crops_check = QtWidgets.QCheckBox("Include microscope crops")
+
+        microscope_group = QtWidgets.QGroupBox("Microscope review")
+        microscope_layout = QtWidgets.QVBoxLayout(microscope_group)
+        microscope_layout.setContentsMargins(8, 8, 8, 8)
+        self.include_crops_check = QtWidgets.QCheckBox("Attach microscope crops to Excel")
         self.include_crops_check.stateChanged.connect(self._save_settings)
-        self.include_crops_check.setToolTip("Add cropped microscope images next to the d and D columns")
-        options_layout.addWidget(self.include_crops_check)
+        self.include_crops_check.setToolTip(
+            "Add cropped microscope images in new columns next to the d and D values"
+        )
+        microscope_layout.addWidget(self.include_crops_check)
         self.highlight_ocr_check = QtWidgets.QCheckBox("Highlight OCR-sourced values")
         self.highlight_ocr_check.stateChanged.connect(self._save_settings)
         self.highlight_ocr_check.setToolTip(
-            "Tint cells when the value was filled from OCR instead of fabrication spreadsheets"
+            "Tint spreadsheet cells where the value was filled from OCR instead of fabrication spreadsheets"
         )
-        options_layout.addWidget(self.highlight_ocr_check)
+        microscope_layout.addWidget(self.highlight_ocr_check)
+        options_layout.addWidget(microscope_group)
 
         figure_size_form = QtWidgets.QFormLayout()
         figure_size_form.setHorizontalSpacing(8)
@@ -1187,7 +1194,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
         with QtCore.QSignalBlocker(self.include_crops_check):
-            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", False))
+            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", True))
         with QtCore.QSignalBlocker(self.highlight_ocr_check):
             self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", False))
         if hasattr(self, "microscope_recursive"):

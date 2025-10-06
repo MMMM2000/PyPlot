@@ -395,11 +395,14 @@ plotting tools:
   directly from footage even when the fabrication sheet is incomplete.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
-  session using the simple single-trace template. Toggle **Include microscope
-  crops** to inject new columns immediately after \(d\) and \(D\) that embed the
-  cropped microscope overlays corresponding to each measurement, and enable
-  **Highlight OCR-sourced values** to tint any cells where OCR (microscope or
-  video) provided the measurement instead of the fabrication spreadsheets. Use the **Figure width/height**
+  session using the simple single-trace template. The **Microscope review** box
+  underneath defaults to **Attach microscope crops to Excel**, which inserts two
+  columns immediately after \(d\) and \(D\) and embeds the cropped microscope
+  overlays beside each measurement so you can validate or correct them in-place.
+  Disable the checkbox when you only need the numeric values. **Highlight
+  OCR-sourced values** keeps its companion toggle so the spreadsheet tints any
+  cells where OCR (microscope or video) provided the measurement instead of the
+  fabrication spreadsheets. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,
