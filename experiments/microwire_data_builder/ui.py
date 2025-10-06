@@ -8,7 +8,7 @@ import math
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
@@ -49,6 +49,7 @@ class WorkerInputs:
     matplotlib_figsize: tuple[float, float]
     include_microscope_crops: bool = True
     highlight_ocr_values: bool = True
+    strain_files: list[Path] = field(default_factory=list)
 
 
 FIGURE_WIDTH_DEFAULT_MM = round(DEFAULT_FIGSIZE[0] * 25.4, 1)
@@ -568,6 +569,7 @@ class BuildWorker(QtCore.QObject):
                 output_dir=inputs.output_dir,
                 microscope_files=microscope_files,
                 video_files=video_files,
+                strain_files=inputs.strain_files,
                 make_plots=bool(inputs.plot_backends),
                 export_formats=inputs.export_formats,
                 output_name=inputs.output_name,
@@ -705,6 +707,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_anneal_dir = str(cwd)
         self._last_root_dir = str(cwd)
         self._last_output_dir = str(self._default_output_dir)
+        self._last_strain_dir = str(cwd)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
         self.log_message.connect(self._append_log)
@@ -1069,6 +1072,21 @@ class BuilderWindow(QtWidgets.QMainWindow):
         micro_layout.addWidget(self.microscope_recursive)
         right_layout.addWidget(self.microscope_group, 1)
 
+        # Strain worksheet
+        self.strain_group = QtWidgets.QGroupBox("Strain worksheet")
+        strain_layout = QtWidgets.QHBoxLayout(self.strain_group)
+        strain_layout.setContentsMargins(8, 8, 8, 8)
+        self.strain_edit = QtWidgets.QLineEdit()
+        self.strain_edit.setPlaceholderText("Select an Excel worksheet with strain data…")
+        strain_layout.addWidget(self.strain_edit, 1)
+        self.strain_button = QtWidgets.QPushButton("Browse…")
+        self.strain_button.clicked.connect(self._select_strain_file)
+        strain_layout.addWidget(self.strain_button)
+        self.clear_strain_button = QtWidgets.QPushButton("Clear")
+        self.clear_strain_button.clicked.connect(self._clear_strain_file)
+        strain_layout.addWidget(self.clear_strain_button)
+        right_layout.addWidget(self.strain_group)
+
         # Options
         self.options_group = QtWidgets.QGroupBox("Options")
         options_layout = QtWidgets.QVBoxLayout(self.options_group)
@@ -1266,6 +1284,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(output_name_value, str) and output_name_value.strip():
             self.output_name_edit.setText(output_name_value)
 
+        strain_path_value = self.settings.value("strain_path", "")
+        if isinstance(strain_path_value, str) and strain_path_value.strip():
+            self.strain_edit.setText(strain_path_value)
+            try:
+                self._last_strain_dir = str(Path(strain_path_value).expanduser().parent)
+            except Exception:
+                pass
+
         last_microscope = self.settings.value("last_microscope_dir", "")
         if isinstance(last_microscope, str) and last_microscope.strip():
             self._last_microscope_dir = last_microscope
@@ -1278,6 +1304,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         last_output = self.settings.value("last_output_dir", "")
         if isinstance(last_output, str) and last_output.strip():
             self._last_output_dir = last_output
+        last_strain = self.settings.value("last_strain_dir", "")
+        if isinstance(last_strain, str) and last_strain.strip():
+            self._last_strain_dir = last_strain
 
         timing_value = self.settings.value("stage_timing", "")
         if isinstance(timing_value, str) and timing_value.strip():
@@ -1324,10 +1353,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("figure_width", self.figure_width_spin.value())
         self.settings.setValue("figure_height", self.figure_height_spin.value())
         self.settings.setValue("output_name", self.output_name_edit.text())
+        self.settings.setValue("strain_path", self.strain_edit.text())
         self.settings.setValue("last_microscope_dir", self._last_microscope_dir)
         self.settings.setValue("last_anneal_dir", self._last_anneal_dir)
         self.settings.setValue("last_root_dir", self._last_root_dir)
         self.settings.setValue("last_output_dir", self._last_output_dir)
+        self.settings.setValue("last_strain_dir", self._last_strain_dir)
         self.settings.setValue("microscope_recursive", self.microscope_recursive.isChecked())
         self.settings.setValue("stage_timing", json.dumps(self._stage_timing_history))
         self.settings.sync()
@@ -1439,6 +1470,24 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.microscope_list.clear()
         self._save_settings()
 
+    def _select_strain_file(self) -> None:
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select strain worksheet",
+            self._last_strain_dir,
+            "Excel files (*.xlsx *.xlsm *.xls)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        self._last_strain_dir = str(path.parent)
+        self.strain_edit.setText(str(path))
+        self._save_settings()
+
+    def _clear_strain_file(self) -> None:
+        self.strain_edit.clear()
+        self._save_settings()
+
     def _add_data_root(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(
             self,
@@ -1495,12 +1544,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         msg.setText(f"'{path.name}' already exists.")
         msg.setInformativeText("Choose how to continue:")
         replace_btn = msg.addButton("Replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
-        continue_btn = msg.addButton("Continue", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        update_btn = msg.addButton("Update", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        continue_btn = msg.addButton("Append", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         cancel_btn = msg.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
         if clicked is cancel_btn:
             return None
+        if clicked is update_btn:
+            return "update"
         if clicked is continue_btn:
             return "append"
         return "replace"
@@ -1581,9 +1633,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def start_build(self) -> None:
         if self._running:
             return
-        if not self.annealing_paths:
-            QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "Please add at least one annealing file.")
-            return
         output_dir_text = self.output_edit.text().strip()
         if not output_dir_text:
             QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "Please choose an output directory.")
@@ -1642,6 +1691,27 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 behaviours[fmt.lower()] = "replace"
 
         annealing_files = list(dict.fromkeys(self.annealing_paths))
+        requires_measurements = any(action != "update" for action in behaviours.values())
+        if requires_measurements and not annealing_files:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Please add at least one annealing file.",
+            )
+            return
+
+        strain_files: list[Path] = []
+        strain_text = self.strain_edit.text().strip()
+        if strain_text:
+            strain_files.append(Path(strain_text).expanduser())
+        if not requires_measurements and not strain_files:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No strain worksheet selected; nothing to update.",
+            )
+            return
+
         worker_inputs = WorkerInputs(
             annealing_files=annealing_files,
             manual_microscope_files=list(dict.fromkeys(self.microscope_paths)),
@@ -1657,6 +1727,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             ),
             include_microscope_crops=self.include_crops_check.isChecked(),
             highlight_ocr_values=self.highlight_ocr_check.isChecked(),
+            strain_files=strain_files,
         )
         self._save_settings()
         self._set_running(True)

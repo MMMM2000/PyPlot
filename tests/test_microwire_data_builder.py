@@ -104,11 +104,15 @@ def test_build_database_integration(tmp_path: Path) -> None:
     df = result.dataframe
     assert len(df) == 1
     row = df.iloc[0]
-    assert list(df.columns) == core.OUTPUT_COLUMNS
+    expected_columns = list(core.OUTPUT_COLUMNS)
+    expected_columns.insert(expected_columns.index("d (µm)") + 1, "d (µm) image")
+    expected_columns.insert(expected_columns.index("D (µm)") + 1, "D (µm) image")
+    assert list(df.columns) == expected_columns
     assert row["Composition"] == "Ni55Fe18Ga27"
     assert row["Microwire"] == "4/1"
     assert row["File 1000 mA"] == anneal_files[0].name
     assert row["File low mA"] == anneal_files[1].name
+    assert pd.isna(row[core.STRAIN_COLUMN])
     assert row["Low mA value (mA)"] == 100
     assert pd.isna(row["d (µm)"])
     assert pd.isna(row["D (µm)"])
@@ -151,6 +155,7 @@ def test_build_database_populates_plot_columns(tmp_path: Path, monkeypatch: pyte
     assert pd.isna(row["Figure — low mA (Origin)"])
     assert set(result.plot_paths) == {produced[high.name].name, produced[low.name].name}
     assert row["Low mA value (mA)"] == 120
+    assert pd.isna(row[core.STRAIN_COLUMN])
 
 
 def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -187,6 +192,7 @@ def test_build_database_origin_backend(tmp_path: Path, monkeypatch: pytest.Monke
     assert row["Figure — low mA (Origin)"] == origin_records[low.name].descriptor
     assert pd.isna(row["Figure — 1000 mA"])
     assert pd.isna(row["Figure — low mA"])
+    assert pd.isna(row[core.STRAIN_COLUMN])
 
 
 def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -226,7 +232,7 @@ def test_excel_export_embeds_plot_images(tmp_path: Path, monkeypatch: pytest.Mon
     images = getattr(worksheet, "_images", [])
     assert images, "Expected embedded plot images in the Excel export"
 
-    figure_col_idx = core.OUTPUT_COLUMNS.index("Figure — 1000 mA")
+    figure_col_idx = result.dataframe.columns.get_loc("Figure — 1000 mA")
     col_letter = get_column_letter(figure_col_idx + 1)
     assert worksheet[f"{col_letter}2"].value is None
 
@@ -396,12 +402,12 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
 
     result = build_database(config)
     row = result.dataframe.iloc[0]
-    temperature_column = core.OUTPUT_COLUMNS[9]
-    underpressure_column = core.OUTPUT_COLUMNS[12]
+    temperature_column = "Temperature (°C)"
+    underpressure_column = "Underpressure"
     assert float(row[temperature_column]) == pytest.approx(382.5)
     assert float(row[underpressure_column]) == pytest.approx(-0.85)
-    assert float(row[core.OUTPUT_COLUMNS[10]]) == pytest.approx(12.5)
-    assert float(row[core.OUTPUT_COLUMNS[11]]) == pytest.approx(37.2)
+    assert float(row["Winding speed (m/min)"]) == pytest.approx(12.5)
+    assert float(row["Glass feeding (mm/min)"]) == pytest.approx(37.2)
     highlights = result.ocr_highlights
     for column in (
         "Temperature (°C)",
@@ -468,3 +474,86 @@ def test_highlight_and_crop_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert 0 in result.ocr_highlights["d (µm)"]
     assert "D (µm)" in result.ocr_highlights
     assert 0 in result.ocr_highlights["D (µm)"]
+
+def test_build_database_uses_strain_records(tmp_path: Path) -> None:
+    pytest.importorskip("openpyxl")
+    high = tmp_path / "Ni55Fe18Ga27 4_1 1000mA.txt"
+    low = tmp_path / "Ni55Fe18Ga27 4_1 120mA.txt"
+    high.write_text("0.1 0.2 2.0\n0.2 0.4 2.0\n")
+    low.write_text("0.05 0.1 2.0\n0.1 0.2 2.0\n")
+    strain_path = tmp_path / "strain.xlsx"
+    pd.DataFrame(
+        {
+            "Composition": ["Ni55Fe18Ga27"],
+            "Microwire": ["4/1"],
+            "M length": [32],
+            "A length": [30],
+            "Strain %": [6.25],
+        }
+    ).to_excel(strain_path, index=False)
+    config = BuilderConfig(
+        fabrication_files=[],
+        annealing_files=[high, low],
+        output_dir=tmp_path / "out",
+        strain_files=[strain_path],
+    )
+    result = build_database(config)
+    row = result.dataframe.iloc[0]
+    assert row[core.STRAIN_COLUMN] == "6.250%"
+    columns = result.dataframe.columns.tolist()
+    figure_idx = columns.index("Figure — 1000 mA")
+    assert columns[figure_idx + 1] == "Figure — low mA"
+    assert columns[figure_idx + 2] == core.STRAIN_COLUMN
+
+
+def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
+    pytest.importorskip("openpyxl")
+    strain_path = tmp_path / "strain.xlsx"
+    pd.DataFrame(
+        {
+            "Composition": ["Ni55Fe18Ga27"],
+            "Microwire": ["4/1"],
+            "M length": [32],
+            "A length": [30],
+            "Strain %": [6.25],
+        }
+    ).to_excel(strain_path, index=False)
+    strain_records = core._load_strain_records([strain_path], logging.getLogger("test"))
+
+    legacy_columns = [
+        "Composition",
+        "Microwire",
+        "d (µm)",
+        "D (µm)",
+        "d/D",
+        "Length (m)",
+        "Figure — 1000 mA",
+        "Figure — low mA",
+    ]
+    legacy_row = {
+        "Composition": "Ni55Fe18Ga27",
+        "Microwire": "4/1",
+        "d (µm)": 8.0,
+        "D (µm)": 40.0,
+        "d/D": 0.2,
+        "Length (m)": 5.0,
+        "Figure — 1000 mA": "high.png",
+        "Figure — low mA": "low.png",
+    }
+
+    csv_path = tmp_path / "legacy.csv"
+    pd.DataFrame([legacy_row], columns=legacy_columns).to_csv(csv_path, index=False)
+    core._update_existing_csv_with_strain(csv_path, strain_records, core.OUTPUT_COLUMNS, logging.getLogger("test"))
+    updated_csv = pd.read_csv(csv_path)
+    assert updated_csv[core.STRAIN_COLUMN].iloc[0] == "6.250%"
+
+    excel_path = tmp_path / "legacy.xlsx"
+    pd.DataFrame([legacy_row], columns=legacy_columns).to_excel(excel_path, index=False)
+    core._update_existing_excel_with_strain(excel_path, strain_records, logging.getLogger("test"))
+    updated_excel = pd.read_excel(excel_path)
+    columns = updated_excel.columns.tolist()
+    figure_idx = columns.index("Figure — 1000 mA")
+    assert columns[figure_idx - 1] == "d/D"
+    assert columns[figure_idx + 1] == "Figure — low mA"
+    assert columns[figure_idx + 2] == core.STRAIN_COLUMN
+    assert updated_excel[core.STRAIN_COLUMN].iloc[0] == "6.250%"

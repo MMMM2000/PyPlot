@@ -438,6 +438,33 @@ plotting tools:
   the corresponding filenames. Choose **Export CSV** and/or **Export Excel** to
   control the output formats; every toggle, folder, and size preference is
   remembered between runs.
+* **Strain worksheet** – the optional strain selector loads martensite/austenite
+  length pairs and their measured shortening from the standalone worksheet. The
+  builder inserts a new **Strain** column immediately after the Matplotlib figure
+  fields, formats the percentage to three decimals, and carries over any `broke`
+  flags so reviewers can see failed samples at a glance. When an export already
+  exists the overwrite prompt now offers **Update** in addition to **Replace** and
+  **Append**. Choosing **Update** refreshes the strain column (and repositions the
+  Matplotlib figure fields next to \(d/D\)) inside the existing Excel/CSV files
+  without rebuilding the entire workbook, preserving embedded microscope crops,
+  Origin OLE objects, and any annotations made during review.
+
+### Strain worksheet updater
+
+The database builder now understands the strain worksheet directly, but you can
+also update the worksheet without rerunning a full build. Enable the
+**Experiments** tab and launch **Strain Worksheet Updater** (or run
+
+```bash
+python -m experiments.strain_worksheet_updater
+```
+
+Select the current strain workbook, the latest microwire database export, and an
+output filename. The tool merges the database **Strain** column back into the
+worksheet, adds rows for new composition/microwire pairs, carries over existing
+martensite/austenite lengths, and flags any samples that broke during the strain
+test. Rows that do not parse into draw/piece identifiers are preserved exactly
+as written so reviewer notes are never lost.
 * **Output** – pick a destination directory and supply a base file name. The
   builder now defaults to your operating system’s **Downloads** folder so the
   exports land somewhere familiar, while still remembering the last directory

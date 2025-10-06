@@ -84,6 +84,9 @@ OUTPUT_COLUMNS = [
     "d (µm)",
     "D (µm)",
     "d/D",
+    "Figure — 1000 mA",
+    "Figure — low mA",
+    "Strain",
     "Length (m)",
     "Production datetime",
     "Mass (g)",
@@ -93,8 +96,6 @@ OUTPUT_COLUMNS = [
     "Glass feeding (mm/min)",
     "Underpressure",
     "Notes",
-    "Figure — 1000 mA",
-    "Figure — low mA",
     "Figure — 1000 mA (Origin)",
     "Figure — low mA (Origin)",
     "Low mA value (mA)",
@@ -112,11 +113,15 @@ FIGURE_COLUMNS = (
     "Figure — low mA",
 )
 
+STRAIN_COLUMN = "Strain"
+
 ORIGIN_FIGURE_COLUMNS = tuple(
     column
     for column in OUTPUT_COLUMNS
     if column.startswith("Figure") and "(Origin)" in column
 )
+
+MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
@@ -360,6 +365,7 @@ class BuilderConfig:
     output_dir: Path
     microscope_files: List[Path] = field(default_factory=list)
     video_files: List[Path] = field(default_factory=list)
+    strain_files: List[Path] = field(default_factory=list)
     make_plots: bool = False
     export_formats: Tuple[str, ...] = ("csv",)
     plot_dir_name: str = PLOT_DIR_NAME
@@ -409,6 +415,21 @@ class BuildResult:
     stats: BuildStats
     microscope_crops: Dict[str, Path] = field(default_factory=dict)
     ocr_highlights: Dict[str, Set[int]] = field(default_factory=dict)
+
+
+@dataclass
+class StrainRecord:
+    """Single strain measurement parsed from the worksheet."""
+
+    composition: str
+    draw: Optional[int]
+    piece: Optional[int]
+    microwire_label: str
+    m_length: Optional[float]
+    a_length: Optional[float]
+    percent: Optional[float]
+    broke: bool
+    source: Path
 
 
 class FabricationIndex:
@@ -772,6 +793,50 @@ def _parse_numeric(value: object) -> Optional[float]:
         return float(number)
     except ValueError:
         return None
+
+
+def _clean_str(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float)) and not _is_nan(value):
+        text = f"{value}"
+    else:
+        text = _normalise_text(value)
+    return text.strip() if text else ""
+
+
+def _parse_strain_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not _is_nan(value):
+        return float(value)
+    text = _clean_str(value)
+    if not text:
+        return None
+    upper = text.upper()
+    if "DIV/0" in upper or "INF" in upper or "BROKE" in upper:
+        return None
+    return _parse_numeric(text)
+
+
+def _microwire_tuple_from_label(label: str) -> Optional[Tuple[int, int]]:
+    match = MICROWIRE_LABEL_RE.search(label)
+    if not match:
+        return None
+    try:
+        return int(match.group(1)), int(match.group(2))
+    except ValueError:
+        return None
+
+
+def _format_strain_value(record: StrainRecord) -> Optional[str]:
+    if record.broke:
+        return "broke"
+    if record.percent is None:
+        return None
+    return f"{record.percent:.3f}%"
 
 
 def _sanitize_datetime_text(text: str) -> str:
@@ -1947,6 +2012,110 @@ def _compose_notes(*records: Dict[str, object]) -> Optional[str]:
     return "; ".join(notes) if notes else None
 
 
+def _load_strain_records(
+    paths: Sequence[Path],
+    log: logging.Logger,
+) -> Dict[Tuple[str, int, int], StrainRecord]:
+    records: Dict[Tuple[str, int, int], StrainRecord] = {}
+    if not paths:
+        return records
+    seen: set[Path] = set()
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path in seen:
+            continue
+        seen.add(path)
+        if not path.exists():
+            log.warning("Strain worksheet %s not found; skipping", path)
+            continue
+        try:
+            df = pd.read_excel(path)
+        except Exception:
+            log.exception("Failed to read strain worksheet %s", path)
+            continue
+        if df.empty:
+            continue
+        column_map: Dict[str, int] = {}
+        for idx, header in enumerate(df.columns):
+            key = _clean_str(header).lower()
+            if not key:
+                continue
+            if "composition" in key:
+                column_map.setdefault("composition", idx)
+            elif "microwire" in key or "wire" in key:
+                column_map.setdefault("microwire", idx)
+            elif key.startswith("m") and "length" in key:
+                column_map.setdefault("m_length", idx)
+            elif key.startswith("a") and "length" in key:
+                column_map.setdefault("a_length", idx)
+            elif "strain" in key or "%" in key:
+                column_map.setdefault("strain", idx)
+            elif "broke" in key or "status" in key or "note" in key:
+                column_map.setdefault("status", idx)
+        comp_idx = column_map.get("composition")
+        micro_idx = column_map.get("microwire")
+        if comp_idx is None or micro_idx is None:
+            log.warning("%s is missing composition or microwire columns; skipping", path)
+            continue
+        for row in df.itertuples(index=False, name=None):
+            values = list(row)
+            composition = _clean_str(values[comp_idx])
+            if not composition or composition.lower() == "composition":
+                continue
+            microwire_label = _clean_str(values[micro_idx])
+            if not microwire_label:
+                continue
+            draw_piece = _microwire_tuple_from_label(microwire_label)
+            if not draw_piece:
+                continue
+            draw, piece = draw_piece
+            m_length = (
+                _parse_strain_float(values[column_map["m_length"]])
+                if "m_length" in column_map
+                else None
+            )
+            a_length = (
+                _parse_strain_float(values[column_map["a_length"]])
+                if "a_length" in column_map
+                else None
+            )
+            percent = (
+                _parse_strain_float(values[column_map["strain"]])
+                if "strain" in column_map
+                else None
+            )
+            broke = False
+            status_idx = column_map.get("status")
+            if status_idx is not None:
+                if _clean_str(values[status_idx]).lower() == "broke":
+                    broke = True
+            if not broke:
+                for value in values:
+                    if _clean_str(value).lower() == "broke":
+                        broke = True
+                        break
+            if percent is None and not broke and m_length not in (None, 0) and a_length is not None:
+                try:
+                    percent = ((m_length - a_length) / m_length) * 100 if m_length else None
+                except ZeroDivisionError:
+                    percent = None
+                if percent is not None and not math.isfinite(percent):
+                    percent = None
+            record = StrainRecord(
+                composition=composition,
+                draw=draw,
+                piece=piece,
+                microwire_label=microwire_label,
+                m_length=m_length,
+                a_length=a_length,
+                percent=percent,
+                broke=broke,
+                source=path,
+            )
+            records[(composition, draw, piece)] = record
+    return records
+
+
 def _microwire_label(draw_x: Optional[int], piece_y: Optional[int]) -> str:
     if draw_x is None or piece_y is None:
         return ""
@@ -2011,6 +2180,128 @@ def _plot_measurement_matplotlib(
     fig.savefig(plot_path, dpi=300)
     plt.close(fig)
     return plot_path
+
+
+def _update_existing_csv_with_strain(
+    path: Path,
+    strain_records: Dict[Tuple[str, int, int], StrainRecord],
+    output_columns: Sequence[str],
+    log: logging.Logger,
+) -> None:
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        log.exception("Failed to read existing CSV at %s; skipping update", path)
+        return
+    if df.empty:
+        return
+    if STRAIN_COLUMN not in df.columns:
+        insert_index = len(df.columns)
+        if STRAIN_COLUMN in output_columns:
+            insert_index = list(output_columns).index(STRAIN_COLUMN)
+        df.insert(insert_index, STRAIN_COLUMN, None)
+    if {"Composition", "Microwire"}.issubset(df.columns) and strain_records:
+        for idx, row in df.iterrows():
+            composition = _clean_str(row.get("Composition"))
+            microwire_label = _clean_str(row.get("Microwire"))
+            key = _microwire_tuple_from_label(microwire_label)
+            if not composition or not key:
+                continue
+            record = strain_records.get((composition, key[0], key[1]))
+            if record is None:
+                continue
+            df.at[idx, STRAIN_COLUMN] = _format_strain_value(record)
+    desired = [column for column in output_columns if column in df.columns]
+    for column in df.columns:
+        if column not in desired:
+            desired.append(column)
+    df = df[desired]
+    df.to_csv(path, index=False)
+
+
+def _update_existing_excel_with_strain(
+    path: Path,
+    strain_records: Dict[Tuple[str, int, int], StrainRecord],
+    log: logging.Logger,
+) -> None:
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.utils import get_column_letter
+    except ImportError as exc:  # pragma: no cover - optional dependency
+        raise RuntimeError("openpyxl is required to update Excel exports") from exc
+
+    wb = load_workbook(path)
+    ws = wb.active
+    if ws.max_row < 1:
+        wb.save(path)
+        return
+
+    def _headers() -> list[str]:
+        return [str(cell.value) if cell.value is not None else "" for cell in ws[1]]
+
+    headers = _headers()
+    try:
+        d_over_d_index = headers.index("d/D") + 1
+    except ValueError:
+        d_over_d_index = None
+    strain_target = len(headers) + 1 if d_over_d_index is None else d_over_d_index + 1
+    if d_over_d_index is not None:
+        for column_name in FIGURE_COLUMNS:
+            headers = _headers()
+            if column_name not in headers:
+                continue
+            current_index = headers.index(column_name) + 1
+            if current_index != strain_target:
+                offset = strain_target - current_index
+                col_letter = get_column_letter(current_index)
+                ws.move_range(
+                    f"{col_letter}1:{col_letter}{ws.max_row}",
+                    rows=0,
+                    cols=offset,
+                )
+            strain_target += 1
+
+    headers = _headers()
+    if STRAIN_COLUMN in headers:
+        current_index = headers.index(STRAIN_COLUMN) + 1
+        if current_index != strain_target:
+            offset = strain_target - current_index
+            col_letter = get_column_letter(current_index)
+            ws.move_range(
+                f"{col_letter}1:{col_letter}{ws.max_row}",
+                rows=0,
+                cols=offset,
+            )
+    else:
+        ws.insert_cols(strain_target)
+        ws.cell(row=1, column=strain_target).value = STRAIN_COLUMN
+
+    headers = _headers()
+    try:
+        composition_index = headers.index("Composition") + 1
+        microwire_index = headers.index("Microwire") + 1
+        strain_index = headers.index(STRAIN_COLUMN) + 1
+    except ValueError:
+        log.warning("Unable to locate Composition/Microwire columns in %s; skipping strain update", path)
+        wb.save(path)
+        return
+
+    if not strain_records:
+        wb.save(path)
+        return
+
+    for row_idx in range(2, ws.max_row + 1):
+        composition = _clean_str(ws.cell(row=row_idx, column=composition_index).value)
+        microwire_label = _clean_str(ws.cell(row=row_idx, column=microwire_index).value)
+        key = _microwire_tuple_from_label(microwire_label)
+        if not composition or not key:
+            continue
+        record = strain_records.get((composition, key[0], key[1]))
+        if record is None:
+            continue
+        ws.cell(row=row_idx, column=strain_index).value = _format_strain_value(record)
+
+    wb.save(path)
 
 
 def _plot_measurement_origin(
@@ -2672,6 +2963,7 @@ def build_database(
     auto_microscope_files = _auto_discover_microscope_paths(config.annealing_files, log)
     microscope_sources = list(dict.fromkeys(manual_microscope_files + auto_microscope_files))
     video_sources = list(dict.fromkeys(Path(p) for p in config.video_files))
+    strain_records = _load_strain_records(getattr(config, "strain_files", []), log)
 
     analysis_total_local = analysis_total
     if analysis_total_local is None:
@@ -2877,6 +3169,11 @@ def build_database(
                 if glass is not None:
                     row["Glass feeding (mm/min)"] = glass
                     row_highlights.add("Glass feeding (mm/min)")
+        strain_record = strain_records.get((composition, draw_x, piece_y))
+        if strain_record:
+            strain_value = _format_strain_value(strain_record)
+            if strain_value is not None:
+                row[STRAIN_COLUMN] = strain_value
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
@@ -3018,6 +3315,13 @@ def build_database(
         if fmt_lower == "csv":
             csv_path = output_dir / f"{output_name}.csv"
             behaviour = behaviours.get("csv", "replace")
+            if behaviour == "update":
+                if csv_path.exists():
+                    _update_existing_csv_with_strain(csv_path, strain_records, output_columns, log)
+                    exports["csv"] = csv_path
+                    continue
+                log.warning("CSV export %s does not exist; creating a new file instead", csv_path)
+                behaviour = "replace"
             to_write = df_out
             if behaviour == "append" and csv_path.exists():
                 try:
@@ -3032,6 +3336,17 @@ def build_database(
         elif fmt_lower == "excel":
             excel_path = output_dir / f"{output_name}.xlsx"
             behaviour = behaviours.get("excel", "replace")
+            if behaviour == "update":
+                if excel_path.exists():
+                    try:
+                        _update_existing_excel_with_strain(excel_path, strain_records, log)
+                    except RuntimeError:
+                        log.exception("Unable to update Excel file at %s", excel_path)
+                        raise
+                    exports["excel"] = excel_path
+                    continue
+                log.warning("Excel export %s does not exist; creating a new file instead", excel_path)
+                behaviour = "replace"
             to_write = df_out
             if behaviour == "append" and excel_path.exists():
                 try:
