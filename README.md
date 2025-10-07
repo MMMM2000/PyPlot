@@ -474,6 +474,26 @@ worksheet, adds rows for new composition/microwire pairs, carries over existing
 martensite/austenite lengths, and flags any samples that broke during the strain
 test. Rows that do not parse into draw/piece identifiers are preserved exactly
 as written so reviewer notes are never lost.
+
+### Strain 3D Plot Explorer
+
+When you want to inspect relationships between strain measurements and the
+microscope diameters, open the **Strain 3D Plot Explorer** from the
+**Experiments** tab (or launch it manually):
+
+```bash
+python -m experiments.strain_3d_plotter
+```
+
+Select a strain worksheet that already includes diameter columns from the
+database builder. The explorer filters out any samples that broke and builds 3D
+scatter plots for every combination of three numeric columns (strain, `d`, `D`,
+lengths, ratios, etc.). Each tab hosts a single interactive Matplotlib figure
+labelled with the microwire ID so you can compare shortening, diameters, and any
+other numeric metrics in context. Use the worksheet’s latest export to pick up
+new strain entries without tweaking plot settings—the tool remembers the last
+file you opened and keeps a console log of how many rows were plotted and which
+combinations were generated.
 * **Output** – pick a destination directory and supply a base file name. The
   builder now defaults to your operating system’s **Downloads** folder so the
   exports land somewhere familiar, while still remembering the last directory
