@@ -390,10 +390,14 @@ plotting tools:
   now refreshes once per second, blends the live moving average with per-stage
   timings saved from previous sessions, and treats sudden slowdowns as sticky so
   brief OCR pauses or long exports immediately push the remaining time upward
-  while later speed-ups bleed in gradually. Familiar datasets still settle on
-  steady remaining times after the first few runs. A **Cancel** button next to
-  **Run** stops the background worker, aborts the build cleanly, and returns the
-  window to an idle state once the cancellation propagates.
+  while later speed-ups bleed in gradually. A status line above the progress bar
+  now names the active stage (for example, **Analysing microscope/video data**)
+  together with its per-stage counters, and the log echoes every stage change so
+  long OCR or export passes still feel alive instead of stalled. Familiar
+  datasets still settle on steady remaining times after the first few runs. A
+  **Cancel** button next to **Run** stops the background worker, aborts the build
+  cleanly, and returns the window to an idle state once the cancellation
+  propagates.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
@@ -404,6 +408,9 @@ plotting tools:
   directly from footage even when the fabrication sheet is incomplete. Fields
   sourced from video OCR are tracked alongside the microscope highlights so you
   can instantly see which values originated outside the fabrication workbook.
+  Prefer to skip the scan on long builds? Uncheck **Extract fabrication metrics
+  from videos** in the Options column and the run stays focused on spreadsheets
+  and microscope evidence only.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
   session using the simple single-trace template. The **Microscope review** box
@@ -414,7 +421,9 @@ plotting tools:
   (microscope or video) provided the measurement instead of the fabrication
   spreadsheets, covering both diameter readings and fabrication metrics harvested
   from draw videos. Disable either checkbox when you only need the numeric
-  values. Use the **Figure width/height**
+  values. When you need a quick spreadsheet refresh without the extra pass over
+  draw recordings, clear **Extract fabrication metrics from videos** and the
+  builder skips the video search entirely. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,
