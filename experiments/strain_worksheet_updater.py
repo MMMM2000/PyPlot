@@ -353,18 +353,32 @@ class StrainWorksheetUpdater(QtWidgets.QWidget):
         self.log_view.appendPlainText(message)
 
 
+def _ensure_app() -> Tuple[QtWidgets.QApplication, bool]:
+    app = QtWidgets.QApplication.instance()
+    owns_app = False
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv)
+        owns_app = True
+    ensure_app_theme(app)
+    return app, owns_app
+
+
 def main() -> QtWidgets.QWidget | None:
-    app = ensure_app_theme()
+    app, owns_app = _ensure_app()
     window = StrainWorksheetUpdater()
     window.show()
+    if owns_app:
+        app.exec()
     return window
 
 
 def run_app() -> None:
-    app = ensure_app_theme()
+    app, owns_app = _ensure_app()
     window = StrainWorksheetUpdater()
     window.show()
-    sys.exit(app.exec())
+    if owns_app:
+        sys.exit(app.exec())
+    # If another component owns the QApplication the launcher will keep running.
 
 
 __all__ = ["main", "run_app", "StrainWorksheetUpdater"]
