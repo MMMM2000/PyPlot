@@ -590,7 +590,9 @@ section and labels each column with a friendly name. Column headings preserve
 the units advertised in the Lakeshore `@@Columns` block (for example `Applied
 Field [Oe]` and `Signal parallel with sample [emu]`), so the exported TXT files
 import cleanly into Origin, pandas, or any other analysis suite without manual
-relabelling.
+relabelling. The inline header detection now triggers only after the
+`@@End of Header.` marker, which prevents the lengthy instrument configuration
+tables that precede the columns block from overriding the real column labels.
 
 Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
 to plot—defaults focus on **Applied Field** versus **Signal parallel with

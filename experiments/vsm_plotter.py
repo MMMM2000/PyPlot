@@ -86,6 +86,7 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
     current_tokens: List[str] = []
     expected_columns: int | None = None
     in_data = False
+    inline_header_ready = False
 
     def _start_section() -> None:
         nonlocal current_rows, current_tokens, expected_columns, in_data
@@ -111,6 +112,10 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
         for line in handle:
             stripped = line.strip()
             if not in_data:
+                if stripped.startswith("@@End of Header"):
+                    inline_header_ready = True
+                    inline_header = None
+                    continue
                 match = HEADER_COLUMN_RE.match(stripped)
                 if match:
                     columns.append(_normalise_column_name(match.group(1), len(columns)))
@@ -118,12 +123,20 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
                 if stripped.startswith("@@"):
                     if stripped.startswith("@@Data") or stripped.startswith("@@Final Manipulated Data"):
                         _start_section()
+                        inline_header_ready = False
                     continue
-                if stripped and not stripped.startswith("@") and not columns:
-                    parts = stripped.split()
-                    if parts and not any(_looks_numeric(part) for part in parts):
-                        if inline_header is None or len(parts) > len(inline_header):
+                if stripped and not stripped.startswith("@"):
+                    if inline_header_ready and inline_header is None:
+                        parts = stripped.split()
+                        if parts and any("_" in part for part in parts):
                             inline_header = parts
+                            inline_header_ready = False
+                            continue
+                    if not columns and inline_header is None:
+                        parts = stripped.split()
+                        if parts and any("_" in part for part in parts):
+                            inline_header = parts
+                            continue
                 continue
 
             if stripped.startswith("@@END Data"):
