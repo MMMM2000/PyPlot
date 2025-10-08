@@ -138,7 +138,7 @@ def _apply_rescaling(
             source_right = y_max
 
         delta = source_right - source_left
-        if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
+        if delta == 0.0:
             results[path] = RescaleResult(
                 scale=1.0,
                 offset=0.0,
@@ -180,6 +180,14 @@ def _suggest_export_subfolder(measurements: Sequence[VSMMeasurement | Path | str
         if cleaned:
             return cleaned
     return "VSM_Export"
+
+
+def _temperature_subfolder_name(temperature: float) -> str:
+    """Return a filesystem-friendly subfolder for a given temperature."""
+
+    label = f"T{temperature:+g}C"
+    cleaned = _clean_folder_name(label)
+    return cleaned or "Temperature"
 
 
 def _find_vsm_files(directory: Path) -> List[Path]:
@@ -600,6 +608,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.last_export_path: Path | None = None
 
         self.measurements: List[VSMMeasurement] = []
+        self._last_prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]] = {}
+        self._last_rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
+        self._last_axes: tuple[str, str] | None = None
+        self._last_rescale_enabled = False
 
         self._build_ui()
         self._load_settings()
@@ -651,6 +663,12 @@ class VSMPlotter(QtWidgets.QWidget):
         controls_layout.addWidget(QtWidgets.QLabel("Y axis"))
         controls_layout.addWidget(self.y_axis_combo)
 
+        controls_layout.addWidget(QtWidgets.QLabel("Matplotlib style"))
+        self.style_combo = QtWidgets.QComboBox()
+        self.style_combo.addItem("Line", "line")
+        self.style_combo.addItem("Line + symbols", "line_markers")
+        controls_layout.addWidget(self.style_combo)
+
         self.rescale_checkbox = QtWidgets.QCheckBox("Normalise Y axis endpoints")
         self.rescale_checkbox.setToolTip(
             "Scale each curve so the negative-field and positive-field endpoints share\n"
@@ -672,6 +690,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.plot_button.clicked.connect(self._generate_plots)
         self.plot_button.setEnabled(False)
         button_row.addWidget(self.plot_button)
+        self.popout_button = QtWidgets.QPushButton("Open in Matplotlib")
+        self.popout_button.clicked.connect(self._open_matplotlib_window)
+        self.popout_button.setEnabled(False)
+        button_row.addWidget(self.popout_button)
         self.export_txt_button = QtWidgets.QPushButton("Export TXT")
         self.export_txt_button.clicked.connect(self._export_txt)
         self.export_txt_button.setEnabled(False)
@@ -718,6 +740,11 @@ class VSMPlotter(QtWidgets.QWidget):
             index = self.export_mode_combo.findData(export_mode)
             if index >= 0:
                 self.export_mode_combo.setCurrentIndex(index)
+        style = self.settings.value("plot_style", "line")
+        if isinstance(style, str):
+            index = self.style_combo.findData(style)
+            if index >= 0:
+                self.style_combo.setCurrentIndex(index)
         rescale_value = self.settings.value("rescale_y", False)
         if isinstance(rescale_value, (str, bool)):
             if isinstance(rescale_value, str):
@@ -742,6 +769,7 @@ class VSMPlotter(QtWidgets.QWidget):
         self.settings.setValue("backend", self.backend_combo.currentText())
         self.settings.setValue("mode", "folder" if self.folder_radio.isChecked() else "files")
         self.settings.setValue("export_mode", self.export_mode_combo.currentData())
+        self.settings.setValue("plot_style", self.style_combo.currentData())
         self.settings.setValue("rescale_y", self.rescale_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
@@ -788,12 +816,17 @@ class VSMPlotter(QtWidgets.QWidget):
         self.measurements.clear()
         self.tab_widget.clear()
         self.log_view.clear()
+        self._last_prepared_groups = {}
+        self._last_rescale_info = {}
+        self._last_axes = None
+        self._last_rescale_enabled = False
         self.temperature_combo.blockSignals(True)
         self.temperature_combo.clear()
         self.temperature_combo.addItem("All temperatures", None)
         self.temperature_combo.blockSignals(False)
         self.plot_button.setEnabled(False)
         self.export_txt_button.setEnabled(False)
+        self.popout_button.setEnabled(False)
 
         paths = self._selected_paths()
         if not paths:
@@ -971,6 +1004,13 @@ class VSMPlotter(QtWidgets.QWidget):
             if prepared:
                 prepared_groups[temperature] = prepared
 
+        if not prepared_groups:
+            self._append_log(
+                "No numeric data matched the selected axes; nothing to plot."
+            )
+            self.popout_button.setEnabled(False)
+            return
+
         rescale_enabled = self.rescale_checkbox.isChecked()
         rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
         if rescale_enabled:
@@ -1000,6 +1040,12 @@ class VSMPlotter(QtWidgets.QWidget):
                         f"{measurement.path.name}: rescaled {y_axis} with scale {result.scale:.3g}{inversion_note} "
                         f"and offset {result.offset:.3g}; targets {result.target_left:.3g} to {result.target_right:.3g}."
                     )
+
+        self._last_prepared_groups = prepared_groups
+        self._last_rescale_info = rescale_info
+        self._last_axes = (x_axis, y_axis)
+        self._last_rescale_enabled = rescale_enabled
+        self.popout_button.setEnabled(True)
 
         backend_choice = self.backend_combo.currentText()
         render_matplotlib = wants_matplotlib(backend_choice)
@@ -1043,6 +1089,72 @@ class VSMPlotter(QtWidgets.QWidget):
             lookup.update(rescale_map)
         return lookup
 
+    def _line_style_kwargs(self) -> Dict[str, Any]:
+        style = self.style_combo.currentData()
+        if style == "line_markers":
+            return {"linestyle": "-", "marker": "o", "markersize": 4}
+        return {"linestyle": "-"}
+
+    def _open_matplotlib_window(self) -> None:
+        if not self._last_prepared_groups or not self._last_axes:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Plot Explorer",
+                "Generate plots before opening a Matplotlib window.",
+            )
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # pragma: no cover - GUI/runtime dependent
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Plot Explorer",
+                f"Matplotlib's interactive backend is unavailable: {exc}",
+            )
+            return
+
+        x_axis, y_axis = self._last_axes
+        rescale_enabled = self._last_rescale_enabled
+        rescale_info = self._last_rescale_info if rescale_enabled else {}
+        line_kwargs = self._line_style_kwargs()
+
+        created = False
+        for temperature, entries in sorted(self._last_prepared_groups.items()):
+            fig, ax = plt.subplots()
+            for measurement, subset in entries:
+                series_y = subset[y_axis]
+                if rescale_enabled:
+                    result = rescale_info.get(temperature, {}).get(measurement.path)
+                    if result is not None:
+                        series_y = series_y * result.scale + result.offset
+                ax.plot(
+                    subset[x_axis].to_numpy(),
+                    series_y.to_numpy(),
+                    label=f"{measurement.angle:g}°",
+                    **line_kwargs,
+                )
+            ax.set_xlabel(x_axis)
+            ax.set_ylabel(y_axis)
+            ax.set_title(f"{y_axis} vs {x_axis} at {temperature:g} °C")
+            ax.legend(loc="best")
+            ax.grid(True)
+            try:  # pragma: no cover - backend dependent
+                fig.canvas.manager.set_window_title(f"{temperature:g} °C")
+            except Exception:
+                pass
+            fig.tight_layout()
+            created = True
+
+        if created:
+            plt.show()
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Plot Explorer",
+                "No Matplotlib plots are available to display.",
+            )
+
     def _export_txt(self) -> None:
         if not self.measurements:
             QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Load VSM measurements first.")
@@ -1073,6 +1185,13 @@ class VSMPlotter(QtWidgets.QWidget):
         target_dir = dialog.selected_directory()
         target_dir.mkdir(parents=True, exist_ok=True)
 
+        unique_temperatures = {
+            measurement.temperature
+            for measurement in self.measurements
+            if measurement.temperature is not None
+        }
+        separate_by_temp = len(unique_temperatures) > 1
+
         export_mode = self.export_mode_combo.currentData()
         rescale_requested = export_mode == "rescaled"
         x_axis = self.x_axis_combo.currentText()
@@ -1097,10 +1216,15 @@ class VSMPlotter(QtWidgets.QWidget):
         exported = 0
         for measurement in self.measurements:
             base_name = measurement.path.stem or f"measurement_{exported + 1}"
-            candidate = target_dir / f"{base_name}.txt"
+            destination_dir = target_dir
+            if separate_by_temp and measurement.temperature is not None:
+                subfolder = _temperature_subfolder_name(measurement.temperature)
+                destination_dir = target_dir / subfolder
+                destination_dir.mkdir(parents=True, exist_ok=True)
+            candidate = destination_dir / f"{base_name}.txt"
             counter = 2
             while candidate.exists():
-                candidate = target_dir / f"{base_name}_{counter}.txt"
+                candidate = destination_dir / f"{base_name}_{counter}.txt"
                 counter += 1
             try:
                 if rescale_requested:
@@ -1159,6 +1283,7 @@ class VSMPlotter(QtWidgets.QWidget):
         rescale_enabled: bool,
     ) -> None:
         self.tab_widget.setVisible(True)
+        line_kwargs = self._line_style_kwargs()
         for temperature, entries in sorted(prepared_groups.items()):
             fig = Figure(figsize=(11.5, 7.8))
             ax = fig.add_subplot(111)
@@ -1172,6 +1297,7 @@ class VSMPlotter(QtWidgets.QWidget):
                     subset[x_axis].to_numpy(),
                     series_y.to_numpy(),
                     label=f"{measurement.angle:g}°",
+                    **line_kwargs,
                 )
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)

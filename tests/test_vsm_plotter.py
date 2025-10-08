@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import math
+
 import importlib.util
 import sys
 
@@ -203,6 +205,37 @@ def test_suggest_export_subfolder_prefers_measurement(tmp_path: Path) -> None:
     suggested = module._suggest_export_subfolder([measurement])
 
     assert suggested == "202507101115-Hys-a000-T-30-00.VSM-Hys-Data"
+
+
+def test_temperature_subfolder_name_formats_signs() -> None:
+    assert module._temperature_subfolder_name(-30.0) == "T-30C"
+    assert module._temperature_subfolder_name(25.0) == "T_25C"
+    assert module._temperature_subfolder_name(25.5).startswith("T_25.5C")
+
+
+def test_apply_rescaling_handles_near_constant_loop(tmp_path: Path) -> None:
+    flat_path = tmp_path / "flat.VSM-Hys-Data"
+    reference_path = tmp_path / "reference.VSM-Hys-Data"
+    df_flat = pd.DataFrame({"X": [-1000.0, 0.0, 1000.0], "Y": [1.77e-20, 1.78e-20, 1.79e-20]})
+    df_reference = pd.DataFrame({"X": [-1000.0, 0.0, 1000.0], "Y": [-9.0e-4, 0.0, 9.0e-4]})
+
+    results = module._apply_rescaling(
+        [
+            (flat_path, df_flat),
+            (reference_path, df_reference),
+        ],
+        "X",
+        "Y",
+    )
+
+    assert flat_path in results and reference_path in results
+    assert results[flat_path].applied
+    assert math.isclose(results[flat_path].target_left, -9.0e-4, rel_tol=1e-6, abs_tol=1e-12)
+    assert math.isclose(results[flat_path].target_right, 9.0e-4, rel_tol=1e-6, abs_tol=1e-12)
+
+    transformed = df_flat["Y"] * results[flat_path].scale + results[flat_path].offset
+    assert math.isclose(float(transformed.iloc[0]), results[flat_path].target_left, rel_tol=1e-3, abs_tol=1e-9)
+    assert math.isclose(float(transformed.iloc[-1]), results[flat_path].target_right, rel_tol=1e-3, abs_tol=1e-9)
 
 
 def test_read_vsm_file_rejects_empty(tmp_path: Path) -> None:

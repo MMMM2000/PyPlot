@@ -611,13 +611,20 @@ concentrate on a single group. The Matplotlib tabs appear on the right-hand side
 of the window with a console log below; they are fully resizable and inherit the
 project’s dark/light theme settings. Window size and the splitter ratio are now
 persisted via application settings, so any adjustments you make to the plot/log
-layout are restored when you launch the explorer again.
+layout are restored when you launch the explorer again. A **Matplotlib style**
+selector toggles between plain line plots and line-plus-symbol traces, and the
+new **Open in Matplotlib** button clones the currently generated tabs into
+interactive desktop windows for quick zooming or annotation outside the embedded
+canvas.
 
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
 positive-field endpoint reaches the same maximum. The target extrema are derived
 from the global minima and maxima across the group, so even traces whose edge
-segments are almost flat are stretched or inverted to match their neighbours.
+segments are almost flat are stretched or inverted to match their neighbours;
+the rescaling logic now treats tiny numerical differences as real variation so
+stubbornly flat traces (such as the 90° sweep in the sample data) pick up the
+shared minima/maxima instead of collapsing to a horizontal line.
 Each transform is logged per file (including the scale, offset, and any
 inversion) and those same values feed the Matplotlib and Origin outputs, keeping
 the on-screen plots and exported data in sync. Leave the option unchecked to
@@ -636,11 +643,14 @@ with the detected column names, so Origin (or any analysis tool) can import the
 clean tables without the surrounding instrumentation metadata. After you pick the
 destination folder you can opt into creating a named subfolder for the export batch,
 and the plotter remembers the last folder you used so repeat runs open the dialog in
-the same location. Choose between exporting the **Original data** or the
-**Rescaled data**; the latter applies the same Y-axis transform used for the
-plots so the TXT tables drop straight into Origin with matching endpoints. When a
-file cannot be rescaled the exporter keeps the measured values and notes the
-decision in the log so downstream processing never receives flattened traces.
+the same location. When more than one temperature is exported the plotter now
+creates a tidy subfolder per temperature (for example `T-30C`), keeping each
+group’s TXT tables isolated for Origin imports. Choose between exporting the
+**Original data** or the **Rescaled data**; the latter applies the same Y-axis
+transform used for the plots so the TXT tables drop straight into Origin with
+matching endpoints. When a file cannot be rescaled the exporter keeps the
+measured values and notes the decision in the log so downstream processing never
+receives flattened traces.
 Even if a run is missing angle/temperature metadata, the loader still enables TXT
 export while noting that plotting is disabled, making it possible to salvage
 data from noisy recipes. If Origin is not installed the exporter logs a short
