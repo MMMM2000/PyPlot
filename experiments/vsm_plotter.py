@@ -19,13 +19,13 @@ from matplotlib.figure import Figure
 from plotting.backends import wants_matplotlib, wants_origin
 from plotting.utils import ensure_app_theme, install_standard_menu, origin_session, schedule_origin_release
 
-HEADER_COLUMN_RE = re.compile(r"Column\\s+\\d+\\s*:\\s*(.+)")
-WHITESPACE_RE = re.compile(r"[_\\s]+")
-ANGLE_RE = re.compile(r"a(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
-TEMP_RE = re.compile(r"T(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
-FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
-ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\\s*=\\s*([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
-SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
+HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
+WHITESPACE_RE = re.compile(r"[_\s]+")
+ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
+TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
+FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
+ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
+SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 
 TEMPERATURE_COLUMN_CANDIDATES = [
     "Sample Temperature [degC]",
