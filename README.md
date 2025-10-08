@@ -585,7 +585,8 @@ of the window with a console log below; they are fully resizable and inherit the
 project’s dark/light theme settings.
 
 OriginPro exports mirror the same grouping, creating a workbook for each
-temperature and writing a sheet per angle with the selected axes. If Origin is
+temperature, writing a sheet per angle with the selected axes, and building a
+line graph that overlays every angle trace with a labelled legend. If Origin is
 not installed the exporter logs a short reminder while leaving the Matplotlib
 tabs intact, so the workflow stays consistent on machines without Origin.
 

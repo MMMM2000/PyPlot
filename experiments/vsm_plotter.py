@@ -7,7 +7,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -520,23 +520,21 @@ class VSMPlotter(QtWidgets.QWidget):
                 schedule_origin_release()
                 exported = 0
                 for temperature, measurements in sorted(groups.items()):
-                    book = op.new_book('w', lname=self._origin_book_name(temperature))
-                    for index, measurement in enumerate(sorted(measurements, key=lambda m: m.angle)):
-                        if index < len(book):
-                            sheet = book[index]
-                        else:
-                            sheet = book.add_sheet()
-                        sheet.name = f"a{measurement.angle:g}"
+                    valid = []
+                    for measurement in sorted(measurements, key=lambda m: m.angle):
                         subset = measurement.data[[x_axis, y_axis]].dropna()
                         if subset.empty:
                             continue
-                        sheet.from_df(subset.astype(float))
-                        try:
-                            sheet.set_label(0, x_axis)
-                            sheet.set_label(1, y_axis)
-                        except Exception:
-                            pass
-                    exported += 1
+                        valid.append((measurement, subset.astype(float)))
+                    if not valid:
+                        continue
+                    try:
+                        self._build_origin_group(op, temperature, valid, x_axis, y_axis)
+                        exported += 1
+                    except Exception as exc:
+                        self._append_log(
+                            f"Origin export failed for {temperature:g} °C: {exc}"
+                        )
                 if exported:
                     self._append_log(f"Sent {exported} temperature groups to Origin.")
                 else:
@@ -549,6 +547,77 @@ class VSMPlotter(QtWidgets.QWidget):
     def _origin_book_name(self, temperature: float) -> str:
         label = f"VSM_{temperature:g}C"
         return "".join(ch if ch.isalnum() else "_" for ch in label)[:30]
+
+    def _build_origin_group(
+        self,
+        origin_any: Any,
+        temperature: float,
+        entries: Sequence[Tuple[VSMMeasurement, pd.DataFrame]],
+        x_axis: str,
+        y_axis: str,
+    ) -> None:
+        book = origin_any.new_book('w', lname=self._origin_book_name(temperature))
+        book.activate()
+
+        graph = origin_any.new_graph(template='line')
+        layer = graph[0] if graph else None
+        if layer is None:
+            return
+
+        for index, (measurement, subset) in enumerate(entries):
+            if index < len(book):
+                sheet = book[index]
+            else:
+                sheet = book.add_sheet()
+            sheet.name = f"a{measurement.angle:g}"
+            sheet.from_df(subset)
+            try:
+                sheet.cols_axis('XY')
+            except Exception:
+                pass
+            for col, label in enumerate((x_axis, y_axis)):
+                try:
+                    sheet.set_label(col, label)
+                except Exception:
+                    pass
+            plot_obj = layer.add_plot(sheet, coly=1, colx=0, type='y')
+            if plot_obj is not None:
+                try:
+                    plot_obj.legend = f"{measurement.angle:g}°"
+                except Exception:
+                    pass
+
+        try:
+            graph.activate()
+        except Exception:
+            pass
+
+        safe_x = self._escape_origin_text(x_axis)
+        safe_y = self._escape_origin_text(y_axis)
+        safe_title = self._escape_origin_text(
+            f"{y_axis} vs {x_axis} at {temperature:g} °C"
+        )
+
+        for command in (
+            'page.antialias=1;',
+            'layer -aa 1;',
+            f'lab -xb "{safe_x}";',
+            f'lab -yl "{safe_y}";',
+            f'title -s "{safe_title}";',
+            'legend;'
+        ):
+            try:
+                origin_any.lt_exec(command)
+            except Exception:
+                pass
+
+        try:
+            layer.rescale()
+        except Exception:
+            pass
+
+    def _escape_origin_text(self, text: str) -> str:
+        return text.replace("\"", "''")
 
     def _append_log(self, message: str) -> None:
         self.log_view.appendPlainText(message)
