@@ -22,13 +22,16 @@ HEADER_COLUMN_RE = re.compile(r"Column\\s+\\d+\\s*:\\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\\s]+")
 ANGLE_RE = re.compile(r"a(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
 TEMP_RE = re.compile(r"T(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
+FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
+ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\\s*=\\s*([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
+SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 
 
 @dataclass
 class VSMMeasurement:
     path: Path
-    temperature: float
-    angle: float
+    temperature: float | None
+    angle: float | None
     data: pd.DataFrame
 
 
@@ -248,12 +251,16 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
                 continue
             if angle is None:
                 match = ANGLE_RE.search(stripped)
+                if not match:
+                    match = FIELD_ANGLE_RE.search(stripped) or ANGLE_OFFSET_RE.search(stripped)
                 if match:
                     candidate = _safe_float(match.group(1))
                     if candidate is not None:
                         angle = candidate
             if temperature is None:
                 match = TEMP_RE.search(stripped)
+                if not match:
+                    match = SET_TEMPERATURE_RE.search(stripped)
                 if match:
                     candidate = _safe_float(match.group(1))
                     if candidate is not None:
@@ -446,7 +453,8 @@ class VSMPlotter(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Select at least one VSM file to load.")
             return
 
-        loaded = 0
+        total_loaded = 0
+        plottable = 0
         common_columns: Dict[str, int] | None = None
         for path in paths:
             if not path.exists():
@@ -459,36 +467,58 @@ class VSMPlotter(QtWidgets.QWidget):
                 continue
             temperature = _parse_temperature(path)
             angle = _parse_angle(path)
-            if temperature is None or angle is None:
-                self._append_log(
-                    f"Could not parse temperature/angle metadata from {path.name}; skipping."
-                )
-                continue
             measurement = VSMMeasurement(path=path, temperature=temperature, angle=angle, data=df)
             self.measurements.append(measurement)
-            loaded += 1
+            total_loaded += 1
+            if temperature is None or angle is None:
+                self._append_log(
+                    f"Could not parse complete metadata from {path.name}; available for TXT export."
+                )
+            else:
+                plottable += 1
             column_set = {col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])}
             if common_columns is None:
                 common_columns = {col: idx for idx, col in enumerate(df.columns) if col in column_set}
             else:
                 common_columns = {col: idx for col, idx in common_columns.items() if col in column_set}
 
-        if loaded == 0:
-            QtWidgets.QMessageBox.information(self, "VSM Plot Explorer", "No valid VSM measurements were loaded.")
+        if total_loaded == 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Plot Explorer",
+                "No VSM measurements could be loaded.",
+            )
             return
 
-        self.measurements.sort(key=lambda m: (m.temperature, m.angle))
-        unique_temperatures = sorted({m.temperature for m in self.measurements})
+        self.measurements.sort(key=lambda m: (
+            float('inf') if m.temperature is None else m.temperature,
+            float('inf') if m.angle is None else m.angle,
+        ))
+
+        unique_temperatures = sorted({m.temperature for m in self.measurements if m.temperature is not None})
         for temp in unique_temperatures:
             self.temperature_combo.addItem(f"{temp:g} °C", temp)
 
-        self._append_log(f"Loaded {loaded} VSM measurements across {len(unique_temperatures)} temperatures.")
-
-        if common_columns:
-            self._populate_axis_combos(list(common_columns.keys()))
+        if plottable:
+            self._append_log(
+                f"Loaded {total_loaded} VSM measurement(s); {plottable} have full metadata."
+            )
         else:
-            self._populate_axis_combos(list(self.measurements[0].data.columns))
-        self.plot_button.setEnabled(True)
+            self._append_log(
+                "Loaded VSM tables without angle/temperature metadata; plotting is disabled but TXT export is available."
+            )
+
+        candidate_columns: List[str]
+        if common_columns:
+            candidate_columns = list(common_columns.keys())
+        elif self.measurements:
+            candidate_columns = list(self.measurements[0].data.columns)
+        else:
+            candidate_columns = []
+        if candidate_columns:
+            self._populate_axis_combos(candidate_columns)
+
+        self.plot_button.setEnabled(plottable > 0)
         self.export_txt_button.setEnabled(True)
         self._save_settings()
 
@@ -535,6 +565,8 @@ class VSMPlotter(QtWidgets.QWidget):
         target_temp = self.temperature_combo.currentData()
         groups: Dict[float, List[VSMMeasurement]] = {}
         for measurement in self.measurements:
+            if measurement.temperature is None or measurement.angle is None:
+                continue
             if target_temp is not None and measurement.temperature != target_temp:
                 continue
             if x_axis not in measurement.data.columns or y_axis not in measurement.data.columns:

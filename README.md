@@ -577,10 +577,13 @@ temperatures are still recovered automatically.
 
 The loader understands both tidy column descriptions (`Column 0: …`) and the
 free-form headers produced by newer VSM exports, ignoring the lengthy
-instrumentation metadata that surrounds the numeric blocks. Drop the sample
-files from `sample_data/VSM_data/` into the explorer to see how the parser
-automatically selects the final manipulated data section and labels each column
-with a friendly name.
+instrumentation metadata that surrounds the numeric blocks. When filenames lack
+tokens entirely, the parser now falls back to lines such as `Set Field Angle
+to …` and `Set Sample Temperature to …`, so even noisy Lakeshore exports still
+recover the rotation and temperature metadata embedded in the recipe. Drop the
+sample files from `sample_data/VSM_data/` into the explorer to see how the
+parser automatically selects the final manipulated data section and labels each
+column with a friendly name.
 
 Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
 to plot—defaults focus on **Applied Field** versus **Signal parallel with
@@ -596,9 +599,12 @@ temperature, writing a sheet per angle with the selected axes, and building a
 line graph that overlays every angle trace with a labelled legend. A dedicated
 **Export TXT** button also writes the parsed data to plain tab-separated files
 with the detected column names, so Origin (or any analysis tool) can import the
-clean tables without the surrounding instrumentation metadata. If Origin is not
-installed the exporter logs a short reminder while leaving the Matplotlib tabs
-intact, so the workflow stays consistent on machines without Origin.
+clean tables without the surrounding instrumentation metadata. Even if a run is
+missing angle/temperature metadata, the loader still enables TXT export while
+noting that plotting is disabled, making it possible to salvage data from noisy
+recipes. If Origin is not installed the exporter logs a short reminder while
+leaving the Matplotlib tabs intact, so the workflow stays consistent on
+machines without Origin.
 
 ## 7. Repository maintenance
 

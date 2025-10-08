@@ -111,6 +111,38 @@ def test_parse_handles_zero_angle_token(tmp_path: Path) -> None:
     assert module._parse_temperature(path) == -30.0
 
 
+def test_parse_metadata_from_set_temperature_line(tmp_path: Path) -> None:
+    path = tmp_path / "no_tokens.VSM-Hys-Data"
+    content = """Action 0:      Set Field Angle to -15.5 [deg]
+Action 1:      Set Sample Temperature to -29.5989 [degC]
+@@Data
+New Section: Section 0:
+1 2 3
+@@END Data
+"""
+    path.write_text(content)
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == -15.5
+    assert module._parse_temperature(path) == -29.5989
+
+
+def test_parse_metadata_from_angle_offset(tmp_path: Path) -> None:
+    path = tmp_path / "offset_only.VSM-Hys-Data"
+    content = """Sample Angle Offset = 42.0
+@@Data
+New Section: Section 0:
+1 2 3
+@@END Data
+"""
+    path.write_text(content)
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 42.0
+
+
 def test_read_vsm_file_rejects_empty(tmp_path: Path) -> None:
     empty_path = tmp_path / "empty.VSM-Hys-Data"
     empty_path.write_text("@@Data\n@@END Data\n")
