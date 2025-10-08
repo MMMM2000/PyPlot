@@ -101,6 +101,16 @@ New Section: Section 0:
     assert module._parse_temperature(path) == -45.0
 
 
+def test_parse_handles_zero_angle_token(tmp_path: Path) -> None:
+    path = tmp_path / "202507101115-Hys-a000-T-30-00.VSM-Hys-Data"
+    path.write_text("@@Data\nNew Section: Section 0:\n1 2 3\n@@END Data\n")
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 0.0
+    assert module._parse_temperature(path) == -30.0
+
+
 def test_read_vsm_file_rejects_empty(tmp_path: Path) -> None:
     empty_path = tmp_path / "empty.VSM-Hys-Data"
     empty_path.write_text("@@Data\n@@END Data\n")
@@ -116,3 +126,4 @@ def test_safe_float_handles_dash_tokens() -> None:
     assert module._safe_float("-30-00") == -30.0
     assert module._safe_float("30-50") == 30.50
     assert module._safe_float("+12-345") == 12.345
+    assert module._safe_float("000-") == 0.0

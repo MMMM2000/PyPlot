@@ -568,8 +568,10 @@ pick individual measurements, then load them into the session. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
 each loop is grouped with peers recorded at the same temperature. Tokens such as
 `T-30-00` are converted to `-30.00 °C`, so the dash-separated format produced by
-the Lakeshore export is recognised without manual editing. When filenames are
-missing the `a`/`T` tokens, the loader now scans the header metadata (for
+the Lakeshore export is recognised without manual editing. Zero-angle runs like
+`a000` (and other filenames that append formatting dashes before the next token)
+now resolve to a numeric angle of `0 °` instead of being skipped. When filenames
+are missing the `a`/`T` tokens, the loader now scans the header metadata (for
 example the `@Filename` lines embedded by the VSM software) so rotations and
 temperatures are still recovered automatically.
 

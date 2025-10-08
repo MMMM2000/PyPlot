@@ -20,8 +20,8 @@ from plotting.utils import ensure_app_theme, install_standard_menu, origin_sessi
 
 HEADER_COLUMN_RE = re.compile(r"Column\\s+\\d+\\s*:\\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\\s]+")
-ANGLE_RE = re.compile(r"a(-?[\\d\\-]+(?:\\.\\d+)?)", re.IGNORECASE)
-TEMP_RE = re.compile(r"T(-?[\\d\\-]+(?:\\.\\d+)?)", re.IGNORECASE)
+ANGLE_RE = re.compile(r"a(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
+TEMP_RE = re.compile(r"T(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
 
 
 @dataclass
@@ -178,6 +178,9 @@ def _safe_float(token: str) -> float | None:
     token = token.strip()
     if not token:
         return None
+    token = token.rstrip("-_")
+    if not token:
+        return None
     try:
         return float(token)
     except ValueError:
@@ -191,7 +194,21 @@ def _safe_float(token: str) -> float | None:
         sign = "-"
         remainder = remainder[1:]
 
-    parts = remainder.split("-")
+    remainder = remainder.strip()
+    remainder = remainder.rstrip("-")
+    if not remainder:
+        return None
+
+    parts = [part for part in remainder.split("-") if part]
+    if not parts:
+        return None
+
+    if len(parts) == 1 and parts[0].isdigit():
+        try:
+            return float(f"{sign}{parts[0]}")
+        except ValueError:
+            return None
+
     if len(parts) >= 2 and all(part.isdigit() for part in parts):
         major = parts[0]
         fractional = "".join(parts[1:])
