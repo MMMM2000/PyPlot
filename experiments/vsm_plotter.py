@@ -73,7 +73,7 @@ class RescaleResult:
 
 
 EDGE_FRACTION = 0.05
-NUMERIC_TOLERANCE = 1e-9
+NUMERIC_TOLERANCE = 1e-12
 
 
 def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[float, float]:
@@ -106,20 +106,21 @@ def _apply_rescaling(
 ) -> Dict[Path, RescaleResult]:
     """Compute linear transforms that align loop endpoints across measurements."""
 
-    prepared: List[tuple[Path, pd.DataFrame, float, float, float]] = []
+    prepared: List[tuple[Path, pd.DataFrame, float, float, float, float]] = []
     for path, subset in entries:
         if subset.empty:
             continue
         left, right = _estimate_edge_values(subset, x_axis, y_axis)
-        series_y = subset[y_axis]
-        span = float(series_y.max() - series_y.min()) if not series_y.empty else 0.0
-        prepared.append((path, subset, left, right, span))
+        series_y = pd.to_numeric(subset[y_axis], errors="coerce")
+        y_min = float(series_y.min()) if not series_y.empty else float(left)
+        y_max = float(series_y.max()) if not series_y.empty else float(right)
+        prepared.append((path, subset, float(left), float(right), y_min, y_max))
 
     if not prepared:
         return {}
 
-    target_left = min(item[2] for item in prepared)
-    target_right = max(item[3] for item in prepared)
+    target_left = min(item[4] for item in prepared)
+    target_right = max(item[5] for item in prepared)
 
     if math.isclose(target_left, target_right, abs_tol=NUMERIC_TOLERANCE):
         reference_left = prepared[0][2]
@@ -128,26 +129,38 @@ def _apply_rescaling(
         target_right = reference_right
 
     results: Dict[Path, RescaleResult] = {}
-    for path, subset, left, right, span in prepared:
-        applied = True
-        if math.isclose(right, left, abs_tol=NUMERIC_TOLERANCE) or math.isclose(
-            span, 0.0, abs_tol=NUMERIC_TOLERANCE
-        ):
-            scale = 1.0
-            offset = 0.0
-            applied = False
-        else:
-            scale = (target_right - target_left) / (right - left)
-            offset = target_left - scale * left
+    for path, subset, left_edge, right_edge, y_min, y_max in prepared:
+        source_left = left_edge
+        source_right = right_edge
+
+        if math.isclose(source_right - source_left, 0.0, abs_tol=NUMERIC_TOLERANCE):
+            source_left = y_min
+            source_right = y_max
+
+        delta = source_right - source_left
+        if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
+            results[path] = RescaleResult(
+                scale=1.0,
+                offset=0.0,
+                source_left=source_left,
+                source_right=source_right,
+                target_left=target_left,
+                target_right=target_right,
+                applied=False,
+            )
+            continue
+
+        scale = (target_right - target_left) / delta
+        offset = target_left - scale * source_left
 
         results[path] = RescaleResult(
             scale=scale,
             offset=offset,
-            source_left=left,
-            source_right=right,
+            source_left=source_left,
+            source_right=source_right,
             target_left=target_left,
             target_right=target_right,
-            applied=applied,
+            applied=True,
         )
 
     return results
@@ -979,7 +992,7 @@ class VSMPlotter(QtWidgets.QWidget):
                         continue
                     if not result.applied:
                         self._append_log(
-                            f"{measurement.path.name}: insufficient variation to rescale {y_axis}; original values kept."
+                            f"{measurement.path.name}: insufficient variation to rescale {y_axis}; original values kept at {result.source_left:.3g}."
                         )
                         continue
                     inversion_note = " (inverted)" if result.scale < 0 else ""
@@ -1095,7 +1108,7 @@ class VSMPlotter(QtWidgets.QWidget):
                         result = rescale_lookup[measurement.path]
                         if not result.applied:
                             self._append_log(
-                                f"{measurement.path.name}: rescale skipped for export; original values written."
+                                f"{measurement.path.name}: insufficient variation to rescale {y_axis}; exported original values."
                             )
                             df_to_write = measurement.data
                         else:
@@ -1225,6 +1238,10 @@ class VSMPlotter(QtWidgets.QWidget):
         label = f"VSM_{temperature:g}C"
         return "".join(ch if ch.isalnum() else "_" for ch in label)[:30]
 
+    def _origin_graph_short_name(self, temperature: float) -> str:
+        label = f"T{temperature:g}C"
+        return "".join(ch if ch.isalnum() else "_" for ch in label)[:13]
+
     def _build_origin_group(
         self,
         origin_any: Any,
@@ -1240,6 +1257,15 @@ class VSMPlotter(QtWidgets.QWidget):
         layer = graph[0] if graph else None
         if layer is None:
             return
+
+        try:
+            graph.lname = f"{temperature:g} °C"
+        except Exception:
+            pass
+        try:
+            graph.name = self._origin_graph_short_name(temperature)
+        except Exception:
+            pass
 
         for index, (measurement, subset) in enumerate(entries):
             if index < len(book):
@@ -1260,7 +1286,7 @@ class VSMPlotter(QtWidgets.QWidget):
             plot_obj = layer.add_plot(sheet, coly=1, colx=0, type='y')
             if plot_obj is not None:
                 try:
-                    plot_obj.legend = f"{measurement.angle:g}°"
+                    plot_obj.legend = f"Angle {measurement.angle:g}°"
                 except Exception:
                     pass
 

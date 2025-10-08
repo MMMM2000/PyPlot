@@ -615,16 +615,22 @@ layout are restored when you launch the explorer again.
 
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
-positive-field endpoint reaches the same maximum. The transform is logged per
-file, highlighting when a curve needed inversion, and the Matplotlib/Origin
-outputs use the rescaled values so angles that were captured with inverted
-signals line up with their neighbours. Leave the option unchecked to plot the
-raw measurements. Measurements with too little variation are detected and left
-untouched so flat loops are no longer forced into horizontal lines.
+positive-field endpoint reaches the same maximum. The target extrema are derived
+from the global minima and maxima across the group, so even traces whose edge
+segments are almost flat are stretched or inverted to match their neighbours.
+Each transform is logged per file (including the scale, offset, and any
+inversion) and those same values feed the Matplotlib and Origin outputs, keeping
+the on-screen plots and exported data in sync. Leave the option unchecked to
+plot the raw measurements. When a loop is genuinely constant the plotter now
+logs that the original values were kept so the exporter never overwrites
+featureless traces with artificial ramps.
 
 OriginPro exports mirror the same grouping, creating a workbook for each
 temperature, writing a sheet per angle with the selected axes, and building a
-line graph that overlays every angle trace with a labelled legend. A dedicated
+line graph that overlays every angle trace with a labelled legend. The graph
+pages are named after their temperature and each legend entry now reads `Angle
+XX°`, making it immediately clear which curve corresponds to which rotation
+without cross-referencing the workbook sheets. A dedicated
 **Export TXT** button also writes the parsed data to plain tab-separated files
 with the detected column names, so Origin (or any analysis tool) can import the
 clean tables without the surrounding instrumentation metadata. After you pick the

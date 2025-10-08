@@ -306,6 +306,29 @@ def test_apply_rescaling_skips_constant_measurements() -> None:
     assert flat_result.offset == pytest.approx(0.0)
 
 
+def test_apply_rescaling_recovers_flat_edges() -> None:
+    base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
+    awkward = pd.DataFrame(
+        {
+            "H": [-10.0, -9.0, -8.0, 8.0, 9.0, 10.0],
+            "M": [0.0, -0.6, -0.8, 0.7, 0.9, 0.0],
+        }
+    )
+
+    results = module._apply_rescaling(
+        [(Path("base"), base), (Path("awkward"), awkward)],
+        "H",
+        "M",
+    )
+
+    awkward_result = results[Path("awkward")]
+    assert awkward_result.applied is True
+
+    transformed = awkward["M"] * awkward_result.scale + awkward_result.offset
+    assert transformed.min() == pytest.approx(awkward_result.target_left)
+    assert transformed.max() == pytest.approx(awkward_result.target_right)
+
+
 def test_find_vsm_files_recurses(tmp_path: Path) -> None:
     root = tmp_path / "root"
     nested = root / "nested"
@@ -323,3 +346,128 @@ def test_find_vsm_files_recurses(tmp_path: Path) -> None:
         Path("nested/deep.VSM-Hys-Data"),
         Path("top.VSM-Hys-Data"),
     ]
+
+
+class _FakeSheet:
+    def __init__(self) -> None:
+        self.data = None
+        self.labels: dict[int, str] = {}
+        self.name = ""
+
+    def from_df(self, df: pd.DataFrame) -> None:
+        self.data = df
+
+    def cols_axis(self, *_: object) -> None:  # pragma: no cover - behaviour not asserted
+        return
+
+    def set_label(self, col: int, label: str) -> None:
+        self.labels[col] = label
+
+
+class _FakeBook(list):
+    def __init__(self) -> None:
+        super().__init__([_FakeSheet()])
+        self.lname = ""
+        self.name = ""
+        self.activated = False
+
+    def activate(self) -> None:
+        self.activated = True
+
+    def add_sheet(self) -> _FakeSheet:
+        sheet = _FakeSheet()
+        self.append(sheet)
+        return sheet
+
+
+class _FakePlot:
+    def __init__(self, sheet: _FakeSheet) -> None:
+        self.sheet = sheet
+        self.legend = ""
+
+
+class _FakeLayer:
+    def __init__(self) -> None:
+        self.plots: list[_FakePlot] = []
+        self.rescaled = False
+
+    def add_plot(self, sheet: _FakeSheet, **_: object) -> _FakePlot:
+        plot = _FakePlot(sheet)
+        self.plots.append(plot)
+        return plot
+
+    def rescale(self) -> None:
+        self.rescaled = True
+
+
+class _FakeGraph:
+    def __init__(self) -> None:
+        self.layers = [_FakeLayer()]
+        self.lname = ""
+        self.name = ""
+        self.activated = False
+
+    def __getitem__(self, index: int) -> _FakeLayer:
+        return self.layers[index]
+
+    def activate(self) -> None:
+        self.activated = True
+
+
+class _FakeOrigin:
+    def __init__(self) -> None:
+        self.books: list[_FakeBook] = []
+        self.graphs: list[_FakeGraph] = []
+        self.commands: list[str] = []
+
+    def new_book(self, *_: object, **kwargs: object) -> _FakeBook:
+        book = _FakeBook()
+        book.lname = str(kwargs.get("lname", ""))
+        self.books.append(book)
+        return book
+
+    def new_graph(self, *_: object, **__: object) -> _FakeGraph:
+        graph = _FakeGraph()
+        self.graphs.append(graph)
+        return graph
+
+    def lt_exec(self, command: str) -> None:
+        self.commands.append(command)
+
+
+def test_build_origin_group_sets_names_and_legends() -> None:
+    plotter = module.VSMPlotter.__new__(module.VSMPlotter)
+    # Bind helper methods expected by _build_origin_group
+    plotter._escape_origin_text = module.VSMPlotter._escape_origin_text.__get__(plotter)
+    plotter._origin_book_name = module.VSMPlotter._origin_book_name.__get__(plotter)
+    plotter._origin_graph_short_name = module.VSMPlotter._origin_graph_short_name.__get__(plotter)
+
+    measurement = module.VSMMeasurement(
+        Path("202507101115-Hys-a010-T-30-00.VSM-Hys-Data"),
+        -30.0,
+        10.0,
+        pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]}),
+    )
+
+    subset = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
+    fake_origin = _FakeOrigin()
+
+    plotter._build_origin_group(
+        fake_origin,
+        -30.0,
+        [(measurement, subset)],
+        "H",
+        "M",
+    )
+
+    assert fake_origin.books, "Expected a workbook to be created"
+    assert fake_origin.graphs, "Expected a graph to be created"
+
+    graph = fake_origin.graphs[0]
+    assert graph.lname == "-30 °C"
+    assert graph.name == plotter._origin_graph_short_name(-30.0)
+
+    layer = graph[0]
+    assert layer.plots, "Expected a plot to be added to the Origin layer"
+    assert layer.plots[0].legend == "Angle 10°"
+
