@@ -110,3 +110,9 @@ def test_read_vsm_file_rejects_empty(tmp_path: Path) -> None:
         assert "No data rows" in str(exc)
     else:  # pragma: no cover - ensure failure is surfaced
         raise AssertionError("Expected ValueError for empty VSM file")
+
+
+def test_safe_float_handles_dash_tokens() -> None:
+    assert module._safe_float("-30-00") == -30.0
+    assert module._safe_float("30-50") == 30.50
+    assert module._safe_float("+12-345") == 12.345

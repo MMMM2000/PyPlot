@@ -20,8 +20,8 @@ from plotting.utils import ensure_app_theme, install_standard_menu, origin_sessi
 
 HEADER_COLUMN_RE = re.compile(r"Column\\s+\\d+\\s*:\\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\\s]+")
-ANGLE_RE = re.compile(r"a(-?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
-TEMP_RE = re.compile(r"T(-?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
+ANGLE_RE = re.compile(r"a(-?[\\d\\-]+(?:\\.\\d+)?)", re.IGNORECASE)
+TEMP_RE = re.compile(r"T(-?[\\d\\-]+(?:\\.\\d+)?)", re.IGNORECASE)
 
 
 @dataclass
@@ -175,10 +175,33 @@ def _looks_numeric(token: str) -> bool:
 
 
 def _safe_float(token: str) -> float | None:
+    token = token.strip()
+    if not token:
+        return None
     try:
         return float(token)
     except ValueError:
-        return None
+        pass
+
+    sign = ""
+    remainder = token
+    if remainder.startswith("+"):
+        remainder = remainder[1:]
+    elif remainder.startswith("-"):
+        sign = "-"
+        remainder = remainder[1:]
+
+    parts = remainder.split("-")
+    if len(parts) >= 2 and all(part.isdigit() for part in parts):
+        major = parts[0]
+        fractional = "".join(parts[1:])
+        candidate = f"{sign}{major}.{fractional}" if fractional else f"{sign}{major}"
+        try:
+            return float(candidate)
+        except ValueError:
+            return None
+
+    return None
 
 
 def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
@@ -310,6 +333,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.plot_button.clicked.connect(self._generate_plots)
         self.plot_button.setEnabled(False)
         button_row.addWidget(self.plot_button)
+        self.export_txt_button = QtWidgets.QPushButton("Export TXT")
+        self.export_txt_button.clicked.connect(self._export_txt)
+        self.export_txt_button.setEnabled(False)
+        button_row.addWidget(self.export_txt_button)
         controls_layout.addLayout(button_row)
 
         controls_layout.addStretch(1)
@@ -395,6 +422,7 @@ class VSMPlotter(QtWidgets.QWidget):
         self.temperature_combo.addItem("All temperatures", None)
         self.temperature_combo.blockSignals(False)
         self.plot_button.setEnabled(False)
+        self.export_txt_button.setEnabled(False)
 
         paths = self._selected_paths()
         if not paths:
@@ -415,7 +443,9 @@ class VSMPlotter(QtWidgets.QWidget):
             temperature = _parse_temperature(path)
             angle = _parse_angle(path)
             if temperature is None or angle is None:
-                self._append_log(f"Could not parse metadata from filename: {path.name}")
+                self._append_log(
+                    f"Could not parse temperature/angle metadata from {path.name}; skipping."
+                )
                 continue
             measurement = VSMMeasurement(path=path, temperature=temperature, angle=angle, data=df)
             self.measurements.append(measurement)
@@ -442,6 +472,7 @@ class VSMPlotter(QtWidgets.QWidget):
         else:
             self._populate_axis_combos(list(self.measurements[0].data.columns))
         self.plot_button.setEnabled(True)
+        self.export_txt_button.setEnabled(True)
         self._save_settings()
 
     def _populate_axis_combos(self, labels: List[str]) -> None:
@@ -518,6 +549,50 @@ class VSMPlotter(QtWidgets.QWidget):
 
         if not render_matplotlib and not export_origin:
             self._append_log("No backend selected; nothing generated.")
+
+    def _export_txt(self) -> None:
+        if not self.measurements:
+            QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Load VSM measurements first.")
+            return
+
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            self.path_edit.text() or str(Path.home()),
+        )
+        if not directory:
+            return
+
+        target_dir = Path(directory)
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        for measurement in self.measurements:
+            base_name = measurement.path.stem or f"measurement_{exported + 1}"
+            candidate = target_dir / f"{base_name}.txt"
+            counter = 2
+            while candidate.exists():
+                candidate = target_dir / f"{base_name}_{counter}.txt"
+                counter += 1
+            try:
+                measurement.data.to_csv(candidate, sep="\t", index=False)
+                exported += 1
+            except Exception as exc:
+                self._append_log(f"Failed to export {measurement.path.name}: {exc}")
+
+        if exported:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Plot Explorer",
+                f"Exported {exported} measurement(s) to {target_dir}",
+            )
+            self._append_log(f"Exported {exported} measurement(s) to {target_dir}")
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Plot Explorer",
+                "No files were exported."
+            )
 
     def _render_matplotlib(
         self,

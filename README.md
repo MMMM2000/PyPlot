@@ -566,8 +566,10 @@ bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
 experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
 pick individual measurements, then load them into the session. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
-each loop is grouped with peers recorded at the same temperature. When filenames
-are missing the `a`/`T` tokens, the loader now scans the header metadata (for
+each loop is grouped with peers recorded at the same temperature. Tokens such as
+`T-30-00` are converted to `-30.00 °C`, so the dash-separated format produced by
+the Lakeshore export is recognised without manual editing. When filenames are
+missing the `a`/`T` tokens, the loader now scans the header metadata (for
 example the `@Filename` lines embedded by the VSM software) so rotations and
 temperatures are still recovered automatically.
 
@@ -589,9 +591,12 @@ project’s dark/light theme settings.
 
 OriginPro exports mirror the same grouping, creating a workbook for each
 temperature, writing a sheet per angle with the selected axes, and building a
-line graph that overlays every angle trace with a labelled legend. If Origin is
-not installed the exporter logs a short reminder while leaving the Matplotlib
-tabs intact, so the workflow stays consistent on machines without Origin.
+line graph that overlays every angle trace with a labelled legend. A dedicated
+**Export TXT** button also writes the parsed data to plain tab-separated files
+with the detected column names, so Origin (or any analysis tool) can import the
+clean tables without the surrounding instrumentation metadata. If Origin is not
+installed the exporter logs a short reminder while leaving the Matplotlib tabs
+intact, so the workflow stays consistent on machines without Origin.
 
 ## 7. Repository maintenance
 
