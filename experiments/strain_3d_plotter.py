@@ -1,4 +1,4 @@
-"""Visualise strain worksheet metrics across 3D scatter combinations."""
+"""Visualise strain worksheet or database metrics across scatter combinations."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import List, Sequence, Tuple
+from typing import Iterable, List, NamedTuple, Sequence, Tuple
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -86,13 +86,39 @@ def _clean_cell(value: object) -> str:
     return str(value).strip()
 
 
+class PlotConfig(NamedTuple):
+    labels: Tuple[str, ...]
+    dimension: int  # 2 or 3
+
+
+def _auto_plot_combinations(
+    labels: Iterable[str],
+    strain_label: str,
+    include_2d: bool,
+    include_3d: bool,
+) -> List[PlotConfig]:
+    """Build automatic combinations ensuring strain is always present."""
+
+    label_list = list(dict.fromkeys(labels))  # preserve order, drop duplicates
+    combos: List[PlotConfig] = []
+    if include_2d:
+        for combo in itertools.combinations(label_list, 2):
+            if strain_label in combo:
+                combos.append(PlotConfig(combo, 2))
+    if include_3d:
+        for combo in itertools.combinations(label_list, 3):
+            if strain_label in combo:
+                combos.append(PlotConfig(combo, 3))
+    return combos
+
+
 class Strain3DPlotter(QtWidgets.QWidget):
-    """Widget that renders 3D scatter plots for strain worksheet metrics."""
+    """Widget that renders 2D/3D scatter plots for strain metrics."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Strain 3D Plot Explorer")
-        self.resize(1400, 900)
+        self.setWindowTitle("Strain Plot Explorer")
+        self.resize(1480, 980)
 
         self.logger = logging.getLogger("strain_3d_plotter")
         self.logger.setLevel(logging.INFO)
@@ -115,11 +141,48 @@ class Strain3DPlotter(QtWidgets.QWidget):
         input_row = QtWidgets.QHBoxLayout()
         input_row.addWidget(self.input_edit, 1)
         input_row.addWidget(self.input_button)
-        form.addRow("Strain worksheet", input_row)
+        form.addRow("Worksheet or database", input_row)
 
         self.backend_combo = QtWidgets.QComboBox()
         self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
         form.addRow("Output backend", self.backend_combo)
+
+        self.mode_combo = QtWidgets.QComboBox()
+        self.mode_combo.addItems(["Automatic combinations", "Manual axes"])
+        self.mode_combo.currentIndexChanged.connect(self._update_mode_state)
+        form.addRow("Plot mode", self.mode_combo)
+
+        self.auto_options = QtWidgets.QWidget()
+        auto_layout = QtWidgets.QHBoxLayout(self.auto_options)
+        auto_layout.setContentsMargins(0, 0, 0, 0)
+        self.auto_2d_check = QtWidgets.QCheckBox("Generate 2D plots")
+        self.auto_3d_check = QtWidgets.QCheckBox("Generate 3D plots")
+        self.auto_3d_check.setChecked(True)
+        auto_layout.addWidget(self.auto_2d_check)
+        auto_layout.addWidget(self.auto_3d_check)
+        auto_layout.addStretch(1)
+        form.addRow("Automatic options", self.auto_options)
+
+        self.manual_options = QtWidgets.QWidget()
+        manual_form = QtWidgets.QGridLayout(self.manual_options)
+        manual_form.setContentsMargins(0, 0, 0, 0)
+        self.manual_dimension_combo = QtWidgets.QComboBox()
+        self.manual_dimension_combo.addItems(["2D", "3D"])
+        self.manual_dimension_combo.currentIndexChanged.connect(
+            self._update_manual_dimension_state
+        )
+        manual_form.addWidget(QtWidgets.QLabel("Plot type"), 0, 0)
+        manual_form.addWidget(self.manual_dimension_combo, 0, 1)
+        self.axis_x_combo = QtWidgets.QComboBox()
+        self.axis_y_combo = QtWidgets.QComboBox()
+        self.axis_z_combo = QtWidgets.QComboBox()
+        manual_form.addWidget(QtWidgets.QLabel("X axis"), 1, 0)
+        manual_form.addWidget(self.axis_x_combo, 1, 1)
+        manual_form.addWidget(QtWidgets.QLabel("Y axis"), 2, 0)
+        manual_form.addWidget(self.axis_y_combo, 2, 1)
+        manual_form.addWidget(QtWidgets.QLabel("Z axis"), 3, 0)
+        manual_form.addWidget(self.axis_z_combo, 3, 1)
+        form.addRow("Manual options", self.manual_options)
 
         layout.addLayout(form)
 
@@ -143,7 +206,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setPlaceholderText("Load a worksheet to generate 3D scatter plots…")
+        self.log_view.setPlaceholderText("Load a worksheet to generate scatter plots…")
         self.splitter.addWidget(self.log_view)
         self.splitter.setStretchFactor(0, 3)
         self.splitter.setStretchFactor(1, 2)
@@ -152,6 +215,8 @@ class Strain3DPlotter(QtWidgets.QWidget):
         self.tab_widget.currentChanged.connect(self._update_fullscreen_state)
 
         install_standard_menu(self, help_topic="strain_3d_plotter", console=self.log_view)
+        self._update_mode_state()
+        self._update_manual_dimension_state()
 
     def _load_settings(self) -> None:
         value = self.settings.value("input_path", "")
@@ -162,17 +227,48 @@ class Strain3DPlotter(QtWidgets.QWidget):
             index = self.backend_combo.findText(backend, QtCore.Qt.MatchFlag.MatchFixedString)
             if index >= 0:
                 self.backend_combo.setCurrentIndex(index)
+        mode = self.settings.value("mode", "Automatic combinations")
+        if isinstance(mode, str):
+            mode_index = self.mode_combo.findText(mode, QtCore.Qt.MatchFlag.MatchFixedString)
+            if mode_index >= 0:
+                self.mode_combo.setCurrentIndex(mode_index)
+        manual_dim = self.settings.value("manual_dimension", "2D")
+        if isinstance(manual_dim, str):
+            dim_index = self.manual_dimension_combo.findText(
+                manual_dim, QtCore.Qt.MatchFlag.MatchFixedString
+            )
+            if dim_index >= 0:
+                self.manual_dimension_combo.setCurrentIndex(dim_index)
+        auto_2d = self.settings.value("auto_2d", False)
+        if isinstance(auto_2d, bool):
+            self.auto_2d_check.setChecked(auto_2d)
+        auto_3d = self.settings.value("auto_3d", True)
+        if isinstance(auto_3d, bool):
+            self.auto_3d_check.setChecked(auto_3d)
 
     def _save_settings(self) -> None:
         self.settings.setValue("input_path", self.input_edit.text())
         self.settings.setValue("backend", self.backend_combo.currentText())
+        self.settings.setValue("mode", self.mode_combo.currentText())
+        self.settings.setValue("manual_dimension", self.manual_dimension_combo.currentText())
+        self.settings.setValue("auto_2d", self.auto_2d_check.isChecked())
+        self.settings.setValue("auto_3d", self.auto_3d_check.isChecked())
         self.settings.sync()
+
+    def _update_mode_state(self) -> None:
+        automatic = self.mode_combo.currentText() == "Automatic combinations"
+        self.auto_options.setVisible(automatic)
+        self.manual_options.setVisible(not automatic)
+
+    def _update_manual_dimension_state(self) -> None:
+        is_3d = self.manual_dimension_combo.currentText() == "3D"
+        self.axis_z_combo.setEnabled(is_3d)
 
     # ------------------------------------------------------------------ file selection
     def _choose_input_file(self) -> None:
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Select strain worksheet",
+            "Select worksheet or database",
             self.input_edit.text() or str(Path.home()),
             "Excel files (*.xlsx *.xlsm *.xls)",
         )
@@ -190,7 +286,11 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if tab is None:
             self.fullscreen_button.setEnabled(False)
             return
-        has_data = tab.property("plot_data") is not None and tab.property("plot_combo") is not None
+        has_data = (
+            tab.property("plot_data") is not None
+            and tab.property("plot_combo") is not None
+            and tab.property("plot_dimension") is not None
+        )
         self.fullscreen_button.setEnabled(has_data)
 
     def _open_fullscreen_plot(self) -> None:
@@ -200,20 +300,23 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         subset = tab.property("plot_data")
         combo = tab.property("plot_combo")
+        dimension = tab.property("plot_dimension")
         title = tab.property("plot_title") or self.tab_widget.tabText(self.tab_widget.currentIndex())
-        if subset is None or combo is None:
+        if subset is None or combo is None or dimension is None:
             QtWidgets.QMessageBox.information(
                 self,
-                "Strain 3D Plot Explorer",
+                "Strain Plot Explorer",
                 "Select a tab generated from worksheet data before opening a full-screen plot.",
             )
             return
 
-        window = PlotWindow(self, title, subset, combo)
+        window = PlotWindow(self, title, subset, combo, dimension)
         window.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
         window.showMaximized()
         self._floating_windows.append(window)
-        window.destroyed.connect(lambda: self._floating_windows.remove(window) if window in self._floating_windows else None)
+        window.destroyed.connect(
+            lambda: self._floating_windows.remove(window) if window in self._floating_windows else None
+        )
 
     def _generate_plots(self) -> None:
         self.tab_widget.clear()
@@ -229,7 +332,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         path = Path(self.input_edit.text().strip())
         if not path.exists():
-            QtWidgets.QMessageBox.warning(self, "Strain 3D Plot Explorer", "Please select an existing worksheet file.")
+            QtWidgets.QMessageBox.warning(self, "Strain Plot Explorer", "Please select an existing file.")
             return
 
         try:
@@ -237,14 +340,14 @@ class Strain3DPlotter(QtWidgets.QWidget):
         except Exception as exc:  # pragma: no cover - user feedback
             QtWidgets.QMessageBox.critical(
                 self,
-                "Strain 3D Plot Explorer",
+                "Strain Plot Explorer",
                 f"Failed to read worksheet:\n{exc}",
             )
             return
 
         df = df.dropna(how="all")
         if df.empty:
-            QtWidgets.QMessageBox.information(self, "Strain 3D Plot Explorer", "The worksheet does not contain any data.")
+            QtWidgets.QMessageBox.information(self, "Strain Plot Explorer", "The worksheet does not contain any data.")
             return
 
         columns = list(df.columns)
@@ -257,8 +360,8 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if strain_idx is None:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Strain 3D Plot Explorer",
-                "Could not locate a strain column. Ensure the worksheet header contains 'strain'.",
+                "Strain Plot Explorer",
+                "Could not locate a strain column. Ensure the header contains 'strain'.",
             )
             return
 
@@ -276,10 +379,12 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         records = []
         for row_index, row in df.iterrows():
-            # Skip repeated header rows that sometimes appear in worksheets
             if composition_idx is not None:
                 if _clean_cell(row.iloc[composition_idx]).lower() == "composition":
                     continue
+            status_value = _clean_cell(row.iloc[status_idx]) if status_idx is not None else ""
+            if status_value.lower().startswith("broke"):
+                continue
             strain_value = _parse_strain_float(row.iloc[strain_idx])
             if strain_value is None:
                 continue
@@ -300,7 +405,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if not records:
             QtWidgets.QMessageBox.information(
                 self,
-                "Strain 3D Plot Explorer",
+                "Strain Plot Explorer",
                 "No rows with strain measurements were found in the worksheet.",
             )
             return
@@ -316,13 +421,10 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if strain_label not in valid_numeric_labels:
             valid_numeric_labels.insert(0, strain_label)
 
-        combinations = list(itertools.combinations(valid_numeric_labels, 3))
-        if not combinations:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Strain 3D Plot Explorer",
-                "Not enough numeric columns with data to build 3D plots.",
-            )
+        self._refresh_axis_options(valid_numeric_labels, strain_label)
+
+        configs = self._build_plot_configs(valid_numeric_labels, strain_label)
+        if not configs:
             return
 
         backend_choice = self.backend_combo.currentText()
@@ -332,31 +434,108 @@ class Strain3DPlotter(QtWidgets.QWidget):
         export_origin = wants_origin(backend_choice)
 
         self._append_log(f"Loaded {len(records)} rows with strain measurements.")
-        self._append_log(f"Prepared {len(combinations)} 3D combinations.")
+        two_d = sum(1 for cfg in configs if cfg.dimension == 2)
+        three_d = sum(1 for cfg in configs if cfg.dimension == 3)
+        if two_d:
+            self._append_log(f"Prepared {two_d} 2D combinations.")
+        if three_d:
+            self._append_log(f"Prepared {three_d} 3D combinations.")
+        if not two_d and not three_d:
+            self._append_log("No plot combinations satisfied the requested settings.")
 
         if render_matplotlib:
-            self._render_matplotlib_tabs(plot_df, combinations)
+            self._render_matplotlib_tabs(plot_df, configs)
         else:
             self.tab_widget.setVisible(False)
 
         if export_origin:
-            self._export_origin(plot_df, combinations)
+            self._export_origin(plot_df, configs)
 
         if not render_matplotlib and not export_origin:
             self._append_log("No backends selected—nothing to generate.")
 
-    def _render_matplotlib_tabs(self, plot_df: pd.DataFrame, combinations: List[Tuple[str, str, str]]) -> None:
+    def _refresh_axis_options(self, labels: List[str], strain_label: str) -> None:
+        def _populate(combo: QtWidgets.QComboBox) -> None:
+            current = combo.currentText()
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(labels)
+            if current and combo.findText(current) >= 0:
+                combo.setCurrentText(current)
+            combo.blockSignals(False)
+
+        for widget in (self.axis_x_combo, self.axis_y_combo, self.axis_z_combo):
+            _populate(widget)
+
+        if labels and not self.axis_x_combo.currentText():
+            self.axis_x_combo.setCurrentText(strain_label)
+        if len(labels) > 1 and not self.axis_y_combo.currentText():
+            for label in labels:
+                if label != strain_label:
+                    self.axis_y_combo.setCurrentText(label)
+                    break
+        if len(labels) > 2 and not self.axis_z_combo.currentText():
+            for label in labels:
+                if label not in {self.axis_x_combo.currentText(), self.axis_y_combo.currentText()}:
+                    self.axis_z_combo.setCurrentText(label)
+                    break
+
+    def _build_plot_configs(self, labels: List[str], strain_label: str) -> List[PlotConfig]:
+        if self.mode_combo.currentText() == "Automatic combinations":
+            include_2d = self.auto_2d_check.isChecked()
+            include_3d = self.auto_3d_check.isChecked()
+            if not include_2d and not include_3d:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Strain Plot Explorer",
+                    "Enable at least one automatic plot type (2D or 3D).",
+                )
+                return []
+            configs = _auto_plot_combinations(labels, strain_label, include_2d, include_3d)
+            if not configs:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Strain Plot Explorer",
+                    "No combinations with strain were available for the selected plot types.",
+                )
+            return configs
+
+        dimension = 3 if self.manual_dimension_combo.currentText() == "3D" else 2
+        x_axis = self.axis_x_combo.currentText()
+        y_axis = self.axis_y_combo.currentText()
+        z_axis = self.axis_z_combo.currentText()
+        if not x_axis or not y_axis:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Strain Plot Explorer",
+                "Select at least X and Y axes for manual plotting.",
+            )
+            return []
+        if dimension == 3 and not z_axis:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Strain Plot Explorer",
+                "Select a Z axis for 3D plotting or switch to 2D mode.",
+            )
+            return []
+        labels_tuple: Tuple[str, ...] = (x_axis, y_axis) if dimension == 2 else (x_axis, y_axis, z_axis)
+        return [PlotConfig(labels_tuple, dimension)]
+
+    def _render_matplotlib_tabs(self, plot_df: pd.DataFrame, configs: List[PlotConfig]) -> None:
         self.tab_widget.setVisible(True)
         generated = 0
 
-        for combo in combinations:
-            subset = plot_df[["Microwire", *combo]].dropna()
+        for config in configs:
+            subset = plot_df[["Microwire", *config.labels]].dropna()
             if subset.empty:
                 continue
-            title = " vs ".join(combo)
-            fig = Figure(figsize=(9.5, 7.0))
-            ax = fig.add_subplot(111, projection="3d")
-            self._draw_scatter(ax, subset, combo)
+            title = " vs ".join(config.labels)
+            fig = Figure(figsize=(10.5, 7.6))
+            if config.dimension == 3:
+                ax = fig.add_subplot(111, projection="3d")
+            else:
+                ax = fig.add_subplot(111)
+            self._draw_scatter(ax, subset, config.labels)
             fig.tight_layout()
 
             canvas = FigureCanvas(fig)
@@ -364,16 +543,17 @@ class Strain3DPlotter(QtWidgets.QWidget):
             tab_layout = QtWidgets.QVBoxLayout(tab)
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
-            tab.setProperty("plot_combo", combo)
+            tab.setProperty("plot_combo", config.labels)
             tab.setProperty("plot_data", subset.copy())
             tab.setProperty("plot_title", title)
+            tab.setProperty("plot_dimension", config.dimension)
             self.tab_widget.addTab(tab, title)
             generated += 1
 
         if generated == 0:
             QtWidgets.QMessageBox.information(
                 self,
-                "Strain 3D Plot Explorer",
+                "Strain Plot Explorer",
                 "No complete data combinations were available for plotting.",
             )
         else:
@@ -383,41 +563,47 @@ class Strain3DPlotter(QtWidgets.QWidget):
         self._update_fullscreen_state()
 
     @staticmethod
-    def _draw_scatter(ax, subset: pd.DataFrame, combo: Tuple[str, str, str]) -> None:
-        xs = subset[combo[0]].to_numpy(dtype=float)
-        ys = subset[combo[1]].to_numpy(dtype=float)
-        zs = subset[combo[2]].to_numpy(dtype=float)
-        labels = subset["Microwire"].tolist()
+    def _draw_scatter(ax, subset: pd.DataFrame, labels: Tuple[str, ...]) -> None:
+        xs = subset[labels[0]].to_numpy(dtype=float)
+        ys = subset[labels[1]].to_numpy(dtype=float)
+        labels_text = subset["Microwire"].tolist()
 
         if xs.max() != xs.min():
             norm = (xs - xs.min()) / (xs.max() - xs.min())
         else:
             norm = [0.5] * len(xs)
         colors = cm.viridis(norm)
-        ax.scatter(xs, ys, zs, c=colors, s=60, depthshade=True)
 
-        for x, y, z, label_text in zip(xs, ys, zs, labels):
-            ax.text(x, y, z, label_text, fontsize=9)
+        if len(labels) == 3:
+            zs = subset[labels[2]].to_numpy(dtype=float)
+            ax.scatter(xs, ys, zs, c=colors, s=60, depthshade=True)
+            for x, y, z, label_text in zip(xs, ys, zs, labels_text):
+                ax.text(x, y, z, label_text, fontsize=9)
+        else:
+            ax.scatter(xs, ys, c=colors, s=60)
+            for x, y, label_text in zip(xs, ys, labels_text):
+                ax.text(x, y, label_text, fontsize=9)
 
-        ax.set_xlabel(combo[0])
-        ax.set_ylabel(combo[1])
-        ax.set_zlabel(combo[2])
-        ax.set_title(" vs ".join(combo))
+        ax.set_xlabel(labels[0])
+        ax.set_ylabel(labels[1])
+        if len(labels) == 3:
+            ax.set_zlabel(labels[2])
+        ax.set_title(" vs ".join(labels))
 
-    def _export_origin(self, plot_df: pd.DataFrame, combinations: List[Tuple[str, str, str]]) -> None:
+    def _export_origin(self, plot_df: pd.DataFrame, configs: List[PlotConfig]) -> None:
         try:
             with origin_session() as op:
                 schedule_origin_release()
                 exported = 0
-                for combo in combinations:
-                    subset = plot_df[["Microwire", *combo]].dropna()
+                for config in configs:
+                    subset = plot_df[["Microwire", *config.labels]].dropna()
                     if subset.empty:
                         continue
                     try:
-                        self._build_origin_graph(op, subset, combo)
+                        self._build_origin_graph(op, subset, config)
                         exported += 1
                     except Exception as exc:  # pragma: no cover - Origin specific
-                        self._append_log(f"Origin plot failed for {' vs '.join(combo)}: {exc}")
+                        self._append_log(f"Origin plot failed for {' vs '.join(config.labels)}: {exc}")
                 if exported:
                     self._append_log(
                         f"Sent {exported} scatter combinations to Origin."
@@ -437,36 +623,43 @@ class Strain3DPlotter(QtWidgets.QWidget):
         self,
         origin_any,
         subset: pd.DataFrame,
-        combo: Tuple[str, str, str],
+        config: PlotConfig,
     ) -> None:
-        title = " vs ".join(combo)
+        title = " vs ".join(config.labels)
         safe_title = self._escape_origin_text(title)
 
-        book = origin_any.new_book('w', lname=self._origin_book_name(combo))
+        book = origin_any.new_book('w', lname=self._origin_book_name(config.labels))
         book.activate()
         sheet = book[0]
 
-        data = subset[[combo[0], combo[1], combo[2]]].astype(float).copy()
-        data.columns = ["X", "Y", "Z"]
+        data = subset[list(config.labels)].astype(float).copy()
+        if config.dimension == 3:
+            data.columns = ["X", "Y", "Z"]
+        else:
+            data.columns = ["X", "Y"]
         sheet.from_df(data)
         try:
-            sheet.cols_axis('XYZ')
+            sheet.cols_axis('XYZ' if config.dimension == 3 else 'XY')
         except Exception:
             pass
 
         try:
             sheet.add_cols(1)
-            sheet.from_list(3, subset["Microwire"].tolist())
-            sheet.set_label(3, "Microwire")
+            sheet.from_list(data.shape[1], subset["Microwire"].tolist())
+            sheet.set_label(data.shape[1], "Microwire")
         except Exception:
             pass
 
         book.activate()
-        origin_any.lt_exec('worksheet -s 0 0 -1 2; worksheet -t plot3d scatter;')
-        origin_any.lt_exec('page.antialias=1; layer -aa 1;')
+        if config.dimension == 3:
+            origin_any.lt_exec('worksheet -s 0 0 -1 2; worksheet -t plot3d scatter;')
+            origin_any.lt_exec('page.antialias=1; layer -aa 1;')
+        else:
+            origin_any.lt_exec('worksheet -s 0 0 -1 1; worksheet -t plot scatter;')
+            origin_any.lt_exec('page.antialias=1;')
         origin_any.lt_exec(f'title -s "{safe_title}";')
 
-    def _origin_book_name(self, combo: Tuple[str, str, str]) -> str:
+    def _origin_book_name(self, combo: Tuple[str, ...]) -> str:
         label = "_".join(combo)
         sanitized = "".join(ch if ch.isalnum() else "_" for ch in label)
         return f"Strain3D_{sanitized[:30]}"
@@ -478,18 +671,29 @@ class Strain3DPlotter(QtWidgets.QWidget):
 class PlotWindow(QtWidgets.QMainWindow):
     """Floating window for reviewing a Matplotlib scatter plot full screen."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None, title: str, subset: pd.DataFrame, combo: Tuple[str, str, str]) -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        title: str,
+        subset: pd.DataFrame,
+        combo: Tuple[str, ...],
+        dimension: int,
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"{title} — Strain 3D Plot Explorer")
+        self.setWindowTitle(f"{title} — Strain Plot Explorer")
         self._subset = subset.copy()
         self._combo = combo
+        self._dimension = dimension
 
-        canvas = FigureCanvas(Figure(figsize=(11.0, 8.5)))
+        canvas = FigureCanvas(Figure(figsize=(13.0, 9.5)))
         self.setCentralWidget(canvas)
 
         fig = canvas.figure
         fig.clear()
-        ax = fig.add_subplot(111, projection="3d")
+        if self._dimension == 3:
+            ax = fig.add_subplot(111, projection="3d")
+        else:
+            ax = fig.add_subplot(111)
         Strain3DPlotter._draw_scatter(ax, self._subset, self._combo)
         fig.tight_layout()
 

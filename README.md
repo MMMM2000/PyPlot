@@ -475,42 +475,46 @@ martensite/austenite lengths, and flags any samples that broke during the strain
 test. Rows that do not parse into draw/piece identifiers are preserved exactly
 as written so reviewer notes are never lost.
 
-### Strain 3D Plot Explorer
+### Strain Plot Explorer
 
-When you want to inspect relationships between strain measurements and the
-microscope diameters, open the **Strain 3D Plot Explorer** from the
+When you want to inspect relationships between strain measurements, microscope
+diameters, and fabrication data, open the **Strain Plot Explorer** from the
 **Experiments** tab (or launch it manually):
 
 ```bash
 python -m experiments.strain_3d_plotter
 ```
 
-Select a strain worksheet that already includes diameter columns from the
-database builder. The explorer filters out any samples that broke and builds 3D
-scatter plots for every combination of three numeric columns (strain, `d`, `D`,
-diameter ratios, Ni/Fe/Ga/Co percentages parsed from the composition, and any
-other derived metrics—`M length` and `A length` are skipped automatically). Each
-tab hosts a large interactive Matplotlib figure labelled with the microwire ID
-so you can compare shortening, diameters, and any other numeric metrics in
-context. Use the worksheet’s latest export to pick up new strain entries without
-tweaking plot settings—the tool remembers the last file you opened and keeps a
-console log of how many rows were plotted and which combinations were
-generated.
+Select either a strain worksheet or a full microwire database export. The
+explorer filters out any samples that broke, parses the Ni/Fe/Ga/Co percentages
+from the composition, and gathers every numeric column except the raw `M length`
+and `A length` inputs. Automatic mode generates scatter plots for every
+available combination that includes strain—choose 2D, 3D, or both with a pair of
+checkboxes. Manual mode lets you pick the dimensionality and specify the exact X
+/ Y (/ Z) axes so you can focus on a single relationship such as strain versus
+draw temperature.
+
+Each tab hosts a large interactive Matplotlib figure labelled with the
+microwire ID so you can compare shortening, diameters, fabrication metrics, and
+elemental content in context. Use the worksheet’s latest export to pick up new
+strain entries without tweaking plot settings—the tool remembers the last file
+you opened and keeps a console log of how many rows were plotted and which
+combinations were generated.
 
 Drag the splitter handle between the plot area and the log console to resize the
 view in real time. When you want to take a closer look, highlight a tab and
-press **Open selected plot in new window** to spawn a maximised window with the
-current 3D scatter plot; it launches full-screen but remains resizable so you
-can position it on a secondary monitor.
+press **Open selected plot in new window** to spawn a maximised window; it
+launches full-screen but remains resizable so you can position it on a secondary
+monitor.
 
 Switch the **Output backend** combo box to **Origin** (or **Both**) to stream
 the same combinations into OriginPro. The explorer opens a workbook for each
-triplet, pushes the X/Y/Z data alongside the microwire labels, and issues the
-`worksheet -t plot3d scatter` LabTalk command so a matching 3D scatter graph is
-created automatically. Extra worksheet columns are added before writing the
-labels so Origin no longer crashes as graphs are generated. If the `originpro`
-package is not available the request is logged without interrupting the
-Matplotlib tabs, making it safe to use on systems without Origin installed.
+pair or triplet, pushes the axis data alongside the microwire labels, and issues
+the appropriate LabTalk command (`worksheet -t plot scatter` for 2D or
+`worksheet -t plot3d scatter` for 3D). Extra worksheet columns are added before
+writing the labels so Origin no longer crashes as graphs are generated. If the
+`originpro` package is not available the request is logged without interrupting
+the Matplotlib tabs, making it safe to use on systems without Origin installed.
 
 The menu bar keeps **Help** as the right-most entry; open it to read an
 in-window guide that walks through input preparation, export options, and
