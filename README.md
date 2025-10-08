@@ -494,19 +494,14 @@ other numeric metrics in context. Use the worksheet’s latest export to pick up
 new strain entries without tweaking plot settings—the tool remembers the last
 file you opened and keeps a console log of how many rows were plotted and which
 combinations were generated.
-* **Output** – pick a destination directory and supply a base file name. The
-  builder now defaults to your operating system’s **Downloads** folder so the
-  exports land somewhere familiar, while still remembering the last directory
-  you picked between launches. The builder writes `<name>.csv`, `<name>.xlsx`
-  when requested, stages the
-  Matplotlib PNGs in a temporary `plots/` folder while embedding them, and then
-  removes that directory so the workbook is the only place the images live.
-  Origin project snippets remain under `origin_objects/` whenever that backend
-  is enabled. CSV exports continue to hold the plot file names while the Excel
-  workbook replaces those cells with embedded media. If a file already exists
-  you can **Replace** it, **Continue** appending new rows, or **Cancel** the
-  build. The completion dialog now includes an **Open** button for quick
-  inspection of the freshly generated dataset.
+
+Switch the **Output backend** combo box to **Origin** (or **Both**) to stream
+the same combinations into OriginPro. The explorer opens a workbook for each
+triplet, pushes the X/Y/Z data alongside the microwire labels, and issues the
+`worksheet -t plot3d scatter` LabTalk command so a matching 3D scatter graph is
+created automatically. If the `originpro` package is not available the request
+is logged without interrupting the Matplotlib tabs, making it safe to use on
+systems without Origin installed.
 
 The menu bar keeps **Help** as the right-most entry; open it to read an
 in-window guide that walks through input preparation, export options, and

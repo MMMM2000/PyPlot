@@ -14,7 +14,13 @@ from matplotlib import cm
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from plotting.utils import ensure_app_theme, install_standard_menu
+from plotting.backends import wants_matplotlib, wants_origin
+from plotting.utils import (
+    ensure_app_theme,
+    install_standard_menu,
+    origin_session,
+    schedule_origin_release,
+)
 
 from experiments.microwire_data_builder.core import _parse_numeric, _parse_strain_float
 
@@ -94,6 +100,10 @@ class Strain3DPlotter(QtWidgets.QWidget):
         input_row.addWidget(self.input_button)
         form.addRow("Strain worksheet", input_row)
 
+        self.backend_combo = QtWidgets.QComboBox()
+        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        form.addRow("Output backend", self.backend_combo)
+
         layout.addLayout(form)
 
         self.run_button = QtWidgets.QPushButton("Generate plots")
@@ -114,9 +124,15 @@ class Strain3DPlotter(QtWidgets.QWidget):
         value = self.settings.value("input_path", "")
         if isinstance(value, str):
             self.input_edit.setText(value)
+        backend = self.settings.value("backend", "Matplotlib")
+        if isinstance(backend, str):
+            index = self.backend_combo.findText(backend, QtCore.Qt.MatchFlag.MatchFixedString)
+            if index >= 0:
+                self.backend_combo.setCurrentIndex(index)
 
     def _save_settings(self) -> None:
         self.settings.setValue("input_path", self.input_edit.text())
+        self.settings.setValue("backend", self.backend_combo.currentText())
         self.settings.sync()
 
     # ------------------------------------------------------------------ file selection
@@ -231,8 +247,29 @@ class Strain3DPlotter(QtWidgets.QWidget):
             )
             return
 
+        backend_choice = self.backend_combo.currentText()
+        self._save_settings()
+
+        render_matplotlib = wants_matplotlib(backend_choice)
+        export_origin = wants_origin(backend_choice)
+
         self._append_log(f"Loaded {len(records)} rows with strain measurements.")
-        self._append_log(f"Generating {len(combinations)} 3D scatter plots…")
+        self._append_log(f"Prepared {len(combinations)} 3D combinations.")
+
+        if render_matplotlib:
+            self._render_matplotlib_tabs(plot_df, combinations)
+        else:
+            self.tab_widget.setVisible(False)
+
+        if export_origin:
+            self._export_origin(plot_df, combinations)
+
+        if not render_matplotlib and not export_origin:
+            self._append_log("No backends selected—nothing to generate.")
+
+    def _render_matplotlib_tabs(self, plot_df: pd.DataFrame, combinations: List[Tuple[str, str, str]]) -> None:
+        self.tab_widget.setVisible(True)
+        generated = 0
 
         for combo in combinations:
             subset = plot_df[["Microwire", *combo]].dropna()
@@ -268,16 +305,87 @@ class Strain3DPlotter(QtWidgets.QWidget):
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
             self.tab_widget.addTab(tab, title)
+            generated += 1
 
-        if self.tab_widget.count() == 0:
+        if generated == 0:
             QtWidgets.QMessageBox.information(
                 self,
                 "Strain 3D Plot Explorer",
                 "No complete data combinations were available for plotting.",
             )
-            return
+        else:
+            self._append_log(
+                "Finished generating Matplotlib plots. Use the tabs above to review them."
+            )
 
-        self._append_log("Finished generating plots. Use the tabs above to review them.")
+    def _export_origin(self, plot_df: pd.DataFrame, combinations: List[Tuple[str, str, str]]) -> None:
+        try:
+            with origin_session() as op:
+                schedule_origin_release()
+                exported = 0
+                for combo in combinations:
+                    subset = plot_df[["Microwire", *combo]].dropna()
+                    if subset.empty:
+                        continue
+                    try:
+                        self._build_origin_graph(op, subset, combo)
+                        exported += 1
+                    except Exception as exc:  # pragma: no cover - Origin specific
+                        self._append_log(f"Origin plot failed for {' vs '.join(combo)}: {exc}")
+                if exported:
+                    self._append_log(
+                        f"Sent {exported} scatter combinations to Origin."
+                    )
+                else:
+                    self._append_log(
+                        "No Origin plots were generated because every combination was empty."
+                    )
+        except (ModuleNotFoundError, ImportError):
+            self._append_log(
+                "OriginPro is not installed. Install the originpro package to enable Origin output."
+            )
+        except Exception as exc:  # pragma: no cover - Origin specific
+            self._append_log(f"Unexpected Origin error: {exc}")
+
+    def _build_origin_graph(
+        self,
+        origin_any,
+        subset: pd.DataFrame,
+        combo: Tuple[str, str, str],
+    ) -> None:
+        title = " vs ".join(combo)
+        safe_title = self._escape_origin_text(title)
+
+        book = origin_any.new_book('w', lname=self._origin_book_name(combo))
+        book.activate()
+        sheet = book[0]
+
+        data = subset[[combo[0], combo[1], combo[2]]].astype(float).copy()
+        data.columns = ["X", "Y", "Z"]
+        sheet.from_df(data)
+        try:
+            sheet.cols_axis('XYZ')
+        except Exception:
+            pass
+
+        try:
+            sheet.from_list(3, subset["Microwire"].tolist())
+            sheet.set_label(3, "Microwire")
+        except Exception:
+            pass
+
+        book.activate()
+        origin_any.lt_exec('worksheet -s 0 0 -1 2; worksheet -t plot3d scatter;')
+        origin_any.lt_exec('page.antialias=1; layer -aa 1;')
+        origin_any.lt_exec(f'title -s "{safe_title}";')
+
+    def _origin_book_name(self, combo: Tuple[str, str, str]) -> str:
+        label = "_".join(combo)
+        sanitized = "".join(ch if ch.isalnum() else "_" for ch in label)
+        return f"Strain3D_{sanitized[:30]}"
+
+    def _escape_origin_text(self, text: str) -> str:
+        return text.replace("\"", "''")
 
 
 def main() -> QtWidgets.QWidget | None:  # pragma: no cover - thin launcher wrapper
@@ -286,7 +394,7 @@ def main() -> QtWidgets.QWidget | None:  # pragma: no cover - thin launcher wrap
     if app is None:
         app = QtWidgets.QApplication(sys.argv)
         created_app = True
-    ensure_app_theme()
+    ensure_app_theme(app)
     widget = Strain3DPlotter()
     widget.show()
     if created_app:
