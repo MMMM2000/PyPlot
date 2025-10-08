@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import List, Sequence, Tuple
@@ -38,6 +39,21 @@ def _pretty_header(value: object, index: int) -> str:
     if cleaned and not cleaned.lower().startswith("unnamed"):
         return cleaned
     return f"Column {index + 1}"
+
+
+def _extract_element_counts(composition: str) -> dict[str, float]:
+    """Extract Ni/Fe/Ga/Co counts from a composition string."""
+
+    counts = {"Ni": 0.0, "Fe": 0.0, "Ga": 0.0, "Co": 0.0}
+    if not composition:
+        return counts
+
+    for element, value in re.findall(r"(Ni|Fe|Ga|Co)\s*(\d+(?:\.\d+)?)", composition):
+        try:
+            counts[element] = float(value)
+        except ValueError:
+            continue
+    return counts
 
 
 def _build_column_map(columns: Sequence[object]) -> dict[str, int]:
@@ -76,11 +92,12 @@ class Strain3DPlotter(QtWidgets.QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Strain 3D Plot Explorer")
-        self.resize(1280, 820)
+        self.resize(1400, 900)
 
         self.logger = logging.getLogger("strain_3d_plotter")
         self.logger.setLevel(logging.INFO)
         self.settings = QtCore.QSettings("MicrowireLab", "Strain3DPlotter")
+        self._floating_windows: list[QtWidgets.QMainWindow] = []
 
         self._build_ui()
         self._load_settings()
@@ -106,17 +123,33 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         layout.addLayout(form)
 
+        buttons_row = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Generate plots")
         self.run_button.clicked.connect(self._generate_plots)
-        layout.addWidget(self.run_button)
+        buttons_row.addWidget(self.run_button)
+
+        self.fullscreen_button = QtWidgets.QPushButton("Open selected plot in new window")
+        self.fullscreen_button.setEnabled(False)
+        self.fullscreen_button.clicked.connect(self._open_fullscreen_plot)
+        buttons_row.addWidget(self.fullscreen_button)
+        buttons_row.addStretch(1)
+        layout.addLayout(buttons_row)
+
+        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        layout.addWidget(self.splitter, 1)
 
         self.tab_widget = QtWidgets.QTabWidget()
-        layout.addWidget(self.tab_widget, 1)
+        self.splitter.addWidget(self.tab_widget)
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("Load a worksheet to generate 3D scatter plots…")
-        layout.addWidget(self.log_view, 1)
+        self.splitter.addWidget(self.log_view)
+        self.splitter.setStretchFactor(0, 3)
+        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setChildrenCollapsible(False)
+
+        self.tab_widget.currentChanged.connect(self._update_fullscreen_state)
 
         install_standard_menu(self, help_topic="strain_3d_plotter", console=self.log_view)
 
@@ -152,9 +185,47 @@ class Strain3DPlotter(QtWidgets.QWidget):
         self.log_view.appendPlainText(message)
         self.logger.info(message)
 
+    def _update_fullscreen_state(self) -> None:
+        tab = self.tab_widget.currentWidget()
+        if tab is None:
+            self.fullscreen_button.setEnabled(False)
+            return
+        has_data = tab.property("plot_data") is not None and tab.property("plot_combo") is not None
+        self.fullscreen_button.setEnabled(has_data)
+
+    def _open_fullscreen_plot(self) -> None:
+        tab = self.tab_widget.currentWidget()
+        if tab is None:
+            return
+
+        subset = tab.property("plot_data")
+        combo = tab.property("plot_combo")
+        title = tab.property("plot_title") or self.tab_widget.tabText(self.tab_widget.currentIndex())
+        if subset is None or combo is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Strain 3D Plot Explorer",
+                "Select a tab generated from worksheet data before opening a full-screen plot.",
+            )
+            return
+
+        window = PlotWindow(self, title, subset, combo)
+        window.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        window.showMaximized()
+        self._floating_windows.append(window)
+        window.destroyed.connect(lambda: self._floating_windows.remove(window) if window in self._floating_windows else None)
+
     def _generate_plots(self) -> None:
         self.tab_widget.clear()
         self.log_view.clear()
+        self.fullscreen_button.setEnabled(False)
+
+        for window in list(self._floating_windows):
+            try:
+                window.close()
+            except Exception:
+                pass
+        self._floating_windows.clear()
 
         path = Path(self.input_edit.text().strip())
         if not path.exists():
@@ -222,6 +293,8 @@ class Strain3DPlotter(QtWidgets.QWidget):
             for col_idx, label in numeric_columns:
                 parsed = _parse_numeric(row.iloc[col_idx])
                 record[label] = parsed
+            for element, value in _extract_element_counts(composition_label).items():
+                record[f"{element} (%)"] = value
             records.append(record)
 
         if not records:
@@ -236,7 +309,9 @@ class Strain3DPlotter(QtWidgets.QWidget):
         valid_numeric_labels = [
             label
             for label in plot_df.columns
-            if label not in {"Microwire", "Composition"} and plot_df[label].notna().sum() >= 2
+            if label not in {"Microwire", "Composition"}
+            and plot_df[label].notna().sum() >= 2
+            and plot_df[label].dropna().nunique() >= 2
         ]
         if strain_label not in valid_numeric_labels:
             valid_numeric_labels.insert(0, strain_label)
@@ -279,34 +354,19 @@ class Strain3DPlotter(QtWidgets.QWidget):
             if subset.empty:
                 continue
             title = " vs ".join(combo)
-            fig = Figure(figsize=(8.0, 6.0))
+            fig = Figure(figsize=(9.5, 7.0))
             ax = fig.add_subplot(111, projection="3d")
-
-            xs = subset[combo[0]].to_numpy(dtype=float)
-            ys = subset[combo[1]].to_numpy(dtype=float)
-            zs = subset[combo[2]].to_numpy(dtype=float)
-            labels = subset["Microwire"].tolist()
-
-            if xs.max() != xs.min():
-                norm = (xs - xs.min()) / (xs.max() - xs.min())
-            else:
-                norm = [0.5] * len(xs)
-            colors = cm.viridis(norm)
-            ax.scatter(xs, ys, zs, c=colors, s=60, depthshade=True)
-
-            for x, y, z, label_text in zip(xs, ys, zs, labels):
-                ax.text(x, y, z, label_text, fontsize=8)
-
-            ax.set_xlabel(combo[0])
-            ax.set_ylabel(combo[1])
-            ax.set_zlabel(combo[2])
-            ax.set_title(title)
+            self._draw_scatter(ax, subset, combo)
+            fig.tight_layout()
 
             canvas = FigureCanvas(fig)
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
+            tab.setProperty("plot_combo", combo)
+            tab.setProperty("plot_data", subset.copy())
+            tab.setProperty("plot_title", title)
             self.tab_widget.addTab(tab, title)
             generated += 1
 
@@ -320,6 +380,29 @@ class Strain3DPlotter(QtWidgets.QWidget):
             self._append_log(
                 "Finished generating Matplotlib plots. Use the tabs above to review them."
             )
+        self._update_fullscreen_state()
+
+    @staticmethod
+    def _draw_scatter(ax, subset: pd.DataFrame, combo: Tuple[str, str, str]) -> None:
+        xs = subset[combo[0]].to_numpy(dtype=float)
+        ys = subset[combo[1]].to_numpy(dtype=float)
+        zs = subset[combo[2]].to_numpy(dtype=float)
+        labels = subset["Microwire"].tolist()
+
+        if xs.max() != xs.min():
+            norm = (xs - xs.min()) / (xs.max() - xs.min())
+        else:
+            norm = [0.5] * len(xs)
+        colors = cm.viridis(norm)
+        ax.scatter(xs, ys, zs, c=colors, s=60, depthshade=True)
+
+        for x, y, z, label_text in zip(xs, ys, zs, labels):
+            ax.text(x, y, z, label_text, fontsize=9)
+
+        ax.set_xlabel(combo[0])
+        ax.set_ylabel(combo[1])
+        ax.set_zlabel(combo[2])
+        ax.set_title(" vs ".join(combo))
 
     def _export_origin(self, plot_df: pd.DataFrame, combinations: List[Tuple[str, str, str]]) -> None:
         try:
@@ -372,6 +455,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
             pass
 
         try:
+            sheet.add_cols(1)
             sheet.from_list(3, subset["Microwire"].tolist())
             sheet.set_label(3, "Microwire")
         except Exception:
@@ -389,6 +473,25 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
     def _escape_origin_text(self, text: str) -> str:
         return text.replace("\"", "''")
+
+
+class PlotWindow(QtWidgets.QMainWindow):
+    """Floating window for reviewing a Matplotlib scatter plot full screen."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None, title: str, subset: pd.DataFrame, combo: Tuple[str, str, str]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"{title} — Strain 3D Plot Explorer")
+        self._subset = subset.copy()
+        self._combo = combo
+
+        canvas = FigureCanvas(Figure(figsize=(11.0, 8.5)))
+        self.setCentralWidget(canvas)
+
+        fig = canvas.figure
+        fig.clear()
+        ax = fig.add_subplot(111, projection="3d")
+        Strain3DPlotter._draw_scatter(ax, self._subset, self._combo)
+        fig.tight_layout()
 
 
 def main() -> QtWidgets.QWidget | None:  # pragma: no cover - thin launcher wrapper
