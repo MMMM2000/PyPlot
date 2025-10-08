@@ -76,7 +76,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Strain 3D Plot Explorer")
-        self.resize(920, 640)
+        self.resize(1280, 820)
 
         self.logger = logging.getLogger("strain_3d_plotter")
         self.logger.setLevel(logging.INFO)
@@ -198,6 +198,9 @@ class Strain3DPlotter(QtWidgets.QWidget):
             if idx == strain_idx or idx == composition_idx or idx == microwire_idx or idx == status_idx:
                 continue
             label = _pretty_header(header, idx)
+            lowered_label = label.lower()
+            if "m length" in lowered_label or "a length" in lowered_label:
+                continue
             numeric_columns.append((idx, label))
 
         records = []
@@ -276,7 +279,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
             if subset.empty:
                 continue
             title = " vs ".join(combo)
-            fig = Figure(figsize=(6.5, 5.0))
+            fig = Figure(figsize=(8.0, 6.0))
             ax = fig.add_subplot(111, projection="3d")
 
             xs = subset[combo[0]].to_numpy(dtype=float)

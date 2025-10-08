@@ -488,7 +488,8 @@ python -m experiments.strain_3d_plotter
 Select a strain worksheet that already includes diameter columns from the
 database builder. The explorer filters out any samples that broke and builds 3D
 scatter plots for every combination of three numeric columns (strain, `d`, `D`,
-lengths, ratios, etc.). Each tab hosts a single interactive Matplotlib figure
+diameter ratios, and any other derived metrics—`M length` and `A length` are
+skipped automatically). Each tab hosts a large interactive Matplotlib figure
 labelled with the microwire ID so you can compare shortening, diameters, and any
 other numeric metrics in context. Use the worksheet’s latest export to pick up
 new strain entries without tweaking plot settings—the tool remembers the last
