@@ -566,7 +566,10 @@ bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
 experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
 pick individual measurements, then load them into the session. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
-each loop is grouped with peers recorded at the same temperature.
+each loop is grouped with peers recorded at the same temperature. When filenames
+are missing the `a`/`T` tokens, the loader now scans the header metadata (for
+example the `@Filename` lines embedded by the VSM software) so rotations and
+temperatures are still recovered automatically.
 
 The loader understands both tidy column descriptions (`Column 0: …`) and the
 free-form headers produced by newer VSM exports, ignoring the lengthy

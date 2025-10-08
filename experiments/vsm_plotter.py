@@ -6,6 +6,7 @@ import logging
 import re
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
@@ -173,24 +174,68 @@ def _looks_numeric(token: str) -> bool:
     return True
 
 
-def _parse_temperature(path: Path) -> float | None:
-    match = TEMP_RE.search(path.stem)
-    if not match:
-        return None
+def _safe_float(token: str) -> float | None:
     try:
-        return float(match.group(1))
+        return float(token)
     except ValueError:
         return None
+
+
+def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
+    stem = path.stem
+    angle_match = ANGLE_RE.search(stem)
+    temp_match = TEMP_RE.search(stem)
+    angle = _safe_float(angle_match.group(1)) if angle_match else None
+    temperature = _safe_float(temp_match.group(1)) if temp_match else None
+    return angle, temperature
+
+
+@lru_cache(maxsize=256)
+def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
+    angle, temperature = _metadata_from_filename(path)
+    if angle is not None and temperature is not None:
+        return angle, temperature
+
+    try:
+        handle = path.open("r", encoding="utf-8", errors="ignore")
+    except OSError:
+        return angle, temperature
+
+    with handle:
+        for raw_line in handle:
+            stripped = raw_line.strip()
+            if not stripped:
+                continue
+            if angle is None:
+                match = ANGLE_RE.search(stripped)
+                if match:
+                    candidate = _safe_float(match.group(1))
+                    if candidate is not None:
+                        angle = candidate
+            if temperature is None:
+                match = TEMP_RE.search(stripped)
+                if match:
+                    candidate = _safe_float(match.group(1))
+                    if candidate is not None:
+                        temperature = candidate
+            if stripped.startswith("@@Data") or stripped.startswith("@@Final Manipulated Data"):
+                if angle is not None and temperature is not None:
+                    break
+                continue
+            if angle is not None and temperature is not None:
+                break
+
+    return angle, temperature
+
+
+def _parse_temperature(path: Path) -> float | None:
+    _, temperature = _metadata_from_file(path)
+    return temperature
 
 
 def _parse_angle(path: Path) -> float | None:
-    match = ANGLE_RE.search(path.stem)
-    if not match:
-        return None
-    try:
-        return float(match.group(1))
-    except ValueError:
-        return None
+    angle, _ = _metadata_from_file(path)
+    return angle
 
 
 class VSMPlotter(QtWidgets.QWidget):

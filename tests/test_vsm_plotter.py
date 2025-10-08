@@ -84,6 +84,23 @@ def test_parse_temperature_and_angle(tmp_path: Path) -> None:
     assert module._parse_angle(path) == 140.0
 
 
+def test_parse_metadata_falls_back_to_header(tmp_path: Path) -> None:
+    path = tmp_path / "fallback.VSM-Hys-Data"
+    content = """@Filename: C\\data\\Ni\\20250712-Hys-a095-T-45-00.VSM-Hys-Data
+@@Data
+New Section: Section 0:
+1.0 2.0 3.0
+@@END Data
+"""
+    path.write_text(content)
+
+    # Ensure cached values from previous tests do not leak in.
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 95.0
+    assert module._parse_temperature(path) == -45.0
+
+
 def test_read_vsm_file_rejects_empty(tmp_path: Path) -> None:
     empty_path = tmp_path / "empty.VSM-Hys-Data"
     empty_path.write_text("@@Data\n@@END Data\n")
