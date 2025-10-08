@@ -564,7 +564,9 @@ The exported columns are:
 Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
 bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
 experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
-pick individual measurements, then load them into the session. Filenames are
+pick individual measurements, then load them into the session. Folder mode now
+recursively scans through subdirectories, so an entire sweep organised by
+temperature/angle folders can be loaded in one go without extra browsing. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
 each loop is grouped with peers recorded at the same temperature. Tokens such as
 `T-30-00` are converted to `-30.00 °C`, so the dash-separated format produced by
@@ -607,7 +609,9 @@ temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
 concentrate on a single group. The Matplotlib tabs appear on the right-hand side
 of the window with a console log below; they are fully resizable and inherit the
-project’s dark/light theme settings.
+project’s dark/light theme settings. Window size and the splitter ratio are now
+persisted via application settings, so any adjustments you make to the plot/log
+layout are restored when you launch the explorer again.
 
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
@@ -615,7 +619,8 @@ positive-field endpoint reaches the same maximum. The transform is logged per
 file, highlighting when a curve needed inversion, and the Matplotlib/Origin
 outputs use the rescaled values so angles that were captured with inverted
 signals line up with their neighbours. Leave the option unchecked to plot the
-raw measurements.
+raw measurements. Measurements with too little variation are detected and left
+untouched so flat loops are no longer forced into horizontal lines.
 
 OriginPro exports mirror the same grouping, creating a workbook for each
 temperature, writing a sheet per angle with the selected axes, and building a
@@ -627,13 +632,17 @@ destination folder you can opt into creating a named subfolder for the export ba
 and the plotter remembers the last folder you used so repeat runs open the dialog in
 the same location. Choose between exporting the **Original data** or the
 **Rescaled data**; the latter applies the same Y-axis transform used for the
-plots so the TXT tables drop straight into Origin with matching endpoints. Even
-if a run is missing angle/temperature metadata, the loader still enables TXT
+plots so the TXT tables drop straight into Origin with matching endpoints. When a
+file cannot be rescaled the exporter keeps the measured values and notes the
+decision in the log so downstream processing never receives flattened traces.
+Even if a run is missing angle/temperature metadata, the loader still enables TXT
 export while noting that plotting is disabled, making it possible to salvage
-data from noisy
-recipes. If Origin is not installed the exporter logs a short reminder while
-leaving the Matplotlib tabs intact, so the workflow stays consistent on
-machines without Origin.
+data from noisy recipes. If Origin is not installed the exporter logs a short
+reminder while leaving the Matplotlib tabs intact, so the workflow stays
+consistent on machines without Origin. When Origin is available the exporter
+launches (or connects to) a visible Origin session instead of closing it
+immediately, making the generated workbooks and graphs accessible for review
+straight after export.
 
 ## 7. Repository maintenance
 

@@ -257,6 +257,15 @@ def test_estimate_edge_values_handles_two_points() -> None:
     assert right == pytest.approx(1.0)
 
 
+def test_estimate_edge_values_sorts_by_field() -> None:
+    df = pd.DataFrame({"H": [10.0, -10.0, 5.0, -9.0], "M": [1.0, -1.0, 0.5, -0.9]})
+
+    left, right = module._estimate_edge_values(df, "H", "M")
+
+    assert left == pytest.approx(-0.95, abs=0.1)
+    assert right == pytest.approx(1.0, abs=0.1)
+
+
 def test_apply_rescaling_inverts_and_scales() -> None:
     base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
     flipped = pd.DataFrame({"H": [-10.0, 10.0], "M": [2.0, -2.0]})
@@ -279,3 +288,38 @@ def test_apply_rescaling_inverts_and_scales() -> None:
     transformed = flipped["M"] * flipped_result.scale + flipped_result.offset
     assert transformed.iloc[0] == pytest.approx(-1.0)
     assert transformed.iloc[1] == pytest.approx(1.0)
+
+
+def test_apply_rescaling_skips_constant_measurements() -> None:
+    base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
+    flat = pd.DataFrame({"H": [-10.0, 10.0], "M": [0.2, 0.2]})
+
+    results = module._apply_rescaling(
+        [(Path("base"), base), (Path("flat"), flat)],
+        "H",
+        "M",
+    )
+
+    flat_result = results[Path("flat")]
+    assert flat_result.applied is False
+    assert flat_result.scale == pytest.approx(1.0)
+    assert flat_result.offset == pytest.approx(0.0)
+
+
+def test_find_vsm_files_recurses(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    top_file = root / "top.VSM-Hys-Data"
+    nested_file = nested / "deep.VSM-Hys-Data"
+    other = nested / "ignore.txt"
+    top_file.write_text("@@Data\n@@END Data\n")
+    nested_file.write_text("@@Data\n@@END Data\n")
+    other.write_text("noop")
+
+    results = module._find_vsm_files(root)
+
+    assert [path.relative_to(root) for path in results] == [
+        Path("nested/deep.VSM-Hys-Data"),
+        Path("top.VSM-Hys-Data"),
+    ]

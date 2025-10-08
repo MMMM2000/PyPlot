@@ -23,18 +23,32 @@ _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 @contextmanager
 def origin_session() -> Iterator[Any]:
-    """Return an Origin session that is closed on exit."""
+    """Return an Origin session that stays available for inspection."""
 
     import originpro as op  # lazy import
+
+    app = None
     try:
-        op.set_show()
+        app = op.Application()  # type: ignore[attr-defined]
     except Exception:
-        pass
+        app = None
+
     try:
+        if app is not None:
+            try:
+                app.Visible = 1  # type: ignore[attr-defined, assignment]
+            except Exception:
+                pass
+        else:
+            try:
+                op.set_show()
+            except Exception:
+                pass
         yield cast(Any, op)
     finally:
+        # Keep Origin running for the user; release is handled via ``schedule_origin_release``.
         try:
-            cast(Any, op).exit()
+            cast(Any, op).lt_exec("win -a;")
         except Exception:
             pass
 

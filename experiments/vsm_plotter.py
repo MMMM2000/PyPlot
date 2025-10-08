@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -69,6 +69,7 @@ class RescaleResult:
     source_right: float
     target_left: float
     target_right: float
+    applied: bool = True
 
 
 EDGE_FRACTION = 0.05
@@ -81,27 +82,20 @@ def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[f
     if df.empty:
         raise ValueError("Cannot estimate edge values from an empty dataframe")
 
-    x_values = df[x_axis]
-    y_values = df[y_axis]
+    ordered = df[[x_axis, y_axis]].dropna().sort_values(by=x_axis)
+    if ordered.empty:
+        raise ValueError("Cannot estimate edge values from non-numeric dataframe")
 
-    min_x = float(x_values.min())
-    max_x = float(x_values.max())
-    span = max_x - min_x
+    count = max(1, math.ceil(len(ordered) * EDGE_FRACTION))
+    left_values = ordered[y_axis].iloc[:count]
+    right_values = ordered[y_axis].iloc[-count:]
 
-    if math.isclose(span, 0.0, abs_tol=NUMERIC_TOLERANCE):
-        first = float(y_values.iloc[0])
-        last = float(y_values.iloc[-1])
-        return first, last
-
-    window = max(span * EDGE_FRACTION, NUMERIC_TOLERANCE)
-    left_mask = x_values <= (min_x + window)
-    right_mask = x_values >= (max_x - window)
-
-    left_values = y_values[left_mask]
-    right_values = y_values[right_mask]
-
-    left = float(left_values.median() if not left_values.empty else y_values.iloc[0])
-    right = float(right_values.median() if not right_values.empty else y_values.iloc[-1])
+    left = float(left_values.median())
+    right = float(right_values.median())
+    if pd.isna(left):
+        left = float(left_values.iloc[0])
+    if pd.isna(right):
+        right = float(right_values.iloc[-1])
     return left, right
 
 
@@ -112,12 +106,14 @@ def _apply_rescaling(
 ) -> Dict[Path, RescaleResult]:
     """Compute linear transforms that align loop endpoints across measurements."""
 
-    prepared: List[tuple[Path, pd.DataFrame, float, float]] = []
+    prepared: List[tuple[Path, pd.DataFrame, float, float, float]] = []
     for path, subset in entries:
         if subset.empty:
             continue
         left, right = _estimate_edge_values(subset, x_axis, y_axis)
-        prepared.append((path, subset, left, right))
+        series_y = subset[y_axis]
+        span = float(series_y.max() - series_y.min()) if not series_y.empty else 0.0
+        prepared.append((path, subset, left, right, span))
 
     if not prepared:
         return {}
@@ -132,10 +128,14 @@ def _apply_rescaling(
         target_right = reference_right
 
     results: Dict[Path, RescaleResult] = {}
-    for path, subset, left, right in prepared:
-        if math.isclose(right, left, abs_tol=NUMERIC_TOLERANCE):
+    for path, subset, left, right, span in prepared:
+        applied = True
+        if math.isclose(right, left, abs_tol=NUMERIC_TOLERANCE) or math.isclose(
+            span, 0.0, abs_tol=NUMERIC_TOLERANCE
+        ):
             scale = 1.0
-            offset = target_left - left
+            offset = 0.0
+            applied = False
         else:
             scale = (target_right - target_left) / (right - left)
             offset = target_left - scale * left
@@ -147,6 +147,7 @@ def _apply_rescaling(
             source_right=right,
             target_left=target_left,
             target_right=target_right,
+            applied=applied,
         )
 
     return results
@@ -166,6 +167,14 @@ def _suggest_export_subfolder(measurements: Sequence[VSMMeasurement | Path | str
         if cleaned:
             return cleaned
     return "VSM_Export"
+
+
+def _find_vsm_files(directory: Path) -> List[Path]:
+    """Return all VSM data files within ``directory`` and its subdirectories."""
+
+    if not directory.is_dir():
+        return []
+    return sorted(p for p in directory.rglob("*.VSM-Hys-Data") if p.is_file())
 
 
 def _normalise_column_name(raw: str, index: int) -> str:
@@ -708,6 +717,12 @@ class VSMPlotter(QtWidgets.QWidget):
             self.folder_radio.setChecked(True)
         else:
             self.file_radio.setChecked(True)
+        geometry = self.settings.value("geometry")
+        if isinstance(geometry, QtCore.QByteArray):
+            self.restoreGeometry(geometry)
+        splitter_state = self.settings.value("splitter_state")
+        if isinstance(splitter_state, QtCore.QByteArray):
+            self.output_splitter.restoreState(splitter_state)
 
     def _save_settings(self) -> None:
         self.settings.setValue("last_path", self.path_edit.text())
@@ -717,7 +732,13 @@ class VSMPlotter(QtWidgets.QWidget):
         self.settings.setValue("rescale_y", self.rescale_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
+        self.settings.setValue("geometry", self.saveGeometry())
+        self.settings.setValue("splitter_state", self.output_splitter.saveState())
         self.settings.sync()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._save_settings()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ file selection
     def _choose_input(self) -> None:
@@ -746,9 +767,7 @@ class VSMPlotter(QtWidgets.QWidget):
             return []
         if self.folder_radio.isChecked():
             directory = Path(text)
-            if not directory.is_dir():
-                return []
-            return sorted(p for p in directory.glob("*.VSM-Hys-Data") if p.is_file())
+            return _find_vsm_files(directory)
         return [Path(part) for part in text.split(";") if part]
 
     # ------------------------------------------------------------------ data loading
@@ -958,6 +977,11 @@ class VSMPlotter(QtWidgets.QWidget):
                     result = rescale_map.get(measurement.path)
                     if result is None:
                         continue
+                    if not result.applied:
+                        self._append_log(
+                            f"{measurement.path.name}: insufficient variation to rescale {y_axis}; original values kept."
+                        )
+                        continue
                     inversion_note = " (inverted)" if result.scale < 0 else ""
                     self._append_log(
                         f"{measurement.path.name}: rescaled {y_axis} with scale {result.scale:.3g}{inversion_note} "
@@ -1069,15 +1093,21 @@ class VSMPlotter(QtWidgets.QWidget):
                 if rescale_requested:
                     if measurement.path in rescale_lookup:
                         result = rescale_lookup[measurement.path]
-                        df_to_write = measurement.data.copy()
-                        if y_axis in df_to_write.columns:
-                            numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
-                            df_to_write[y_axis] = numeric * result.scale + result.offset
-                        else:
+                        if not result.applied:
                             self._append_log(
-                                f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
+                                f"{measurement.path.name}: rescale skipped for export; original values written."
                             )
                             df_to_write = measurement.data
+                        else:
+                            df_to_write = measurement.data.copy()
+                            if y_axis in df_to_write.columns:
+                                numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
+                                df_to_write[y_axis] = numeric * result.scale + result.offset
+                            else:
+                                self._append_log(
+                                    f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
+                                )
+                                df_to_write = measurement.data
                     else:
                         self._append_log(
                             f"{measurement.path.name}: no rescale transform available; exported original values."
@@ -1286,3 +1316,4 @@ def main() -> QtWidgets.QWidget | None:  # pragma: no cover - launcher helper
 
 if __name__ == "__main__":  # pragma: no cover - manual execution
     main()
+
