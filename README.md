@@ -609,6 +609,14 @@ concentrate on a single group. The Matplotlib tabs appear on the right-hand side
 of the window with a console log below; they are fully resizable and inherit the
 project’s dark/light theme settings.
 
+Enable **Normalise Y axis endpoints** to automatically scale every loop in a
+temperature group so the negative-field endpoint shares a common minimum and the
+positive-field endpoint reaches the same maximum. The transform is logged per
+file, highlighting when a curve needed inversion, and the Matplotlib/Origin
+outputs use the rescaled values so angles that were captured with inverted
+signals line up with their neighbours. Leave the option unchecked to plot the
+raw measurements.
+
 OriginPro exports mirror the same grouping, creating a workbook for each
 temperature, writing a sheet per angle with the selected axes, and building a
 line graph that overlays every angle trace with a labelled legend. A dedicated
@@ -617,9 +625,12 @@ with the detected column names, so Origin (or any analysis tool) can import the
 clean tables without the surrounding instrumentation metadata. After you pick the
 destination folder you can opt into creating a named subfolder for the export batch,
 and the plotter remembers the last folder you used so repeat runs open the dialog in
-the same location. Even if a run is
-missing angle/temperature metadata, the loader still enables TXT export while
-noting that plotting is disabled, making it possible to salvage data from noisy
+the same location. Choose between exporting the **Original data** or the
+**Rescaled data**; the latter applies the same Y-axis transform used for the
+plots so the TXT tables drop straight into Origin with matching endpoints. Even
+if a run is missing angle/temperature metadata, the loader still enables TXT
+export while noting that plotting is disabled, making it possible to salvage
+data from noisy
 recipes. If Origin is not installed the exporter logs a short reminder while
 leaving the Matplotlib tabs intact, so the workflow stays consistent on
 machines without Origin.

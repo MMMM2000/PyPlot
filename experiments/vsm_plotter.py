@@ -59,6 +59,99 @@ class VSMMeasurement:
     data: pd.DataFrame
 
 
+@dataclass
+class RescaleResult:
+    """Describe the linear transform used to align hysteresis endpoints."""
+
+    scale: float
+    offset: float
+    source_left: float
+    source_right: float
+    target_left: float
+    target_right: float
+
+
+EDGE_FRACTION = 0.05
+NUMERIC_TOLERANCE = 1e-9
+
+
+def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[float, float]:
+    """Return representative Y values near the minimum and maximum X coordinates."""
+
+    if df.empty:
+        raise ValueError("Cannot estimate edge values from an empty dataframe")
+
+    x_values = df[x_axis]
+    y_values = df[y_axis]
+
+    min_x = float(x_values.min())
+    max_x = float(x_values.max())
+    span = max_x - min_x
+
+    if math.isclose(span, 0.0, abs_tol=NUMERIC_TOLERANCE):
+        first = float(y_values.iloc[0])
+        last = float(y_values.iloc[-1])
+        return first, last
+
+    window = max(span * EDGE_FRACTION, NUMERIC_TOLERANCE)
+    left_mask = x_values <= (min_x + window)
+    right_mask = x_values >= (max_x - window)
+
+    left_values = y_values[left_mask]
+    right_values = y_values[right_mask]
+
+    left = float(left_values.median() if not left_values.empty else y_values.iloc[0])
+    right = float(right_values.median() if not right_values.empty else y_values.iloc[-1])
+    return left, right
+
+
+def _apply_rescaling(
+    entries: Sequence[tuple[Path, pd.DataFrame]],
+    x_axis: str,
+    y_axis: str,
+) -> Dict[Path, RescaleResult]:
+    """Compute linear transforms that align loop endpoints across measurements."""
+
+    prepared: List[tuple[Path, pd.DataFrame, float, float]] = []
+    for path, subset in entries:
+        if subset.empty:
+            continue
+        left, right = _estimate_edge_values(subset, x_axis, y_axis)
+        prepared.append((path, subset, left, right))
+
+    if not prepared:
+        return {}
+
+    target_left = min(item[2] for item in prepared)
+    target_right = max(item[3] for item in prepared)
+
+    if math.isclose(target_left, target_right, abs_tol=NUMERIC_TOLERANCE):
+        reference_left = prepared[0][2]
+        reference_right = prepared[0][3]
+        target_left = reference_left
+        target_right = reference_right
+
+    results: Dict[Path, RescaleResult] = {}
+    for path, subset, left, right in prepared:
+        if math.isclose(right, left, abs_tol=NUMERIC_TOLERANCE):
+            scale = 1.0
+            offset = target_left - left
+        else:
+            scale = (target_right - target_left) / (right - left)
+            offset = target_left - scale * left
+
+        results[path] = RescaleResult(
+            scale=scale,
+            offset=offset,
+            source_left=left,
+            source_right=right,
+            target_left=target_left,
+            target_right=target_right,
+        )
+
+    return results
+
+
 def _suggest_export_subfolder(measurements: Sequence[VSMMeasurement | Path | str]) -> str:
     """Suggest a folder name based on the first measurement path."""
 
@@ -536,6 +629,19 @@ class VSMPlotter(QtWidgets.QWidget):
         controls_layout.addWidget(QtWidgets.QLabel("Y axis"))
         controls_layout.addWidget(self.y_axis_combo)
 
+        self.rescale_checkbox = QtWidgets.QCheckBox("Normalise Y axis endpoints")
+        self.rescale_checkbox.setToolTip(
+            "Scale each curve so the negative-field and positive-field endpoints share\n"
+            "a common minimum/maximum across all angles for the same temperature."
+        )
+        controls_layout.addWidget(self.rescale_checkbox)
+
+        controls_layout.addWidget(QtWidgets.QLabel("TXT export mode"))
+        self.export_mode_combo = QtWidgets.QComboBox()
+        self.export_mode_combo.addItem("Original data", "original")
+        self.export_mode_combo.addItem("Rescaled data", "rescaled")
+        controls_layout.addWidget(self.export_mode_combo)
+
         button_row = QtWidgets.QHBoxLayout()
         self.load_button = QtWidgets.QPushButton("Load data")
         self.load_button.clicked.connect(self._load_measurements)
@@ -585,6 +691,18 @@ class VSMPlotter(QtWidgets.QWidget):
             index = self.backend_combo.findText(backend, QtCore.Qt.MatchFlag.MatchFixedString)
             if index >= 0:
                 self.backend_combo.setCurrentIndex(index)
+        export_mode = self.settings.value("export_mode", "original")
+        if isinstance(export_mode, str):
+            index = self.export_mode_combo.findData(export_mode)
+            if index >= 0:
+                self.export_mode_combo.setCurrentIndex(index)
+        rescale_value = self.settings.value("rescale_y", False)
+        if isinstance(rescale_value, (str, bool)):
+            if isinstance(rescale_value, str):
+                rescale_bool = rescale_value.lower() in {"1", "true", "yes"}
+            else:
+                rescale_bool = bool(rescale_value)
+            self.rescale_checkbox.setChecked(rescale_bool)
         mode = self.settings.value("mode", "files")
         if mode == "folder":
             self.folder_radio.setChecked(True)
@@ -595,6 +713,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self.settings.setValue("last_path", self.path_edit.text())
         self.settings.setValue("backend", self.backend_combo.currentText())
         self.settings.setValue("mode", "folder" if self.folder_radio.isChecked() else "files")
+        self.settings.setValue("export_mode", self.export_mode_combo.currentData())
+        self.settings.setValue("rescale_y", self.rescale_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.sync()
@@ -801,6 +921,49 @@ class VSMPlotter(QtWidgets.QWidget):
             )
             return
 
+        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]] = {}
+        for temperature, measurement_list in sorted(groups.items()):
+            prepared: List[tuple[VSMMeasurement, pd.DataFrame]] = []
+            for measurement in sorted(measurement_list, key=lambda m: m.angle):
+                subset = (
+                    measurement.data[[x_axis, y_axis]]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .dropna()
+                )
+                if subset.empty:
+                    self._append_log(
+                        f"{measurement.path.name}: no numeric data for the selected axes; skipped."
+                    )
+                    continue
+                prepared.append((measurement, subset))
+            if prepared:
+                prepared_groups[temperature] = prepared
+
+        rescale_enabled = self.rescale_checkbox.isChecked()
+        rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
+        if rescale_enabled:
+            for temperature, entries in prepared_groups.items():
+                rescale_map = _apply_rescaling(
+                    [(measurement.path, subset) for measurement, subset in entries],
+                    x_axis,
+                    y_axis,
+                )
+                if not rescale_map:
+                    self._append_log(
+                        f"{temperature:g} °C: unable to compute rescaling for {y_axis}; keeping original values."
+                    )
+                    continue
+                rescale_info[temperature] = rescale_map
+                for measurement, _ in entries:
+                    result = rescale_map.get(measurement.path)
+                    if result is None:
+                        continue
+                    inversion_note = " (inverted)" if result.scale < 0 else ""
+                    self._append_log(
+                        f"{measurement.path.name}: rescaled {y_axis} with scale {result.scale:.3g}{inversion_note} "
+                        f"and offset {result.offset:.3g}; targets {result.target_left:.3g} to {result.target_right:.3g}."
+                    )
+
         backend_choice = self.backend_combo.currentText()
         render_matplotlib = wants_matplotlib(backend_choice)
         export_origin = wants_origin(backend_choice)
@@ -808,15 +971,40 @@ class VSMPlotter(QtWidgets.QWidget):
         self.tab_widget.clear()
 
         if render_matplotlib:
-            self._render_matplotlib(groups, x_axis, y_axis)
+            self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
         else:
             self.tab_widget.setVisible(False)
 
         if export_origin:
-            self._export_origin(groups, x_axis, y_axis)
+            self._export_origin(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
 
         if not render_matplotlib and not export_origin:
             self._append_log("No backend selected; nothing generated.")
+
+    def _compute_rescale_lookup(self, x_axis: str, y_axis: str) -> Dict[Path, RescaleResult]:
+        grouped: Dict[float, List[VSMMeasurement]] = {}
+        for measurement in self.measurements:
+            if measurement.temperature is None:
+                continue
+            if x_axis not in measurement.data.columns or y_axis not in measurement.data.columns:
+                continue
+            grouped.setdefault(measurement.temperature, []).append(measurement)
+
+        lookup: Dict[Path, RescaleResult] = {}
+        for measurement_list in grouped.values():
+            entries: List[tuple[Path, pd.DataFrame]] = []
+            for measurement in measurement_list:
+                subset = (
+                    measurement.data[[x_axis, y_axis]]
+                    .apply(pd.to_numeric, errors="coerce")
+                    .dropna()
+                )
+                if subset.empty:
+                    continue
+                entries.append((measurement.path, subset))
+            rescale_map = _apply_rescaling(entries, x_axis, y_axis)
+            lookup.update(rescale_map)
+        return lookup
 
     def _export_txt(self) -> None:
         if not self.measurements:
@@ -848,6 +1036,27 @@ class VSMPlotter(QtWidgets.QWidget):
         target_dir = dialog.selected_directory()
         target_dir.mkdir(parents=True, exist_ok=True)
 
+        export_mode = self.export_mode_combo.currentData()
+        rescale_requested = export_mode == "rescaled"
+        x_axis = self.x_axis_combo.currentText()
+        y_axis = self.y_axis_combo.currentText()
+        if rescale_requested and (not x_axis or not y_axis):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Plot Explorer",
+                "Select X and Y axes before exporting rescaled data.",
+            )
+            rescale_requested = False
+
+        rescale_lookup: Dict[Path, RescaleResult] = {}
+        if rescale_requested:
+            rescale_lookup = self._compute_rescale_lookup(x_axis, y_axis)
+            if not rescale_lookup:
+                self._append_log(
+                    "Rescaled export requested but no transforms could be calculated; exporting original data."
+                )
+                rescale_requested = False
+
         exported = 0
         for measurement in self.measurements:
             base_name = measurement.path.stem or f"measurement_{exported + 1}"
@@ -857,7 +1066,26 @@ class VSMPlotter(QtWidgets.QWidget):
                 candidate = target_dir / f"{base_name}_{counter}.txt"
                 counter += 1
             try:
-                measurement.data.to_csv(candidate, sep="\t", index=False)
+                if rescale_requested:
+                    if measurement.path in rescale_lookup:
+                        result = rescale_lookup[measurement.path]
+                        df_to_write = measurement.data.copy()
+                        if y_axis in df_to_write.columns:
+                            numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
+                            df_to_write[y_axis] = numeric * result.scale + result.offset
+                        else:
+                            self._append_log(
+                                f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
+                            )
+                            df_to_write = measurement.data
+                    else:
+                        self._append_log(
+                            f"{measurement.path.name}: no rescale transform available; exported original values."
+                        )
+                        df_to_write = measurement.data
+                else:
+                    df_to_write = measurement.data
+                df_to_write.to_csv(candidate, sep="\t", index=False)
                 exported += 1
             except Exception as exc:
                 self._append_log(f"Failed to export {measurement.path.name}: {exc}")
@@ -881,21 +1109,25 @@ class VSMPlotter(QtWidgets.QWidget):
 
     def _render_matplotlib(
         self,
-        groups: Dict[float, List[VSMMeasurement]],
+        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
+        rescale_info: Dict[float, Dict[Path, RescaleResult]],
         x_axis: str,
         y_axis: str,
+        rescale_enabled: bool,
     ) -> None:
         self.tab_widget.setVisible(True)
-        for temperature, measurements in sorted(groups.items()):
+        for temperature, entries in sorted(prepared_groups.items()):
             fig = Figure(figsize=(11.5, 7.8))
             ax = fig.add_subplot(111)
-            for measurement in sorted(measurements, key=lambda m: m.angle):
-                subset = measurement.data[[x_axis, y_axis]].dropna()
-                if subset.empty:
-                    continue
+            for measurement, subset in entries:
+                series_y = subset[y_axis]
+                if rescale_enabled:
+                    result = rescale_info.get(temperature, {}).get(measurement.path)
+                    if result is not None:
+                        series_y = series_y * result.scale + result.offset
                 ax.plot(
-                    subset[x_axis].astype(float).to_numpy(),
-                    subset[y_axis].astype(float).to_numpy(),
+                    subset[x_axis].to_numpy(),
+                    series_y.to_numpy(),
                     label=f"{measurement.angle:g}°",
                 )
             ax.set_xlabel(x_axis)
@@ -916,21 +1148,31 @@ class VSMPlotter(QtWidgets.QWidget):
 
     def _export_origin(
         self,
-        groups: Dict[float, List[VSMMeasurement]],
+        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
+        rescale_info: Dict[float, Dict[Path, RescaleResult]],
         x_axis: str,
         y_axis: str,
+        rescale_enabled: bool,
     ) -> None:
         try:
             with origin_session() as op:
                 schedule_origin_release()
                 exported = 0
-                for temperature, measurements in sorted(groups.items()):
+                for temperature, entries in sorted(prepared_groups.items()):
                     valid = []
-                    for measurement in sorted(measurements, key=lambda m: m.angle):
-                        subset = measurement.data[[x_axis, y_axis]].dropna()
-                        if subset.empty:
+                    for measurement, subset in entries:
+                        series_y = subset[y_axis]
+                        if rescale_enabled:
+                            result = rescale_info.get(temperature, {}).get(measurement.path)
+                            if result is not None:
+                                series_y = series_y * result.scale + result.offset
+                        export_subset = pd.DataFrame({
+                            x_axis: subset[x_axis],
+                            y_axis: series_y,
+                        }).astype(float)
+                        if export_subset.empty:
                             continue
-                        valid.append((measurement, subset.astype(float)))
+                        valid.append((measurement, export_subset))
                     if not valid:
                         continue
                     try:

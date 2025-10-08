@@ -246,3 +246,36 @@ New Section: Section 0:
 
     assert angle == pytest.approx(12.0)
     assert temperature == pytest.approx(-30.0, abs=0.2)
+
+
+def test_estimate_edge_values_handles_two_points() -> None:
+    df = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
+
+    left, right = module._estimate_edge_values(df, "H", "M")
+
+    assert left == pytest.approx(-1.0)
+    assert right == pytest.approx(1.0)
+
+
+def test_apply_rescaling_inverts_and_scales() -> None:
+    base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
+    flipped = pd.DataFrame({"H": [-10.0, 10.0], "M": [2.0, -2.0]})
+
+    results = module._apply_rescaling(
+        [(Path("base"), base), (Path("flipped"), flipped)],
+        "H",
+        "M",
+    )
+
+    assert Path("base") in results
+    assert Path("flipped") in results
+
+    base_result = results[Path("base")]
+    flipped_result = results[Path("flipped")]
+
+    assert base_result.scale == pytest.approx(1.0)
+    assert base_result.offset == pytest.approx(0.0)
+
+    transformed = flipped["M"] * flipped_result.scale + flipped_result.offset
+    assert transformed.iloc[0] == pytest.approx(-1.0)
+    assert transformed.iloc[1] == pytest.approx(1.0)
