@@ -8,7 +8,7 @@ import math
 import re
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Sequence
 
@@ -25,11 +25,21 @@ from .core import (
     build_database,
     _normalise_output_name,
     _metadata_from_path,
+    _microscope_key,
+    _draw_key,
 )
 
 
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
+
+
+_STAGE_LABELS = {
+    "prep": "Preparing support files",
+    "analysis": "Analysing microscope/video data",
+    "build": "Building database rows",
+    "final": "Finalising exports",
+}
 
 
 @dataclass
@@ -45,6 +55,10 @@ class WorkerInputs:
     plot_backends: tuple[str, ...]
     export_behaviour: dict[str, str]
     matplotlib_figsize: tuple[float, float]
+    include_microscope_crops: bool = True
+    highlight_ocr_values: bool = True
+    analyse_videos: bool = True
+    strain_files: list[Path] = field(default_factory=list)
 
 
 FIGURE_WIDTH_DEFAULT_MM = round(DEFAULT_FIGSIZE[0] * 25.4, 1)
@@ -64,12 +78,14 @@ def collect_support_files(
     annealing_files: Sequence[Path],
     data_roots: Sequence[Path],
     progress_callback: Optional[Callable[[], None]] = None,
+    include_videos: bool = True,
 ) -> tuple[list[Path], list[Path], list[Path]]:
     """Locate fabrication spreadsheets, microscope images and videos.
 
     When ``progress_callback`` is supplied it is invoked after each annealing
     file has been analysed so callers can surface responsive progress updates
-    while the filesystem scan is running.
+    while the filesystem scan is running. Set ``include_videos`` to ``False`` to
+    skip the slower video discovery path entirely.
     """
 
     if not annealing_files:
@@ -268,35 +284,76 @@ def collect_support_files(
                 for piece_dir in _piece_dirs(comp_dir, draw):
                     if piece_dir not in search_dirs:
                         search_dirs.append(piece_dir)
-            fragment = f"{draw}_{piece}"
+            fragment_tokens = {
+                f"{draw}_{piece}",
+                f"{draw}-{piece}",
+                f"{draw}{piece}",
+                f"{draw} {piece}",
+                f"{draw}.{piece}",
+            }
             for search_dir in search_dirs:
                 if not search_dir.is_dir():
                     continue
                 try:
-                    candidates = _iter_fragment_files(
-                        search_dir, fragment, MICROSCOPE_EXTENSIONS, limit=50
-                    )
+                    candidates: list[Path] = []
+                    for fragment in fragment_tokens:
+                        candidates.extend(
+                            _iter_fragment_files(
+                                search_dir,
+                                fragment,
+                                MICROSCOPE_EXTENSIONS,
+                                limit=50,
+                            )
+                        )
                 except Exception:
                     continue
-                for candidate in candidates:
-                    if is_microscope_candidate(candidate):
+                if not candidates:
+                    try:
+                        candidates = _iter_fragment_files(
+                            search_dir, "", MICROSCOPE_EXTENSIONS, limit=100
+                        )
+                    except Exception:
+                        continue
+                for candidate in dict.fromkeys(candidates):
+                    if not is_microscope_candidate(candidate):
+                        continue
+                    key = _microscope_key(candidate)
+                    if key == (composition, draw, piece):
                         _append_unique(auto_micro, seen_micro, candidate)
-            video_dirs: list[Path] = []
-            if video_root is not None:
-                video_dirs.extend(_composition_dirs(video_root, composition))
-            for comp_dir in composition_dirs:
-                video_dirs.extend(_piece_dirs(comp_dir, draw))
-            for search_dir in video_dirs:
-                if not search_dir.is_dir():
-                    continue
-                try:
-                    candidates = _iter_fragment_files(
-                        search_dir, fragment, VIDEO_EXTENSIONS, limit=40
-                    )
-                except Exception:
-                    continue
-                for candidate in candidates:
-                    _append_unique(videos, seen_video, candidate)
+            if include_videos:
+                video_dirs: list[Path] = []
+                if video_root is not None:
+                    video_dirs.extend(_composition_dirs(video_root, composition))
+                for comp_dir in composition_dirs:
+                    video_dirs.extend(_piece_dirs(comp_dir, draw))
+                for search_dir in video_dirs:
+                    if not search_dir.is_dir():
+                        continue
+                    try:
+                        video_candidates: list[Path] = []
+                        for fragment in fragment_tokens:
+                            video_candidates.extend(
+                                _iter_fragment_files(
+                                    search_dir, fragment, VIDEO_EXTENSIONS, limit=60
+                                )
+                            )
+                    except Exception:
+                        continue
+                    if not video_candidates:
+                        try:
+                            video_candidates = _iter_fragment_files(
+                                search_dir, "", VIDEO_EXTENSIONS, limit=120
+                            )
+                        except Exception:
+                            continue
+                    for candidate in dict.fromkeys(video_candidates):
+                        key = _microscope_key(candidate)
+                        if key == (composition, draw, piece):
+                            _append_unique(videos, seen_video, candidate)
+                            continue
+                        draw_key = _draw_key(candidate)
+                        if draw_key == (composition, draw):
+                            _append_unique(videos, seen_video, candidate)
         finally:
             if progress_callback is not None:
                 try:
@@ -511,11 +568,14 @@ class BuildWorker(QtCore.QObject):
                 annealing_files,
                 inputs.data_roots,
                 progress_callback=_prepare_bridge,
+                include_videos=inputs.analyse_videos,
             )
             _check_cancelled()
             self._tracker.finish_prepare()
             _check_cancelled()
             microscope_files = list(dict.fromkeys(manual_microscope + auto_microscope))
+            if not inputs.analyse_videos:
+                video_files = []
             analysis_units = len(microscope_files) + len(video_files)
             self._tracker.set_analysis_units(analysis_units)
             config = BuilderConfig(
@@ -524,12 +584,15 @@ class BuildWorker(QtCore.QObject):
                 output_dir=inputs.output_dir,
                 microscope_files=microscope_files,
                 video_files=video_files,
+                strain_files=inputs.strain_files,
                 make_plots=bool(inputs.plot_backends),
                 export_formats=inputs.export_formats,
                 output_name=inputs.output_name,
                 plot_backends=inputs.plot_backends,
                 export_behaviour=inputs.export_behaviour,
                 matplotlib_figsize=inputs.matplotlib_figsize,
+                include_microscope_crops=inputs.include_microscope_crops,
+                highlight_ocr_values=inputs.highlight_ocr_values,
             )
             config.output_dir.mkdir(parents=True, exist_ok=True)
             self.logger.info(
@@ -546,6 +609,12 @@ class BuildWorker(QtCore.QObject):
                 )
             if video_files:
                 self.logger.info("Using %s video file(s)", len(video_files))
+            elif inputs.analyse_videos:
+                self.logger.info("No fabrication videos were found for analysis.")
+            else:
+                self.logger.info(
+                    "Fabrication video analysis disabled; skipping video metrics."
+                )
 
             def _progress_bridge(current: int, total: int) -> None:
                 _check_cancelled()
@@ -638,9 +707,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_timestamp: float | None = None
         self._seconds_per_unit_ema: float | None = None
         self._last_eta_seconds: float | None = None
+        self._overall_progress_current: int = 0
+        self._overall_progress_total: int = 0
+        self._progress_counts_text: str = ""
+        self._progress_stage_text: str = ""
+        self._last_logged_stage: str | None = None
         self._stage_order: tuple[str, ...] = ("prep", "analysis", "build", "final")
         self._stage_timing_history: dict[str, dict[str, float | int]] = {}
         self._init_stage_tracking()
+
+        self._eta_timer = QtCore.QTimer(self)
+        self._eta_timer.setInterval(1000)
+        self._eta_timer.timeout.connect(self._on_eta_timer)
 
         cwd = Path.cwd()
         downloads_dir = Path.home() / "Downloads"
@@ -652,6 +730,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_anneal_dir = str(cwd)
         self._last_root_dir = str(cwd)
         self._last_output_dir = str(self._default_output_dir)
+        self._last_strain_dir = str(cwd)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
         self.log_message.connect(self._append_log)
@@ -681,6 +760,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_timestamp = now
         self._seconds_per_unit_ema = None
         self._last_eta_seconds = None
+        self._overall_progress_current = 0
+        self._overall_progress_total = 0
+        self._progress_counts_text = ""
+        self._progress_stage_text = ""
+        self._last_logged_stage = None
         self._init_stage_tracking()
 
     def _clear_progress_tracking(self) -> None:
@@ -689,6 +773,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_progress_timestamp = None
         self._seconds_per_unit_ema = None
         self._last_eta_seconds = None
+        self._overall_progress_current = 0
+        self._overall_progress_total = 0
+        self._progress_counts_text = ""
+        self._progress_stage_text = ""
+        self._last_logged_stage = None
         self._init_stage_tracking()
 
     def _reset_stage_metrics(self, stage: str) -> None:
@@ -813,10 +902,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 completed_units = max(int(self._stage_progress.get(stage, 0)), 0)
                 if elapsed_stage > 0 and completed_units > 0:
                     runtime_rate = elapsed_stage / completed_units
-                    _push(rates, runtime_rate, 0.35)
+                    _push(rates, runtime_rate, 0.5)
 
             if stage == active_stage and self._seconds_per_unit_ema:
-                _push(rates, self._seconds_per_unit_ema, 0.2)
+                _push(rates, self._seconds_per_unit_ema, 0.3)
 
             if not rates and global_rate is not None:
                 _push(rates, global_rate, 0.5)
@@ -876,12 +965,57 @@ class BuilderWindow(QtWidgets.QMainWindow):
             filtered = seconds
         else:
             if seconds > previous:
-                alpha = 0.2
+                alpha = 0.65
             else:
-                alpha = 0.4
+                alpha = 0.2
             filtered = previous + (seconds - previous) * alpha
         self._last_eta_seconds = max(filtered, 0.0)
         return self._last_eta_seconds
+
+    def _on_eta_timer(self) -> None:
+        self._update_eta_display()
+
+    def _resolve_active_stage(self) -> str | None:
+        for key in self._stage_order:
+            total_units = max(int(self._stage_totals.get(key, 0)), 0)
+            progress_units = min(max(int(self._stage_progress.get(key, 0)), 0), total_units)
+            if total_units > 0 and progress_units < total_units:
+                return key
+        return None
+
+    def _update_eta_display(self, now: Optional[float] = None) -> None:
+        if not self._running:
+            return
+        if now is None:
+            now = time.monotonic()
+        current = max(int(self._overall_progress_current), 0)
+        total = max(int(self._overall_progress_total), 1)
+        remaining_units = max(total - current, 0)
+        eta_text: Optional[str] = None
+        if remaining_units <= 0:
+            self._last_eta_seconds = None
+            if current:
+                eta_text = "Finishing..."
+        else:
+            active_stage = self._resolve_active_stage()
+            remaining_seconds = self._estimate_remaining_seconds(now, active_stage, current, total)
+            if remaining_seconds is not None and math.isfinite(remaining_seconds):
+                smoothed = self._smooth_eta(remaining_seconds)
+                eta_text = self._format_eta(smoothed)
+            elif current > 0:
+                eta_text = "Estimating..."
+                self._last_eta_seconds = None
+
+        parts: list[str] = []
+        if self._progress_stage_text:
+            parts.append(self._progress_stage_text)
+        if self._progress_counts_text:
+            parts.append(self._progress_counts_text)
+        if eta_text:
+            parts.append(eta_text)
+        label_text = " • ".join(parts) if parts else "Working..."
+        if label_text != self.progress_label.text():
+            self.progress_label.setText(label_text)
 
     def _build_ui(self) -> None:
         central = QtWidgets.QWidget(self)
@@ -968,6 +1102,21 @@ class BuilderWindow(QtWidgets.QMainWindow):
         micro_layout.addWidget(self.microscope_recursive)
         right_layout.addWidget(self.microscope_group, 1)
 
+        # Strain worksheet
+        self.strain_group = QtWidgets.QGroupBox("Strain worksheet")
+        strain_layout = QtWidgets.QHBoxLayout(self.strain_group)
+        strain_layout.setContentsMargins(8, 8, 8, 8)
+        self.strain_edit = QtWidgets.QLineEdit()
+        self.strain_edit.setPlaceholderText("Select an Excel worksheet with strain data…")
+        strain_layout.addWidget(self.strain_edit, 1)
+        self.strain_button = QtWidgets.QPushButton("Browse…")
+        self.strain_button.clicked.connect(self._select_strain_file)
+        strain_layout.addWidget(self.strain_button)
+        self.clear_strain_button = QtWidgets.QPushButton("Clear")
+        self.clear_strain_button.clicked.connect(self._clear_strain_file)
+        strain_layout.addWidget(self.clear_strain_button)
+        right_layout.addWidget(self.strain_group)
+
         # Options
         self.options_group = QtWidgets.QGroupBox("Options")
         options_layout = QtWidgets.QVBoxLayout(self.options_group)
@@ -985,6 +1134,35 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.export_excel_check = QtWidgets.QCheckBox("Export Excel")
         self.export_excel_check.stateChanged.connect(self._save_settings)
         options_layout.addWidget(self.export_excel_check)
+
+        microscope_group = QtWidgets.QGroupBox("Microscope review")
+        microscope_layout = QtWidgets.QVBoxLayout(microscope_group)
+        microscope_layout.setContentsMargins(8, 8, 8, 8)
+        self.include_crops_check = QtWidgets.QCheckBox("Attach microscope crops to Excel")
+        self.include_crops_check.stateChanged.connect(self._save_settings)
+        self.include_crops_check.setToolTip(
+            "Add cropped microscope images in new columns next to the d and D values"
+        )
+        with QtCore.QSignalBlocker(self.include_crops_check):
+            self.include_crops_check.setChecked(True)
+        microscope_layout.addWidget(self.include_crops_check)
+        self.highlight_ocr_check = QtWidgets.QCheckBox("Highlight OCR-sourced values")
+        self.highlight_ocr_check.stateChanged.connect(self._save_settings)
+        self.highlight_ocr_check.setToolTip(
+            "Tint spreadsheet cells where the value was filled from OCR instead of fabrication spreadsheets"
+        )
+        with QtCore.QSignalBlocker(self.highlight_ocr_check):
+            self.highlight_ocr_check.setChecked(True)
+        microscope_layout.addWidget(self.highlight_ocr_check)
+        options_layout.addWidget(microscope_group)
+
+        self.video_metrics_check = QtWidgets.QCheckBox("Extract fabrication metrics from videos")
+        self.video_metrics_check.setChecked(True)
+        self.video_metrics_check.stateChanged.connect(self._save_settings)
+        self.video_metrics_check.setToolTip(
+            "Sample fabrication videos to OCR winding speed, glass feed, temperature, and underpressure values"
+        )
+        options_layout.addWidget(self.video_metrics_check)
 
         figure_size_form = QtWidgets.QFormLayout()
         figure_size_form.setHorizontalSpacing(8)
@@ -1117,6 +1295,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.export_csv_check.setChecked(_read_bool("export_csv", True))
         with QtCore.QSignalBlocker(self.export_excel_check):
             self.export_excel_check.setChecked(_read_bool("export_excel", False))
+        with QtCore.QSignalBlocker(self.include_crops_check):
+            self.include_crops_check.setChecked(_read_bool("include_microscope_crops", True))
+        with QtCore.QSignalBlocker(self.highlight_ocr_check):
+            self.highlight_ocr_check.setChecked(_read_bool("highlight_ocr_values", True))
+        with QtCore.QSignalBlocker(self.video_metrics_check):
+            self.video_metrics_check.setChecked(_read_bool("analyse_videos", True))
         if hasattr(self, "microscope_recursive"):
             with QtCore.QSignalBlocker(self.microscope_recursive):
                 self.microscope_recursive.setChecked(_read_bool("microscope_recursive", True))
@@ -1140,6 +1324,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(output_name_value, str) and output_name_value.strip():
             self.output_name_edit.setText(output_name_value)
 
+        strain_path_value = self.settings.value("strain_path", "")
+        if isinstance(strain_path_value, str) and strain_path_value.strip():
+            self.strain_edit.setText(strain_path_value)
+            try:
+                self._last_strain_dir = str(Path(strain_path_value).expanduser().parent)
+            except Exception:
+                pass
+
         last_microscope = self.settings.value("last_microscope_dir", "")
         if isinstance(last_microscope, str) and last_microscope.strip():
             self._last_microscope_dir = last_microscope
@@ -1152,6 +1344,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         last_output = self.settings.value("last_output_dir", "")
         if isinstance(last_output, str) and last_output.strip():
             self._last_output_dir = last_output
+        last_strain = self.settings.value("last_strain_dir", "")
+        if isinstance(last_strain, str) and last_strain.strip():
+            self._last_strain_dir = last_strain
 
         timing_value = self.settings.value("stage_timing", "")
         if isinstance(timing_value, str) and timing_value.strip():
@@ -1193,13 +1388,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.settings.setValue("plot_origin", self.plot_origin_check.isChecked())
         self.settings.setValue("export_csv", self.export_csv_check.isChecked())
         self.settings.setValue("export_excel", self.export_excel_check.isChecked())
+        self.settings.setValue("include_microscope_crops", self.include_crops_check.isChecked())
+        self.settings.setValue("highlight_ocr_values", self.highlight_ocr_check.isChecked())
+        self.settings.setValue("analyse_videos", self.video_metrics_check.isChecked())
         self.settings.setValue("figure_width", self.figure_width_spin.value())
         self.settings.setValue("figure_height", self.figure_height_spin.value())
         self.settings.setValue("output_name", self.output_name_edit.text())
+        self.settings.setValue("strain_path", self.strain_edit.text())
         self.settings.setValue("last_microscope_dir", self._last_microscope_dir)
         self.settings.setValue("last_anneal_dir", self._last_anneal_dir)
         self.settings.setValue("last_root_dir", self._last_root_dir)
         self.settings.setValue("last_output_dir", self._last_output_dir)
+        self.settings.setValue("last_strain_dir", self._last_strain_dir)
         self.settings.setValue("microscope_recursive", self.microscope_recursive.isChecked())
         self.settings.setValue("stage_timing", json.dumps(self._stage_timing_history))
         self.settings.sync()
@@ -1221,7 +1421,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _collect_support_files(
         self, annealing_files: list[Path]
     ) -> tuple[list[Path], list[Path], list[Path]]:
-        return collect_support_files(annealing_files, self.data_roots)
+        include_videos = getattr(self, "video_metrics_check", None)
+        analyse_videos = True
+        if isinstance(include_videos, QtWidgets.QCheckBox):
+            analyse_videos = include_videos.isChecked()
+        return collect_support_files(
+            annealing_files,
+            self.data_roots,
+            include_videos=analyse_videos,
+        )
 
     def _add_anneal_files(self) -> None:
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -1311,6 +1519,24 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.microscope_list.clear()
         self._save_settings()
 
+    def _select_strain_file(self) -> None:
+        filename, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select strain worksheet",
+            self._last_strain_dir,
+            "Excel files (*.xlsx *.xlsm *.xls)",
+        )
+        if not filename:
+            return
+        path = Path(filename)
+        self._last_strain_dir = str(path.parent)
+        self.strain_edit.setText(str(path))
+        self._save_settings()
+
+    def _clear_strain_file(self) -> None:
+        self.strain_edit.clear()
+        self._save_settings()
+
     def _add_data_root(self) -> None:
         folder = QtWidgets.QFileDialog.getExistingDirectory(
             self,
@@ -1367,12 +1593,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         msg.setText(f"'{path.name}' already exists.")
         msg.setInformativeText("Choose how to continue:")
         replace_btn = msg.addButton("Replace", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
-        continue_btn = msg.addButton("Continue", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        update_btn = msg.addButton("Update", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        continue_btn = msg.addButton("Append", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         cancel_btn = msg.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
         msg.exec()
         clicked = msg.clickedButton()
         if clicked is cancel_btn:
             return None
+        if clicked is update_btn:
+            return "update"
         if clicked is continue_btn:
             return "append"
         return "replace"
@@ -1417,11 +1646,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.run_button.setEnabled(not running)
         self.cancel_button.setEnabled(running)
         if running:
+            if not self._eta_timer.isActive():
+                self._eta_timer.start()
             self._reset_progress_tracking()
             self.progress_bar.setRange(0, 0)
             self.progress_bar.setValue(0)
-            self.progress_label.setText("Preparing...")
+            self._progress_stage_text = _STAGE_LABELS.get("prep", "Preparing...")
+            self._update_eta_display()
         else:
+            self._eta_timer.stop()
             self._clear_progress_tracking()
             if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
                 self.progress_bar.setRange(0, 100)
@@ -1449,9 +1682,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def start_build(self) -> None:
         if self._running:
-            return
-        if not self.annealing_paths:
-            QtWidgets.QMessageBox.warning(self, "Microwire Data Builder", "Please add at least one annealing file.")
             return
         output_dir_text = self.output_edit.text().strip()
         if not output_dir_text:
@@ -1511,6 +1741,27 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 behaviours[fmt.lower()] = "replace"
 
         annealing_files = list(dict.fromkeys(self.annealing_paths))
+        requires_measurements = any(action != "update" for action in behaviours.values())
+        if requires_measurements and not annealing_files:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Please add at least one annealing file.",
+            )
+            return
+
+        strain_files: list[Path] = []
+        strain_text = self.strain_edit.text().strip()
+        if strain_text:
+            strain_files.append(Path(strain_text).expanduser())
+        if not requires_measurements and not strain_files:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No strain worksheet selected; nothing to update.",
+            )
+            return
+
         worker_inputs = WorkerInputs(
             annealing_files=annealing_files,
             manual_microscope_files=list(dict.fromkeys(self.microscope_paths)),
@@ -1524,6 +1775,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 float(self.figure_width_spin.value()) / 25.4,
                 float(self.figure_height_spin.value()) / 25.4,
             ),
+            include_microscope_crops=self.include_crops_check.isChecked(),
+            highlight_ocr_values=self.highlight_ocr_check.isChecked(),
+            analyse_videos=self.video_metrics_check.isChecked(),
+            strain_files=strain_files,
         )
         self._save_settings()
         self._set_running(True)
@@ -1574,9 +1829,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if ema is None:
                         ema = instantaneous
                     elif instantaneous >= ema:
-                        ema = (ema * 0.6) + (instantaneous * 0.4)
+                        ema = (ema * 0.35) + (instantaneous * 0.65)
                     else:
-                        ema = (ema * 0.8) + (instantaneous * 0.2)
+                        ema = (ema * 0.9) + (instantaneous * 0.1)
                     self._seconds_per_unit_ema = max(ema, 0.0)
             self._last_progress_value = current
             self._last_progress_timestamp = now
@@ -1607,11 +1862,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         stage_total = self._stage_totals.get(stage, 0)
 
         active_stage: str | None = None
+        active_value: int = 0
+        active_total: int = 0
         for key in self._stage_order:
             total_units = max(int(self._stage_totals.get(key, 0)), 0)
             progress_units = min(max(int(self._stage_progress.get(key, 0)), 0), total_units)
             if total_units > 0 and progress_units < total_units:
                 active_stage = key
+                active_total = total_units
+                active_value = progress_units
                 break
 
         metrics = self._stage_metrics.setdefault(
@@ -1638,9 +1897,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     if ema is None:
                         ema = instantaneous
                     elif instantaneous >= ema:
-                        ema = (ema * 0.65) + (instantaneous * 0.35)
+                        ema = (ema * 0.35) + (instantaneous * 0.65)
                     else:
-                        ema = (ema * 0.85) + (instantaneous * 0.15)
+                        ema = (ema * 0.9) + (instantaneous * 0.1)
                     metrics["ema"] = max(ema, 0.0)
             else:
                 if runtime.get("start") is None:
@@ -1674,6 +1933,38 @@ class BuilderWindow(QtWidgets.QMainWindow):
             metrics["last_timestamp"] = now
             metrics["last_value"] = max(stage_total, stage_value)
 
+        stage_label: str = ""
+        if active_stage is not None:
+            label = _STAGE_LABELS.get(active_stage, active_stage.title())
+            if active_total > 0:
+                stage_label = f"{label} ({active_value}/{active_total})"
+            else:
+                stage_label = label
+        elif current < total:
+            stage_label = "Finalising build..."
+        if stage_label != self._progress_stage_text:
+            self._progress_stage_text = stage_label
+        if active_stage != self._last_logged_stage:
+            if active_stage is None:
+                if current < total:
+                    self.logger.info("Stage complete; finalising remaining tasks…")
+                else:
+                    self.logger.info("All build stages completed.")
+            else:
+                if active_total > 0:
+                    self.logger.info(
+                        "Stage: %s (%s/%s)",
+                        _STAGE_LABELS.get(active_stage, active_stage.title()),
+                        active_value,
+                        active_total,
+                    )
+                else:
+                    self.logger.info(
+                        "Stage: %s",
+                        _STAGE_LABELS.get(active_stage, active_stage.title()),
+                    )
+            self._last_logged_stage = active_stage
+
         percent = int(round(100 * current / total))
         if percent < self._displayed_percent:
             percent = self._displayed_percent
@@ -1682,27 +1973,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if self.progress_bar.maximum() == 0 and self.progress_bar.minimum() == 0:
             self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(max(0, min(100, percent)))
-
-        eta_text: Optional[str] = None
-        remaining_units = max(total - current, 0)
-        if remaining_units <= 0:
-            eta_text = "Finishing..."
-            self._last_eta_seconds = None
-        else:
-            remaining_seconds = self._estimate_remaining_seconds(
-                now, active_stage, current, total
-            )
-            if remaining_seconds is not None and math.isfinite(remaining_seconds):
-                smoothed = self._smooth_eta(remaining_seconds)
-                eta_text = self._format_eta(smoothed)
-            elif current > 0:
-                eta_text = "Estimating..."
-                self._last_eta_seconds = None
-
-        label_text = f"{current}/{total}"
-        if eta_text:
-            label_text += f" • {eta_text}"
-        self.progress_label.setText(label_text)
+        self._overall_progress_current = current
+        self._overall_progress_total = total
+        self._progress_counts_text = f"{current}/{total}"
+        self._update_eta_display(now=now)
 
     def _handle_finished(self, result: BuildResult) -> None:
         self._set_running(False)

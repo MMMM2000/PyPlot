@@ -341,25 +341,37 @@ plotting tools:
   piece Y. Added paths are remembered between runs.
 * **Microscope images (.jpg/.png)** – drop calibrated microscope captures for
   the same draw/piece identifiers and the builder OCRs the red overlay labels to
-  fill in the core diameter \(d\), glass diameter \(D\), and their ratio when the
-  fabrication workbook is incomplete. The reader prioritises `*core*` images for
+  fill the core diameter \(d\), glass diameter \(D\), and their ratio instead of
+  trusting fabrication spreadsheet entries. Every diameter cell in the export is
+  therefore sourced directly from microscope evidence: when OCR fails the
+  spreadsheet is left blank so questionable measurements stand out, and when a
+  value is produced the Excel export highlights it (with the toggle enabled) and
+  links the microscope overlay automatically. Crops focus on the recognised
+  overlay region when Tesseract reports bounding boxes and gracefully fall back
+  to the full capture whenever the bounding box is missing so there is always a
+  picture beside the diameter. The reader prioritises `*core*` images for
   \(d\) and `*glass*` images for \(D\), normalises the overlay text so `[1]`
   markers without a closing bracket (for example `"[116.7µm"`) are repaired to
   `[1] 6.7µm`, filters out the `[2]` annotations that often describe a secondary
   feature in glass captures, ignores stray scale-bar values and other
   unrealistic measurements that lack the `[1]` marker, and now scans every
   `[1]` match in a capture before committing to a value so partial `187µm`
-  fallbacks no longer override later `8.7µm` readings. The tool also accepts
-  draw/piece tokens written with spaces or hyphens (for example, `5-4` or `5 4`)
-  in addition to the original underscore format when matching images to
-  measurements.
+  fallbacks no longer override later `8.7µm` readings. The OCR pass runs a
+  multi-pass sweep that resizes, sharpens, binarises, and inverts captures while
+  trying several page-segmentation modes, capturing bounding boxes for each
+  candidate measurement so the source overlay can be cropped automatically.
+  The tool also accepts draw/piece tokens written with spaces or hyphens (for
+  example, `5-4` or `5 4`) in addition to the original underscore format when
+  matching images to measurements and records how close each OCR result is to a
+  manually verified reference list. Those references now stay in the log — if a
+  capture is missing or the OCR value drifts beyond tolerance the builder emits
+  a summary so you know which microscope passes still need attention without
+  back-filling the spreadsheet with manual numbers.
   Install Tesseract so the OCR layer can run (`brew install tesseract` on macOS,
   `choco install tesseract` on Windows, or `apt install tesseract-ocr` on
   Ubuntu) and keep the English trained data up to date for crisp overlays (Homebrew users can run
   `brew install tesseract-lang`). The OCR pass now forces Tesseract’s LSTM engine
-  in numeric mode to stabilise bracketed diameter readings, and when OCR cannot
-  run the builder falls back to a curated table of measured diameters for the
-  reference microwires so required fields never regress to blanks. The builder now searches PATH, Homebrew/MacPorts trees,
+  in numeric mode to stabilise bracketed diameter readings. The builder now searches PATH, Homebrew/MacPorts trees,
   Windows Program Files, Chocolatey, user-level installs, and even the `.app`
   bundles that ship a private copy of the binary before giving up with a single
   warning. Setting the `TESSERACT_CMD` environment variable still overrides the
@@ -375,20 +387,43 @@ plotting tools:
   continues through microscope OCR and video analysis with per-image updates,
   tracks each annealing file as the database is assembled, and finishes by
   reporting export/plot work alongside a live time-remaining estimate. The ETA
-  now blends the live moving average with per-stage timings saved from previous
-  sessions and tempers sudden speed changes, so slow OCR phases or longer
-  exports pull the prediction upward sensibly while familiar datasets settle on
-  steady remaining times after the first few runs. A **Cancel** button next to
-  **Run** stops the background worker, aborts the build cleanly, and returns the
-  window to an idle state once the cancellation propagates.
+  now refreshes once per second, blends the live moving average with per-stage
+  timings saved from previous sessions, and treats sudden slowdowns as sticky so
+  brief OCR pauses or long exports immediately push the remaining time upward
+  while later speed-ups bleed in gradually. A status line above the progress bar
+  now names the active stage (for example, **Analysing microscope/video data**)
+  together with its per-stage counters, and the log echoes every stage change so
+  long OCR or export passes still feel alive instead of stalled. Familiar
+  datasets still settle on steady remaining times after the first few runs. A
+  **Cancel** button next to **Run** stops the background worker, aborts the build
+  cleanly, and returns the window to an idle state once the cancellation
+  propagates.
 * **Fabrication videos (.mp4/.mkv/.avi/.mov)** – place draw recordings next to
   the annealing data and the builder samples one frame every 30 seconds from the
   steady-state portion of the clip (ignoring the first 50 % and final 10 %). OCR
   is applied to each sampled frame and the median temperature/underpressure is
-  used to back-fill any missing fabrication readings.
+  used to back-fill any missing fabrication readings. The video pass now also
+  extracts winding speed and glass-feeding rates when the on-screen overlays
+  advertise them, so the spreadsheet columns for those metrics can be populated
+  directly from footage even when the fabrication sheet is incomplete. Fields
+  sourced from video OCR are tracked alongside the microscope highlights so you
+  can instantly see which values originated outside the fabrication workbook.
+  Prefer to skip the scan on long builds? Uncheck **Extract fabrication metrics
+  from videos** in the Options column and the run stays focused on spreadsheets
+  and microscope evidence only.
 * **Options** – the left column offers **Matplotlib plots (PNG)** to reuse the familiar
   red/blue annealing style or tick **Origin plots** to push the data to an Origin
-  session using the simple single-trace template. Use the **Figure width/height**
+  session using the simple single-trace template. The **Microscope review** box
+  underneath keeps both toggles enabled by default: **Attach microscope crops to
+  Excel** inserts two columns immediately after \(d\) and \(D\) and embeds the
+  microscope evidence beside each measurement so you can validate or correct
+  them in-place, and **Highlight OCR-sourced values** tints any cells where OCR
+  (microscope or video) provided the measurement instead of the fabrication
+  spreadsheets, covering both diameter readings and fabrication metrics harvested
+  from draw videos. Disable either checkbox when you only need the numeric
+  values. When you need a quick spreadsheet refresh without the extra pass over
+  draw recordings, clear **Extract fabrication metrics from videos** and the
+  builder skips the video search entirely. Use the **Figure width/height**
   controls to choose the Matplotlib canvas size in inches (the defaults are now
   10.0 × 6.0 in so the Excel workbook shows large, legible charts without manual
   resizing); the values are saved between runs and the axis labels, ticks,
@@ -412,19 +447,77 @@ plotting tools:
   the corresponding filenames. Choose **Export CSV** and/or **Export Excel** to
   control the output formats; every toggle, folder, and size preference is
   remembered between runs.
-* **Output** – pick a destination directory and supply a base file name. The
-  builder now defaults to your operating system’s **Downloads** folder so the
-  exports land somewhere familiar, while still remembering the last directory
-  you picked between launches. The builder writes `<name>.csv`, `<name>.xlsx`
-  when requested, stages the
-  Matplotlib PNGs in a temporary `plots/` folder while embedding them, and then
-  removes that directory so the workbook is the only place the images live.
-  Origin project snippets remain under `origin_objects/` whenever that backend
-  is enabled. CSV exports continue to hold the plot file names while the Excel
-  workbook replaces those cells with embedded media. If a file already exists
-  you can **Replace** it, **Continue** appending new rows, or **Cancel** the
-  build. The completion dialog now includes an **Open** button for quick
-  inspection of the freshly generated dataset.
+* **Strain worksheet** – the optional strain selector loads martensite/austenite
+  length pairs and their measured shortening from the standalone worksheet. The
+  builder inserts a new **Strain** column immediately after the Matplotlib figure
+  fields, formats the percentage to three decimals, and carries over any `broke`
+  flags so reviewers can see failed samples at a glance. When an export already
+  exists the overwrite prompt now offers **Update** in addition to **Replace** and
+  **Append**. Choosing **Update** refreshes the strain column (and repositions the
+  Matplotlib figure fields next to \(d/D\)) inside the existing Excel/CSV files
+  without rebuilding the entire workbook, preserving embedded microscope crops,
+  Origin OLE objects, and any annotations made during review.
+
+### Strain worksheet updater
+
+The database builder now understands the strain worksheet directly, but you can
+also update the worksheet without rerunning a full build. Enable the
+**Experiments** tab and launch **Strain Worksheet Updater** (or run
+
+```bash
+python -m experiments.strain_worksheet_updater
+```
+
+Select the current strain workbook, the latest microwire database export, and an
+output filename. The tool merges the database **Strain** column back into the
+worksheet, adds rows for new composition/microwire pairs, carries over existing
+martensite/austenite lengths, and flags any samples that broke during the strain
+test. Rows that do not parse into draw/piece identifiers are preserved exactly
+as written so reviewer notes are never lost.
+
+### Strain Plot Explorer
+
+When you want to inspect relationships between strain measurements, microscope
+diameters, and fabrication data, open the **Strain Plot Explorer** from the
+**Experiments** tab (or launch it manually):
+
+```bash
+python -m experiments.strain_3d_plotter
+```
+
+Select either a strain worksheet or a full microwire database export. The
+explorer filters out any samples that broke, parses the Ni/Fe/Ga/Co percentages
+from the composition, and gathers every numeric column except the raw `M length`
+and `A length` inputs. File-path columns such as **File 1000 mA** and
+**File Low mA** together with the embedded Matplotlib figure columns are
+suppressed automatically so they never appear as axis choices. Automatic mode
+generates scatter plots for every available combination that includes strain—
+toggle 2D and 3D passes independently in the left-hand control pane. Manual mode
+lets you pick the dimensionality and specify the exact X / Y (/ Z) axes so you
+can focus on a single relationship such as strain versus draw temperature.
+
+Controls now live in a dedicated panel on the left, keeping the plot tabs and log
+console spacious on the right. Each tab hosts a large interactive Matplotlib
+figure labelled with the microwire ID so you can compare shortening, diameters,
+fabrication metrics, and elemental content in context. Use the worksheet’s
+latest export to pick up new strain entries without tweaking plot settings—the
+tool remembers the last file you opened and keeps a console log of how many rows
+were plotted and which combinations were generated.
+
+Drag the splitter handle between the plot area and the log console to resize the
+view in real time. When you want to take a closer look, highlight a tab and
+press **Open selected plot in new window** to spawn a maximised window; it
+launches full-screen but remains resizable so you can position it on a secondary
+monitor.
+
+Switch the **Output backend** combo box to **Origin** (or **Both**) to stream
+the same combinations into OriginPro. The explorer opens a workbook for each
+pair or triplet, pushes the axis data alongside the microwire labels, and issues
+the appropriate LabTalk command (`worksheet -t plot scatter` for 2D or
+`worksheet -t plot3d scatter` for 3D). Extra worksheet columns are added before
+writing the labels so Origin no longer crashes as graphs are generated. If the
+`originpro` package is not available the request is logged without interrupting
+the Matplotlib tabs, making it safe to use on systems without Origin installed.
 
 The menu bar keeps **Help** as the right-most entry; open it to read an
 in-window guide that walks through input preparation, export options, and
@@ -465,6 +558,29 @@ The exported columns are:
  artefacts later. Matplotlib figures are embedded directly into the Excel sheet
  and the temporary `plots/` staging folder is deleted once the workbook is
  written.
+
+### VSM Plot Explorer
+
+Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
+bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
+experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
+pick individual measurements, then load them into the session. Filenames are
+parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
+each loop is grouped with peers recorded at the same temperature.
+
+Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
+to plot—defaults focus on **Applied Field** versus **Signal parallel with
+sample**, but every numeric column advertised in the header is available. Set the
+temperature filter to `All temperatures` to build a tab per temperature, each
+containing every angle trace for that run, or pick a specific temperature to
+concentrate on a single group. The Matplotlib tabs appear on the right-hand side
+of the window with a console log below; they are fully resizable and inherit the
+project’s dark/light theme settings.
+
+OriginPro exports mirror the same grouping, creating a workbook for each
+temperature and writing a sheet per angle with the selected axes. If Origin is
+not installed the exporter logs a short reminder while leaving the Matplotlib
+tabs intact, so the workflow stays consistent on machines without Origin.
 
 ## 7. Repository maintenance
 
