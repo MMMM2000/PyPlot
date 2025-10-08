@@ -568,6 +568,13 @@ pick individual measurements, then load them into the session. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
 each loop is grouped with peers recorded at the same temperature.
 
+The loader understands both tidy column descriptions (`Column 0: …`) and the
+free-form headers produced by newer VSM exports, ignoring the lengthy
+instrumentation metadata that surrounds the numeric blocks. Drop the sample
+files from `sample_data/VSM_data/` into the explorer to see how the parser
+automatically selects the final manipulated data section and labels each column
+with a friendly name.
+
 Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
 to plot—defaults focus on **Applied Field** versus **Signal parallel with
 sample**, but every numeric column advertised in the header is available. Set the

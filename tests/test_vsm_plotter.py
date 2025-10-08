@@ -53,6 +53,31 @@ def test_read_vsm_file_parses_numeric_columns(tmp_path: Path) -> None:
     assert len(df) == 3
 
 
+def test_read_vsm_file_handles_inline_header_and_noise(tmp_path: Path) -> None:
+    path = tmp_path / "202507101320-Hys-a050-T-30-00.VSM-Hys-Data"
+    content = """Random metadata line
+Instrument 1k Oe: Field Setting Par : FTCR = 5000; DR = 10000;
+Time_since_start Applied_Field Loop
+@@Data
+New Section: Section 0:
+0.0 0.0 0.0
+@@END Data.
+Notes between sections
+@@Final Manipulated Data
+New Section: Section 0:
+1.0 5.0 0.2
+2.0 -5.0 -0.3
+@@END Data
+"""
+    path.write_text(content)
+
+    df = module._read_vsm_file(path)
+
+    assert list(df.columns) == ["Time since start", "Applied Field", "Loop"]
+    assert len(df) == 2
+    assert df.iloc[0].tolist() == [1.0, 5.0, 0.2]
+
+
 def test_parse_temperature_and_angle(tmp_path: Path) -> None:
     path = _write_sample(tmp_path)
     assert module._parse_temperature(path) == -30.0

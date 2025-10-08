@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import logging
 import re
 import sys
@@ -19,6 +18,7 @@ from plotting.backends import wants_matplotlib, wants_origin
 from plotting.utils import ensure_app_theme, install_standard_menu, origin_session, schedule_origin_release
 
 HEADER_COLUMN_RE = re.compile(r"Column\\s+\\d+\\s*:\\s*(.+)")
+WHITESPACE_RE = re.compile(r"[_\\s]+")
 ANGLE_RE = re.compile(r"a(-?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 TEMP_RE = re.compile(r"T(-?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 
@@ -40,11 +40,46 @@ def _normalise_column_name(raw: str, index: int) -> str:
     return primary or f"Column {index}"
 
 
+def _normalise_header_token(raw: str, index: int) -> str:
+    """Best effort conversion of inline header tokens to friendly labels."""
+
+    cleaned = raw.strip().strip("_")
+    cleaned = WHITESPACE_RE.sub(" ", cleaned)
+    cleaned = cleaned.strip()
+    return cleaned or f"Column {index}"
+
+
 def _read_vsm_file(path: Path) -> pd.DataFrame:
     columns: List[str] = []
-    data_lines: List[str] = []
-    with path.open("r", encoding="utf-8", errors="ignore") as handle:
+    inline_header: List[str] | None = None
+    sections: List[List[List[str]]] = []
+
+    current_rows: List[List[str]] = []
+    current_tokens: List[str] = []
+    expected_columns: int | None = None
+    in_data = False
+
+    def _start_section() -> None:
+        nonlocal current_rows, current_tokens, expected_columns, in_data
+        current_rows = []
+        current_tokens = []
+        expected_columns = len(columns) or (len(inline_header) if inline_header else None)
+        in_data = True
+
+    def _finish_section() -> None:
+        nonlocal current_rows, current_tokens, expected_columns, in_data
+        if expected_columns and current_tokens:
+            if len(current_tokens) == expected_columns:
+                current_rows.append(current_tokens[:])
+            current_tokens = []
+        if current_rows:
+            sections.append([row[:] for row in current_rows])
+        current_rows = []
+        current_tokens = []
+        expected_columns = None
         in_data = False
+
+    with path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             stripped = line.strip()
             if not in_data:
@@ -52,36 +87,90 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
                 if match:
                     columns.append(_normalise_column_name(match.group(1), len(columns)))
                     continue
-                if stripped.startswith("@@Data"):
-                    in_data = True
+                if stripped.startswith("@@"):
+                    if stripped.startswith("@@Data") or stripped.startswith("@@Final Manipulated Data"):
+                        _start_section()
                     continue
-            else:
-                if stripped.startswith("@@END Data"):
-                    break
-                if not stripped or stripped.startswith("New Section"):
-                    continue
-                if stripped.startswith("@"):
-                    continue
-                data_lines.append(stripped)
-    if not data_lines:
+                if stripped and not stripped.startswith("@") and not columns:
+                    parts = stripped.split()
+                    if parts and not any(_looks_numeric(part) for part in parts):
+                        if inline_header is None or len(parts) > len(inline_header):
+                            inline_header = parts
+                continue
+
+            if stripped.startswith("@@END Data"):
+                _finish_section()
+                continue
+            if stripped.startswith("@@"):
+                continue
+            if not stripped or stripped.startswith("New Section"):
+                continue
+            if stripped.startswith("@"):
+                continue
+
+            tokens = stripped.split()
+            if not tokens:
+                continue
+            current_tokens.extend(tokens)
+            if expected_columns is None:
+                if columns:
+                    expected_columns = len(columns)
+                elif inline_header:
+                    expected_columns = len(inline_header)
+                else:
+                    expected_columns = len(tokens)
+            if expected_columns:
+                while len(current_tokens) >= expected_columns:
+                    row = current_tokens[:expected_columns]
+                    current_rows.append(row)
+                    current_tokens = current_tokens[expected_columns:]
+
+    if in_data:
+        _finish_section()
+
+    for section in reversed(sections):
+        if section:
+            data_rows = section
+            break
+    else:
         raise ValueError("No data rows detected in VSM file")
-    buffer = io.StringIO("\n".join(data_lines))
-    df = pd.read_csv(buffer, delim_whitespace=True, header=None)
+
+    df = pd.DataFrame(data_rows, dtype=float)
+
+    width = df.shape[1]
+    resolved: List[str] = []
+    source_names: List[str]
     if columns:
-        resolved: List[str] = []
-        for idx, column in enumerate(columns):
-            name = column
-            if name in resolved:
-                suffix = 2
-                while f"{name} ({suffix})" in resolved:
-                    suffix += 1
-                name = f"{name} ({suffix})"
-            resolved.append(name)
-        if len(resolved) < len(df.columns):
-            for idx in range(len(resolved), len(df.columns)):
-                resolved.append(f"Column {idx}")
-        df.columns = resolved[: len(df.columns)]
+        source_names = columns
+    elif inline_header:
+        source_names = [_normalise_header_token(token, idx) for idx, token in enumerate(inline_header)]
+    else:
+        source_names = []
+
+    for idx in range(width):
+        if idx < len(source_names):
+            name = source_names[idx]
+        else:
+            name = f"Column {idx}"
+        if name in resolved:
+            suffix = 2
+            while f"{name} ({suffix})" in resolved:
+                suffix += 1
+            name = f"{name} ({suffix})"
+        resolved.append(name)
+    df.columns = resolved
     return df
+
+
+def _looks_numeric(token: str) -> bool:
+    token = token.strip()
+    if not token:
+        return False
+    try:
+        float(token)
+    except ValueError:
+        return False
+    return True
 
 
 def _parse_temperature(path: Path) -> float | None:
