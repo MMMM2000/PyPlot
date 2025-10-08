@@ -6,6 +6,7 @@ import importlib.util
 import sys
 
 import pandas as pd
+import pytest
 
 MODULE_PATH = Path(__file__).resolve().parent.parent / "experiments" / "vsm_plotter.py"
 
@@ -159,3 +160,28 @@ def test_safe_float_handles_dash_tokens() -> None:
     assert module._safe_float("30-50") == 30.50
     assert module._safe_float("+12-345") == 12.345
     assert module._safe_float("000-") == 0.0
+
+
+def test_metadata_can_be_derived_from_columns(tmp_path: Path) -> None:
+    content = """@@Columns
+Column 0: Time since start, Time [s]
+Column 1: Field Angle, Field Angle [deg]
+Column 2: Temperature, Sample Temperature [degC]
+Column 3: Applied Field, Applied Field [Oe]
+@@END Columns
+@@End of Header.
+@@Data
+New Section: Section 0:
+0.0 12.0 -29.8 0.0
+1.0 12.0 -30.2 1.0
+2.0 12.0 -30.0 -1.0
+@@END Data
+"""
+    path = tmp_path / "no_header_metadata.VSM-Hys-Data"
+    path.write_text(content)
+
+    df = module._read_vsm_file(path)
+    angle, temperature = module._derive_metadata_from_dataframe(df)
+
+    assert angle == pytest.approx(12.0)
+    assert temperature == pytest.approx(-30.0, abs=0.2)

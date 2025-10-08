@@ -26,6 +26,18 @@ FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\\s+([-+]?\\d+(?:\\.\\d+)?)", re
 ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\\s*=\\s*([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 
+TEMPERATURE_COLUMN_CANDIDATES = [
+    "Sample Temperature [degC]",
+    "Temperature [degC]",
+    "Temperature 2 [degC]",
+    "Raw Temperature [degC]",
+]
+
+ANGLE_COLUMN_CANDIDATES = [
+    "Field Angle [deg]",
+    "Signal Angle with field [deg]",
+    "Signal Angle with sample [deg]",
+]
 
 @dataclass
 class VSMMeasurement:
@@ -187,6 +199,50 @@ def _looks_numeric(token: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _coerce_constant_value(series: pd.Series) -> float | None:
+    numeric = pd.to_numeric(series, errors="coerce").dropna()
+    if numeric.empty:
+        return None
+    value = float(numeric.median())
+    if pd.isna(value):
+        return None
+    return value
+
+
+def _match_column(df: pd.DataFrame, candidate: str) -> str | None:
+    needle = candidate.lower()
+    for column in df.columns:
+        if column.lower() == needle:
+            return column
+    for column in df.columns:
+        if needle in column.lower():
+            return column
+    return None
+
+
+def _derive_metadata_from_dataframe(df: pd.DataFrame) -> tuple[float | None, float | None]:
+    angle = None
+    temperature = None
+
+    for label in ANGLE_COLUMN_CANDIDATES:
+        column = _match_column(df, label)
+        if column is None:
+            continue
+        angle = _coerce_constant_value(df[column])
+        if angle is not None:
+            break
+
+    for label in TEMPERATURE_COLUMN_CANDIDATES:
+        column = _match_column(df, label)
+        if column is None:
+            continue
+        temperature = _coerce_constant_value(df[column])
+        if temperature is not None:
+            break
+
+    return angle, temperature
 
 
 def _safe_float(token: str) -> float | None:
@@ -479,9 +535,23 @@ class VSMPlotter(QtWidgets.QWidget):
                 continue
             temperature = _parse_temperature(path)
             angle = _parse_angle(path)
+
+            derived_angle, derived_temperature = _derive_metadata_from_dataframe(df)
+            recovered: List[str] = []
+            if angle is None and derived_angle is not None:
+                angle = derived_angle
+                recovered.append(f"angle={angle:g}°")
+            if temperature is None and derived_temperature is not None:
+                temperature = derived_temperature
+                recovered.append(f"temperature={temperature:g} °C")
+
             measurement = VSMMeasurement(path=path, temperature=temperature, angle=angle, data=df)
             self.measurements.append(measurement)
             total_loaded += 1
+            if recovered:
+                self._append_log(
+                    f"Recovered {', '.join(recovered)} from data columns in {path.name}."
+                )
             if temperature is None or angle is None:
                 self._append_log(
                     f"Could not parse complete metadata from {path.name}; available for TXT export."
