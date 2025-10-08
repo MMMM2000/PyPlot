@@ -614,7 +614,10 @@ temperature, writing a sheet per angle with the selected axes, and building a
 line graph that overlays every angle trace with a labelled legend. A dedicated
 **Export TXT** button also writes the parsed data to plain tab-separated files
 with the detected column names, so Origin (or any analysis tool) can import the
-clean tables without the surrounding instrumentation metadata. Even if a run is
+clean tables without the surrounding instrumentation metadata. After you pick the
+destination folder you can opt into creating a named subfolder for the export batch,
+and the plotter remembers the last folder you used so repeat runs open the dialog in
+the same location. Even if a run is
 missing angle/temperature metadata, the loader still enables TXT export while
 noting that plotting is disabled, making it possible to salvage data from noisy
 recipes. If Origin is not installed the exporter logs a short reminder while

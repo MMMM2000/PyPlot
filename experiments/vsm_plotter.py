@@ -26,6 +26,7 @@ TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
 FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
+FOLDER_SANITIZE_RE = re.compile(r"[^0-9A-Za-z._-]+")
 
 TEMPERATURE_COLUMN_CANDIDATES = [
     "Sample Temperature [degC]",
@@ -40,12 +41,38 @@ ANGLE_COLUMN_CANDIDATES = [
     "Signal Angle with sample [deg]",
 ]
 
+
+def _clean_folder_name(name: str) -> str:
+    """Sanitise folder names so they play nicely with the local filesystem."""
+
+    candidate = name.strip().replace("/", "_").replace('\\', "_")
+    candidate = FOLDER_SANITIZE_RE.sub("_", candidate)
+    candidate = candidate.strip("._-")
+    return candidate
+
+
 @dataclass
 class VSMMeasurement:
     path: Path
     temperature: float | None
     angle: float | None
     data: pd.DataFrame
+
+
+def _suggest_export_subfolder(measurements: Sequence[VSMMeasurement | Path | str]) -> str:
+    """Suggest a folder name based on the first measurement path."""
+
+    for entry in measurements:
+        if isinstance(entry, VSMMeasurement):
+            stem = entry.path.stem
+        elif isinstance(entry, Path):
+            stem = entry.stem
+        else:
+            stem = str(entry)
+        cleaned = _clean_folder_name(stem)
+        if cleaned:
+            return cleaned
+    return "VSM_Export"
 
 
 def _normalise_column_name(raw: str, index: int) -> str:
@@ -68,7 +95,6 @@ def _normalise_column_name(raw: str, index: int) -> str:
         return f"{primary} {unit}".strip()
     return primary
 
-
 def _normalise_header_token(raw: str, index: int) -> str:
     """Best effort conversion of inline header tokens to friendly labels."""
 
@@ -76,7 +102,6 @@ def _normalise_header_token(raw: str, index: int) -> str:
     cleaned = WHITESPACE_RE.sub(" ", cleaned)
     cleaned = cleaned.strip()
     return cleaned or f"Column {index}"
-
 
 def _normalise_metadata_value(value: float | None, *, decimals: int = 3) -> float | None:
     """Round metadata to a friendly value while guarding against NaNs."""
@@ -101,7 +126,6 @@ def _normalise_metadata_value(value: float | None, *, decimals: int = 3) -> floa
     if rounded == 0:
         return 0.0
     return rounded
-
 
 def _read_vsm_file(path: Path) -> pd.DataFrame:
     columns: List[str] = []
@@ -228,7 +252,6 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
     df.columns = resolved
     return df
 
-
 def _looks_numeric(token: str) -> bool:
     token = token.strip()
     if not token:
@@ -239,7 +262,6 @@ def _looks_numeric(token: str) -> bool:
         return False
     return True
 
-
 def _coerce_constant_value(series: pd.Series) -> float | None:
     numeric = pd.to_numeric(series, errors="coerce").dropna()
     if numeric.empty:
@@ -248,7 +270,6 @@ def _coerce_constant_value(series: pd.Series) -> float | None:
     if pd.isna(value):
         return None
     return value
-
 
 def _match_column(df: pd.DataFrame, candidate: str) -> str | None:
     needle = candidate.lower()
@@ -259,7 +280,6 @@ def _match_column(df: pd.DataFrame, candidate: str) -> str | None:
         if needle in column.lower():
             return column
     return None
-
 
 def _derive_metadata_from_dataframe(df: pd.DataFrame) -> tuple[float | None, float | None]:
     angle = None
@@ -282,7 +302,6 @@ def _derive_metadata_from_dataframe(df: pd.DataFrame) -> tuple[float | None, flo
             break
 
     return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
-
 
 def _safe_float(token: str) -> float | None:
     token = token.strip()
@@ -330,7 +349,6 @@ def _safe_float(token: str) -> float | None:
 
     return None
 
-
 def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
     stem = path.stem
     angle_match = ANGLE_RE.search(stem)
@@ -338,7 +356,6 @@ def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
     angle = _safe_float(angle_match.group(1)) if angle_match else None
     temperature = _safe_float(temp_match.group(1)) if temp_match else None
     return angle, temperature
-
 
 @lru_cache(maxsize=256)
 def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
@@ -381,16 +398,78 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
 
     return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
 
-
 def _parse_temperature(path: Path) -> float | None:
     _, temperature = _metadata_from_file(path)
     return temperature
-
 
 def _parse_angle(path: Path) -> float | None:
     angle, _ = _metadata_from_file(path)
     return angle
 
+class ExportOptionsDialog(QtWidgets.QDialog):
+    """Prompt for optional subfolder creation when exporting TXT files."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None, base_directory: Path, *, suggestion: str = "") -> None:
+        super().__init__(parent)
+        self.setWindowTitle("TXT Export Options")
+        self.base_directory = Path(base_directory)
+        self._selected_directory = self.base_directory
+        self._suggestion = _clean_folder_name(suggestion) or "VSM_Export"
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        label = QtWidgets.QLabel(f"Base folder:\n{self.base_directory}")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+
+        self.subfolder_checkbox = QtWidgets.QCheckBox("Create subfolder")
+        layout.addWidget(self.subfolder_checkbox)
+
+        self.subfolder_edit = QtWidgets.QLineEdit()
+        self.subfolder_edit.setPlaceholderText(self._suggestion)
+        self.subfolder_edit.setEnabled(False)
+        layout.addWidget(self.subfolder_edit)
+
+        self.subfolder_checkbox.toggled.connect(self._toggle_subfolder)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _toggle_subfolder(self, checked: bool) -> None:
+        self.subfolder_edit.setEnabled(checked)
+        if checked and not self.subfolder_edit.text():
+            self.subfolder_edit.setText(self._suggestion)
+            self.subfolder_edit.selectAll()
+            self.subfolder_edit.setFocus()
+
+    def accept(self) -> None:  # type: ignore[override]
+        if self.subfolder_checkbox.isChecked():
+            text = self.subfolder_edit.text().strip()
+            if not text:
+                text = self._suggestion
+            cleaned = _clean_folder_name(text)
+            if not cleaned:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "TXT Export Options",
+                    "Provide a folder name or disable subfolder creation.",
+                )
+                return
+            self.subfolder_edit.setText(cleaned)
+            self._selected_directory = self.base_directory / cleaned
+        else:
+            self._selected_directory = self.base_directory
+        super().accept()
+
+    def selected_directory(self) -> Path:
+        return self._selected_directory
 
 class VSMPlotter(QtWidgets.QWidget):
     """Render hysteresis loops for VSM-HYS-DATA files."""
@@ -403,6 +482,7 @@ class VSMPlotter(QtWidgets.QWidget):
         self.logger = logging.getLogger("vsm_plotter")
         self.logger.setLevel(logging.INFO)
         self.settings = QtCore.QSettings("MicrowireLab", "VSMPlotter")
+        self.last_export_path: Path | None = None
 
         self.measurements: List[VSMMeasurement] = []
 
@@ -494,6 +574,12 @@ class VSMPlotter(QtWidgets.QWidget):
         value = self.settings.value("last_path", "")
         if isinstance(value, str):
             self.path_edit.setText(value)
+        export_path = self.settings.value("last_export_path", "")
+        if isinstance(export_path, str) and export_path:
+            try:
+                self.last_export_path = Path(export_path)
+            except (TypeError, ValueError):  # pragma: no cover - defensive
+                self.last_export_path = None
         backend = self.settings.value("backend", "Matplotlib")
         if isinstance(backend, str):
             index = self.backend_combo.findText(backend, QtCore.Qt.MatchFlag.MatchFixedString)
@@ -509,6 +595,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self.settings.setValue("last_path", self.path_edit.text())
         self.settings.setValue("backend", self.backend_combo.currentText())
         self.settings.setValue("mode", "folder" if self.folder_radio.isChecked() else "files")
+        if self.last_export_path:
+            self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.sync()
 
     # ------------------------------------------------------------------ file selection
@@ -735,15 +823,29 @@ class VSMPlotter(QtWidgets.QWidget):
             QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Load VSM measurements first.")
             return
 
+        start_directory = (
+            str(self.last_export_path)
+            if self.last_export_path is not None
+            else self.path_edit.text()
+        )
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select export folder",
-            self.path_edit.text() or str(Path.home()),
+            start_directory or str(Path.home()),
         )
         if not directory:
             return
 
-        target_dir = Path(directory)
+        base_dir = Path(directory)
+        dialog = ExportOptionsDialog(
+            self,
+            base_dir,
+            suggestion=_suggest_export_subfolder(self.measurements),
+        )
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        target_dir = dialog.selected_directory()
         target_dir.mkdir(parents=True, exist_ok=True)
 
         exported = 0
@@ -767,6 +869,9 @@ class VSMPlotter(QtWidgets.QWidget):
                 f"Exported {exported} measurement(s) to {target_dir}",
             )
             self._append_log(f"Exported {exported} measurement(s) to {target_dir}")
+            self.last_export_path = target_dir
+            self.settings.setValue("last_export_path", str(target_dir))
+            self.settings.sync()
         else:
             QtWidgets.QMessageBox.information(
                 self,
@@ -923,7 +1028,6 @@ class VSMPlotter(QtWidgets.QWidget):
         self.log_view.appendPlainText(message)
         self.logger.info(message)
 
-
 def main() -> QtWidgets.QWidget | None:  # pragma: no cover - launcher helper
     app = QtWidgets.QApplication.instance()
     created_app = False
@@ -937,7 +1041,6 @@ def main() -> QtWidgets.QWidget | None:  # pragma: no cover - launcher helper
         app.exec()
         return None
     return widget
-
 
 if __name__ == "__main__":  # pragma: no cover - manual execution
     main()

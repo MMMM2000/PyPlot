@@ -191,6 +191,20 @@ New Section: Section 0:
     assert module._parse_angle(path) == 42.0
 
 
+def test_clean_folder_name_sanitises_tokens() -> None:
+    assert module._clean_folder_name("Folder name/with spaces") == "Folder_name_with_spaces"
+
+
+def test_suggest_export_subfolder_prefers_measurement(tmp_path: Path) -> None:
+    df = pd.DataFrame({"value": [1]})
+    path = tmp_path / "202507101115-Hys-a000-T-30-00.VSM-Hys-Data"
+    measurement = module.VSMMeasurement(path=path, temperature=None, angle=None, data=df)
+
+    suggested = module._suggest_export_subfolder([measurement])
+
+    assert suggested == "202507101115-Hys-a000-T-30-00.VSM-Hys-Data"
+
+
 def test_read_vsm_file_rejects_empty(tmp_path: Path) -> None:
     empty_path = tmp_path / "empty.VSM-Hys-Data"
     empty_path.write_text("@@Data\n@@END Data\n")
