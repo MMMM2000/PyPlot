@@ -36,12 +36,24 @@ class VSMMeasurement:
 
 
 def _normalise_column_name(raw: str, index: int) -> str:
-    cleaned = raw.strip()
+    cleaned = re.sub(r"\\s+", " ", raw.strip())
     if not cleaned:
         return f"Column {index}"
-    primary = cleaned.split(",", 1)[0].strip()
-    primary = re.sub(r"\\s+", " ", primary)
-    return primary or f"Column {index}"
+
+    primary, *remainder = cleaned.split(",", 1)
+    primary = WHITESPACE_RE.sub(" ", primary).strip()
+    if not primary:
+        primary = f"Column {index}"
+
+    unit = ""
+    if remainder:
+        unit_match = re.search(r"\[(.+?)\]", remainder[0])
+        if unit_match:
+            unit = unit_match.group(0)
+
+    if unit and unit not in primary:
+        return f"{primary} {unit}".strip()
+    return primary
 
 
 def _normalise_header_token(raw: str, index: int) -> str:

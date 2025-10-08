@@ -45,9 +45,9 @@ def test_read_vsm_file_parses_numeric_columns(tmp_path: Path) -> None:
     path = _write_sample(tmp_path)
     df = module._read_vsm_file(path)
     assert list(df.columns)[:3] == [
-        "Time since start",
-        "Applied Field",
-        "Signal parallel with sample",
+        "Time since start [s]",
+        "Applied Field [Oe]",
+        "Signal parallel with sample [emu]",
     ]
     assert isinstance(df, pd.DataFrame)
     assert len(df) == 3

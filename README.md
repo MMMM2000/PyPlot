@@ -583,7 +583,10 @@ to …` and `Set Sample Temperature to …`, so even noisy Lakeshore exports sti
 recover the rotation and temperature metadata embedded in the recipe. Drop the
 sample files from `sample_data/VSM_data/` into the explorer to see how the
 parser automatically selects the final manipulated data section and labels each
-column with a friendly name.
+column with a friendly name. Column headings preserve the units advertised in
+the Lakeshore `@@Columns` block (for example `Applied Field [Oe]` and `Signal
+parallel with sample [emu]`), so the exported TXT files import cleanly into
+Origin, pandas, or any other analysis suite without manual relabelling.
 
 Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
 to plot—defaults focus on **Applied Field** versus **Signal parallel with
