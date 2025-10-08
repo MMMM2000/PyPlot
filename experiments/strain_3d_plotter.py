@@ -130,7 +130,13 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
     # ------------------------------------------------------------------ ui helpers
     def _build_ui(self) -> None:
-        layout = QtWidgets.QVBoxLayout(self)
+        layout = QtWidgets.QHBoxLayout(self)
+
+        self.controls = QtWidgets.QFrame()
+        self.controls.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.controls.setMinimumWidth(320)
+        controls_layout = QtWidgets.QVBoxLayout(self.controls)
+        controls_layout.setContentsMargins(12, 12, 12, 12)
 
         form = QtWidgets.QFormLayout()
         form.setLabelAlignment(QtCore.Qt.AlignmentFlag.AlignRight)
@@ -184,7 +190,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
         manual_form.addWidget(self.axis_z_combo, 3, 1)
         form.addRow("Manual options", self.manual_options)
 
-        layout.addLayout(form)
+        controls_layout.addLayout(form)
 
         buttons_row = QtWidgets.QHBoxLayout()
         self.run_button = QtWidgets.QPushButton("Generate plots")
@@ -196,21 +202,26 @@ class Strain3DPlotter(QtWidgets.QWidget):
         self.fullscreen_button.clicked.connect(self._open_fullscreen_plot)
         buttons_row.addWidget(self.fullscreen_button)
         buttons_row.addStretch(1)
-        layout.addLayout(buttons_row)
+        controls_layout.addLayout(buttons_row)
+        controls_layout.addStretch(1)
 
-        self.splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
-        layout.addWidget(self.splitter, 1)
+        layout.addWidget(self.controls, 0)
+
+        self.output_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical)
+        layout.addWidget(self.output_splitter, 1)
+        layout.setStretch(0, 0)
+        layout.setStretch(1, 1)
 
         self.tab_widget = QtWidgets.QTabWidget()
-        self.splitter.addWidget(self.tab_widget)
+        self.output_splitter.addWidget(self.tab_widget)
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setPlaceholderText("Load a worksheet to generate scatter plots…")
-        self.splitter.addWidget(self.log_view)
-        self.splitter.setStretchFactor(0, 3)
-        self.splitter.setStretchFactor(1, 2)
-        self.splitter.setChildrenCollapsible(False)
+        self.output_splitter.addWidget(self.log_view)
+        self.output_splitter.setStretchFactor(0, 4)
+        self.output_splitter.setStretchFactor(1, 2)
+        self.output_splitter.setChildrenCollapsible(False)
 
         self.tab_widget.currentChanged.connect(self._update_fullscreen_state)
 
@@ -374,6 +385,8 @@ class Strain3DPlotter(QtWidgets.QWidget):
             label = _pretty_header(header, idx)
             lowered_label = label.lower()
             if "m length" in lowered_label or "a length" in lowered_label:
+                continue
+            if "file" in lowered_label or "matplotlib" in lowered_label or "figure" in lowered_label:
                 continue
             numeric_columns.append((idx, label))
 
@@ -572,7 +585,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
             norm = (xs - xs.min()) / (xs.max() - xs.min())
         else:
             norm = [0.5] * len(xs)
-        colors = cm.viridis(norm)
+        colors = [tuple(rgba) for rgba in cm.viridis(norm)]
 
         if len(labels) == 3:
             zs = subset[labels[2]].to_numpy(dtype=float)

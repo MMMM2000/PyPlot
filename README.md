@@ -488,18 +488,21 @@ python -m experiments.strain_3d_plotter
 Select either a strain worksheet or a full microwire database export. The
 explorer filters out any samples that broke, parses the Ni/Fe/Ga/Co percentages
 from the composition, and gathers every numeric column except the raw `M length`
-and `A length` inputs. Automatic mode generates scatter plots for every
-available combination that includes strain—choose 2D, 3D, or both with a pair of
-checkboxes. Manual mode lets you pick the dimensionality and specify the exact X
-/ Y (/ Z) axes so you can focus on a single relationship such as strain versus
-draw temperature.
+and `A length` inputs. File-path columns such as **File 1000 mA** and
+**File Low mA** together with the embedded Matplotlib figure columns are
+suppressed automatically so they never appear as axis choices. Automatic mode
+generates scatter plots for every available combination that includes strain—
+toggle 2D and 3D passes independently in the left-hand control pane. Manual mode
+lets you pick the dimensionality and specify the exact X / Y (/ Z) axes so you
+can focus on a single relationship such as strain versus draw temperature.
 
-Each tab hosts a large interactive Matplotlib figure labelled with the
-microwire ID so you can compare shortening, diameters, fabrication metrics, and
-elemental content in context. Use the worksheet’s latest export to pick up new
-strain entries without tweaking plot settings—the tool remembers the last file
-you opened and keeps a console log of how many rows were plotted and which
-combinations were generated.
+Controls now live in a dedicated panel on the left, keeping the plot tabs and log
+console spacious on the right. Each tab hosts a large interactive Matplotlib
+figure labelled with the microwire ID so you can compare shortening, diameters,
+fabrication metrics, and elemental content in context. Use the worksheet’s
+latest export to pick up new strain entries without tweaking plot settings—the
+tool remembers the last file you opened and keeps a console log of how many rows
+were plotted and which combinations were generated.
 
 Drag the splitter handle between the plot area and the log console to resize the
 view in real time. When you want to take a closer look, highlight a tab and
@@ -555,6 +558,29 @@ The exported columns are:
  artefacts later. Matplotlib figures are embedded directly into the Excel sheet
  and the temporary `plots/` staging folder is deleted once the workbook is
  written.
+
+### VSM Plot Explorer
+
+Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
+bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
+experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
+pick individual measurements, then load them into the session. Filenames are
+parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
+each loop is grouped with peers recorded at the same temperature.
+
+Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
+to plot—defaults focus on **Applied Field** versus **Signal parallel with
+sample**, but every numeric column advertised in the header is available. Set the
+temperature filter to `All temperatures` to build a tab per temperature, each
+containing every angle trace for that run, or pick a specific temperature to
+concentrate on a single group. The Matplotlib tabs appear on the right-hand side
+of the window with a console log below; they are fully resizable and inherit the
+project’s dark/light theme settings.
+
+OriginPro exports mirror the same grouping, creating a workbook for each
+temperature and writing a sheet per angle with the selected axes. If Origin is
+not installed the exporter logs a short reminder while leaving the Matplotlib
+tabs intact, so the workflow stays consistent on machines without Origin.
 
 ## 7. Repository maintenance
 
