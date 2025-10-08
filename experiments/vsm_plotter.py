@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import re
 import sys
 from dataclasses import dataclass
@@ -75,6 +76,31 @@ def _normalise_header_token(raw: str, index: int) -> str:
     cleaned = WHITESPACE_RE.sub(" ", cleaned)
     cleaned = cleaned.strip()
     return cleaned or f"Column {index}"
+
+
+def _normalise_metadata_value(value: float | None, *, decimals: int = 3) -> float | None:
+    """Round metadata to a friendly value while guarding against NaNs."""
+
+    if value is None:
+        return None
+    if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+        return None
+
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    rounded = round(numeric, decimals)
+    nearest_integer = round(rounded)
+    if math.isclose(rounded, nearest_integer, abs_tol=0.45):
+        rounded = float(nearest_integer)
+    else:
+        rounded = round(rounded, decimals)
+
+    if rounded == 0:
+        return 0.0
+    return rounded
 
 
 def _read_vsm_file(path: Path) -> pd.DataFrame:
@@ -255,7 +281,7 @@ def _derive_metadata_from_dataframe(df: pd.DataFrame) -> tuple[float | None, flo
         if temperature is not None:
             break
 
-    return angle, temperature
+    return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
 
 
 def _safe_float(token: str) -> float | None:
@@ -318,7 +344,7 @@ def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
 def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
     angle, temperature = _metadata_from_filename(path)
     if angle is not None and temperature is not None:
-        return angle, temperature
+        return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
 
     try:
         handle = path.open("r", encoding="utf-8", errors="ignore")
@@ -353,7 +379,7 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
             if angle is not None and temperature is not None:
                 break
 
-    return angle, temperature
+    return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
 
 
 def _parse_temperature(path: Path) -> float | None:
@@ -553,24 +579,34 @@ class VSMPlotter(QtWidgets.QWidget):
             recovered: List[str] = []
             if angle is None and derived_angle is not None:
                 angle = derived_angle
-                recovered.append(f"angle={angle:g}°")
+                recovered.append("angle")
             if temperature is None and derived_temperature is not None:
                 temperature = derived_temperature
-                recovered.append(f"temperature={temperature:g} °C")
+                recovered.append("temperature")
 
             measurement = VSMMeasurement(path=path, temperature=temperature, angle=angle, data=df)
             self.measurements.append(measurement)
             total_loaded += 1
-            if recovered:
-                self._append_log(
-                    f"Recovered {', '.join(recovered)} from data columns in {path.name}."
-                )
+
             if temperature is None or angle is None:
-                self._append_log(
-                    f"Could not parse complete metadata from {path.name}; available for TXT export."
-                )
+                if recovered:
+                    self._append_log(
+                        f"{path.name}: recovered {', '.join(recovered)} from data columns but metadata remains incomplete; TXT export only."
+                    )
+                else:
+                    self._append_log(
+                        f"Could not parse complete metadata from {path.name}; available for TXT export."
+                    )
             else:
                 plottable += 1
+                if recovered:
+                    self._append_log(
+                        f"{path.name}: using recovered metadata ({angle:g}° @ {temperature:g} °C)."
+                    )
+                else:
+                    self._append_log(
+                        f"{path.name}: {angle:g}° @ {temperature:g} °C."
+                    )
             column_set = {col for col in df.columns if pd.api.types.is_numeric_dtype(df[col])}
             if common_columns is None:
                 common_columns = {col: idx for idx, col in enumerate(df.columns) if col in column_set}

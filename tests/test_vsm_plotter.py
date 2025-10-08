@@ -156,7 +156,24 @@ New Section: Section 0:
     module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
 
     assert module._parse_angle(path) == -15.5
-    assert module._parse_temperature(path) == -29.5989
+    assert module._parse_temperature(path) == -30.0
+
+
+def test_metadata_rounds_action_block_values(tmp_path: Path) -> None:
+    path = tmp_path / "rounding.VSM-Hys-Data"
+    content = """Action 0:      Set Field Angle to 9.9998 [deg]
+Action 1:      Set Sample Temperature to -30.1037 [degC]
+@@Data
+New Section: Section 0:
+1 2 3
+@@END Data
+"""
+    path.write_text(content)
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 10.0
+    assert module._parse_temperature(path) == -30.0
 
 
 def test_parse_metadata_from_angle_offset(tmp_path: Path) -> None:

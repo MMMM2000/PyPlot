@@ -580,13 +580,16 @@ free-form headers produced by newer VSM exports, ignoring the lengthy
 instrumentation metadata that surrounds the numeric blocks. When filenames lack
 tokens entirely, the parser now falls back to lines such as `Set Field Angle
 to …` and `Set Sample Temperature to …`, so even noisy Lakeshore exports still
-recover the rotation and temperature metadata embedded in the recipe. If the
-headers are stripped as well, the plotter inspects the `Field Angle [deg]` and
-`Sample Temperature [degC]` columns and infers a representative value from the
-data stream, which means runs remain plottable even when only the raw numeric
-table is present. Drop the sample files from `sample_data/VSM_data/` into the
-explorer to see how the parser automatically selects the final manipulated data
-section and labels each column with a friendly name. Column headings preserve
+recover the rotation and temperature metadata embedded in the recipe. Those
+action block values are rounded to sensible integers, so instrument readbacks
+like `9.9998°` and `-30.1037 °C` surface as `10°` and `-30 °C` throughout the
+UI, logs, and TXT exports. If the headers are stripped as well, the plotter
+inspects the `Field Angle [deg]` and `Sample Temperature [degC]` columns and
+infers a representative value from the data stream, which means runs remain
+plottable even when only the raw numeric table is present. Drop the sample files
+from `sample_data/VSM_data/` into the explorer to see how the parser
+automatically selects the final manipulated data section and labels each column
+with a friendly name. Column headings preserve
 the units advertised in the Lakeshore `@@Columns` block (for example `Applied
 Field [Oe]` and `Signal parallel with sample [emu]`), so the exported TXT files
 import cleanly into Origin, pandas, or any other analysis suite without manual
