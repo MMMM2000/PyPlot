@@ -390,17 +390,40 @@ def test_find_vsm_files_recurses(tmp_path: Path) -> None:
     nested.mkdir(parents=True)
     top_file = root / "top.VSM-Hys-Data"
     nested_file = nested / "deep.VSM-Hys-Data"
+    lowercase = nested / "alt.vsm-hys-data"
     other = nested / "ignore.txt"
     top_file.write_text("@@Data\n@@END Data\n")
     nested_file.write_text("@@Data\n@@END Data\n")
+    lowercase.write_text("@@Data\n@@END Data\n")
     other.write_text("noop")
 
     results = module._find_vsm_files(root)
 
     assert [path.relative_to(root) for path in results] == [
+        Path("nested/alt.vsm-hys-data"),
         Path("nested/deep.VSM-Hys-Data"),
         Path("top.VSM-Hys-Data"),
     ]
+
+
+def test_apply_rescaling_symmetrises_targets() -> None:
+    base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.5, 1.2]})
+    narrow = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1e-3, 5e-4]})
+
+    results = module._apply_rescaling(
+        [(Path("base"), base), (Path("narrow"), narrow)],
+        "H",
+        "M",
+    )
+
+    base_result = results[Path("base")]
+    narrow_result = results[Path("narrow")]
+
+    assert base_result.target_right == pytest.approx(-base_result.target_left)
+
+    transformed = narrow["M"] * narrow_result.scale + narrow_result.offset
+    assert transformed.iloc[0] == pytest.approx(base_result.target_left, rel=1e-6, abs=1e-9)
+    assert transformed.iloc[-1] == pytest.approx(base_result.target_right, rel=1e-6, abs=1e-9)
 
 
 class _FakeSheet:

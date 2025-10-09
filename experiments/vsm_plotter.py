@@ -175,6 +175,12 @@ def _apply_rescaling(
                 target_left = best_entry[4] - epsilon
                 target_right = best_entry[5] + epsilon
 
+    if target_left < 0 < target_right:
+        symmetric_span = max(abs(target_left), abs(target_right))
+        if symmetric_span > 0:
+            target_left = -symmetric_span
+            target_right = symmetric_span
+
     results: Dict[Path, RescaleResult] = {}
     for path, subset, left_edge, right_edge, y_min, y_max in prepared:
         source_left = left_edge
@@ -274,7 +280,14 @@ def _find_vsm_files(directory: Path) -> List[Path]:
 
     if not directory.is_dir():
         return []
-    return sorted(p for p in directory.rglob("*.VSM-Hys-Data") if p.is_file())
+
+    matches: List[Path] = []
+    for candidate in directory.rglob("*"):
+        if not candidate.is_file():
+            continue
+        if candidate.name.lower().endswith(".vsm-hys-data"):
+            matches.append(candidate)
+    return sorted(matches)
 
 
 @dataclass

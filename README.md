@@ -575,7 +575,8 @@ Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
 bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
 experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
 pick individual measurements, then load them into the session. Folder mode now
-recursively scans through subdirectories, so an entire sweep organised by
+recursively scans through subdirectories—matching the Lakeshore exports in a
+case-insensitive way—so an entire sweep organised by
 temperature/angle folders can be loaded in one go without extra browsing. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
 each loop is grouped with peers recorded at the same temperature. Tokens such as
@@ -633,9 +634,10 @@ embedded canvas.
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
 positive-field endpoint reaches the same maximum. The target extrema are derived
-from the global minima and maxima across the group, so even traces whose edge
-segments are almost flat (such as the 90° run in the sample data) are stretched
-using their measured variation instead of collapsing into a horizontal line. The
+from the global minima and maxima across the group and then mirrored about zero,
+so even traces whose edge segments are almost flat (such as the 90° run in the
+sample data) are stretched using their measured variation instead of collapsing
+into a horizontal line. The
 “near-zero” detection now adapts to the scale of the measurement, meaning true
 zero-degree runs and other tiny spans still participate in the rescale instead of
 being skipped. A synthetic gradient is only injected when a sweep is genuinely
