@@ -40,9 +40,17 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               launcher tidy.
 
             ### Menu bar highlights
+            * **File → Open File… / Open Folder…** call the same loaders as the toolbar buttons
+              and remember your most recent paths. Use **Close Window** or **Quit** when you are
+              done.
+            * **Edit → Undo / Redo / Cut / Copy / Paste / Select All** target whichever widget
+              currently has focus, so you can edit text boxes or tables without leaving the
+              keyboard.
             * **View → Theme** flips between system, light, and dark palettes across every open
               window. Changes apply instantly, even to existing loggers.
             * **View → Reset Layout** restores splitter positions if you shrink a pane too far.
+            * **Window** mirrors native macOS and Windows behaviour—minimise, zoom, move/resize,
+              enter full screen, jump between open tools, or bring them all to the front.
             * **Help → View Help** keeps this step-by-step manual at hand for whichever dialog
               you are learning.
 

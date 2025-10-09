@@ -1057,17 +1057,23 @@ def _ensure_menu_bar(target: QtWidgets.QWidget) -> QtWidgets.QMenuBar:
         if bar is None:
             bar = QtWidgets.QMenuBar(target)
             target.setMenuBar(bar)
-        return bar
+    else:
+        layout = target.layout()
+        if layout is None:
+            layout = QtWidgets.QVBoxLayout(target)
+            target.setLayout(layout)
 
-    layout = target.layout()
-    if layout is None:
-        layout = QtWidgets.QVBoxLayout(target)
-        target.setLayout(layout)
+        bar = getattr(layout, "menuBar", lambda: None)()
+        if bar is None:
+            bar = QtWidgets.QMenuBar(target)
+            layout.setMenuBar(bar)
 
-    bar = getattr(layout, "menuBar", lambda: None)()
-    if bar is None:
-        bar = QtWidgets.QMenuBar(target)
-        layout.setMenuBar(bar)
+    if sys.platform == "darwin":
+        try:
+            bar.setNativeMenuBar(True)
+        except Exception:
+            pass
+
     return bar
 
 
@@ -1411,6 +1417,15 @@ def install_standard_menu(
             quit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
         except Exception:
             pass
+        try:
+            quit_role = QtGui.QAction.MenuRole.QuitRole  # type: ignore[attr-defined]
+        except AttributeError:
+            quit_role = None
+        if quit_role is not None:
+            try:
+                quit_action.setMenuRole(quit_role)
+            except Exception:
+                pass
 
         def _quit_application() -> None:
             app = QtWidgets.QApplication.instance()
@@ -1421,9 +1436,109 @@ def install_standard_menu(
 
         quit_action.triggered.connect(_quit_application)
 
-    view_menu = menu_bar.addMenu("&View")
-    if view_menu is None:
-        return menu_bar
+    edit_menu = QtWidgets.QMenu("Edit" if sys.platform == "darwin" else "&Edit", menu_bar)
+    edit_menu.setObjectName("mw_shared_edit")
+    menu_bar.addMenu(edit_menu)
+
+    def _focused_widget() -> QtWidgets.QWidget | None:
+        widget = QtWidgets.QApplication.focusWidget()
+        while widget is not None and not widget.isEnabled():
+            widget = widget.parentWidget()
+        return widget
+
+    edit_actions: list[tuple[QtGui.QAction, tuple[str, ...]]] = []
+
+    def _invoke_focus(methods: tuple[str, ...]) -> None:
+        widget = _focused_widget()
+        if widget is None:
+            return
+        for name in methods:
+            target_method = getattr(widget, name, None)
+            if callable(target_method):
+                try:
+                    target_method()
+                except Exception:
+                    pass
+                break
+
+    def _add_edit_action(
+        label: str,
+        shortcut: QtGui.QKeySequence.StandardKey | str | None,
+        icon: QtWidgets.QStyle.StandardPixmap | None,
+        methods: tuple[str, ...],
+    ) -> None:
+        action = edit_menu.addAction(label)
+        if action is None:
+            return
+        if icon is not None:
+            _set_icon(action, icon)
+        if shortcut is not None:
+            try:
+                action.setShortcut(QtGui.QKeySequence(shortcut))
+            except Exception:
+                pass
+        action.triggered.connect(lambda checked=False, m=methods: _invoke_focus(m))
+        edit_actions.append((action, methods))
+
+    _add_edit_action(
+        "Undo",
+        QtGui.QKeySequence.StandardKey.Undo,
+        QtWidgets.QStyle.StandardPixmap.SP_ArrowBack,
+        ("undo",),
+    )
+    _add_edit_action(
+        "Redo",
+        QtGui.QKeySequence.StandardKey.Redo,
+        QtWidgets.QStyle.StandardPixmap.SP_ArrowForward,
+        ("redo",),
+    )
+    edit_menu.addSeparator()
+    _add_edit_action(
+        "Cut",
+        QtGui.QKeySequence.StandardKey.Cut,
+        QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton,
+        ("cut",),
+    )
+    _add_edit_action(
+        "Copy",
+        QtGui.QKeySequence.StandardKey.Copy,
+        QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView,
+        ("copy",),
+    )
+    _add_edit_action(
+        "Paste",
+        QtGui.QKeySequence.StandardKey.Paste,
+        QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton,
+        ("paste",),
+    )
+    edit_menu.addSeparator()
+    _add_edit_action(
+        "Select All",
+        QtGui.QKeySequence.StandardKey.SelectAll,
+        QtWidgets.QStyle.StandardPixmap.SP_DialogYesButton,
+        ("selectAll",),
+    )
+
+    def _update_edit_actions() -> None:
+        widget = _focused_widget()
+        for action, methods in edit_actions:
+            enabled = False
+            current = widget
+            while current is not None and not enabled:
+                if current.isEnabled():
+                    for name in methods:
+                        candidate = getattr(current, name, None)
+                        if callable(candidate):
+                            enabled = True
+                            break
+                current = current.parentWidget()
+            action.setEnabled(enabled)
+
+    edit_menu.aboutToShow.connect(_update_edit_actions)
+    _update_edit_actions()
+
+    view_menu = QtWidgets.QMenu("&View", menu_bar)
+    menu_bar.addMenu(view_menu)
     view_menu.setObjectName("mw_shared_view")
     theme_submenu = theme_manager().create_theme_menu(view_menu)
     if isinstance(theme_submenu, QtWidgets.QMenu):
@@ -1476,20 +1591,37 @@ def install_standard_menu(
             reset_action.triggered.connect(_reset_layout)
 
     window_title = "Window" if sys.platform == "darwin" else "&Window"
-    window_menu = menu_bar.addMenu(window_title)
-    if window_menu is not None:
-        window_menu.setObjectName("mw_shared_window")
-        if not hasattr(window_menu, "_mw_manager"):
-            window_menu._mw_manager = _WindowMenuManager(window_menu, target)  # type: ignore[attr-defined]
+    window_menu = QtWidgets.QMenu(window_title, menu_bar)
+    menu_bar.addMenu(window_menu)
+    window_menu.setObjectName("mw_shared_window")
+    try:
+        window_role = QtGui.QAction.MenuRole.WindowRole  # type: ignore[attr-defined]
+    except AttributeError:
+        window_role = None
+    if window_role is not None:
+        try:
+            window_menu.menuAction().setMenuRole(window_role)
+        except Exception:
+            pass
+    if not hasattr(window_menu, "_mw_manager"):
+        window_menu._mw_manager = _WindowMenuManager(window_menu, target)  # type: ignore[attr-defined]
 
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
     menu_bar.addMenu(developer_menu)
 
-    help_menu = menu_bar.addMenu("&Help")
-    if help_menu is None:
-        return menu_bar
+    help_menu = QtWidgets.QMenu("&Help", menu_bar)
+    menu_bar.addMenu(help_menu)
     help_menu.setObjectName("mw_shared_help")
+    try:
+        help_role = QtGui.QAction.MenuRole.HelpMenuRole  # type: ignore[attr-defined]
+    except AttributeError:
+        help_role = None
+    if help_role is not None:
+        try:
+            help_menu.menuAction().setMenuRole(help_role)
+        except Exception:
+            pass
     if help_topic:
         help_action = help_menu.addAction("View Help")
         if help_action is not None:

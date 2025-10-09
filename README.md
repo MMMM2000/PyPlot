@@ -162,17 +162,23 @@ optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its me
 Every window now includes a shared menu bar.  The **File** menu wires the
 standard `Open File…`/`Open Folder…` shortcuts to the same loaders the toolbar
 buttons use, adds `Close Window`/`Quit` actions, and keeps the last-used paths in
-sync so keyboard-driven workflows stay quick.  The **View** menu exposes theme
-controls (System/Light/Dark), toggles the file browser or console panes, and
-resets splitter sizes if the layout becomes cramped, while **Help** opens a
-Markdown guide tailored to the current tool.  A dedicated **Window** menu now
-ships on both macOS and Windows with native-feeling icons, shortcuts, and a live
+sync so keyboard-driven workflows stay quick.  A new **Edit** menu sits beside
+it with working `Undo`, `Redo`, `Cut`, `Copy`, `Paste`, and `Select All`
+shortcuts that operate on whichever widget currently has focus, so you can
+drive text boxes and tables without touching the mouse.  The **View** menu
+exposes theme controls (System/Light/Dark), toggles the file browser or console
+panes, and resets splitter sizes if the layout becomes cramped, while **Help**
+opens a Markdown guide tailored to the current tool.  A dedicated **Window**
+menu now ships on both macOS and Windows with native-feeling icons, shortcuts,
+and a live
 window list: along with `Minimize`, `Zoom/Maximize`, `Fill Screen`, `Center on
 Screen`, `Move & Resize…`, and an `Enter/Exit Full Screen` toggle it offers
 `Next Window`, `Previous Window`, and `Bring All to Front` actions. The bottom of
 the menu lists every visible microwire tool (complete with window icons and an
 active-window checkmark) so you can jump straight to another dialog without
-hunting through the dock or taskbar.  When onboarding new colleagues you can
+hunting through the dock or taskbar.  On macOS the menu now pins itself to the
+native menubar, so the Window and Edit entries show up exactly where users
+expect them.  When onboarding new colleagues you can
 point them to the menu entry for context without having to maintain a separate
 manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
