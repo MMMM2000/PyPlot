@@ -198,6 +198,15 @@ def _find_vsm_files(directory: Path) -> List[Path]:
     return sorted(p for p in directory.rglob("*.VSM-Hys-Data") if p.is_file())
 
 
+@dataclass
+class PlotTabState:
+    """Track Matplotlib artefacts for a rendered temperature tab."""
+
+    axes: Any
+    canvas: FigureCanvas
+    lines: Dict[float, Any]
+
+
 def _normalise_column_name(raw: str, index: int) -> str:
     cleaned = re.sub(r"\\s+", " ", raw.strip())
     if not cleaned:
@@ -612,6 +621,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self._last_rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
         self._last_axes: tuple[str, str] | None = None
         self._last_rescale_enabled = False
+        self._line_visibility: Dict[float, Dict[float, bool]] = {}
+        self._plot_tabs: Dict[float, PlotTabState] = {}
 
         self._build_ui()
         self._load_settings()
@@ -820,6 +831,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self._last_rescale_info = {}
         self._last_axes = None
         self._last_rescale_enabled = False
+        self._line_visibility = {}
+        self._plot_tabs = {}
         self.temperature_combo.blockSignals(True)
         self.temperature_combo.clear()
         self.temperature_combo.addItem("All temperatures", None)
@@ -1095,6 +1108,39 @@ class VSMPlotter(QtWidgets.QWidget):
             return {"linestyle": "-", "marker": "o", "markersize": 4}
         return {"linestyle": "-"}
 
+    def _refresh_tab_legend(self, tab_state: PlotTabState, *, draw: bool = True) -> None:
+        legend = getattr(tab_state.axes, "legend_", None)
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:  # pragma: no cover - matplotlib backend specific
+                pass
+        visible_lines = [line for line in tab_state.lines.values() if line.get_visible()]
+        labels = [line.get_label() for line in visible_lines]
+        tab_state.axes.legend(visible_lines, labels, loc="best")
+        tab_state.axes.grid(True)
+        try:
+            tab_state.axes.figure.tight_layout()
+        except Exception:  # pragma: no cover - backend specific
+            pass
+        if draw:
+            try:
+                tab_state.canvas.draw_idle()
+            except Exception:  # pragma: no cover - backend specific
+                pass
+
+    def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
+        visibility = self._line_visibility.setdefault(temperature, {})
+        visibility[angle] = visible
+        tab_state = self._plot_tabs.get(temperature)
+        if tab_state is None:
+            return
+        line = tab_state.lines.get(angle)
+        if line is None:
+            return
+        line.set_visible(visible)
+        self._refresh_tab_legend(tab_state)
+
     def _open_matplotlib_window(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
             QtWidgets.QMessageBox.information(
@@ -1117,12 +1163,17 @@ class VSMPlotter(QtWidgets.QWidget):
         x_axis, y_axis = self._last_axes
         rescale_enabled = self._last_rescale_enabled
         rescale_info = self._last_rescale_info if rescale_enabled else {}
+        visibility = self._line_visibility
         line_kwargs = self._line_style_kwargs()
 
         created = False
         for temperature, entries in sorted(self._last_prepared_groups.items()):
             fig, ax = plt.subplots()
+            plotted = False
             for measurement, subset in entries:
+                angle_visibility = visibility.get(temperature, {}).get(measurement.angle, True)
+                if not angle_visibility:
+                    continue
                 series_y = subset[y_axis]
                 if rescale_enabled:
                     result = rescale_info.get(temperature, {}).get(measurement.path)
@@ -1134,17 +1185,23 @@ class VSMPlotter(QtWidgets.QWidget):
                     label=f"{measurement.angle:g}°",
                     **line_kwargs,
                 )
+                plotted = True
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)
             ax.set_title(f"{y_axis} vs {x_axis} at {temperature:g} °C")
-            ax.legend(loc="best")
+            if plotted:
+                ax.legend(loc="best")
             ax.grid(True)
             try:  # pragma: no cover - backend dependent
                 fig.canvas.manager.set_window_title(f"{temperature:g} °C")
             except Exception:
                 pass
             fig.tight_layout()
-            created = True
+            created = created or plotted
+
+            if not plotted:
+                plt.close(fig)
+                continue
 
         if created:
             plt.show()
@@ -1283,35 +1340,92 @@ class VSMPlotter(QtWidgets.QWidget):
         rescale_enabled: bool,
     ) -> None:
         self.tab_widget.setVisible(True)
+        self._plot_tabs = {}
+        for temperature in list(self._line_visibility.keys()):
+            if temperature not in prepared_groups:
+                del self._line_visibility[temperature]
         line_kwargs = self._line_style_kwargs()
         for temperature, entries in sorted(prepared_groups.items()):
             fig = Figure(figsize=(11.5, 7.8))
             ax = fig.add_subplot(111)
+            visibility = self._line_visibility.setdefault(temperature, {})
+            lines: Dict[float, Any] = {}
+            valid_angles: set[float] = set()
             for measurement, subset in entries:
+                angle = float(measurement.angle)
                 series_y = subset[y_axis]
                 if rescale_enabled:
                     result = rescale_info.get(temperature, {}).get(measurement.path)
                     if result is not None:
                         series_y = series_y * result.scale + result.offset
-                ax.plot(
+                line, = ax.plot(
                     subset[x_axis].to_numpy(),
                     series_y.to_numpy(),
                     label=f"{measurement.angle:g}°",
                     **line_kwargs,
                 )
+                visible = visibility.get(angle, True)
+                line.set_visible(visible)
+                lines[angle] = line
+                valid_angles.add(angle)
+
+            for angle in list(visibility.keys()):
+                if angle not in valid_angles:
+                    del visibility[angle]
+
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)
             ax.set_title(f"{y_axis} vs {x_axis} at {temperature:g} °C")
-            ax.legend(loc="best")
             ax.grid(True)
-            fig.tight_layout()
 
             canvas = FigureCanvas(fig)
+            tab_state = PlotTabState(axes=ax, canvas=canvas, lines=lines)
+            self._plot_tabs[temperature] = tab_state
+
             tab = QtWidgets.QWidget()
             layout = QtWidgets.QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(canvas)
+
+            controls_frame = QtWidgets.QFrame()
+            controls_layout = QtWidgets.QVBoxLayout(controls_frame)
+            controls_layout.setContentsMargins(8, 8, 8, 4)
+            controls_layout.setSpacing(4)
+            label = QtWidgets.QLabel("Show angles")
+            label.setAlignment(
+                QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            controls_layout.addWidget(label)
+            scroll_area = QtWidgets.QScrollArea()
+            scroll_area.setWidgetResizable(True)
+            scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+            scroll_area.setHorizontalScrollBarPolicy(
+                QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            scroll_area.setVerticalScrollBarPolicy(
+                QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            scroll_area.setMaximumHeight(150)
+            checkbox_container = QtWidgets.QWidget()
+            checkbox_layout = QtWidgets.QVBoxLayout(checkbox_container)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            checkbox_layout.setSpacing(2)
+            for angle, line in sorted(lines.items()):
+                checkbox = QtWidgets.QCheckBox(f"{angle:g}°")
+                checkbox.setChecked(line.get_visible())
+                checkbox.toggled.connect(
+                    lambda checked, temp=temperature, ang=angle: self._toggle_line_visibility(
+                        temp, ang, checked
+                    )
+                )
+                checkbox_layout.addWidget(checkbox)
+            checkbox_layout.addStretch(1)
+            scroll_area.setWidget(checkbox_container)
+            controls_layout.addWidget(scroll_area)
+
+            layout.addWidget(controls_frame, 0)
+            layout.addWidget(canvas, 1)
             self.tab_widget.addTab(tab, f"{temperature:g} °C")
+            self._refresh_tab_legend(tab_state)
 
         self._append_log("Finished generating Matplotlib hysteresis plots.")
 

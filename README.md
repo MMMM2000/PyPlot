@@ -607,8 +607,11 @@ to plot—defaults focus on **Applied Field** versus **Signal parallel with
 sample**, but every numeric column advertised in the header is available. Set the
 temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
-concentrate on a single group. The Matplotlib tabs appear on the right-hand side
-of the window with a console log below; they are fully resizable and inherit the
+concentrate on a single group. Each Matplotlib tab now includes a **Show angles**
+checklist so individual traces can be toggled without regenerating the plots; the
+legend, Matplotlib pop-out windows, and Origin exports respect the same
+visibility choices. The Matplotlib tabs appear on the right-hand side of the
+window with a console log below; they are fully resizable and inherit the
 project’s dark/light theme settings. Window size and the splitter ratio are now
 persisted via application settings, so any adjustments you make to the plot/log
 layout are restored when you launch the explorer again. A **Matplotlib style**

@@ -504,3 +504,94 @@ def test_build_origin_group_sets_names_and_legends() -> None:
     assert layer.plots, "Expected a plot to be added to the Origin layer"
     assert layer.plots[0].legend == "Angle 10°"
 
+
+def test_toggle_line_visibility_updates_lines_and_state() -> None:
+    plotter = module.VSMPlotter.__new__(module.VSMPlotter)
+    plotter._line_visibility = {}
+    plotter._plot_tabs = {}
+    plotter._refresh_tab_legend = module.VSMPlotter._refresh_tab_legend.__get__(plotter)
+    plotter._toggle_line_visibility = module.VSMPlotter._toggle_line_visibility.__get__(plotter)
+
+    class _DummyLine:
+        def __init__(self, label: str) -> None:
+            self.label = label
+            self.visible = True
+
+        def set_visible(self, value: bool) -> None:
+            self.visible = value
+
+        def get_visible(self) -> bool:
+            return self.visible
+
+        def get_label(self) -> str:
+            return self.label
+
+    class _DummyCanvas:
+        def __init__(self) -> None:
+            self.draw_calls = 0
+
+        def draw_idle(self) -> None:
+            self.draw_calls += 1
+
+    class _DummyFigure:
+        def __init__(self) -> None:
+            self.tight_layout_calls = 0
+
+        def tight_layout(self) -> None:
+            self.tight_layout_calls += 1
+
+    class _DummyLegend:
+        def __init__(self, axes: "_DummyAxes") -> None:
+            self.axes = axes
+            self.handles: list[_DummyLine] = []
+            self.labels: list[str] = []
+
+        def remove(self) -> None:
+            self.axes.removed_calls.append(True)
+
+    class _DummyAxes:
+        def __init__(self) -> None:
+            self.figure = _DummyFigure()
+            self.legend_history: list[tuple[list[_DummyLine], list[str], str]] = []
+            self.removed_calls: list[bool] = []
+            self.legend_ = _DummyLegend(self)
+
+        def legend(
+            self,
+            handles: list[_DummyLine],
+            labels: list[str],
+            loc: str = "best",
+        ) -> _DummyLegend:
+            legend = _DummyLegend(self)
+            legend.handles = handles
+            legend.labels = labels
+            self.legend_history.append((handles, labels, loc))
+            self.legend_ = legend
+            return legend
+
+        def grid(self, *_: object, **__: object) -> None:
+            return
+
+    temperature = -30.0
+    angle = 45.0
+    line = _DummyLine("45°")
+    axes = _DummyAxes()
+    canvas = _DummyCanvas()
+    tab_state = module.PlotTabState(axes=axes, canvas=canvas, lines={angle: line})
+    plotter._plot_tabs[temperature] = tab_state
+
+    plotter._toggle_line_visibility(temperature, angle, False)
+    assert plotter._line_visibility[temperature][angle] is False
+    assert not line.visible
+    assert canvas.draw_calls == 1
+    assert axes.removed_calls == [True]
+    assert axes.legend_history[-1][0] == []
+
+    plotter._toggle_line_visibility(temperature, angle, True)
+    assert plotter._line_visibility[temperature][angle] is True
+    assert line.visible
+    assert canvas.draw_calls == 2
+    handles, labels, _ = axes.legend_history[-1]
+    assert handles == [line]
+    assert labels == ["45°"]
+
