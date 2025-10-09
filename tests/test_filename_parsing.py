@@ -1,6 +1,11 @@
 import pytest
 
-from plotting.stress_dependence.core import parse_metadata as sd_parse
+pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
+
+from plotting.stress_dependence.core import (
+    parse_metadata as sd_parse,
+    explain_metadata_failure,
+)
 from plotting.stress_sensitivity.core import parse_metadata as ss_parse
 from plotting.hsw_load_compare.core import parse_metadata as hl_parse
 from plotting.temperature_sensitivity.core import parse_metadata as ts_parse
@@ -29,3 +34,8 @@ def test_temperature_filename_parsing():
 
     md_td = td_parse("FeSiB 85_10 74mA 100C")
     assert md_td and md_td["temp_val"] == 100
+
+
+def test_stress_dependence_reports_missing_anneal_token():
+    reason = explain_metadata_failure("FeSiB 85_10 sampleA 150a")
+    assert "annealing" in reason.lower()

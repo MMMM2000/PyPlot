@@ -40,6 +40,16 @@ npm install -g @openai/codex
 The requirements include `pyvisa`, `pyvisa-py`, `psutil` and `zeroconf` so VISA
 resources can be discovered without vendor drivers.
 
+### 1.4 OriginPro Python packages
+
+Origin’s embedded Python environment ships without the scientific stack the
+plotters rely on. Before selecting the **Origin** backend in any tool, open
+OriginPro and install the packages from **Connectivity → Python Packages**.
+Install at least `originpro`, `numpy`, `pandas`, `python-dateutil`, `pytz`,
+`six`, and `tzdata`. Origin keeps these packages separate from your system
+environment, so this one-time setup step is required on every machine that
+should produce Origin workbooks or graphs.
+
 ## 2. Master launcher
 
 Run the launcher to access all utilities in a single window:
@@ -685,6 +695,11 @@ When at least one angle in a batch shows measurable variation the rescaler now
 anchors every trace to that widest span before falling back to the gradient,
 preventing nearly flat loops (such as the 90° sweep) from collapsing into a
 horizontal line on screen or in the exported data.
+If Origin is installed but the **Origin** backend fails to appear, open
+**Connectivity → Python Packages** inside Origin and install the `originpro`
+stack (at minimum `originpro`, `numpy`, `pandas`, `python-dateutil`, `pytz`,
+`six`, and `tzdata`). The launcher detects the automation API once those packages
+are available and logs a reminder if the environment still lacks them.
 Even if a run is missing angle/temperature metadata, the loader still enables TXT
 export while noting that plotting is disabled, making it possible to salvage
 data from noisy recipes. If Origin is not installed the exporter logs a short

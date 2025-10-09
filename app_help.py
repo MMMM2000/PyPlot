@@ -56,6 +56,14 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             4. Adjust the theme or enable experiments from the menu bar without closing the
                window, then iterate on the same dataset using the retained file list.
 
+            ### Origin integration
+            * OriginPro maintains its own Python environment. Open **Connectivity → Python
+              Packages** inside Origin and install the automation stack (`originpro`, `numpy`,
+              `pandas`, `python-dateutil`, `pytz`, `six`, `tzdata`) before selecting the
+              **Origin** backend in any tool.
+            * The launcher's console logs a reminder if those packages are missing, but Origin
+              exports will only appear once the embedded environment has been prepared.
+
             Installation, hardware wiring, and packaging notes live in the project README. This
             in-app help focuses on day-to-day operation once the environment is set up.
             """

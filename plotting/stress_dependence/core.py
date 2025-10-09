@@ -145,6 +145,39 @@ def format_sample_end(sample_end: str) -> str:
         return f"{sample_end[:-1]} (unmarked end)"
     return sample_end
 
+def explain_metadata_failure(stem: str) -> str:
+    """Return a human-readable reason why ``stem`` did not match ``FNAME_RE``."""
+
+    tokens = stem.split()
+    if not tokens:
+        return "filename is empty after removing the extension"
+
+    load_token = tokens[-1]
+    if not re.fullmatch(r"\d+(?:,\d+)?[ab]", load_token):
+        return "missing load token at the end (expected something like '150a')"
+
+    if len(tokens) < 4:
+        return (
+            "expected '<composition> <title> <sample_end> <anneal> <load><dir>' — add an"
+            " annealing current such as '0mA'"
+        )
+
+    sample_token = tokens[-2]
+    if not sample_token.lower().endswith(("a", "b")):
+        return "sample end token should end with 'a' or 'b' (for example 'SG-1a')"
+
+    anneal_token = tokens[-3]
+    if not re.search(r"\d", anneal_token):
+        return "annealing current is missing digits — add a value such as '47mA'"
+    if not re.search(r"(?:ma|a)$", anneal_token.lower()):
+        return "annealing token should end with 'mA' or 'A' (e.g. '47mA')"
+
+    return (
+        "filename does not match '<composition> <title> <sample_end> <anneal> <load><dir>'"
+        " — check for stray spaces or missing tokens"
+    )
+
+
 def load_data(files: List[str]) -> pd.DataFrame:
     """Load measurement files into a single DataFrame."""
     files = sorted(files)
@@ -152,9 +185,11 @@ def load_data(files: List[str]) -> pd.DataFrame:
         raise FileNotFoundError("No files selected")
     dfs = []
     for fn in files:
-        md = parse_metadata(Path(fn).stem)
+        stem = Path(fn).stem
+        md = parse_metadata(stem)
         if md is None:
-            print(f"Skipping {fn}")
+            reason = explain_metadata_failure(stem)
+            print(f"Skipping {fn}: {reason}")
             continue
         df = pd.read_csv(
             fn,
