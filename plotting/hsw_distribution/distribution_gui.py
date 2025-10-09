@@ -13,27 +13,69 @@ if __package__ is None or __package__ == "":
     # When executed directly, ensure the repository root is on sys.path so the
     # ``plotting`` package can be imported correctly.
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import (
-        ensure_app_theme,
-        select_files_or_folder,
-        show_plots,
-        restore_backend_choice,
-        store_backend_choice,
-        selected_backend,
-        install_standard_menu,
-    )
+    try:
+        from plotting.utils import (
+            ensure_app_theme,
+            select_files_or_folder,
+            show_plots,
+            restore_backend_choice as _restore_backend_choice,
+            store_backend_choice,
+            selected_backend,
+            install_standard_menu,
+        )
+    except ImportError:
+        from plotting.utils import (
+            ensure_app_theme,
+            select_files_or_folder,
+            show_plots,
+            store_backend_choice,
+            selected_backend,
+            install_standard_menu,
+        )
+        _restore_backend_choice = None  # type: ignore[assignment]
     from plotting.backends import wants_matplotlib, wants_origin
 else:
-    from ..utils import (
-        ensure_app_theme,
-        select_files_or_folder,
-        show_plots,
-        restore_backend_choice,
-        store_backend_choice,
-        selected_backend,
-        install_standard_menu,
-    )
+    try:
+        from ..utils import (
+            ensure_app_theme,
+            select_files_or_folder,
+            show_plots,
+            restore_backend_choice as _restore_backend_choice,
+            store_backend_choice,
+            selected_backend,
+            install_standard_menu,
+        )
+    except ImportError:
+        from ..utils import (
+            ensure_app_theme,
+            select_files_or_folder,
+            show_plots,
+            store_backend_choice,
+            selected_backend,
+            install_standard_menu,
+        )
+        _restore_backend_choice = None  # type: ignore[assignment]
     from ..backends import wants_matplotlib, wants_origin
+
+
+if "_restore_backend_choice" not in globals() or _restore_backend_choice is None:  # type: ignore[name-defined]
+
+    def restore_backend_choice(
+        key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
+    ) -> str:
+        """Legacy fallback that selects ``default`` without persisting state."""
+
+        normalised = str(default or "matplotlib").lower()
+        values = [combo.itemText(idx).strip().lower() for idx in range(combo.count())]
+        if not values:
+            return normalised
+        if normalised not in values:
+            normalised = "matplotlib" if "matplotlib" in values else values[0]
+        combo.setCurrentIndex(values.index(normalised))
+        return normalised
+
+else:
+    restore_backend_choice = _restore_backend_choice  # type: ignore[assignment]
 
 
 def ask_files() -> List[str]:

@@ -315,6 +315,10 @@ colleagues:
    each window double as an onboarding guide.
 4. Zip the entire `dist/launcher` directory when sharing the tools so recipients
    can extract and run the launcher without installing Python.
+5. Rebuild the launcher whenever you pull UI updates—especially ones touching
+   backend selections—so frozen copies include helpers such as
+   `restore_backend_choice` and avoid runtime `NameError` issues on colleague
+   machines.
 
 ## 6. Experiments
 
