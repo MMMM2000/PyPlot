@@ -75,7 +75,7 @@ class RescaleResult:
 
 
 EDGE_FRACTION = 0.05
-ABS_TOLERANCE = 1e-15
+ABS_TOLERANCE = 1e-30
 RELATIVE_TOLERANCE = 1e-6
 REFERENCE_FLOOR = 1e-30
 
@@ -99,9 +99,8 @@ def _is_near_zero(value: float, *references: float) -> bool:
     scale = max(scale, REFERENCE_FLOOR)
     if math.isnan(value):
         return True
-    if abs(value) <= ABS_TOLERANCE:
-        return True
-    return abs(value) <= scale * RELATIVE_TOLERANCE
+    tolerance = max(ABS_TOLERANCE, scale * RELATIVE_TOLERANCE)
+    return abs(value) <= tolerance
 
 
 def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[float, float]:

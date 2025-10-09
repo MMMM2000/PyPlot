@@ -342,6 +342,25 @@ def test_apply_rescaling_generates_gradient_for_constant_measurements() -> None:
     assert flat_result.replacement.iloc[-1] == pytest.approx(flat_result.target_right, abs=1e-9)
 
 
+def test_apply_rescaling_scales_near_constant_measurements() -> None:
+    base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
+    tiny = pd.DataFrame({"H": [-10.0, 10.0], "M": [-5e-20, 5e-20]})
+
+    results = module._apply_rescaling(
+        [(Path("base"), base), (Path("tiny"), tiny)],
+        "H",
+        "M",
+    )
+
+    base_result = results[Path("base")]
+    tiny_result = results[Path("tiny")]
+
+    assert tiny_result.replacement is None
+    transformed = tiny["M"] * tiny_result.scale + tiny_result.offset
+    assert transformed.iloc[0] == pytest.approx(base_result.target_left, rel=1e-6, abs=1e-12)
+    assert transformed.iloc[-1] == pytest.approx(base_result.target_right, rel=1e-6, abs=1e-12)
+
+
 def test_apply_rescaling_recovers_flat_edges() -> None:
     base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
     awkward = pd.DataFrame(
