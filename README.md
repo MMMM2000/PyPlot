@@ -155,14 +155,16 @@ buttons use, adds `Close Window`/`Quit` actions, and keeps the last-used paths i
 sync so keyboard-driven workflows stay quick.  The **View** menu exposes theme
 controls (System/Light/Dark), toggles the file browser or console panes, and
 resets splitter sizes if the layout becomes cramped, while **Help** opens a
-Markdown guide tailored to the current tool.  On macOS a dedicated **Window**
-menu now mirrors the behaviour of native productivity apps: alongside
-`Minimize`/`Zoom` and `Bring All to Front` you will find `Fill`, `Center`,
-`Move & Resize…`, and an `Enter/Exit Full Screen` toggle that updates to reflect
-the current state. A live `Switch Window` submenu lists the other open tools so
-you can jump between them without resorting to the dock.  When onboarding new
-colleagues you can point them to the menu entry for context without having to
-maintain a separate manual.  The main action row stays anchored beneath the settings so
+Markdown guide tailored to the current tool.  A dedicated **Window** menu now
+ships on both macOS and Windows with native-feeling icons, shortcuts, and a live
+window list: along with `Minimize`, `Zoom/Maximize`, `Fill Screen`, `Center on
+Screen`, `Move & Resize…`, and an `Enter/Exit Full Screen` toggle it offers
+`Next Window`, `Previous Window`, and `Bring All to Front` actions. The bottom of
+the menu lists every visible microwire tool (complete with window icons and an
+active-window checkmark) so you can jump straight to another dialog without
+hunting through the dock or taskbar.  When onboarding new colleagues you can
+point them to the menu entry for context without having to maintain a separate
+manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
 Origin sessions are closed automatically after plots are generated—and even if a
 run aborts—so the Origin application can be closed independently from the
@@ -632,10 +634,9 @@ Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
 positive-field endpoint reaches the same maximum. The target extrema are derived
 from the global minima and maxima across the group, so even traces whose edge
-segments are almost flat are stretched or inverted to match their neighbours;
-stubbornly flat sweeps (such as the 90° run in the sample data) now receive a
-synthetic gradient that carries them from the shared minimum on the left to the
-shared maximum on the right instead of collapsing into a horizontal line. Each
+segments are almost flat (such as the 90° run in the sample data) are stretched
+using their measured variation instead of collapsing into a horizontal line. A
+synthetic gradient is only injected when a sweep is genuinely constant. Each
 transform is logged per file—either the scale/offset pair or a note that a
 gradient was generated—and those same values feed the Matplotlib, Origin, and
 TXT outputs, keeping the on-screen plots and exported data in sync. Leave the
@@ -661,8 +662,8 @@ transform used for the plots so the TXT tables drop straight into Origin with
 matching endpoints. When a file cannot be rescaled the exporter keeps the
 measured values and notes the decision in the log so downstream processing never
 receives flattened traces.
-Constant sweeps pick up the same synthetic gradient that drives the plots, so
-the exported TXT tables mirror the aligned endpoints you see on screen.
+Constant sweeps still pick up the same synthetic gradient that drives the plots,
+so the exported TXT tables mirror the aligned endpoints you see on screen.
 Even if a run is missing angle/temperature metadata, the loader still enables TXT
 export while noting that plotting is disabled, making it possible to salvage
 data from noisy recipes. If Origin is not installed the exporter logs a short

@@ -75,7 +75,33 @@ class RescaleResult:
 
 
 EDGE_FRACTION = 0.05
-NUMERIC_TOLERANCE = 1e-12
+ABS_TOLERANCE = 1e-15
+RELATIVE_TOLERANCE = 1e-6
+REFERENCE_FLOOR = 1e-30
+
+
+def _is_near_zero(value: float, *references: float) -> bool:
+    """Return ``True`` when ``value`` is negligible compared to ``references``."""
+
+    magnitudes: List[float] = []
+    for ref in references:
+        if ref is None or isinstance(ref, (pd.Series, pd.DataFrame)):
+            continue
+        try:
+            magnitude = abs(float(ref))
+        except (TypeError, ValueError):
+            continue
+        if math.isnan(magnitude) or math.isinf(magnitude):
+            continue
+        magnitudes.append(magnitude)
+
+    scale = max(magnitudes, default=0.0)
+    scale = max(scale, REFERENCE_FLOOR)
+    if math.isnan(value):
+        return True
+    if abs(value) <= ABS_TOLERANCE:
+        return True
+    return abs(value) <= scale * RELATIVE_TOLERANCE
 
 
 def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[float, float]:
@@ -127,7 +153,7 @@ def _apply_rescaling(
     target_left = min(item[4] for item in prepared)
     target_right = max(item[5] for item in prepared)
 
-    if math.isclose(target_left, target_right, abs_tol=NUMERIC_TOLERANCE):
+    if _is_near_zero(target_right - target_left, target_left, target_right):
         reference_left = prepared[0][2]
         reference_right = prepared[0][3]
         target_left = reference_left
@@ -138,12 +164,12 @@ def _apply_rescaling(
         source_left = left_edge
         source_right = right_edge
 
-        if math.isclose(source_right - source_left, 0.0, abs_tol=NUMERIC_TOLERANCE):
+        if _is_near_zero(source_right - source_left, source_left, source_right, y_min, y_max):
             source_left = y_min
             source_right = y_max
 
         delta = source_right - source_left
-        if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
+        if _is_near_zero(delta, source_left, source_right, y_min, y_max):
             numeric_series = pd.to_numeric(subset[y_axis], errors="coerce").dropna()
             if not numeric_series.empty:
                 alt_min = float(numeric_series.min())
@@ -152,12 +178,12 @@ def _apply_rescaling(
                 alt_min = y_min
                 alt_max = y_max
 
-            if not math.isclose(alt_max - alt_min, 0.0, abs_tol=NUMERIC_TOLERANCE):
+            if not _is_near_zero(alt_max - alt_min, alt_min, alt_max):
                 source_left = alt_min
                 source_right = alt_max
                 delta = source_right - source_left
 
-        if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
+        if _is_near_zero(delta, source_left, source_right):
             gradient = pd.Series(
                 np.linspace(target_left, target_right, len(subset), dtype=float),
                 index=subset.index,

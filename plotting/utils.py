@@ -275,6 +275,68 @@ def _activate_window(widget: QtWidgets.QWidget) -> None:
         pass
 
 
+def _visible_windows(exclude: QtWidgets.QWidget | None = None) -> list[QtWidgets.QWidget]:
+    """Return a list of visible top-level windows, ordered by title."""
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return []
+    windows: list[QtWidgets.QWidget] = []
+    for widget in app.topLevelWidgets():
+        if not isinstance(widget, QtWidgets.QWidget):
+            continue
+        if not widget.isWindow():
+            continue
+        if exclude is not None and widget is exclude:
+            continue
+        try:
+            visible = widget.isVisible()
+        except Exception:
+            visible = False
+        if not visible:
+            continue
+        windows.append(widget)
+
+    def _sort_key(item: QtWidgets.QWidget) -> tuple[int, str, int]:
+        title = item.windowTitle() or item.objectName() or item.__class__.__name__
+        try:
+            active = QtWidgets.QApplication.activeWindow() is item
+        except Exception:
+            active = False
+        return (0 if active else 1, title.casefold(), id(item))
+
+    windows.sort(key=_sort_key)
+    return windows
+
+
+def _cycle_window(offset: int) -> None:
+    """Activate the next or previous window relative to the current one."""
+
+    windows = _visible_windows()
+    if not windows:
+        return
+
+    try:
+        active = QtWidgets.QApplication.activeWindow()
+    except Exception:
+        active = None
+
+    if active in windows:
+        index = windows.index(active)
+    else:
+        index = 0
+
+    target = windows[(index + offset) % len(windows)]
+    _activate_window(target)
+
+
+def _bring_all_to_front() -> None:
+    """Raise every visible window so they appear in front."""
+
+    for widget in _visible_windows():
+        _activate_window(widget)
+
+
 def _show_move_resize_dialog(widget: QtWidgets.QWidget) -> None:
     """Prompt for explicit geometry settings and apply them to ``widget``."""
 
@@ -1009,6 +1071,201 @@ def _ensure_menu_bar(target: QtWidgets.QWidget) -> QtWidgets.QMenuBar:
     return bar
 
 
+class _WindowMenuManager(QtCore.QObject):
+    """Populate the shared Window menu with native-feeling actions."""
+
+    def __init__(self, menu: QtWidgets.QMenu, target: QtWidgets.QWidget) -> None:
+        super().__init__(menu)
+        self._menu = menu
+        self._target_ref = weakref.ref(target)
+        menu.aboutToShow.connect(self.rebuild)
+
+    def rebuild(self) -> None:
+        menu = self._menu
+        target = self._target_ref()
+        menu.clear()
+        if target is None:
+            placeholder = menu.addAction("No window")
+            if placeholder is not None:
+                placeholder.setEnabled(False)
+            return
+
+        style = getattr(target, "style", lambda: None)()
+        if style is None:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                style = app.style()
+
+        def _set_icon(action: QtGui.QAction | None, role: QtWidgets.QStyle.StandardPixmap) -> None:
+            if action is None or style is None:
+                return
+            try:
+                icon = style.standardIcon(role)
+            except Exception:
+                icon = QtGui.QIcon()
+            if not icon.isNull():
+                action.setIcon(icon)
+
+        def _set_shortcut(
+            action: QtGui.QAction | None,
+            shortcut: QtGui.QKeySequence.StandardKey | str,
+        ) -> None:
+            if action is None:
+                return
+            try:
+                if isinstance(shortcut, QtGui.QKeySequence.StandardKey):
+                    action.setShortcut(QtGui.QKeySequence(shortcut))
+                else:
+                    action.setShortcut(QtGui.QKeySequence(shortcut))
+            except Exception:
+                pass
+
+        # Minimize ---------------------------------------------------------
+        minimize_action = menu.addAction("Minimize")
+        _set_icon(minimize_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton)
+        _set_shortcut(minimize_action, QtGui.QKeySequence.StandardKey.Minimize)
+        if minimize_action is not None:
+            if hasattr(target, "showMinimized"):
+                minimize_action.triggered.connect(target.showMinimized)
+            else:
+                minimize_action.setEnabled(False)
+
+        # Zoom / Maximize --------------------------------------------------
+        zoom_label = "Zoom" if sys.platform == "darwin" else "Maximize"
+        zoom_action = menu.addAction(zoom_label)
+        _set_icon(zoom_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton)
+        if zoom_action is not None:
+
+            def _toggle_zoom() -> None:
+                if not hasattr(target, "isMaximized"):
+                    zoom_action.setEnabled(False)
+                    return
+                try:
+                    if target.isMaximized():
+                        target.showNormal()
+                    else:
+                        target.showMaximized()
+                except Exception:
+                    pass
+
+            zoom_action.triggered.connect(_toggle_zoom)
+
+        # Fill -------------------------------------------------------------
+        fill_action = menu.addAction("Fill Screen")
+        _set_icon(fill_action, QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon)
+        if fill_action is not None:
+
+            def _fill_target() -> None:
+                _fill_window(target)
+
+            fill_action.triggered.connect(_fill_target)
+
+        # Center -----------------------------------------------------------
+        center_action = menu.addAction("Center on Screen")
+        _set_icon(center_action, QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton)
+        if center_action is not None:
+
+            def _center_target() -> None:
+                _center_window(target)
+
+            center_action.triggered.connect(_center_target)
+
+        # Move & Resize ----------------------------------------------------
+        move_action = menu.addAction("Move && Resize…")
+        _set_icon(move_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        if move_action is not None:
+
+            def _move_resize_target() -> None:
+                _show_move_resize_dialog(target)
+
+            move_action.triggered.connect(_move_resize_target)
+
+        # Full screen ------------------------------------------------------
+        full_screen_active = False
+        if hasattr(target, "isFullScreen"):
+            try:
+                full_screen_active = target.isFullScreen()
+            except Exception:
+                full_screen_active = False
+        full_screen_text = "Exit Full Screen" if full_screen_active else "Enter Full Screen"
+        full_screen_action = menu.addAction(full_screen_text)
+        _set_icon(full_screen_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton)
+        if full_screen_action is not None:
+            _set_shortcut(
+                full_screen_action,
+                QtGui.QKeySequence.StandardKey.FullScreen,
+            )
+
+            def _toggle_full_screen() -> None:
+                if not hasattr(target, "isFullScreen"):
+                    full_screen_action.setEnabled(False)
+                    return
+                try:
+                    if target.isFullScreen():
+                        target.showNormal()
+                    else:
+                        target.showFullScreen()
+                except Exception:
+                    pass
+                self.rebuild()
+
+            full_screen_action.triggered.connect(_toggle_full_screen)
+
+        # Navigation -------------------------------------------------------
+        menu.addSeparator()
+        next_action = menu.addAction("Next Window")
+        _set_icon(next_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowForward)
+        if next_action is not None:
+            _set_shortcut(
+                next_action,
+                QtGui.QKeySequence.StandardKey.NextChild,
+            )
+            next_action.triggered.connect(lambda: _cycle_window(+1))
+
+        prev_action = menu.addAction("Previous Window")
+        _set_icon(prev_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowBack)
+        if prev_action is not None:
+            _set_shortcut(
+                prev_action,
+                QtGui.QKeySequence.StandardKey.PreviousChild,
+            )
+            prev_action.triggered.connect(lambda: _cycle_window(-1))
+
+        bring_action = menu.addAction("Bring All to Front")
+        _set_icon(bring_action, QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        if bring_action is not None:
+            bring_action.triggered.connect(_bring_all_to_front)
+
+        # Window list ------------------------------------------------------
+        windows = _visible_windows()
+        menu.addSeparator()
+        if windows:
+            menu.addSection("Windows")
+            try:
+                active = QtWidgets.QApplication.activeWindow()
+            except Exception:
+                active = None
+            for widget in windows:
+                title = widget.windowTitle() or widget.objectName() or widget.__class__.__name__
+                entry = menu.addAction(title)
+                if entry is None:
+                    continue
+                icon = getattr(widget, "windowIcon", lambda: QtGui.QIcon())()
+                if icon is not None and not icon.isNull():
+                    entry.setIcon(icon)
+                entry.setCheckable(True)
+                entry.setChecked(widget is active)
+
+                def _activate_target(_: bool = False, w: QtWidgets.QWidget = widget) -> None:
+                    _activate_window(w)
+
+                entry.triggered.connect(_activate_target)
+        else:
+            placeholder = menu.addAction("No open windows")
+            if placeholder is not None:
+                placeholder.setEnabled(False)
+
+
 def install_standard_menu(
     target: QtWidgets.QWidget,
     *,
@@ -1201,140 +1458,12 @@ def install_standard_menu(
         if reset_action is not None:
             reset_action.triggered.connect(_reset_layout)
 
-    if sys.platform == "darwin":
-        window_menu = menu_bar.addMenu("Window")
-        if window_menu is not None:
-            window_menu.setObjectName("mw_shared_window")
-            minimize_action = window_menu.addAction("Minimize")
-            if minimize_action is not None:
-                try:
-                    minimize_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Minimize))
-                except Exception:
-                    pass
-                if hasattr(target, "showMinimized"):
-                    minimize_action.triggered.connect(target.showMinimized)
-                else:
-                    minimize_action.setEnabled(False)
-
-            zoom_action = window_menu.addAction("Zoom")
-            if zoom_action is not None:
-
-                def _toggle_zoom() -> None:
-                    if not hasattr(target, "isMaximized"):
-                        return
-                    try:
-                        if target.isMaximized():
-                            target.showNormal()
-                        else:
-                            target.showMaximized()
-                    except Exception:
-                        pass
-
-                zoom_action.triggered.connect(_toggle_zoom)
-
-            fill_action = window_menu.addAction("Fill")
-            if fill_action is not None:
-
-                def _fill_target() -> None:
-                    _fill_window(target)
-
-                fill_action.triggered.connect(_fill_target)
-
-            center_action = window_menu.addAction("Center")
-            if center_action is not None:
-
-                def _center_target() -> None:
-                    _center_window(target)
-
-                center_action.triggered.connect(_center_target)
-
-            move_resize_action = window_menu.addAction("Move && Resize…")
-            if move_resize_action is not None:
-
-                def _move_resize_target() -> None:
-                    _show_move_resize_dialog(target)
-
-                move_resize_action.triggered.connect(_move_resize_target)
-
-            full_screen_action = window_menu.addAction("Enter Full Screen")
-
-            def _toggle_full_screen() -> None:
-                if not hasattr(target, "isFullScreen"):
-                    return
-                try:
-                    if target.isFullScreen():
-                        target.showNormal()
-                    else:
-                        target.showFullScreen()
-                except Exception:
-                    pass
-
-            if full_screen_action is not None:
-                full_screen_action.triggered.connect(_toggle_full_screen)
-
-                def _sync_full_screen_text() -> None:
-                    if not hasattr(target, "isFullScreen"):
-                        full_screen_action.setEnabled(False)
-                        full_screen_action.setText("Enter Full Screen")
-                        return
-                    full_screen_action.setEnabled(True)
-                    try:
-                        active = target.isFullScreen()
-                    except Exception:
-                        active = False
-                    full_screen_action.setText("Exit Full Screen" if active else "Enter Full Screen")
-
-                window_menu.aboutToShow.connect(_sync_full_screen_text)
-
-            window_menu.addSeparator()
-
-            switch_menu = window_menu.addMenu("Switch Window")
-            if switch_menu is not None:
-                switch_menu.setObjectName("mw_shared_window_switch")
-
-                def _populate_switch_menu() -> None:
-                    switch_menu.clear()
-                    app = QtWidgets.QApplication.instance()
-                    if app is None:
-                        return
-                    added = False
-                    for widget in app.topLevelWidgets():
-                        if not isinstance(widget, QtWidgets.QWidget):
-                            continue
-                        if widget is target or not widget.isVisible():
-                            continue
-                        title = widget.windowTitle() or widget.__class__.__name__
-                        action = switch_menu.addAction(title)
-
-                        def _activate_target(_: bool = False, w: QtWidgets.QWidget = widget) -> None:
-                            _activate_window(w)
-
-                        action.triggered.connect(_activate_target)
-                        added = True
-                    if not added:
-                        placeholder = switch_menu.addAction("No other windows")
-                        placeholder.setEnabled(False)
-
-                switch_menu.aboutToShow.connect(_populate_switch_menu)
-
-            window_menu.addSeparator()
-
-            bring_action = window_menu.addAction("Bring All to Front")
-            if bring_action is not None:
-
-                def _bring_all_to_front() -> None:
-                    app = QtWidgets.QApplication.instance()
-                    if app is None:
-                        return
-                    for widget in app.topLevelWidgets():
-                        try:
-                            widget.show()
-                            widget.raise_()
-                            widget.activateWindow()
-                        except Exception:
-                            continue
-
-                bring_action.triggered.connect(_bring_all_to_front)
+    window_title = "Window" if sys.platform == "darwin" else "&Window"
+    window_menu = menu_bar.addMenu(window_title)
+    if window_menu is not None:
+        window_menu.setObjectName("mw_shared_window")
+        if not hasattr(window_menu, "_mw_manager"):
+            window_menu._mw_manager = _WindowMenuManager(window_menu, target)  # type: ignore[attr-defined]
 
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
