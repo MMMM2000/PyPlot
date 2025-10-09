@@ -7,11 +7,12 @@ import math
 import re
 import sys
 from dataclasses import dataclass
-from functools import lru_cache
+from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import pandas as pd
+import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
@@ -70,6 +71,7 @@ class RescaleResult:
     target_left: float
     target_right: float
     applied: bool = True
+    replacement: pd.Series | None = None
 
 
 EDGE_FRACTION = 0.05
@@ -138,15 +140,20 @@ def _apply_rescaling(
             source_right = y_max
 
         delta = source_right - source_left
-        if delta == 0.0:
+        if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
+            gradient = pd.Series(
+                np.linspace(target_left, target_right, len(subset), dtype=float),
+                index=subset.index,
+            )
             results[path] = RescaleResult(
-                scale=1.0,
-                offset=0.0,
+                scale=0.0,
+                offset=target_left,
                 source_left=source_left,
                 source_right=source_right,
                 target_left=target_left,
                 target_right=target_right,
-                applied=False,
+                applied=True,
+                replacement=gradient,
             )
             continue
 
@@ -188,6 +195,19 @@ def _temperature_subfolder_name(temperature: float) -> str:
     label = f"T{temperature:+g}C"
     cleaned = _clean_folder_name(label)
     return cleaned or "Temperature"
+
+
+def _coerce_bool(value: object) -> bool:
+    """Return ``True`` when ``value`` represents an enabled boolean."""
+
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        return lowered in {"1", "true", "yes", "on", "enabled"}
+    return False
 
 
 def _find_vsm_files(directory: Path) -> List[Path]:
@@ -623,6 +643,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self._last_rescale_enabled = False
         self._line_visibility: Dict[float, Dict[float, bool]] = {}
         self._plot_tabs: Dict[float, PlotTabState] = {}
+        self._angle_checkboxes: Dict[float, Dict[float, QtWidgets.QCheckBox]] = {}
+        self._angle_group_widgets: List[QtWidgets.QWidget] = []
 
         self._build_ui()
         self._load_settings()
@@ -687,6 +709,32 @@ class VSMPlotter(QtWidgets.QWidget):
         )
         controls_layout.addWidget(self.rescale_checkbox)
 
+        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme")
+        self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
+        self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
+        controls_layout.addWidget(self.dark_mode_checkbox)
+
+        angle_label = QtWidgets.QLabel("Show angles")
+        controls_layout.addWidget(angle_label)
+        self.angle_scroll = QtWidgets.QScrollArea()
+        self.angle_scroll.setWidgetResizable(True)
+        self.angle_scroll.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.angle_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.angle_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.angle_scroll.setMaximumHeight(220)
+        self.angle_container = QtWidgets.QWidget()
+        self.angle_layout = QtWidgets.QVBoxLayout(self.angle_container)
+        self.angle_layout.setContentsMargins(8, 4, 8, 4)
+        self.angle_layout.setSpacing(4)
+        self.angle_placeholder = QtWidgets.QLabel("Load data to configure visibility.")
+        self.angle_placeholder.setWordWrap(True)
+        self.angle_placeholder.setEnabled(False)
+        self.angle_layout.addWidget(self.angle_placeholder)
+        self.angle_layout.addStretch(1)
+        self.angle_scroll.setWidget(self.angle_container)
+        self.angle_scroll.setEnabled(False)
+        controls_layout.addWidget(self.angle_scroll)
+
         controls_layout.addWidget(QtWidgets.QLabel("TXT export mode"))
         self.export_mode_combo = QtWidgets.QComboBox()
         self.export_mode_combo.addItem("Original data", "original")
@@ -729,7 +777,13 @@ class VSMPlotter(QtWidgets.QWidget):
         self.output_splitter.setStretchFactor(1, 1)
         self.output_splitter.setChildrenCollapsible(False)
 
-        install_standard_menu(self, help_topic="vsm_plotter", console=self.log_view)
+        install_standard_menu(
+            self,
+            help_topic="vsm_plotter",
+            console=self.log_view,
+            open_file=self._open_files_from_menu,
+            open_folder=self._open_folder_from_menu,
+        )
 
     def _load_settings(self) -> None:
         value = self.settings.value("last_path", "")
@@ -757,12 +811,11 @@ class VSMPlotter(QtWidgets.QWidget):
             if index >= 0:
                 self.style_combo.setCurrentIndex(index)
         rescale_value = self.settings.value("rescale_y", False)
-        if isinstance(rescale_value, (str, bool)):
-            if isinstance(rescale_value, str):
-                rescale_bool = rescale_value.lower() in {"1", "true", "yes"}
-            else:
-                rescale_bool = bool(rescale_value)
-            self.rescale_checkbox.setChecked(rescale_bool)
+        if rescale_value is not None:
+            self.rescale_checkbox.setChecked(_coerce_bool(rescale_value))
+        dark_value = self.settings.value("plot_dark_mode", False)
+        if dark_value is not None:
+            self.dark_mode_checkbox.setChecked(_coerce_bool(dark_value))
         mode = self.settings.value("mode", "files")
         if mode == "folder":
             self.folder_radio.setChecked(True)
@@ -782,6 +835,7 @@ class VSMPlotter(QtWidgets.QWidget):
         self.settings.setValue("export_mode", self.export_mode_combo.currentData())
         self.settings.setValue("plot_style", self.style_combo.currentData())
         self.settings.setValue("rescale_y", self.rescale_checkbox.isChecked())
+        self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.setValue("geometry", self.saveGeometry())
@@ -813,6 +867,14 @@ class VSMPlotter(QtWidgets.QWidget):
                 self.path_edit.setText(";".join(files))
         self._save_settings()
 
+    def _open_files_from_menu(self) -> None:
+        self.file_radio.setChecked(True)
+        self._choose_input()
+
+    def _open_folder_from_menu(self) -> None:
+        self.folder_radio.setChecked(True)
+        self._choose_input()
+
     def _selected_paths(self) -> List[Path]:
         text = self.path_edit.text().strip()
         if not text:
@@ -833,6 +895,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self._last_rescale_enabled = False
         self._line_visibility = {}
         self._plot_tabs = {}
+        self._angle_checkboxes = {}
+        self._reset_angle_controls()
         self.temperature_combo.blockSignals(True)
         self.temperature_combo.clear()
         self.temperature_combo.addItem("All temperatures", None)
@@ -1018,11 +1082,14 @@ class VSMPlotter(QtWidgets.QWidget):
                 prepared_groups[temperature] = prepared
 
         if not prepared_groups:
+            self._update_angle_controls({})
             self._append_log(
                 "No numeric data matched the selected axes; nothing to plot."
             )
             self.popout_button.setEnabled(False)
             return
+
+        self._update_angle_controls(prepared_groups)
 
         rescale_enabled = self.rescale_checkbox.isChecked()
         rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
@@ -1042,6 +1109,11 @@ class VSMPlotter(QtWidgets.QWidget):
                 for measurement, _ in entries:
                     result = rescale_map.get(measurement.path)
                     if result is None:
+                        continue
+                    if result.replacement is not None:
+                        self._append_log(
+                            f"{measurement.path.name}: generated gradient for {y_axis} spanning {result.target_left:.3g} to {result.target_right:.3g}."
+                        )
                         continue
                     if not result.applied:
                         self._append_log(
@@ -1108,6 +1180,78 @@ class VSMPlotter(QtWidgets.QWidget):
             return {"linestyle": "-", "marker": "o", "markersize": 4}
         return {"linestyle": "-"}
 
+    def _apply_plot_theme(self, axes: Any) -> None:
+        """Apply the current light/dark theme to ``axes``."""
+
+        dark = self.dark_mode_checkbox.isChecked()
+        if dark:
+            bg = "#121212"
+            fg = "#f0f0f0"
+            grid = "#404040"
+        else:
+            bg = "#ffffff"
+            fg = "#202020"
+            grid = "#d0d0d0"
+
+        try:
+            axes.set_facecolor(bg)
+            axes.figure.set_facecolor(bg)
+        except Exception:  # pragma: no cover - backend differences
+            pass
+
+        try:
+            for spine in getattr(axes, "spines", {}).values():
+                spine.set_color(fg)
+        except Exception:  # pragma: no cover - backend differences
+            pass
+
+        try:
+            axes.tick_params(colors=fg)
+            axes.xaxis.label.set_color(fg)
+            axes.yaxis.label.set_color(fg)
+            axes.title.set_color(fg)
+        except Exception:  # pragma: no cover - backend differences
+            pass
+
+        try:
+            axes.grid(True, color=grid)
+        except Exception:  # pragma: no cover - backend differences
+            pass
+
+    def _style_legend(self, legend: Any | None) -> None:
+        """Restyle ``legend`` to match the current theme."""
+
+        if legend is None:
+            return
+        dark = self.dark_mode_checkbox.isChecked()
+        fg = "#f0f0f0" if dark else "#202020"
+        bg = "#1e1e1e" if dark else "#ffffff"
+
+        try:
+            for text in legend.get_texts():
+                text.set_color(fg)
+        except Exception:  # pragma: no cover - backend differences
+            pass
+
+        try:
+            frame = legend.get_frame()
+            frame.set_facecolor(bg)
+            frame.set_edgecolor(fg if dark else "#4c4c4c")
+        except Exception:  # pragma: no cover - backend differences
+            pass
+
+    def _restyle_plots(self) -> None:
+        """Reapply the chosen theme to existing Matplotlib tabs."""
+
+        for tab_state in self._plot_tabs.values():
+            self._apply_plot_theme(tab_state.axes)
+            legend = getattr(tab_state.axes, "legend_", None)
+            self._style_legend(legend)
+            try:
+                tab_state.canvas.draw_idle()
+            except Exception:  # pragma: no cover - backend differences
+                pass
+
     def _refresh_tab_legend(self, tab_state: PlotTabState, *, draw: bool = True) -> None:
         legend = getattr(tab_state.axes, "legend_", None)
         if legend is not None:
@@ -1117,8 +1261,9 @@ class VSMPlotter(QtWidgets.QWidget):
                 pass
         visible_lines = [line for line in tab_state.lines.values() if line.get_visible()]
         labels = [line.get_label() for line in visible_lines]
-        tab_state.axes.legend(visible_lines, labels, loc="best")
-        tab_state.axes.grid(True)
+        legend = tab_state.axes.legend(visible_lines, labels, loc="best")
+        self._apply_plot_theme(tab_state.axes)
+        self._style_legend(legend)
         try:
             tab_state.axes.figure.tight_layout()
         except Exception:  # pragma: no cover - backend specific
@@ -1129,9 +1274,99 @@ class VSMPlotter(QtWidgets.QWidget):
             except Exception:  # pragma: no cover - backend specific
                 pass
 
+    def _clear_angle_group_widgets(self) -> None:
+        if not hasattr(self, "angle_layout"):
+            return
+        for widget in self._angle_group_widgets:
+            try:
+                self.angle_layout.removeWidget(widget)
+            except Exception:
+                pass
+            widget.setParent(None)
+            widget.deleteLater()
+        self._angle_group_widgets.clear()
+
+    def _reset_angle_controls(self) -> None:
+        if not hasattr(self, "angle_layout"):
+            return
+        self._clear_angle_group_widgets()
+        if hasattr(self, "angle_placeholder"):
+            self.angle_placeholder.setVisible(True)
+        if hasattr(self, "angle_scroll"):
+            self.angle_scroll.setEnabled(False)
+
+    def _update_angle_controls(
+        self,
+        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
+    ) -> None:
+        if not hasattr(self, "angle_layout"):
+            return
+        self._clear_angle_group_widgets()
+        self._angle_checkboxes = {}
+        if not prepared_groups:
+            if hasattr(self, "angle_placeholder"):
+                self.angle_placeholder.setVisible(True)
+            if hasattr(self, "angle_scroll"):
+                self.angle_scroll.setEnabled(False)
+            return
+
+        if hasattr(self, "angle_placeholder"):
+            self.angle_placeholder.setVisible(False)
+        self.angle_scroll.setEnabled(True)
+
+        for temperature, entries in sorted(prepared_groups.items()):
+            group_box = QtWidgets.QGroupBox(f"{temperature:g} °C")
+            group_box.setFlat(True)
+            group_layout = QtWidgets.QVBoxLayout(group_box)
+            group_layout.setContentsMargins(6, 4, 6, 4)
+            group_layout.setSpacing(2)
+
+            visibility = self._line_visibility.setdefault(temperature, {})
+            checkboxes: Dict[float, QtWidgets.QCheckBox] = {}
+            seen_angles: set[float] = set()
+
+            for measurement, _ in entries:
+                if measurement.angle is None:
+                    continue
+                angle = float(measurement.angle)
+                if angle in seen_angles:
+                    continue
+                seen_angles.add(angle)
+                checkbox = QtWidgets.QCheckBox(f"{angle:g}°")
+                checkbox.setChecked(visibility.get(angle, True))
+                checkbox.toggled.connect(
+                    partial(self._on_angle_checkbox_toggled, temperature, angle)
+                )
+                group_layout.addWidget(checkbox)
+                checkboxes[angle] = checkbox
+
+            for missing in [key for key in visibility.keys() if key not in seen_angles]:
+                del visibility[missing]
+
+            if not checkboxes:
+                placeholder = QtWidgets.QLabel("No angles detected for this temperature.")
+                placeholder.setEnabled(False)
+                group_layout.addWidget(placeholder)
+
+            group_layout.addStretch(1)
+            self.angle_layout.insertWidget(self.angle_layout.count() - 1, group_box)
+            self._angle_group_widgets.append(group_box)
+            self._angle_checkboxes[temperature] = checkboxes
+
+        for stale_temp in [key for key in list(self._line_visibility.keys()) if key not in prepared_groups]:
+            del self._line_visibility[stale_temp]
+
+    def _on_angle_checkbox_toggled(self, temperature: float, angle: float, checked: bool) -> None:
+        self._toggle_line_visibility(temperature, angle, checked)
+
     def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
         visibility = self._line_visibility.setdefault(temperature, {})
         visibility[angle] = visible
+        checkbox = self._angle_checkboxes.get(temperature, {}).get(angle)
+        if checkbox is not None and checkbox.isChecked() != visible:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(visible)
+            checkbox.blockSignals(False)
         tab_state = self._plot_tabs.get(temperature)
         if tab_state is None:
             return
@@ -1178,10 +1413,13 @@ class VSMPlotter(QtWidgets.QWidget):
                 if rescale_enabled:
                     result = rescale_info.get(temperature, {}).get(measurement.path)
                     if result is not None:
-                        series_y = series_y * result.scale + result.offset
+                        if result.replacement is not None:
+                            series_y = result.replacement.reindex(subset.index)
+                        else:
+                            series_y = series_y * result.scale + result.offset
                 ax.plot(
                     subset[x_axis].to_numpy(),
-                    series_y.to_numpy(),
+                    pd.to_numeric(series_y, errors="coerce").to_numpy(),
                     label=f"{measurement.angle:g}°",
                     **line_kwargs,
                 )
@@ -1189,9 +1427,10 @@ class VSMPlotter(QtWidgets.QWidget):
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)
             ax.set_title(f"{y_axis} vs {x_axis} at {temperature:g} °C")
+            self._apply_plot_theme(ax)
             if plotted:
-                ax.legend(loc="best")
-            ax.grid(True)
+                legend = ax.legend(loc="best")
+                self._style_legend(legend)
             try:  # pragma: no cover - backend dependent
                 fig.canvas.manager.set_window_title(f"{temperature:g} °C")
             except Exception:
@@ -1287,7 +1526,19 @@ class VSMPlotter(QtWidgets.QWidget):
                 if rescale_requested:
                     if measurement.path in rescale_lookup:
                         result = rescale_lookup[measurement.path]
-                        if not result.applied:
+                        if result.replacement is not None:
+                            if y_axis in measurement.data.columns:
+                                df_to_write = measurement.data.copy()
+                                numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
+                                updated = numeric.copy()
+                                updated.loc[result.replacement.index] = result.replacement.to_numpy()
+                                df_to_write[y_axis] = updated
+                            else:
+                                self._append_log(
+                                    f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
+                                )
+                                df_to_write = measurement.data
+                        elif not result.applied:
                             self._append_log(
                                 f"{measurement.path.name}: insufficient variation to rescale {y_axis}; exported original values."
                             )
@@ -1357,10 +1608,14 @@ class VSMPlotter(QtWidgets.QWidget):
                 if rescale_enabled:
                     result = rescale_info.get(temperature, {}).get(measurement.path)
                     if result is not None:
-                        series_y = series_y * result.scale + result.offset
+                        if result.replacement is not None:
+                            replacement = result.replacement.reindex(subset.index)
+                            series_y = replacement
+                        else:
+                            series_y = series_y * result.scale + result.offset
                 line, = ax.plot(
                     subset[x_axis].to_numpy(),
-                    series_y.to_numpy(),
+                    pd.to_numeric(series_y, errors="coerce").to_numpy(),
                     label=f"{measurement.angle:g}°",
                     **line_kwargs,
                 )
@@ -1376,7 +1631,12 @@ class VSMPlotter(QtWidgets.QWidget):
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)
             ax.set_title(f"{y_axis} vs {x_axis} at {temperature:g} °C")
-            ax.grid(True)
+            self._apply_plot_theme(ax)
+
+            legend = None
+            if lines:
+                legend = ax.legend(loc="best")
+                self._style_legend(legend)
 
             canvas = FigureCanvas(fig)
             tab_state = PlotTabState(axes=ax, canvas=canvas, lines=lines)
@@ -1385,47 +1645,10 @@ class VSMPlotter(QtWidgets.QWidget):
             tab = QtWidgets.QWidget()
             layout = QtWidgets.QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
-
-            controls_frame = QtWidgets.QFrame()
-            controls_layout = QtWidgets.QVBoxLayout(controls_frame)
-            controls_layout.setContentsMargins(8, 8, 8, 4)
-            controls_layout.setSpacing(4)
-            label = QtWidgets.QLabel("Show angles")
-            label.setAlignment(
-                QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
-            )
-            controls_layout.addWidget(label)
-            scroll_area = QtWidgets.QScrollArea()
-            scroll_area.setWidgetResizable(True)
-            scroll_area.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
-            scroll_area.setHorizontalScrollBarPolicy(
-                QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
-            )
-            scroll_area.setVerticalScrollBarPolicy(
-                QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
-            )
-            scroll_area.setMaximumHeight(150)
-            checkbox_container = QtWidgets.QWidget()
-            checkbox_layout = QtWidgets.QVBoxLayout(checkbox_container)
-            checkbox_layout.setContentsMargins(0, 0, 0, 0)
-            checkbox_layout.setSpacing(2)
-            for angle, line in sorted(lines.items()):
-                checkbox = QtWidgets.QCheckBox(f"{angle:g}°")
-                checkbox.setChecked(line.get_visible())
-                checkbox.toggled.connect(
-                    lambda checked, temp=temperature, ang=angle: self._toggle_line_visibility(
-                        temp, ang, checked
-                    )
-                )
-                checkbox_layout.addWidget(checkbox)
-            checkbox_layout.addStretch(1)
-            scroll_area.setWidget(checkbox_container)
-            controls_layout.addWidget(scroll_area)
-
-            layout.addWidget(controls_frame, 0)
-            layout.addWidget(canvas, 1)
+            layout.addWidget(canvas)
             self.tab_widget.addTab(tab, f"{temperature:g} °C")
-            self._refresh_tab_legend(tab_state)
+            if legend is None:
+                self._refresh_tab_legend(tab_state)
 
         self._append_log("Finished generating Matplotlib hysteresis plots.")
 

@@ -189,7 +189,11 @@ class PyVISAAnnealingLogger(QtWidgets.QWidget):
 
         root_layout = QtWidgets.QVBoxLayout(self)
         root_layout.addWidget(content)
-        install_standard_menu(self, help_topic="logger_pyvisa_current_annealing")
+        install_standard_menu(
+            self,
+            help_topic="logger_pyvisa_current_annealing",
+            open_folder=self.choose_dir,
+        )
         theme_manager().theme_changed.connect(self._apply_theme_update)
 
         # ---------------------------------------------------------------- connections

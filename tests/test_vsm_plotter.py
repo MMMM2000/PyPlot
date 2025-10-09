@@ -230,6 +230,7 @@ def test_apply_rescaling_handles_near_constant_loop(tmp_path: Path) -> None:
 
     assert flat_path in results and reference_path in results
     assert results[flat_path].applied
+    assert results[flat_path].replacement is None
     assert math.isclose(results[flat_path].target_left, -9.0e-4, rel_tol=1e-6, abs_tol=1e-12)
     assert math.isclose(results[flat_path].target_right, 9.0e-4, rel_tol=1e-6, abs_tol=1e-12)
 
@@ -323,7 +324,7 @@ def test_apply_rescaling_inverts_and_scales() -> None:
     assert transformed.iloc[1] == pytest.approx(1.0)
 
 
-def test_apply_rescaling_skips_constant_measurements() -> None:
+def test_apply_rescaling_generates_gradient_for_constant_measurements() -> None:
     base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.0, 1.0]})
     flat = pd.DataFrame({"H": [-10.0, 10.0], "M": [0.2, 0.2]})
 
@@ -334,9 +335,11 @@ def test_apply_rescaling_skips_constant_measurements() -> None:
     )
 
     flat_result = results[Path("flat")]
-    assert flat_result.applied is False
-    assert flat_result.scale == pytest.approx(1.0)
-    assert flat_result.offset == pytest.approx(0.0)
+    assert flat_result.applied is True
+    assert flat_result.replacement is not None
+    assert len(flat_result.replacement) == len(flat)
+    assert flat_result.replacement.iloc[0] == pytest.approx(flat_result.target_left, abs=1e-9)
+    assert flat_result.replacement.iloc[-1] == pytest.approx(flat_result.target_right, abs=1e-9)
 
 
 def test_apply_rescaling_recovers_flat_edges() -> None:
@@ -509,6 +512,13 @@ def test_toggle_line_visibility_updates_lines_and_state() -> None:
     plotter = module.VSMPlotter.__new__(module.VSMPlotter)
     plotter._line_visibility = {}
     plotter._plot_tabs = {}
+    plotter._angle_checkboxes = {}
+
+    class _DummyDarkToggle:
+        def isChecked(self) -> bool:
+            return False
+
+    plotter.dark_mode_checkbox = _DummyDarkToggle()
     plotter._refresh_tab_legend = module.VSMPlotter._refresh_tab_legend.__get__(plotter)
     plotter._toggle_line_visibility = module.VSMPlotter._toggle_line_visibility.__get__(plotter)
 

@@ -109,7 +109,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.setupUi(self)
         self.setWindowTitle("Data Logger")
 
-        install_standard_menu(self, help_topic="logger_serial_data")
+        install_standard_menu(
+            self,
+            help_topic="logger_serial_data",
+            open_folder=self.choose_log_dir,
+        )
 
         self.naming_history = LineEditHistory(QtCore.QSettings("microwire", "naming_history"), parent=self)
 

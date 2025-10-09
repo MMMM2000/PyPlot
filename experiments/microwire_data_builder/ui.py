@@ -738,7 +738,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._build_ui()
         self._configure_logging()
         self._load_settings()
-        install_standard_menu(self, help_topic="builder_database", console=self.log_group)
+        install_standard_menu(
+            self,
+            help_topic="builder_database",
+            console=self.log_group,
+            open_file=self._add_microscope_files,
+            open_folder=self._add_data_root,
+        )
 
     # ------------------------------------------------------------------ setup
     def _init_stage_tracking(self) -> None:

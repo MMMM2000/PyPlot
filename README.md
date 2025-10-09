@@ -149,12 +149,17 @@ Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 
-Every window now includes a shared menu bar.  The **View** menu exposes theme
+Every window now includes a shared menu bar.  The **File** menu wires the
+standard `Open File…`/`Open Folder…` shortcuts to the same loaders the toolbar
+buttons use, adds `Close Window`/`Quit` actions, and keeps the last-used paths in
+sync so keyboard-driven workflows stay quick.  The **View** menu exposes theme
 controls (System/Light/Dark), toggles the file browser or console panes, and
 resets splitter sizes if the layout becomes cramped, while **Help** opens a
-Markdown guide tailored to the current tool.  When onboarding new colleagues you
-can point them to the menu entry for context without having to maintain a
-separate manual.  The main action row stays anchored beneath the settings so
+Markdown guide tailored to the current tool.  On macOS a dedicated **Window**
+menu joins the bar with native `Minimize`, `Zoom`, and `Bring All to Front`
+actions so the utilities behave like first-party apps.  When onboarding new
+colleagues you can point them to the menu entry for context without having to
+maintain a separate manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
 Origin sessions are closed automatically after plots are generated—and even if a
 run aborts—so the Origin application can be closed independently from the
@@ -607,33 +612,32 @@ to plot—defaults focus on **Applied Field** versus **Signal parallel with
 sample**, but every numeric column advertised in the header is available. Set the
 temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
-concentrate on a single group. Each Matplotlib tab now includes a **Show angles**
-checklist so individual traces can be toggled without regenerating the plots; the
-legend, Matplotlib pop-out windows, and Origin exports respect the same
-visibility choices. The Matplotlib tabs appear on the right-hand side of the
-window with a console log below; they are fully resizable and inherit the
-project’s dark/light theme settings. Window size and the splitter ratio are now
-persisted via application settings, so any adjustments you make to the plot/log
-layout are restored when you launch the explorer again. A **Matplotlib style**
-selector toggles between plain line plots and line-plus-symbol traces, and the
-new **Open in Matplotlib** button clones the currently generated tabs into
-interactive desktop windows for quick zooming or annotation outside the embedded
-canvas.
+concentrate on a single group. The angle visibility controls now live alongside
+the other settings on the left: once data is loaded, each temperature gains a
+collapsible **Show angles** section whose checkboxes hide or reveal traces in the
+embedded Matplotlib canvas, pop-out windows, and Origin exports simultaneously
+without regenerating plots. The Matplotlib tabs remain on the right-hand side of
+the window with a console log below; they are fully resizable and the splitter
+ratio is persisted between sessions. A **Matplotlib style** selector toggles
+between plain line plots and line-plus-symbol traces, a new **Dark plot theme**
+checkbox recolours both embedded and pop-out Matplotlib figures to match the rest
+of the UI, and the **Open in Matplotlib** button still clones the current tabs
+into interactive desktop windows for quick zooming or annotation outside the
+embedded canvas.
 
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
 positive-field endpoint reaches the same maximum. The target extrema are derived
 from the global minima and maxima across the group, so even traces whose edge
 segments are almost flat are stretched or inverted to match their neighbours;
-the rescaling logic now treats tiny numerical differences as real variation so
-stubbornly flat traces (such as the 90° sweep in the sample data) pick up the
-shared minima/maxima instead of collapsing to a horizontal line.
-Each transform is logged per file (including the scale, offset, and any
-inversion) and those same values feed the Matplotlib and Origin outputs, keeping
-the on-screen plots and exported data in sync. Leave the option unchecked to
-plot the raw measurements. When a loop is genuinely constant the plotter now
-logs that the original values were kept so the exporter never overwrites
-featureless traces with artificial ramps.
+stubbornly flat sweeps (such as the 90° run in the sample data) now receive a
+synthetic gradient that carries them from the shared minimum on the left to the
+shared maximum on the right instead of collapsing into a horizontal line. Each
+transform is logged per file—either the scale/offset pair or a note that a
+gradient was generated—and those same values feed the Matplotlib, Origin, and
+TXT outputs, keeping the on-screen plots and exported data in sync. Leave the
+option unchecked to plot the raw measurements if you prefer to inspect the
+measured values.
 
 OriginPro exports mirror the same grouping, creating a workbook for each
 temperature, writing a sheet per angle with the selected axes, and building a
@@ -654,6 +658,8 @@ transform used for the plots so the TXT tables drop straight into Origin with
 matching endpoints. When a file cannot be rescaled the exporter keeps the
 measured values and notes the decision in the log so downstream processing never
 receives flattened traces.
+Constant sweeps pick up the same synthetic gradient that drives the plots, so
+the exported TXT tables mirror the aligned endpoints you see on screen.
 Even if a run is missing angle/temperature metadata, the loader still enables TXT
 export while noting that plotting is disabled, making it possible to salvage
 data from noisy recipes. If Origin is not installed the exporter logs a short

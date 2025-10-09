@@ -3,6 +3,7 @@ import os
 import sys
 import weakref
 import atexit
+import sys
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -867,6 +868,9 @@ def install_standard_menu(
     file_widget: QtWidgets.QWidget | None = None,
     splitter: QtWidgets.QSplitter | None = None,
     default_split_sizes: list[int] | tuple[int, int] | None = None,
+    open_file: Callable[[], None] | None = None,
+    open_folder: Callable[[], None] | None = None,
+    close_window: Callable[[], None] | None = None,
 ) -> QtWidgets.QMenuBar:
     """Attach the shared menu bar with theme, layout, and help entries."""
 
@@ -882,6 +886,117 @@ def install_standard_menu(
             to_remove.append(action)
     for action in to_remove:
         menu_bar.removeAction(action)
+
+    def _resolve_handler(
+        default: Callable[[], None] | None,
+        names: tuple[str, ...],
+    ) -> Callable[[], None] | None:
+        if callable(default):
+            return default
+        for name in names:
+            candidate = getattr(target, name, None)
+            if callable(candidate):
+                return candidate
+        return None
+
+    file_handler = _resolve_handler(
+        open_file,
+        (
+            "_open_files_from_menu",
+            "open_files",
+            "open_file",
+            "choose_files",
+            "choose_file",
+            "browse_files",
+            "browse_file",
+            "select_files",
+            "select_file",
+        ),
+    )
+    folder_handler = _resolve_handler(
+        open_folder,
+        (
+            "_open_folder_from_menu",
+            "open_folder",
+            "open_directory",
+            "open_dir",
+            "choose_folder",
+            "choose_directory",
+            "choose_dir",
+            "browse_folder",
+            "browse_directory",
+            "browse_dir",
+            "select_folder",
+            "select_directory",
+        ),
+    )
+
+    close_handler: Callable[[], None] | None = close_window if callable(close_window) else None
+    if close_handler is None:
+        candidate = getattr(target, "close", None)
+        close_handler = candidate if callable(candidate) else None
+
+    file_menu = QtWidgets.QMenu("&File", menu_bar)
+    file_menu.setObjectName("mw_shared_file")
+    first_action = menu_bar.actions()[0] if menu_bar.actions() else None
+    if first_action is not None:
+        menu_bar.insertMenu(first_action, file_menu)
+    else:
+        menu_bar.addMenu(file_menu)
+
+    open_file_action = file_menu.addAction("Open &File…")
+    if open_file_action is not None:
+        try:
+            open_file_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
+        except Exception:
+            pass
+        if file_handler is not None:
+            open_file_action.triggered.connect(file_handler)
+        else:
+            open_file_action.setEnabled(False)
+
+    open_folder_action = file_menu.addAction("Open F&older…")
+    if open_folder_action is not None:
+        shortcut = "Ctrl+Shift+O"
+        if sys.platform == "darwin":
+            shortcut = "Meta+Shift+O"
+        try:
+            open_folder_action.setShortcut(QtGui.QKeySequence(shortcut))
+        except Exception:
+            pass
+        if folder_handler is not None:
+            open_folder_action.triggered.connect(folder_handler)
+        else:
+            open_folder_action.setEnabled(False)
+
+    file_menu.addSeparator()
+
+    close_action = file_menu.addAction("&Close Window")
+    if close_action is not None:
+        try:
+            close_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Close))
+        except Exception:
+            pass
+        if close_handler is not None:
+            close_action.triggered.connect(close_handler)
+        else:
+            close_action.setEnabled(False)
+
+    quit_action = file_menu.addAction("&Quit")
+    if quit_action is not None:
+        try:
+            quit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
+        except Exception:
+            pass
+
+        def _quit_application() -> None:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.quit()
+            else:  # pragma: no cover - fallback for embedded usage
+                sys.exit(0)
+
+        quit_action.triggered.connect(_quit_application)
 
     view_menu = menu_bar.addMenu("&View")
     if view_menu is None:
@@ -936,6 +1051,54 @@ def install_standard_menu(
         reset_action = view_menu.addAction("&Reset Layout")
         if reset_action is not None:
             reset_action.triggered.connect(_reset_layout)
+
+    if sys.platform == "darwin":
+        window_menu = menu_bar.addMenu("Window")
+        if window_menu is not None:
+            window_menu.setObjectName("mw_shared_window")
+            minimize_action = window_menu.addAction("Minimize")
+            if minimize_action is not None:
+                try:
+                    minimize_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Minimize))
+                except Exception:
+                    pass
+                if hasattr(target, "showMinimized"):
+                    minimize_action.triggered.connect(target.showMinimized)
+                else:
+                    minimize_action.setEnabled(False)
+
+            zoom_action = window_menu.addAction("Zoom")
+            if zoom_action is not None:
+
+                def _toggle_zoom() -> None:
+                    if not hasattr(target, "isMaximized"):
+                        return
+                    try:
+                        if target.isMaximized():
+                            target.showNormal()
+                        else:
+                            target.showMaximized()
+                    except Exception:
+                        pass
+
+                zoom_action.triggered.connect(_toggle_zoom)
+
+            bring_action = window_menu.addAction("Bring All to Front")
+            if bring_action is not None:
+
+                def _bring_all_to_front() -> None:
+                    app = QtWidgets.QApplication.instance()
+                    if app is None:
+                        return
+                    for widget in app.topLevelWidgets():
+                        try:
+                            widget.show()
+                            widget.raise_()
+                            widget.activateWindow()
+                        except Exception:
+                            continue
+
+                bring_action.triggered.connect(_bring_all_to_front)
 
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
