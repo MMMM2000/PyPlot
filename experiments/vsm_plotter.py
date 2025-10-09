@@ -92,12 +92,15 @@ def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[f
     left_values = ordered[y_axis].iloc[:count]
     right_values = ordered[y_axis].iloc[-count:]
 
-    left = float(left_values.median())
-    right = float(right_values.median())
-    if pd.isna(left):
-        left = float(left_values.iloc[0])
-    if pd.isna(right):
-        right = float(right_values.iloc[-1])
+    numeric_left = pd.to_numeric(left_values, errors="coerce").dropna()
+    if numeric_left.empty:
+        numeric_left = pd.Series([left_values.iloc[0]], index=left_values.index[:1])
+    numeric_right = pd.to_numeric(right_values, errors="coerce").dropna()
+    if numeric_right.empty:
+        numeric_right = pd.Series([right_values.iloc[-1]], index=right_values.index[-1:])
+
+    left = float(numeric_left.min())
+    right = float(numeric_right.max())
     return left, right
 
 
@@ -140,6 +143,20 @@ def _apply_rescaling(
             source_right = y_max
 
         delta = source_right - source_left
+        if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
+            numeric_series = pd.to_numeric(subset[y_axis], errors="coerce").dropna()
+            if not numeric_series.empty:
+                alt_min = float(numeric_series.min())
+                alt_max = float(numeric_series.max())
+            else:
+                alt_min = y_min
+                alt_max = y_max
+
+            if not math.isclose(alt_max - alt_min, 0.0, abs_tol=NUMERIC_TOLERANCE):
+                source_left = alt_min
+                source_right = alt_max
+                delta = source_right - source_left
+
         if math.isclose(delta, 0.0, abs_tol=NUMERIC_TOLERANCE):
             gradient = pd.Series(
                 np.linspace(target_left, target_right, len(subset), dtype=float),

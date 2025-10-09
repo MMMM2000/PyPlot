@@ -202,6 +202,155 @@ def _apply_color_scheme(
             app.setPalette(standard_palette)
 
 
+def _available_geometry(widget: QtWidgets.QWidget) -> QtCore.QRect | None:
+    """Return the available screen geometry for ``widget``."""
+
+    screen = getattr(widget, "screen", lambda: None)()
+    if screen is None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                screen = app.primaryScreen()
+            except Exception:
+                screen = None
+    if screen is None:
+        return None
+    try:
+        return screen.availableGeometry()
+    except Exception:
+        return None
+
+
+def _center_window(widget: QtWidgets.QWidget) -> None:
+    """Move ``widget`` to the centre of its current screen."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+    widget.showNormal()
+    available = _available_geometry(widget)
+    frame = widget.frameGeometry()
+    if available is None:
+        widget.move(max(0, frame.x()), max(0, frame.y()))
+        return
+
+    size = frame.size()
+    if size.width() <= 0 or size.height() <= 0:
+        hint = widget.sizeHint()
+        width = max(widget.minimumWidth(), hint.width(), 320)
+        height = max(widget.minimumHeight(), hint.height(), 240)
+        size.setWidth(width)
+        size.setHeight(height)
+        frame.setSize(size)
+
+    frame.moveCenter(available.center())
+    widget.move(frame.topLeft())
+
+
+def _fill_window(widget: QtWidgets.QWidget) -> None:
+    """Expand ``widget`` to fill the available screen geometry."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+    widget.showNormal()
+    available = _available_geometry(widget)
+    if available is None:
+        try:
+            widget.showMaximized()
+        except Exception:
+            pass
+        return
+    widget.setGeometry(available)
+
+
+def _activate_window(widget: QtWidgets.QWidget) -> None:
+    """Make ``widget`` the active, front-most window."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+    try:
+        widget.show()
+        widget.raise_()
+        widget.activateWindow()
+    except Exception:
+        pass
+
+
+def _show_move_resize_dialog(widget: QtWidgets.QWidget) -> None:
+    """Prompt for explicit geometry settings and apply them to ``widget``."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+
+    dialog = QtWidgets.QDialog(widget)
+    dialog.setWindowTitle("Move && Resize")
+    dialog.setModal(True)
+
+    layout = QtWidgets.QFormLayout(dialog)
+    layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+    geometry = widget.geometry()
+    available = _available_geometry(widget)
+
+    min_width = max(200, widget.minimumWidth())
+    min_height = max(200, widget.minimumHeight())
+    width_hint = widget.sizeHint().width() if widget.sizeHint().width() > 0 else min_width
+    height_hint = widget.sizeHint().height() if widget.sizeHint().height() > 0 else min_height
+
+    width_max = max(min_width, available.width() if available is not None else min_width * 4)
+    height_max = max(min_height, available.height() if available is not None else min_height * 4)
+
+    width_value = max(min_width, min(width_max, geometry.width() or width_hint))
+    height_value = max(min_height, min(height_max, geometry.height() or height_hint))
+
+    x_spin = QtWidgets.QSpinBox(dialog)
+    x_spin.setRange(-10000, 10000)
+    x_spin.setValue(geometry.x())
+    layout.addRow("X position", x_spin)
+
+    y_spin = QtWidgets.QSpinBox(dialog)
+    y_spin.setRange(-10000, 10000)
+    y_spin.setValue(geometry.y())
+    layout.addRow("Y position", y_spin)
+
+    width_spin = QtWidgets.QSpinBox(dialog)
+    width_spin.setRange(min_width, width_max)
+    width_spin.setValue(width_value)
+    layout.addRow("Width", width_spin)
+
+    height_spin = QtWidgets.QSpinBox(dialog)
+    height_spin.setRange(min_height, height_max)
+    height_spin.setValue(height_value)
+    layout.addRow("Height", height_spin)
+
+    button_box = QtWidgets.QDialogButtonBox(
+        QtWidgets.QDialogButtonBox.StandardButton.Ok
+        | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+        parent=dialog,
+    )
+    layout.addRow(button_box)
+
+    button_box.accepted.connect(dialog.accept)
+    button_box.rejected.connect(dialog.reject)
+
+    if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+        return
+
+    new_width = width_spin.value()
+    new_height = height_spin.value()
+    new_x = x_spin.value()
+    new_y = y_spin.value()
+
+    if available is not None:
+        new_width = min(new_width, available.width())
+        new_height = min(new_height, available.height())
+        new_x = max(available.left(), min(new_x, available.right() - new_width))
+        new_y = max(available.top(), min(new_y, available.bottom() - new_height))
+
+    widget.showNormal()
+    widget.setGeometry(QtCore.QRect(new_x, new_y, new_width, new_height))
+    _activate_window(widget)
+
+
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
     """Apply a palette and style that follow the host operating system.
 
@@ -1082,6 +1231,93 @@ def install_standard_menu(
                         pass
 
                 zoom_action.triggered.connect(_toggle_zoom)
+
+            fill_action = window_menu.addAction("Fill")
+            if fill_action is not None:
+
+                def _fill_target() -> None:
+                    _fill_window(target)
+
+                fill_action.triggered.connect(_fill_target)
+
+            center_action = window_menu.addAction("Center")
+            if center_action is not None:
+
+                def _center_target() -> None:
+                    _center_window(target)
+
+                center_action.triggered.connect(_center_target)
+
+            move_resize_action = window_menu.addAction("Move && Resize…")
+            if move_resize_action is not None:
+
+                def _move_resize_target() -> None:
+                    _show_move_resize_dialog(target)
+
+                move_resize_action.triggered.connect(_move_resize_target)
+
+            full_screen_action = window_menu.addAction("Enter Full Screen")
+
+            def _toggle_full_screen() -> None:
+                if not hasattr(target, "isFullScreen"):
+                    return
+                try:
+                    if target.isFullScreen():
+                        target.showNormal()
+                    else:
+                        target.showFullScreen()
+                except Exception:
+                    pass
+
+            if full_screen_action is not None:
+                full_screen_action.triggered.connect(_toggle_full_screen)
+
+                def _sync_full_screen_text() -> None:
+                    if not hasattr(target, "isFullScreen"):
+                        full_screen_action.setEnabled(False)
+                        full_screen_action.setText("Enter Full Screen")
+                        return
+                    full_screen_action.setEnabled(True)
+                    try:
+                        active = target.isFullScreen()
+                    except Exception:
+                        active = False
+                    full_screen_action.setText("Exit Full Screen" if active else "Enter Full Screen")
+
+                window_menu.aboutToShow.connect(_sync_full_screen_text)
+
+            window_menu.addSeparator()
+
+            switch_menu = window_menu.addMenu("Switch Window")
+            if switch_menu is not None:
+                switch_menu.setObjectName("mw_shared_window_switch")
+
+                def _populate_switch_menu() -> None:
+                    switch_menu.clear()
+                    app = QtWidgets.QApplication.instance()
+                    if app is None:
+                        return
+                    added = False
+                    for widget in app.topLevelWidgets():
+                        if not isinstance(widget, QtWidgets.QWidget):
+                            continue
+                        if widget is target or not widget.isVisible():
+                            continue
+                        title = widget.windowTitle() or widget.__class__.__name__
+                        action = switch_menu.addAction(title)
+
+                        def _activate_target(_: bool = False, w: QtWidgets.QWidget = widget) -> None:
+                            _activate_window(w)
+
+                        action.triggered.connect(_activate_target)
+                        added = True
+                    if not added:
+                        placeholder = switch_menu.addAction("No other windows")
+                        placeholder.setEnabled(False)
+
+                switch_menu.aboutToShow.connect(_populate_switch_menu)
+
+            window_menu.addSeparator()
 
             bring_action = window_menu.addAction("Bring All to Front")
             if bring_action is not None:

@@ -156,8 +156,11 @@ sync so keyboard-driven workflows stay quick.  The **View** menu exposes theme
 controls (System/Light/Dark), toggles the file browser or console panes, and
 resets splitter sizes if the layout becomes cramped, while **Help** opens a
 Markdown guide tailored to the current tool.  On macOS a dedicated **Window**
-menu joins the bar with native `Minimize`, `Zoom`, and `Bring All to Front`
-actions so the utilities behave like first-party apps.  When onboarding new
+menu now mirrors the behaviour of native productivity apps: alongside
+`Minimize`/`Zoom` and `Bring All to Front` you will find `Fill`, `Center`,
+`Move & Resize…`, and an `Enter/Exit Full Screen` toggle that updates to reflect
+the current state. A live `Switch Window` submenu lists the other open tools so
+you can jump between them without resorting to the dock.  When onboarding new
 colleagues you can point them to the menu entry for context without having to
 maintain a separate manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
