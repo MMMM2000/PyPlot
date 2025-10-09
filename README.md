@@ -577,7 +577,10 @@ experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
 pick individual measurements, then load them into the session. Folder mode now
 recursively scans through subdirectories—matching the Lakeshore exports in a
 case-insensitive way—so an entire sweep organised by
-temperature/angle folders can be loaded in one go without extra browsing. Filenames are
+temperature/angle folders can be loaded in one go without extra browsing. Files
+that Windows has duplicated with suffixes such as `- Copy` (leaving the
+`.VSM-Hys-Data` token in the middle of the filename) are also detected, so
+captured runs remain discoverable even after ad-hoc copying. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
 each loop is grouped with peers recorded at the same temperature. Tokens such as
 `T-30-00` are converted to `-30.00 °C`, so the dash-separated format produced by
@@ -652,7 +655,9 @@ temperature, writing a sheet per angle with the selected axes, and building a
 line graph that overlays every angle trace with a labelled legend. The graph
 pages are named after their temperature and each legend entry now reads `Angle
 XX°`, making it immediately clear which curve corresponds to which rotation
-without cross-referencing the workbook sheets. A dedicated
+without cross-referencing the workbook sheets. Each worksheet comment is also
+populated with the matching angle, so the metadata remains visible even when the
+Legend is hidden. A dedicated
 **Export TXT** button also writes the parsed data to plain tab-separated files
 with the detected column names, so Origin (or any analysis tool) can import the
 clean tables without the surrounding instrumentation metadata. After you pick the

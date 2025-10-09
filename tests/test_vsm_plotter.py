@@ -193,6 +193,16 @@ New Section: Section 0:
     assert module._parse_angle(path) == 42.0
 
 
+def test_parse_metadata_handles_positive_temperature_token(tmp_path: Path) -> None:
+    path = tmp_path / "202507101555-Hys-a000-T030-00.VSM-Hys-Data"
+    path.write_text("@@Data\nNew Section: Section 0:\n1 2 3\n@@END Data\n")
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 0.0
+    assert module._parse_temperature(path) == 30.0
+
+
 def test_clean_folder_name_sanitises_tokens() -> None:
     assert module._clean_folder_name("Folder name/with spaces") == "Folder_name_with_spaces"
 
@@ -406,6 +416,17 @@ def test_find_vsm_files_recurses(tmp_path: Path) -> None:
     ]
 
 
+def test_find_vsm_files_includes_copy_suffix(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    expected = root / "202507101555-Hys-a000-T030-00.VSM-Hys-Data - Copy"
+    expected.write_text("@@Data\n@@END Data\n")
+
+    results = module._find_vsm_files(root)
+
+    assert results == [expected]
+
+
 def test_apply_rescaling_symmetrises_targets() -> None:
     base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.5, 1.2]})
     narrow = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1e-3, 5e-4]})
@@ -431,6 +452,8 @@ class _FakeSheet:
         self.data = None
         self.labels: dict[int, str] = {}
         self.name = ""
+        self.comment = ""
+        self.activated = False
 
     def from_df(self, df: pd.DataFrame) -> None:
         self.data = df
@@ -440,6 +463,9 @@ class _FakeSheet:
 
     def set_label(self, col: int, label: str) -> None:
         self.labels[col] = label
+
+    def activate(self) -> None:  # pragma: no cover - behaviour not asserted
+        self.activated = True
 
 
 class _FakeBook(list):
@@ -541,6 +567,13 @@ def test_build_origin_group_sets_names_and_legends() -> None:
     assert fake_origin.books, "Expected a workbook to be created"
     assert fake_origin.graphs, "Expected a graph to be created"
 
+    book = fake_origin.books[0]
+    sheet = book[0]
+    assert sheet.name == "a10"
+    assert sheet.data.equals(subset)
+    assert sheet.labels == {0: "H", 1: "M"}
+    assert sheet.comment == "Angle 10°"
+
     graph = fake_origin.graphs[0]
     assert graph.lname == "-30 °C"
     assert graph.name == plotter._origin_graph_short_name(-30.0)
@@ -548,6 +581,7 @@ def test_build_origin_group_sets_names_and_legends() -> None:
     layer = graph[0]
     assert layer.plots, "Expected a plot to be added to the Origin layer"
     assert layer.plots[0].legend == "Angle 10°"
+    assert any("wks.comment$=\"Angle 10°\";" in cmd for cmd in fake_origin.commands)
 
 
 def test_toggle_line_visibility_updates_lines_and_state() -> None:

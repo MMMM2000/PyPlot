@@ -24,6 +24,7 @@ HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
 ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
 TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
+VSM_FILE_TOKEN_RE = re.compile(r"\.vsm-hys-data(?:$|[^0-9a-z])")
 FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
@@ -285,7 +286,8 @@ def _find_vsm_files(directory: Path) -> List[Path]:
     for candidate in directory.rglob("*"):
         if not candidate.is_file():
             continue
-        if candidate.name.lower().endswith(".vsm-hys-data"):
+        name_lower = candidate.name.lower()
+        if VSM_FILE_TOKEN_RE.search(name_lower):
             matches.append(candidate)
     return sorted(matches)
 
@@ -1818,6 +1820,20 @@ class VSMPlotter(QtWidgets.QWidget):
                     sheet.set_label(col, label)
                 except Exception:
                     pass
+            comment = f"Angle {measurement.angle:g}°"
+            safe_comment = self._escape_origin_text(comment)
+            try:
+                sheet.activate()
+            except Exception:
+                pass
+            try:
+                origin_any.lt_exec(f'wks.comment$="{safe_comment}";')
+            except Exception:
+                pass
+            try:
+                setattr(sheet, "comment", comment)
+            except Exception:
+                pass
             plot_obj = layer.add_plot(sheet, coly=1, colx=0, type='y')
             if plot_obj is not None:
                 try:
