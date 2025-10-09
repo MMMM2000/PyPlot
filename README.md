@@ -664,6 +664,10 @@ measured values and notes the decision in the log so downstream processing never
 receives flattened traces.
 Constant sweeps still pick up the same synthetic gradient that drives the plots,
 so the exported TXT tables mirror the aligned endpoints you see on screen.
+When at least one angle in a batch shows measurable variation the rescaler now
+anchors every trace to that widest span before falling back to the gradient,
+preventing nearly flat loops (such as the 90° sweep) from collapsing into a
+horizontal line on screen or in the exported data.
 Even if a run is missing angle/temperature metadata, the loader still enables TXT
 export while noting that plotting is disabled, making it possible to salvage
 data from noisy recipes. If Origin is not installed the exporter logs a short

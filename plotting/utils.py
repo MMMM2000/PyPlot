@@ -1123,7 +1123,24 @@ class _WindowMenuManager(QtCore.QObject):
         # Minimize ---------------------------------------------------------
         minimize_action = menu.addAction("Minimize")
         _set_icon(minimize_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton)
-        _set_shortcut(minimize_action, QtGui.QKeySequence.StandardKey.Minimize)
+        try:
+            minimize_attr = getattr(QtGui.QKeySequence.StandardKey, "Minimize")
+        except AttributeError:
+            minimize_attr = None
+        except Exception:
+            minimize_attr = None
+        try:
+            unknown_key = getattr(QtGui.QKeySequence.StandardKey, "UnknownKey")
+        except AttributeError:
+            unknown_key = None
+        except Exception:
+            unknown_key = None
+        minimize_shortcut: QtGui.QKeySequence.StandardKey | str
+        if minimize_attr is None or minimize_attr == unknown_key:
+            minimize_shortcut = "Meta+M" if sys.platform == "darwin" else "Ctrl+M"
+        else:
+            minimize_shortcut = minimize_attr
+        _set_shortcut(minimize_action, minimize_shortcut)
         if minimize_action is not None:
             if hasattr(target, "showMinimized"):
                 minimize_action.triggered.connect(target.showMinimized)

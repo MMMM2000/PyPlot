@@ -154,10 +154,27 @@ def _apply_rescaling(
     target_right = max(item[5] for item in prepared)
 
     if _is_near_zero(target_right - target_left, target_left, target_right):
-        reference_left = prepared[0][2]
-        reference_right = prepared[0][3]
-        target_left = reference_left
-        target_right = reference_right
+        best_entry = max(
+            prepared,
+            key=lambda item: abs(item[5] - item[4]),
+        )
+        best_span = abs(best_entry[5] - best_entry[4])
+        if not _is_near_zero(best_span, best_entry[4], best_entry[5]):
+            target_left = best_entry[4]
+            target_right = best_entry[5]
+        else:
+            edge_span = abs(best_entry[3] - best_entry[2])
+            if not _is_near_zero(edge_span, best_entry[2], best_entry[3]):
+                target_left = best_entry[2]
+                target_right = best_entry[3]
+            else:
+                epsilon = max(
+                    abs(best_entry[4]),
+                    abs(best_entry[5]),
+                    1.0,
+                ) * RELATIVE_TOLERANCE
+                target_left = best_entry[4] - epsilon
+                target_right = best_entry[5] + epsilon
 
     results: Dict[Path, RescaleResult] = {}
     for path, subset, left_edge, right_edge, y_min, y_max in prepared:
