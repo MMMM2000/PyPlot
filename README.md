@@ -592,7 +592,10 @@ before the next token) now resolve to a numeric angle of `0 °` instead of being
 skipped. When filenames
 are missing the `a`/`T` tokens, the loader now scans the header metadata (for
 example the `@Filename` lines embedded by the VSM software) so rotations and
-temperatures are still recovered automatically.
+temperatures are still recovered automatically. Even if a measurement has lost
+the `.VSM-Hys-Data` suffix entirely, the loader recognises the typical Lakeshore
+`Hys`/`T`/`a` tokens and imports the file when recursing through a folder tree,
+so stray copies still make it into the session without manual renaming.
 
 The loader understands both tidy column descriptions (`Column 0: …`) and the
 free-form headers produced by newer VSM exports, ignoring the lengthy
@@ -656,8 +659,9 @@ line graph that overlays every angle trace with a labelled legend. The graph
 pages are named after their temperature and each legend entry now reads `Angle
 XX°`, making it immediately clear which curve corresponds to which rotation
 without cross-referencing the workbook sheets. Each worksheet comment is also
-populated with the matching angle, so the metadata remains visible even when the
-Legend is hidden. A dedicated
+populated with the matching angle and the same value is written into the Y-column
+*Comments* row, mirroring the layout shown in Origin's Object Manager so the angle
+is visible even if the legend is hidden. A dedicated
 **Export TXT** button also writes the parsed data to plain tab-separated files
 with the detected column names, so Origin (or any analysis tool) can import the
 clean tables without the surrounding instrumentation metadata. After you pick the

@@ -427,6 +427,17 @@ def test_find_vsm_files_includes_copy_suffix(tmp_path: Path) -> None:
     assert results == [expected]
 
 
+def test_find_vsm_files_handles_suffixless_exports(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    expected = root / "202507101555-Hys-a000-T030-00"
+    expected.write_text("@@Data\n@@END Data\n")
+
+    results = module._find_vsm_files(root)
+
+    assert results == [expected]
+
+
 def test_apply_rescaling_symmetrises_targets() -> None:
     base = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1.5, 1.2]})
     narrow = pd.DataFrame({"H": [-10.0, 10.0], "M": [-1e-3, 5e-4]})
@@ -454,6 +465,7 @@ class _FakeSheet:
         self.name = ""
         self.comment = ""
         self.activated = False
+        self.column_comments: dict[int, str] = {}
 
     def from_df(self, df: pd.DataFrame) -> None:
         self.data = df
@@ -463,6 +475,9 @@ class _FakeSheet:
 
     def set_label(self, col: int, label: str) -> None:
         self.labels[col] = label
+
+    def set_comment(self, col: int, comment: str) -> None:
+        self.column_comments[col] = comment
 
     def activate(self) -> None:  # pragma: no cover - behaviour not asserted
         self.activated = True
@@ -573,6 +588,7 @@ def test_build_origin_group_sets_names_and_legends() -> None:
     assert sheet.data.equals(subset)
     assert sheet.labels == {0: "H", 1: "M"}
     assert sheet.comment == "Angle 10°"
+    assert sheet.column_comments == {1: "Angle 10°"}
 
     graph = fake_origin.graphs[0]
     assert graph.lname == "-30 °C"
@@ -581,7 +597,7 @@ def test_build_origin_group_sets_names_and_legends() -> None:
     layer = graph[0]
     assert layer.plots, "Expected a plot to be added to the Origin layer"
     assert layer.plots[0].legend == "Angle 10°"
-    assert any("wks.comment$=\"Angle 10°\";" in cmd for cmd in fake_origin.commands)
+    assert any("wks.col2.comment$=\"Angle 10°\";" in cmd for cmd in fake_origin.commands)
 
 
 def test_toggle_line_visibility_updates_lines_and_state() -> None:

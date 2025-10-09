@@ -24,7 +24,7 @@ HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
 ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
 TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
-VSM_FILE_TOKEN_RE = re.compile(r"\.vsm-hys-data(?:$|[^0-9a-z])")
+VSM_FILE_TOKEN_RE = re.compile(r"vsm-hys-data(?:$|[^0-9a-z])")
 FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
 SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
@@ -276,6 +276,20 @@ def _coerce_bool(value: object) -> bool:
     return False
 
 
+def _looks_like_vsm_name(name: str) -> bool:
+    """Return ``True`` when ``name`` resembles a VSM hysteresis export."""
+
+    lowered = name.strip().lower()
+    if VSM_FILE_TOKEN_RE.search(lowered):
+        return True
+
+    stem = Path(lowered).stem
+    if VSM_FILE_TOKEN_RE.search(stem):
+        return True
+
+    return "-hys-" in stem and "-t" in stem and "-a" in stem
+
+
 def _find_vsm_files(directory: Path) -> List[Path]:
     """Return all VSM data files within ``directory`` and its subdirectories."""
 
@@ -286,10 +300,13 @@ def _find_vsm_files(directory: Path) -> List[Path]:
     for candidate in directory.rglob("*"):
         if not candidate.is_file():
             continue
-        name_lower = candidate.name.lower()
-        if VSM_FILE_TOKEN_RE.search(name_lower):
+        if _looks_like_vsm_name(candidate.name):
             matches.append(candidate)
-    return sorted(matches)
+
+    unique: Dict[Path, Path] = {}
+    for path in matches:
+        unique[path.resolve()] = path
+    return sorted(unique.values())
 
 
 @dataclass
@@ -1827,9 +1844,17 @@ class VSMPlotter(QtWidgets.QWidget):
             except Exception:
                 pass
             try:
-                origin_any.lt_exec(f'wks.comment$="{safe_comment}";')
+                sheet.set_comment(1, comment)  # type: ignore[attr-defined]
             except Exception:
                 pass
+            for command in (
+                f'wks.comment$="{safe_comment}";',
+                f'wks.col2.comment$="{safe_comment}";',
+            ):
+                try:
+                    origin_any.lt_exec(command)
+                except Exception:
+                    pass
             try:
                 setattr(sheet, "comment", comment)
             except Exception:
