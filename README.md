@@ -1,8 +1,8 @@
 # Microwire Data Plotting & Logging
 
 Tools for measuring and visualising data from microwire experiments.  The
-repository provides loggers for serial devices and VISA instruments, a generic
-data logger and a small launcher that groups all utilities.
+repository provides loggers for serial devices, a generic data logger, and a
+small launcher that groups all utilities.
 
 ## 1. Installation
 
@@ -16,7 +16,6 @@ python -m venv .venv
 .\.venv\Scripts\Activate
 python -m pip install --upgrade pip
 pip install -r requirements.txt
-pip install -U pyvisa-py    # optional: update VISA backend
 ```
 
 ### 1.2 macOS / Linux
@@ -26,7 +25,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install --upgrade pip
 pip install -r requirements.txt
-pip install -U pyvisa-py    # optional: update VISA backend
 ```
 
 ### 1.3 Additional tools
@@ -37,8 +35,8 @@ The project occasionally uses the Codex CLI for development helpers:
 npm install -g @openai/codex
 ```
 
-The requirements include `pyvisa`, `pyvisa-py`, `psutil` and `zeroconf` so VISA
-resources can be discovered without vendor drivers.
+The requirements include `psutil` and `zeroconf` so serial and network devices
+can be discovered without vendor drivers.
 
 ### 1.4 OriginPro Python packages
 
@@ -190,19 +188,17 @@ Developer notes: the Qt overrides now accept optional `QPaintEvent`/`QCloseEvent
 arguments to match the PyQt6 stubs, Origin helpers coerce LabTalk worksheets
 and plots to dynamic objects before assigning colours or symbols, and pandas
 series are converted to NumPy arrays before histogramming so Pylance no longer
-flags our plotting pipelines. The PyVISA annealing logger also checks that
-`styleHints()` is available before reading the system colour scheme, and the
-Maxion controls guard against layouts that omit `rowCount()`. Hysteresis and
-load-compare exporters likewise treat Origin handles dynamically, and GUI
-wrappers invoke plotting routines through small closures so helpers expecting
-`Callable[[], None]` remain satisfied even when plotters return figures.
+flags our plotting pipelines. The Maxion controls guard against layouts that
+omit `rowCount()`, hysteresis and load-compare exporters treat Origin handles
+dynamically, and GUI wrappers invoke plotting routines through small closures
+so helpers expecting `Callable[[], None]` remain satisfied even when plotters
+return figures.
 
-The menu bar also adds a **Developer** section. Enable **Keep File Selections**
+The menu bar also adds a **Develop** section. Enable **Keep File Selections**
 to reopen plotting dialogs with the same files pre-selected—handy when you are
 tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose
-prototype utilities such as the PyVISA annealing logger and the Microwire Data
-Builder. Keep the toggle off for day-to-day work to focus on production tools
-only.
+prototype utilities such as the VSM Origin Workbench while keeping the launcher
+focused on production tools by default.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: each
 sample is annotated beneath the axis with its microwire ID (`2/1`, `2/2`, …)
@@ -267,26 +263,7 @@ Launch from the master launcher or run
 python -m data_logging.current_annealing_logger.current_annealing_logger
 ```
 
-### 3.2 PyVISA Current Annealing Logger (experimental)
-
-The PyVISA variant now lives under the launcher’s **Experiments** tab. Enable
-the tab from **Developer → Show Experiments Tab** to expose it. The GUI mirrors
-the serial logger feature-for-feature—configure peak current, step, interval,
-dwell, and loop count (including an infinite option) while the time estimate
-updates live. The voltage-limit dialog, **Reverse now** button, and contact-loss
-guard all behave like the serial tool, and the ramp-down trace is plotted in a
-contrasting colour. Select a VISA resource (e.g. `ASRL/ttyV1::INSTR`), choose
-where to log, and click **Start annealing**—the first zero sample is skipped
-automatically. The logger remembers its last log directory and file name and
-shares the same menu shortcuts for themes and layout tweaks.
-
-Run it directly with
-
-```bash
-python -m experiments.pyvisa_current_annealing_logger
-```
-
-### 3.3 Generic Data Logger
+### 3.2 Generic Data Logger
 
 Records arbitrary measurements to structured text files with a built‑in file
 name builder.  Real‑time plots update while logging and match the system theme.
@@ -341,22 +318,14 @@ colleagues:
 Prototype user interfaces and plotting experiments live in the `experiments`
 directory and are independent from the main tools.
 
-### PyVISA current annealing logger
-
-`experiments/pyvisa_current_annealing_logger.py` mirrors the serial logger while
-talking to VISA instruments. Enable the Experiments tab from the launcher’s
-**Developer** menu to access it, or run the module directly when you want to
-exercise VISA hardware without altering the production launcher.
-
 ### Microwire data builder
 
-`experiments/microwire_data_builder` assembles fabrication spreadsheets and
-current-annealing text files into a single analytics-ready table. Enable the
-**Experiments** tab from the launcher’s **Developer** menu and choose
-**Microwire Data Builder** or start it directly:
+`microwire_data_builder` assembles fabrication spreadsheets and
+current-annealing text files into a single analytics-ready table. Launch it from
+the master launcher’s **Builders** tab or start it directly:
 
 ```bash
-python -m experiments.microwire_data_builder
+python -m microwire_data_builder
 ```
 
 The PyQt6 window splits the settings and status widgets on the left from the
@@ -505,14 +474,14 @@ martensite/austenite lengths, and flags any samples that broke during the strain
 test. Rows that do not parse into draw/piece identifiers are preserved exactly
 as written so reviewer notes are never lost.
 
-### Strain Plot Explorer
+### Strain 3D Plot
 
 When you want to inspect relationships between strain measurements, microscope
-diameters, and fabrication data, open the **Strain Plot Explorer** from the
-**Experiments** tab (or launch it manually):
+diameters, and fabrication data, open **Strain 3D Plot** from the launcher’s
+**Plotting** tab (or launch it manually):
 
 ```bash
-python -m experiments.strain_3d_plotter
+python -m plotting.strain_3d_plot
 ```
 
 Select either a strain worksheet or a full microwire database export. The
@@ -559,6 +528,10 @@ Each microwire (composition + draw/piece) becomes a single row with English
 headers tailored for analytics. The builder selects the 1000 mA measurement and
 the lowest available current for each microwire, generates optional plots with
 the familiar red/blue styling, and records provenance back to the source files.
+### VSM Origin Workbench (experimental)
+
+Enable the Experiments tab from the launcher’s **Develop** menu and launch **VSM Origin Workbench** to explore a Lakeshore-inspired layout. The central canvas reuses the hysteresis plotting pipeline while dock widgets on the left and right mirror Origin’s Project Explorer, Message Log, and Object Manager. Each dock can be pinned, auto-hidden, or floated as an always-on-top window so you can recreate your preferred workspace. Every imported loop also appears as an editable worksheet: double-click cells to tweak values, right-click to remove rows, and replot to see the adjustments reflected in the overlay.
+
 The exported columns are:
 
 * Composition
@@ -589,12 +562,12 @@ The exported columns are:
  and the temporary `plots/` staging folder is deleted once the workbook is
  written.
 
-### VSM Plot Explorer
+### VSM Hysteresis Loops
 
 Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
-bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
-experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
-pick individual measurements, then load them into the session. Folder mode now
+bulk from **VSM Hysteresis Loops** (launcher **Plotting** tab or `python -m
+plotting.vsm_hysteresis_loops`). Point the tool at a folder of `VSM-Hys-Data`
+files or pick individual measurements, then load them into the session. Folder mode now
 recursively scans through subdirectories—matching the Lakeshore exports in a
 case-insensitive way—so an entire sweep organised by
 temperature/angle folders can be loaded in one go without extra browsing. Files
@@ -641,7 +614,8 @@ tables that precede the columns block from overriding the real column labels.
 
 Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
 to plot—defaults focus on **Applied Field** versus **Signal parallel with
-sample**, but every numeric column advertised in the header is available. Set the
+sample**, but every numeric column advertised in the header is available and the
+dialog remembers your most recent axis selections between sessions. Set the
 temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
 concentrate on a single group. The angle visibility controls now live alongside
@@ -656,6 +630,12 @@ checkbox recolours both embedded and pop-out Matplotlib figures to match the res
 of the UI, and the **Open in Matplotlib** button still clones the current tabs
 into interactive desktop windows for quick zooming or annotation outside the
 embedded canvas.
+Use the **Angle overlays** panel beneath the visibility controls to highlight a
+set of rotations and compare how the loops evolve with temperature. Select one
+or more angles and click **Plot selected angles across temperatures** to open a
+dedicated Matplotlib window where every curve is grouped by angle but coloured
+by temperature. Rescaling, dark-mode styling, and line/marker preferences carry
+over automatically, making it easy to build publication-ready comparisons.
 
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the

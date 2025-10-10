@@ -10,12 +10,12 @@ import sys
 import pandas as pd
 import pytest
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "experiments" / "vsm_plotter.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent / "plotting" / "vsm_hysteresis_loops.py"
 
-spec = importlib.util.spec_from_file_location("vsm_plotter", MODULE_PATH)
+spec = importlib.util.spec_from_file_location("vsm_hysteresis_loops", MODULE_PATH)
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
-sys.modules["vsm_plotter"] = module
+sys.modules["vsm_hysteresis_loops"] = module
 try:
     spec.loader.exec_module(module)  # type: ignore[call-arg]
 except ImportError as exc:  # pragma: no cover - environment guard

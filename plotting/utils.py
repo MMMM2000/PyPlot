@@ -1901,7 +1901,7 @@ class _DeveloperOptions(QtCore.QObject):
         self.experiments_visibility_changed.emit(enabled)
 
     def create_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
-        menu = QtWidgets.QMenu("&Developer", parent)
+        menu = QtWidgets.QMenu("&Develop", parent)
 
         keep_action = menu.addAction("Keep &File Selections")
         if keep_action is not None:

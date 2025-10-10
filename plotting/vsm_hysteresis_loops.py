@@ -719,12 +719,18 @@ class VSMPlotter(QtWidgets.QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("VSM Plot Explorer")
+        self.setWindowTitle("VSM Hysteresis Loops")
         self.resize(1480, 940)
 
-        self.logger = logging.getLogger("vsm_plotter")
+        self.logger = logging.getLogger("vsm_hysteresis_loops")
         self.logger.setLevel(logging.INFO)
-        self.settings = QtCore.QSettings("MicrowireLab", "VSMPlotter")
+        self.settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
+        stored_x = self.settings.value("x_axis")
+        stored_y = self.settings.value("y_axis")
+        self._stored_axes: tuple[str | None, str | None] = (
+            stored_x if isinstance(stored_x, str) and stored_x else None,
+            stored_y if isinstance(stored_y, str) and stored_y else None,
+        )
         self.last_export_path: Path | None = None
 
         self.measurements: List[VSMMeasurement] = []
@@ -787,6 +793,9 @@ class VSMPlotter(QtWidgets.QWidget):
         controls_layout.addWidget(QtWidgets.QLabel("Y axis"))
         controls_layout.addWidget(self.y_axis_combo)
 
+        self.x_axis_combo.currentTextChanged.connect(self._store_axis_selection)
+        self.y_axis_combo.currentTextChanged.connect(self._store_axis_selection)
+
         controls_layout.addWidget(QtWidgets.QLabel("Matplotlib style"))
         self.style_combo = QtWidgets.QComboBox()
         self.style_combo.addItem("Line", "line")
@@ -825,6 +834,27 @@ class VSMPlotter(QtWidgets.QWidget):
         self.angle_scroll.setWidget(self.angle_container)
         self.angle_scroll.setEnabled(False)
         controls_layout.addWidget(self.angle_scroll)
+
+        self.angle_overlay_group = QtWidgets.QGroupBox("Angle overlays")
+        overlay_layout = QtWidgets.QVBoxLayout(self.angle_overlay_group)
+        overlay_layout.setContentsMargins(6, 4, 6, 4)
+        overlay_layout.setSpacing(4)
+        self.angle_overlay_list = QtWidgets.QListWidget()
+        self.angle_overlay_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        overlay_layout.addWidget(self.angle_overlay_list)
+        self.angle_overlay_button = QtWidgets.QPushButton(
+            "Plot selected angles across temperatures"
+        )
+        self.angle_overlay_button.setEnabled(False)
+        overlay_layout.addWidget(self.angle_overlay_button)
+        controls_layout.addWidget(self.angle_overlay_group)
+
+        self.angle_overlay_list.itemSelectionChanged.connect(
+            self._update_overlay_button_state
+        )
+        self.angle_overlay_button.clicked.connect(self._plot_angle_overlays)
 
         controls_layout.addWidget(QtWidgets.QLabel("TXT export mode"))
         self.export_mode_combo = QtWidgets.QComboBox()
@@ -870,10 +900,13 @@ class VSMPlotter(QtWidgets.QWidget):
 
         install_standard_menu(
             self,
-            help_topic="vsm_plotter",
+            help_topic="vsm_hysteresis_loops",
             console=self.log_view,
             open_file=self._open_files_from_menu,
             open_folder=self._open_folder_from_menu,
+            close_window=self.close,
+            splitter=self.output_splitter,
+            default_split_sizes=[3, 1],
         )
 
     def _load_settings(self) -> None:
@@ -927,6 +960,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.settings.setValue("plot_style", self.style_combo.currentData())
         self.settings.setValue("rescale_y", self.rescale_checkbox.isChecked())
         self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
+        if hasattr(self, "x_axis_combo"):
+            self.settings.setValue("x_axis", self.x_axis_combo.currentText())
+        if hasattr(self, "y_axis_combo"):
+            self.settings.setValue("y_axis", self.y_axis_combo.currentText())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.setValue("geometry", self.saveGeometry())
@@ -998,7 +1035,7 @@ class VSMPlotter(QtWidgets.QWidget):
 
         paths = self._selected_paths()
         if not paths:
-            QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Select at least one VSM file to load.")
+            QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Select at least one VSM file to load.")
             return
 
         total_loaded = 0
@@ -1057,7 +1094,7 @@ class VSMPlotter(QtWidgets.QWidget):
         if total_loaded == 0:
             QtWidgets.QMessageBox.information(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 "No VSM measurements could be loaded.",
             )
             return
@@ -1097,16 +1134,27 @@ class VSMPlotter(QtWidgets.QWidget):
     def _populate_axis_combos(self, labels: List[str]) -> None:
         numeric_labels = [label for label in labels if label]
         preferred_x = [
-            "Applied Field",
             "Applied Field [Oe]",
+            "Applied Field",
             "Applied Field For Plot",
         ]
         preferred_y = [
+            "Signal X direction [emu]",
             "Signal parallel with sample",
             "Signal Magnitude",
             "Moment [emu]",
         ]
-        def _choose(preferences: Iterable[str], combo: QtWidgets.QComboBox) -> None:
+
+        stored_x, stored_y = self._stored_axes
+
+        def _choose(
+            preferences: Iterable[str],
+            combo: QtWidgets.QComboBox,
+            stored: str | None,
+        ) -> None:
+            if stored and stored in numeric_labels:
+                combo.setCurrentText(stored)
+                return
             for pref in preferences:
                 matches = [label for label in numeric_labels if pref.lower() in label.lower()]
                 if matches:
@@ -1120,18 +1168,33 @@ class VSMPlotter(QtWidgets.QWidget):
             combo.clear()
             combo.addItems(numeric_labels)
             combo.blockSignals(False)
-        _choose(preferred_x, self.x_axis_combo)
-        _choose(preferred_y, self.y_axis_combo)
+        _choose(preferred_x, self.x_axis_combo, stored_x)
+        _choose(preferred_y, self.y_axis_combo, stored_y)
+        self._store_axis_selection()
 
     # ------------------------------------------------------------------ plotting helpers
+    def _store_axis_selection(self) -> None:
+        if not hasattr(self, "x_axis_combo") or not hasattr(self, "y_axis_combo"):
+            return
+        x_axis = self.x_axis_combo.currentText().strip()
+        y_axis = self.y_axis_combo.currentText().strip()
+        self._stored_axes = (
+            x_axis or None,
+            y_axis or None,
+        )
+        if x_axis:
+            self.settings.setValue("x_axis", x_axis)
+        if y_axis:
+            self.settings.setValue("y_axis", y_axis)
+
     def _generate_plots(self) -> None:
         if not self.measurements:
-            QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Load VSM measurements first.")
+            QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Load VSM measurements first.")
             return
         x_axis = self.x_axis_combo.currentText()
         y_axis = self.y_axis_combo.currentText()
         if not x_axis or not y_axis:
-            QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Select X and Y axes for plotting.")
+            QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Select X and Y axes for plotting.")
             return
 
         target_temp = self.temperature_combo.currentData()
@@ -1149,7 +1212,7 @@ class VSMPlotter(QtWidgets.QWidget):
         if not groups:
             QtWidgets.QMessageBox.information(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 "No measurements match the selected filters and axes.",
             )
             return
@@ -1385,6 +1448,16 @@ class VSMPlotter(QtWidgets.QWidget):
             self.angle_placeholder.setVisible(True)
         if hasattr(self, "angle_scroll"):
             self.angle_scroll.setEnabled(False)
+        self._reset_overlay_controls()
+
+    def _reset_overlay_controls(self) -> None:
+        if not hasattr(self, "angle_overlay_list"):
+            return
+        self.angle_overlay_list.blockSignals(True)
+        self.angle_overlay_list.clear()
+        self.angle_overlay_list.blockSignals(False)
+        if hasattr(self, "angle_overlay_button"):
+            self.angle_overlay_button.setEnabled(False)
 
     def _update_angle_controls(
         self,
@@ -1447,6 +1520,54 @@ class VSMPlotter(QtWidgets.QWidget):
         for stale_temp in [key for key in list(self._line_visibility.keys()) if key not in prepared_groups]:
             del self._line_visibility[stale_temp]
 
+        self._update_angle_overlay_options(prepared_groups)
+
+    def _update_angle_overlay_options(
+        self,
+        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
+    ) -> None:
+        if not hasattr(self, "angle_overlay_list"):
+            return
+        selected_angles = set(self._selected_overlay_angles())
+        self.angle_overlay_list.blockSignals(True)
+        self.angle_overlay_list.clear()
+        available_angles = sorted(
+            {
+                float(measurement.angle)
+                for entries in prepared_groups.values()
+                for measurement, _ in entries
+                if measurement.angle is not None
+            }
+        )
+        for angle in available_angles:
+            item = QtWidgets.QListWidgetItem(f"{angle:g}°")
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, angle)
+            self.angle_overlay_list.addItem(item)
+            if angle in selected_angles:
+                item.setSelected(True)
+        self.angle_overlay_list.blockSignals(False)
+        self._update_overlay_button_state()
+
+    def _selected_overlay_angles(self) -> List[float]:
+        if not hasattr(self, "angle_overlay_list"):
+            return []
+        angles: List[float] = []
+        for item in self.angle_overlay_list.selectedItems():
+            try:
+                value = float(item.data(QtCore.Qt.ItemDataRole.UserRole))
+            except (TypeError, ValueError):
+                continue
+            angles.append(value)
+        return angles
+
+    def _update_overlay_button_state(self) -> None:
+        if not hasattr(self, "angle_overlay_button"):
+            return
+        has_angles = bool(self._selected_overlay_angles())
+        self.angle_overlay_button.setEnabled(
+            has_angles and bool(self._last_prepared_groups)
+        )
+
     def _on_angle_checkbox_toggled(self, temperature: float, angle: float, checked: bool) -> None:
         self._toggle_line_visibility(temperature, angle, checked)
 
@@ -1467,11 +1588,103 @@ class VSMPlotter(QtWidgets.QWidget):
         line.set_visible(visible)
         self._refresh_tab_legend(tab_state)
 
+    def _plot_angle_overlays(self) -> None:
+        if not self._last_prepared_groups or not self._last_axes:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots before creating angle overlays.",
+            )
+            return
+
+        angles = self._selected_overlay_angles()
+        if not angles:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Select at least one angle to plot across temperatures.",
+            )
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # pragma: no cover - backend dependent
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Hysteresis Loops",
+                f"Matplotlib's interactive backend is unavailable: {exc}",
+            )
+            return
+
+        x_axis, y_axis = self._last_axes
+        rescale_enabled = self._last_rescale_enabled
+        rescale_info = self._last_rescale_info if rescale_enabled else {}
+        line_kwargs = self._line_style_kwargs()
+
+        count = len(angles)
+        cols = 2 if count > 1 else 1
+        rows = math.ceil(count / cols)
+        fig, axes = plt.subplots(rows, cols, squeeze=False)
+        axes_flat = list(axes.flat)
+
+        for ax in axes_flat[count:]:
+            fig.delaxes(ax)
+
+        for index, angle in enumerate(angles):
+            ax = axes_flat[index]
+            plotted = False
+            for temperature, entries in sorted(self._last_prepared_groups.items()):
+                for measurement, subset in entries:
+                    if measurement.angle is None:
+                        continue
+                    if not math.isclose(float(measurement.angle), angle, abs_tol=0.05):
+                        continue
+                    series_y = subset[y_axis]
+                    if rescale_enabled:
+                        result = rescale_info.get(temperature, {}).get(measurement.path)
+                        if result is not None:
+                            if result.replacement is not None:
+                                replacement = result.replacement.reindex(subset.index)
+                                series_y = replacement
+                            else:
+                                series_y = series_y * result.scale + result.offset
+                    ax.plot(
+                        subset[x_axis].to_numpy(),
+                        pd.to_numeric(series_y, errors="coerce").to_numpy(),
+                        label=f"{temperature:g} °C",
+                        **line_kwargs,
+                    )
+                    plotted = True
+            if plotted:
+                ax.set_title(f"{angle:g}° across temperatures")
+                ax.set_xlabel(x_axis)
+                ax.set_ylabel(y_axis)
+                self._apply_plot_theme(ax)
+                legend = ax.legend(loc="best")
+                if legend is not None:
+                    self._style_legend(legend)
+            else:
+                ax.set_axis_off()
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No data for this angle.",
+                    transform=ax.transAxes,
+                    ha="center",
+                    va="center",
+                )
+
+        fig.tight_layout()
+        self._append_log(
+            "Opened Matplotlib window showing selected angles across temperatures."
+        )
+        plt.show()
+
     def _open_matplotlib_window(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
             QtWidgets.QMessageBox.information(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 "Generate plots before opening a Matplotlib window.",
             )
             return
@@ -1481,7 +1694,7 @@ class VSMPlotter(QtWidgets.QWidget):
         except Exception as exc:  # pragma: no cover - GUI/runtime dependent
             QtWidgets.QMessageBox.warning(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 f"Matplotlib's interactive backend is unavailable: {exc}",
             )
             return
@@ -1538,13 +1751,13 @@ class VSMPlotter(QtWidgets.QWidget):
         else:
             QtWidgets.QMessageBox.information(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 "No Matplotlib plots are available to display.",
             )
 
     def _export_txt(self) -> None:
         if not self.measurements:
-            QtWidgets.QMessageBox.warning(self, "VSM Plot Explorer", "Load VSM measurements first.")
+            QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Load VSM measurements first.")
             return
 
         start_directory = (
@@ -1586,7 +1799,7 @@ class VSMPlotter(QtWidgets.QWidget):
         if rescale_requested and (not x_axis or not y_axis):
             QtWidgets.QMessageBox.warning(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 "Select X and Y axes before exporting rescaled data.",
             )
             rescale_requested = False
@@ -1659,7 +1872,7 @@ class VSMPlotter(QtWidgets.QWidget):
         if exported:
             QtWidgets.QMessageBox.information(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 f"Exported {exported} measurement(s) to {target_dir}",
             )
             self._append_log(f"Exported {exported} measurement(s) to {target_dir}")
@@ -1669,7 +1882,7 @@ class VSMPlotter(QtWidgets.QWidget):
         else:
             QtWidgets.QMessageBox.information(
                 self,
-                "VSM Plot Explorer",
+                "VSM Hysteresis Loops",
                 "No files were exported."
             )
 

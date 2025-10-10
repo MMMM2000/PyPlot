@@ -32,7 +32,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * **Double-click** any file in the list to open it in Explorer/Finder for quick
               inspection.
 
-            ### Developer menu essentials
+            ### Develop menu essentials
             * **Keep File Selections** – when iterating on a dataset, enable this so the dialog
               reopens with your previous file list intact.
             * **Show Experiments Tab** – exposes prototypes (the PyVISA annealing logger and the
@@ -89,8 +89,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                while the selected window opens so you can return here without relaunching the
                program. New windows are tracked automatically and the launcher warns you if
                closing it would also close child dialogs.
-            3. Use **Developer → Show Experiments Tab** to reveal or hide the prototype list and
-               **Developer → Keep File Selections** if you want plotting dialogs to reopen with
+            3. Use **Develop → Show Experiments Tab** to reveal or hide the prototype list and
+               **Develop → Keep File Selections** if you want plotting dialogs to reopen with
                the same input files pre-selected. The experiments currently bundle the PyVISA
                annealing logger and the Microwire Data Builder.
             4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
@@ -331,6 +331,28 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "experiment_vsm_origin_workbench": {
+        "title": "VSM Origin Workbench",
+        "body": dedent(
+            """
+            ### Layout overview
+            * Launch the workbench from the launcher’s **Experiments** tab (enable it from the **Develop** menu).
+            * The central plot mirrors the standard hysteresis-loop viewer. Docks on the left expose the Project Explorer and Message Log; the right dock mirrors Origin’s Object Manager; the bottom dock lists editable worksheets.
+            * Click the pin icon to keep a dock visible, unpin it to enable auto-hide on hover, or use the float button to pop the panel out into an always-on-top window.
+
+            ### Loading data
+            1. Choose one or more `VSM-Hys-Data` files (or point to a folder) and click **Load data**.
+            2. The Project Explorer groups loops by temperature and angle. Worksheet tabs mirror each measurement so you can review or edit the numeric tables.
+            3. Double-click a worksheet cell to edit it in place or right-click a selection and choose **Delete selected rows** to remove bad readings before plotting.
+
+            ### Plotting
+            * Pick the X/Y axes, optionally enable **Normalise loop endpoints**, and toggle the dark theme if you prefer a graphite background.
+            * Click **Plot loops** to refresh the Matplotlib canvas. Use the Object Manager tree to hide or show individual angles without regenerating the plot.
+            * The **Angle overlays** panel opens a dedicated Matplotlib window comparing selected angles across all temperatures so you can inspect thermal trends quickly.
+            """
+        ).strip(),
+    },
+
     "logger_current_annealing": {
         "title": "Serial current annealing logger",
         "body": dedent(
@@ -357,42 +379,6 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Notes
             * The shared menu bar provides theme controls, console visibility toggles, and this
               help entry for quick reference.
-            """
-        ).strip(),
-    },
-    "logger_pyvisa_current_annealing": {
-        "title": "PyVISA current annealing logger",
-        "body": dedent(
-            """
-            ### Connect to the instrument
-            * Open the logger from the launcher’s **Experiments** tab (enable it from the
-              **Developer** menu). The window mirrors the serial logger but communicates via
-              VISA.
-            1. Click **Refresh** to enumerate VISA resources. Devices discovered by NI-VISA or
-               ``pyvisa-py`` appear alongside serial bridges (`ASRL…`).
-            2. Pick the instrument, adjust the log directory and filename if required, and press
-               **Connect**. The dialog remembers the previous selections between sessions.
-
-            ### Configure the annealing sequence
-            * Set **Max**, **Step**, and **Interval** to describe the ramp. The live time estimate
-              updates immediately when you adjust any parameter or loop count.
-            * Specify the **Dwell** time at the peak and choose how many loops to execute. Set the
-              loop count to `∞` for continuous operation. Toggle **Reverse to zero after max** to
-              force a return to zero between loops.
-
-            ### Run and monitor
-            * Press **Start annealing** to begin the scripted ramp. Voltage, current, and
-              resistance are logged with timestamps, and resistance traces update live.
-            * **Reverse current now** initiates an immediate ramp-down. **Stop annealing** ends the
-              process gracefully while keeping the data file intact.
-            * Contact-loss detection mirrors the serial logger: it requires sustained zero current
-              readings before aborting and prompts you when the supply reaches 30 V.
-
-            ### Extras
-            * The standalone **Start Log/Stop Log** buttons let you capture instrument telemetry
-              without running a ramp.
-            * Appearance and layout controls live under the **View** menu, and this manual is
-              always available from **Help → View Help**.
             """
         ).strip(),
     },

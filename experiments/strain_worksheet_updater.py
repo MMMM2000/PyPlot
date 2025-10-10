@@ -12,7 +12,7 @@ from PyQt6 import QtCore, QtWidgets
 
 from plotting.utils import ensure_app_theme, install_standard_menu
 
-from experiments.microwire_data_builder.core import (
+from microwire_data_builder.core import (
     STRAIN_COLUMN,
     StrainRecord,
     _load_strain_records,
