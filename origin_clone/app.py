@@ -491,7 +491,9 @@ class OriginCloneWindow(QtWidgets.QMainWindow):
 
     def __init__(self) -> None:
         super().__init__()
-        ensure_app_theme(self)
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            ensure_app_theme(app)
         self.setWindowTitle("Origin Clone (Prototype)")
         self.resize(1400, 900)
 
