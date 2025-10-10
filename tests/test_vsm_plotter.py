@@ -159,3 +159,11 @@ def test_safe_float_handles_dash_tokens() -> None:
     assert module._safe_float("30-50") == 30.50
     assert module._safe_float("+12-345") == 12.345
     assert module._safe_float("000-") == 0.0
+
+
+def test_looks_numeric_handles_units_and_punctuation() -> None:
+    assert module._looks_numeric("5000;")
+    assert module._looks_numeric("1k")
+    assert module._looks_numeric("-2.5m")
+    assert not module._looks_numeric("Loop")
+    assert not module._looks_numeric("cm3)")

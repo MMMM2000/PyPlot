@@ -25,6 +25,10 @@ TEMP_RE = re.compile(r"T(-?(?:\\d+(?:\\.\\d+)?)(?:-\\d+)*)", re.IGNORECASE)
 FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\\s*=\\s*([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
 SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\\s+([-+]?\\d+(?:\\.\\d+)?)", re.IGNORECASE)
+_PLAIN_NUMBER_RE = re.compile(r"^[-+]?\d*(?:\.\d+)?(?:[eE][-+]?\d+)?$")
+_NUMBER_WITH_UNIT_RE = re.compile(
+    r"^(?P<value>[-+]?\d*(?:\.\d+)?(?:[eE][-+]?\d+)?)(?P<unit>[a-zA-Zμ]{1,3})$"
+)
 
 
 @dataclass
@@ -170,11 +174,24 @@ def _looks_numeric(token: str) -> bool:
     token = token.strip()
     if not token:
         return False
-    try:
-        float(token)
-    except ValueError:
-        return False
-    return True
+    if _PLAIN_NUMBER_RE.match(token):
+        return True
+
+    cleaned = token.rstrip(",;:)]}%")
+    if cleaned and _PLAIN_NUMBER_RE.match(cleaned):
+        return True
+
+    if cleaned:
+        unit_match = _NUMBER_WITH_UNIT_RE.match(cleaned)
+        if unit_match:
+            magnitude = unit_match.group("value")
+            try:
+                float(magnitude)
+            except ValueError:
+                return False
+            else:
+                return True
+    return False
 
 
 def _safe_float(token: str) -> float | None:
