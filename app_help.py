@@ -99,6 +99,39 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "origin_clone": {
+        "title": "Origin Clone prototype",
+        "body": dedent(
+            """
+            ### Welcome to the Origin Clone
+            This experiment mirrors Origin's tabbed workspace with project, object, message,
+            and console panes. Use **File → New Workbook** to start from a blank sheet or
+            **File → Import Data…** to load CSV, TSV, or Excel files into editable worksheets.
+
+            ### Working with worksheets
+            * The toolbar above each sheet inserts or deletes rows and columns.
+            * Click a column header to select it; multi-select with Ctrl/Cmd to choose X and Y
+              inputs for plotting.
+            * Double-click the worksheet name in the Project Explorer to refocus it if several
+              windows are open.
+
+            ### Plotting and analysis
+            * Choose **Plot → Quick Line Plot** to draw the selected columns (first as X, the rest
+              as Y) in a Matplotlib figure. **Plot → Plot All vs First Column** graphs every
+              column against the first.
+            * **Analysis → Column Statistics** logs quick descriptive stats to the Message Log.
+
+            ### Object manager & console
+            * The Object Manager lists worksheet columns or graph layers, keeping their types and
+              sizes visible while you work.
+            * The dockable Python console exposes the project environment (``app``) and pandas as
+              ``pd`` for light scripting. Results and errors print straight into the console pane.
+
+            Auto-hide controls on each dock let you pin panes open, collapse them to slim tabs, or
+            float them as independent always-on-top tool windows—just like Origin.
+            """
+        ).strip(),
+    },
     "plot_temperature_sensitivity": {
         "title": "Temperature sensitivity plotter",
         "body": dedent(

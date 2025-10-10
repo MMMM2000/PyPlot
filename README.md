@@ -532,6 +532,18 @@ the familiar red/blue styling, and records provenance back to the source files.
 
 Enable the Experiments tab from the launcher’s **Develop** menu and launch **VSM Origin Workbench** to explore a Lakeshore-inspired layout. The central canvas reuses the hysteresis plotting pipeline while dock widgets on the left and right mirror Origin’s Project Explorer, Message Log, and Object Manager. Each dock can be pinned, auto-hidden, or floated as an always-on-top window so you can recreate your preferred workspace. Every imported loop also appears as an editable worksheet: double-click cells to tweak values, right-click to remove rows, and replot to see the adjustments reflected in the overlay.
 
+### Origin Clone (prototype)
+
+The new **Origin Clone (Prototype)** experiment scales the concept up to a general-purpose Origin-style desktop. Launch it from the Experiments tab to open a tabbed MDI workspace backed by Matplotlib and pandas. Key features include:
+
+* **Project Explorer** and **Message Log** docks that auto-hide, pin, or float independently just like Origin’s panels.
+* Editable worksheets with toolbar buttons for inserting/removing rows and columns. Import CSV/TSV/Excel files or start with a blank sheet.
+* Quick plotting via **Plot → Quick Line Plot** (using your column selection) or **Plot → Plot All vs First Column**. Graphs appear as their own subwindows and are listed alongside worksheets in the explorer.
+* An **Object Manager** dock that lists worksheet columns or graph layers with their data types and point counts.
+* A dockable Python console seeded with the project (`app`) and `pandas` namespace for lightweight scripting inside the workspace.
+
+Use the shared menu to export the active worksheet as CSV, compute descriptive statistics, or cascade/tile open windows. The layout, docking behaviour, and menu structure closely mirror Origin, providing a foundation for future automation and plotting modules.
+
 The exported columns are:
 
 * Composition

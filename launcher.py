@@ -191,12 +191,24 @@ class MasterLauncher(QtWidgets.QWidget):
 
         self.main_layout.addLayout(button_row)
 
-        menu_bar = install_standard_menu(self, help_topic="launcher", close_window=self.close)
+        menu_bar = install_standard_menu(
+            self,
+            help_topic="launcher",
+            close_window=self._close_launcher,
+        )
         sort_menu = menu_bar.addMenu("&Sort")
         if sort_menu is None:
             sort_menu = QtWidgets.QMenu("&Sort", self)
             menu_bar.addMenu(sort_menu)
         self._install_sort_menu(sort_menu)
+
+    def _close_launcher(self) -> None:
+        """Close hook that satisfies :func:`install_standard_menu`."""
+
+        # ``QWidget.close`` returns ``bool`` and Pylance/Pyright expect the menu
+        # callback to return ``None``.  We call the underlying method but
+        # intentionally drop the return value to keep the type contract tidy.
+        self.close()
 
     def _restore_launcher(self) -> None:
         if self._closing:
