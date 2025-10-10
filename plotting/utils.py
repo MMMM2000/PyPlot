@@ -22,6 +22,46 @@ from app_help import show_help
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 
+def _apply_standard_icon(
+    action: QtGui.QAction | None,
+    role: QtWidgets.QStyle.StandardPixmap | None,
+    style: QtWidgets.QStyle | None = None,
+) -> None:
+    """Assign a style-derived icon to an action when available."""
+
+    if action is None or role is None:
+        return
+    resolved_style: QtWidgets.QStyle | None = style
+    if resolved_style is None:
+        try:
+            parent = action.parent()
+        except Exception:
+            parent = None
+        if isinstance(parent, QtWidgets.QWidget):
+            try:
+                resolved_style = parent.style()
+            except Exception:
+                resolved_style = None
+    if resolved_style is None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                resolved_style = app.style()
+            except Exception:
+                resolved_style = None
+    if resolved_style is None:
+        return
+    try:
+        icon = resolved_style.standardIcon(role)
+    except Exception:
+        icon = QtGui.QIcon()
+    if not icon.isNull():
+        try:
+            action.setIcon(icon)
+        except Exception:
+            pass
+
+
 @contextmanager
 def origin_session() -> Iterator[Any]:
     """Return an Origin session that stays available for inspection."""
@@ -1102,16 +1142,6 @@ class _WindowMenuManager(QtCore.QObject):
             if app is not None:
                 style = app.style()
 
-        def _set_icon(action: QtGui.QAction | None, role: QtWidgets.QStyle.StandardPixmap) -> None:
-            if action is None or style is None:
-                return
-            try:
-                icon = style.standardIcon(role)
-            except Exception:
-                icon = QtGui.QIcon()
-            if not icon.isNull():
-                action.setIcon(icon)
-
         def _set_shortcut(
             action: QtGui.QAction | None,
             shortcut: QtGui.QKeySequence.StandardKey | str,
@@ -1128,7 +1158,7 @@ class _WindowMenuManager(QtCore.QObject):
 
         # Minimize ---------------------------------------------------------
         minimize_action = menu.addAction("Minimize")
-        _set_icon(minimize_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton)
+        _apply_standard_icon(minimize_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton, style)
         try:
             minimize_attr = getattr(QtGui.QKeySequence.StandardKey, "Minimize")
         except AttributeError:
@@ -1156,7 +1186,7 @@ class _WindowMenuManager(QtCore.QObject):
         # Zoom / Maximize --------------------------------------------------
         zoom_label = "Zoom" if sys.platform == "darwin" else "Maximize"
         zoom_action = menu.addAction(zoom_label)
-        _set_icon(zoom_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton)
+        _apply_standard_icon(zoom_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton, style)
         if zoom_action is not None:
 
             def _toggle_zoom() -> None:
@@ -1175,7 +1205,7 @@ class _WindowMenuManager(QtCore.QObject):
 
         # Fill -------------------------------------------------------------
         fill_action = menu.addAction("Fill Screen")
-        _set_icon(fill_action, QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon)
+        _apply_standard_icon(fill_action, QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon, style)
         if fill_action is not None:
 
             def _fill_target() -> None:
@@ -1185,7 +1215,7 @@ class _WindowMenuManager(QtCore.QObject):
 
         # Center -----------------------------------------------------------
         center_action = menu.addAction("Center on Screen")
-        _set_icon(center_action, QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton)
+        _apply_standard_icon(center_action, QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton, style)
         if center_action is not None:
 
             def _center_target() -> None:
@@ -1195,7 +1225,7 @@ class _WindowMenuManager(QtCore.QObject):
 
         # Move & Resize ----------------------------------------------------
         move_action = menu.addAction("Move && Resize…")
-        _set_icon(move_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView)
+        _apply_standard_icon(move_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView, style)
         if move_action is not None:
 
             def _move_resize_target() -> None:
@@ -1212,7 +1242,7 @@ class _WindowMenuManager(QtCore.QObject):
                 full_screen_active = False
         full_screen_text = "Exit Full Screen" if full_screen_active else "Enter Full Screen"
         full_screen_action = menu.addAction(full_screen_text)
-        _set_icon(full_screen_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton)
+        _apply_standard_icon(full_screen_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton, style)
         if full_screen_action is not None:
             _set_shortcut(
                 full_screen_action,
@@ -1237,7 +1267,7 @@ class _WindowMenuManager(QtCore.QObject):
         # Navigation -------------------------------------------------------
         menu.addSeparator()
         next_action = menu.addAction("Next Window")
-        _set_icon(next_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowForward)
+        _apply_standard_icon(next_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowForward, style)
         if next_action is not None:
             _set_shortcut(
                 next_action,
@@ -1246,7 +1276,7 @@ class _WindowMenuManager(QtCore.QObject):
             next_action.triggered.connect(lambda: _cycle_window(+1))
 
         prev_action = menu.addAction("Previous Window")
-        _set_icon(prev_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowBack)
+        _apply_standard_icon(prev_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowBack, style)
         if prev_action is not None:
             _set_shortcut(
                 prev_action,
@@ -1255,7 +1285,7 @@ class _WindowMenuManager(QtCore.QObject):
             prev_action.triggered.connect(lambda: _cycle_window(-1))
 
         bring_action = menu.addAction("Bring All to Front")
-        _set_icon(bring_action, QtWidgets.QStyle.StandardPixmap.SP_BrowserReload)
+        _apply_standard_icon(bring_action, QtWidgets.QStyle.StandardPixmap.SP_BrowserReload, style)
         if bring_action is not None:
             bring_action.triggered.connect(_bring_all_to_front)
 
@@ -1471,7 +1501,7 @@ def install_standard_menu(
         if action is None:
             return
         if icon is not None:
-            _set_icon(action, icon)
+            _apply_standard_icon(action, icon)
         if shortcut is not None:
             try:
                 action.setShortcut(QtGui.QKeySequence(shortcut))
