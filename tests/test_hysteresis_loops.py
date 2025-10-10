@@ -1,3 +1,7 @@
+import pytest
+
+pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
+
 import matplotlib
 matplotlib.use("Agg")
 

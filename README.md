@@ -40,6 +40,16 @@ npm install -g @openai/codex
 The requirements include `pyvisa`, `pyvisa-py`, `psutil` and `zeroconf` so VISA
 resources can be discovered without vendor drivers.
 
+### 1.4 OriginPro Python packages
+
+Origin’s embedded Python environment ships without the scientific stack the
+plotters rely on. Before selecting the **Origin** backend in any tool, open
+OriginPro and install the packages from **Connectivity → Python Packages**.
+Install at least `originpro`, `numpy`, `pandas`, `python-dateutil`, `pytz`,
+`six`, and `tzdata`. Origin keeps these packages separate from your system
+environment, so this one-time setup step is required on every machine that
+should produce Origin workbooks or graphs.
+
 ## 2. Master launcher
 
 Run the launcher to access all utilities in a single window:
@@ -149,12 +159,28 @@ Maxion plotter adds
 optional ×10³/×10⁴ axis scaling and a switch to centre the Y axis on its median
 (from raw or processed data).
 
-Every window now includes a shared menu bar.  The **View** menu exposes theme
-controls (System/Light/Dark), toggles the file browser or console panes, and
-resets splitter sizes if the layout becomes cramped, while **Help** opens a
-Markdown guide tailored to the current tool.  When onboarding new colleagues you
-can point them to the menu entry for context without having to maintain a
-separate manual.  The main action row stays anchored beneath the settings so
+Every window now includes a shared menu bar.  The **File** menu wires the
+standard `Open File…`/`Open Folder…` shortcuts to the same loaders the toolbar
+buttons use, adds `Close Window`/`Quit` actions, and keeps the last-used paths in
+sync so keyboard-driven workflows stay quick.  A new **Edit** menu sits beside
+it with working `Undo`, `Redo`, `Cut`, `Copy`, `Paste`, and `Select All`
+shortcuts that operate on whichever widget currently has focus, so you can
+drive text boxes and tables without touching the mouse.  The **View** menu
+exposes theme controls (System/Light/Dark), toggles the file browser or console
+panes, and resets splitter sizes if the layout becomes cramped, while **Help**
+opens a Markdown guide tailored to the current tool.  A dedicated **Window**
+menu now ships on both macOS and Windows with native-feeling icons, shortcuts,
+and a live
+window list: along with `Minimize`, `Zoom/Maximize`, `Fill Screen`, `Center on
+Screen`, `Move & Resize…`, and an `Enter/Exit Full Screen` toggle it offers
+`Next Window`, `Previous Window`, and `Bring All to Front` actions. The bottom of
+the menu lists every visible microwire tool (complete with window icons and an
+active-window checkmark) so you can jump straight to another dialog without
+hunting through the dock or taskbar.  On macOS the menu now pins itself to the
+native menubar, so the Window and Edit entries show up exactly where users
+expect them.  When onboarding new colleagues you can
+point them to the menu entry for context without having to maintain a separate
+manual.  The main action row stays anchored beneath the settings so
 Run/Plot buttons remain visible without scrolling through long option lists.
 Origin sessions are closed automatically after plots are generated—and even if a
 run aborts—so the Origin application can be closed independently from the
@@ -305,6 +331,10 @@ colleagues:
    each window double as an onboarding guide.
 4. Zip the entire `dist/launcher` directory when sharing the tools so recipients
    can extract and run the launcher without installing Python.
+5. Rebuild the launcher whenever you pull UI updates—especially ones touching
+   backend selections—so frozen copies include helpers such as
+   `restore_backend_choice` and avoid runtime `NameError` issues on colleague
+   machines.
 
 ## 6. Experiments
 
@@ -564,23 +594,126 @@ The exported columns are:
 Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
 bulk from the **VSM Plot Explorer** (launcher **Experiments** tab or `python -m
 experiments.vsm_plotter`). Point the tool at a folder of `VSM-Hys-Data` files or
-pick individual measurements, then load them into the session. Filenames are
+pick individual measurements, then load them into the session. Folder mode now
+recursively scans through subdirectories—matching the Lakeshore exports in a
+case-insensitive way—so an entire sweep organised by
+temperature/angle folders can be loaded in one go without extra browsing. Files
+that Windows has duplicated with suffixes such as `- Copy` (leaving the
+`.VSM-Hys-Data` token in the middle of the filename) are also detected, so
+captured runs remain discoverable even after ad-hoc copying. Filenames are
 parsed for the acquisition temperature (`T±XX`) and rotation angle (`aXXX`) so
-each loop is grouped with peers recorded at the same temperature.
+each loop is grouped with peers recorded at the same temperature. Tokens such as
+`T-30-00` are converted to `-30.00 °C`, so the dash-separated format produced by
+the Lakeshore export is recognised without manual editing. These filename tokens
+are consumed directly, so runs named with the standard `a000`/`T-30-00` pattern
+register the expected angle/temperature without triggering the TXT-only warning.
+Zero-angle runs like `a000` (and other filenames that append formatting dashes
+before the next token) now resolve to a numeric angle of `0 °` instead of being
+skipped. When filenames
+are missing the `a`/`T` tokens, the loader now scans the header metadata (for
+example the `@Filename` lines embedded by the VSM software) so rotations and
+temperatures are still recovered automatically. Even if a measurement has lost
+the `.VSM-Hys-Data` suffix entirely, the loader recognises the typical Lakeshore
+`Hys`/`T`/`a` tokens and imports the file when recursing through a folder tree,
+so stray copies still make it into the session without manual renaming.
+
+The loader understands both tidy column descriptions (`Column 0: …`) and the
+free-form headers produced by newer VSM exports, ignoring the lengthy
+instrumentation metadata that surrounds the numeric blocks. When filenames lack
+tokens entirely, the parser now falls back to lines such as `Set Field Angle
+to …` and `Set Sample Temperature to …`, so even noisy Lakeshore exports still
+recover the rotation and temperature metadata embedded in the recipe. Those
+action block values are rounded to sensible integers, so instrument readbacks
+like `9.9998°` and `-30.1037 °C` surface as `10°` and `-30 °C` throughout the
+UI, logs, and TXT exports. If the headers are stripped as well, the plotter
+inspects the `Field Angle [deg]` and `Sample Temperature [degC]` columns and
+infers a representative value from the data stream, which means runs remain
+plottable even when only the raw numeric table is present. Drop the sample files
+from `sample_data/VSM_data/` into the explorer to see how the parser
+automatically selects the final manipulated data section and labels each column
+with a friendly name. Column headings preserve
+the units advertised in the Lakeshore `@@Columns` block (for example `Applied
+Field [Oe]` and `Signal parallel with sample [emu]`), so the exported TXT files
+import cleanly into Origin, pandas, or any other analysis suite without manual
+relabelling. The inline header detection now triggers only after the
+`@@End of Header.` marker, which prevents the lengthy instrument configuration
+tables that precede the columns block from overriding the real column labels.
 
 Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
 to plot—defaults focus on **Applied Field** versus **Signal parallel with
 sample**, but every numeric column advertised in the header is available. Set the
 temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
-concentrate on a single group. The Matplotlib tabs appear on the right-hand side
-of the window with a console log below; they are fully resizable and inherit the
-project’s dark/light theme settings.
+concentrate on a single group. The angle visibility controls now live alongside
+the other settings on the left: once data is loaded, each temperature gains a
+collapsible **Show angles** section whose checkboxes hide or reveal traces in the
+embedded Matplotlib canvas, pop-out windows, and Origin exports simultaneously
+without regenerating plots. The Matplotlib tabs remain on the right-hand side of
+the window with a console log below; they are fully resizable and the splitter
+ratio is persisted between sessions. A **Matplotlib style** selector toggles
+between plain line plots and line-plus-symbol traces, a new **Dark plot theme**
+checkbox recolours both embedded and pop-out Matplotlib figures to match the rest
+of the UI, and the **Open in Matplotlib** button still clones the current tabs
+into interactive desktop windows for quick zooming or annotation outside the
+embedded canvas.
+
+Enable **Normalise Y axis endpoints** to automatically scale every loop in a
+temperature group so the negative-field endpoint shares a common minimum and the
+positive-field endpoint reaches the same maximum. The target extrema are derived
+from the global minima and maxima across the group and then mirrored about zero,
+so even traces whose edge segments are almost flat (such as the 90° run in the
+sample data) are stretched using their measured variation instead of collapsing
+into a horizontal line. The
+“near-zero” detection now adapts to the scale of the measurement, meaning true
+zero-degree runs and other tiny spans still participate in the rescale instead of
+being skipped. A synthetic gradient is only injected when a sweep is genuinely
+constant. Each transform is logged per file—either the scale/offset pair or a note
+that a gradient was generated—and those same values feed the Matplotlib, Origin,
+and TXT outputs, keeping the on-screen plots and exported data in sync. Leave the
+option unchecked to plot the raw measurements if you prefer to inspect the
+measured values.
 
 OriginPro exports mirror the same grouping, creating a workbook for each
-temperature and writing a sheet per angle with the selected axes. If Origin is
-not installed the exporter logs a short reminder while leaving the Matplotlib
-tabs intact, so the workflow stays consistent on machines without Origin.
+temperature, writing a sheet per angle with the selected axes, and building a
+line graph that overlays every angle trace with a labelled legend. The graph
+pages are named after their temperature and each legend entry now reads `Angle
+XX°`, making it immediately clear which curve corresponds to which rotation
+without cross-referencing the workbook sheets. Each worksheet comment is also
+populated with the matching angle and the same value is written into the Y-column
+*Comments* row, mirroring the layout shown in Origin's Object Manager so the angle
+is visible even if the legend is hidden. A dedicated
+**Export TXT** button also writes the parsed data to plain tab-separated files
+with the detected column names, so Origin (or any analysis tool) can import the
+clean tables without the surrounding instrumentation metadata. After you pick the
+destination folder you can opt into creating a named subfolder for the export batch,
+and the plotter remembers the last folder you used so repeat runs open the dialog in
+the same location. When more than one temperature is exported the plotter now
+creates a tidy subfolder per temperature (for example `T-30C`), keeping each
+group’s TXT tables isolated for Origin imports. Choose between exporting the
+**Original data** or the **Rescaled data**; the latter applies the same Y-axis
+transform used for the plots so the TXT tables drop straight into Origin with
+matching endpoints. When a file cannot be rescaled the exporter keeps the
+measured values and notes the decision in the log so downstream processing never
+receives flattened traces.
+Constant sweeps still pick up the same synthetic gradient that drives the plots,
+so the exported TXT tables mirror the aligned endpoints you see on screen.
+When at least one angle in a batch shows measurable variation the rescaler now
+anchors every trace to that widest span before falling back to the gradient,
+preventing nearly flat loops (such as the 90° sweep) from collapsing into a
+horizontal line on screen or in the exported data.
+If Origin is installed but the **Origin** backend fails to appear, open
+**Connectivity → Python Packages** inside Origin and install the `originpro`
+stack (at minimum `originpro`, `numpy`, `pandas`, `python-dateutil`, `pytz`,
+`six`, and `tzdata`). The launcher detects the automation API once those packages
+are available and logs a reminder if the environment still lacks them.
+Even if a run is missing angle/temperature metadata, the loader still enables TXT
+export while noting that plotting is disabled, making it possible to salvage
+data from noisy recipes. If Origin is not installed the exporter logs a short
+reminder while leaving the Matplotlib tabs intact, so the workflow stays
+consistent on machines without Origin. When Origin is available the exporter
+launches (or connects to) a visible Origin session instead of closing it
+immediately, making the generated workbooks and graphs accessible for review
+straight after export.
 
 ## 7. Repository maintenance
 

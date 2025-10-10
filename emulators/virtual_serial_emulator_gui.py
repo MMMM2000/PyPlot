@@ -439,7 +439,11 @@ class Main(QWidget):
         layout.addWidget(emu_box)
         layout.addWidget(self.log)
 
-        install_standard_menu(self, help_topic="emulator_serial")
+        install_standard_menu(
+            self,
+            help_topic="emulator_serial",
+            open_file=self.on_browse_sample,
+        )
 
         # initial
         self.refresh_ports()

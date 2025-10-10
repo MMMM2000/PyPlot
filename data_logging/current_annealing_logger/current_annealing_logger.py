@@ -116,7 +116,12 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
         except Exception:
             pass
-        menu_bar = install_standard_menu(self, help_topic="logger_current_annealing")
+        menu_bar = install_standard_menu(
+            self,
+            help_topic="logger_current_annealing",
+            open_file=self.handle_browse_full_file,
+            open_folder=self.handle_browse_log_dir,
+        )
         self._mode_actions: Dict[int, QtGui.QAction] = {}
         self._mode_group: Optional[QtGui.QActionGroup] = None
         self._mode_menu: Optional[QtWidgets.QMenu] = None

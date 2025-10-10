@@ -3,6 +3,7 @@ import os
 import sys
 import weakref
 import atexit
+import sys
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -21,20 +22,74 @@ from app_help import show_help
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 
+def _apply_standard_icon(
+    action: QtGui.QAction | None,
+    role: QtWidgets.QStyle.StandardPixmap | None,
+    style: QtWidgets.QStyle | None = None,
+) -> None:
+    """Assign a style-derived icon to an action when available."""
+
+    if action is None or role is None:
+        return
+    resolved_style: QtWidgets.QStyle | None = style
+    if resolved_style is None:
+        try:
+            parent = action.parent()
+        except Exception:
+            parent = None
+        if isinstance(parent, QtWidgets.QWidget):
+            try:
+                resolved_style = parent.style()
+            except Exception:
+                resolved_style = None
+    if resolved_style is None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                resolved_style = app.style()
+            except Exception:
+                resolved_style = None
+    if resolved_style is None:
+        return
+    try:
+        icon = resolved_style.standardIcon(role)
+    except Exception:
+        icon = QtGui.QIcon()
+    if not icon.isNull():
+        try:
+            action.setIcon(icon)
+        except Exception:
+            pass
+
+
 @contextmanager
 def origin_session() -> Iterator[Any]:
-    """Return an Origin session that is closed on exit."""
+    """Return an Origin session that stays available for inspection."""
 
     import originpro as op  # lazy import
+
+    app = None
     try:
-        op.set_show()
+        app = op.Application()  # type: ignore[attr-defined]
     except Exception:
-        pass
+        app = None
+
     try:
+        if app is not None:
+            try:
+                app.Visible = 1  # type: ignore[attr-defined, assignment]
+            except Exception:
+                pass
+        else:
+            try:
+                op.set_show()
+            except Exception:
+                pass
         yield cast(Any, op)
     finally:
+        # Keep Origin running for the user; release is handled via ``schedule_origin_release``.
         try:
-            cast(Any, op).exit()
+            cast(Any, op).lt_exec("win -a;")
         except Exception:
             pass
 
@@ -185,6 +240,217 @@ def _apply_color_scheme(
             app.setPalette(_dark_palette(accent))
         else:
             app.setPalette(standard_palette)
+
+
+def _available_geometry(widget: QtWidgets.QWidget) -> QtCore.QRect | None:
+    """Return the available screen geometry for ``widget``."""
+
+    screen = getattr(widget, "screen", lambda: None)()
+    if screen is None:
+        app = QtWidgets.QApplication.instance()
+        if app is not None:
+            try:
+                screen = app.primaryScreen()
+            except Exception:
+                screen = None
+    if screen is None:
+        return None
+    try:
+        return screen.availableGeometry()
+    except Exception:
+        return None
+
+
+def _center_window(widget: QtWidgets.QWidget) -> None:
+    """Move ``widget`` to the centre of its current screen."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+    widget.showNormal()
+    available = _available_geometry(widget)
+    frame = widget.frameGeometry()
+    if available is None:
+        widget.move(max(0, frame.x()), max(0, frame.y()))
+        return
+
+    size = frame.size()
+    if size.width() <= 0 or size.height() <= 0:
+        hint = widget.sizeHint()
+        width = max(widget.minimumWidth(), hint.width(), 320)
+        height = max(widget.minimumHeight(), hint.height(), 240)
+        size.setWidth(width)
+        size.setHeight(height)
+        frame.setSize(size)
+
+    frame.moveCenter(available.center())
+    widget.move(frame.topLeft())
+
+
+def _fill_window(widget: QtWidgets.QWidget) -> None:
+    """Expand ``widget`` to fill the available screen geometry."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+    widget.showNormal()
+    available = _available_geometry(widget)
+    if available is None:
+        try:
+            widget.showMaximized()
+        except Exception:
+            pass
+        return
+    widget.setGeometry(available)
+
+
+def _activate_window(widget: QtWidgets.QWidget) -> None:
+    """Make ``widget`` the active, front-most window."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+    try:
+        widget.show()
+        widget.raise_()
+        widget.activateWindow()
+    except Exception:
+        pass
+
+
+def _visible_windows(exclude: QtWidgets.QWidget | None = None) -> list[QtWidgets.QWidget]:
+    """Return a list of visible top-level windows, ordered by title."""
+
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        return []
+    windows: list[QtWidgets.QWidget] = []
+    for widget in app.topLevelWidgets():
+        if not isinstance(widget, QtWidgets.QWidget):
+            continue
+        if not widget.isWindow():
+            continue
+        if exclude is not None and widget is exclude:
+            continue
+        try:
+            visible = widget.isVisible()
+        except Exception:
+            visible = False
+        if not visible:
+            continue
+        windows.append(widget)
+
+    def _sort_key(item: QtWidgets.QWidget) -> tuple[int, str, int]:
+        title = item.windowTitle() or item.objectName() or item.__class__.__name__
+        try:
+            active = QtWidgets.QApplication.activeWindow() is item
+        except Exception:
+            active = False
+        return (0 if active else 1, title.casefold(), id(item))
+
+    windows.sort(key=_sort_key)
+    return windows
+
+
+def _cycle_window(offset: int) -> None:
+    """Activate the next or previous window relative to the current one."""
+
+    windows = _visible_windows()
+    if not windows:
+        return
+
+    try:
+        active = QtWidgets.QApplication.activeWindow()
+    except Exception:
+        active = None
+
+    if active in windows:
+        index = windows.index(active)
+    else:
+        index = 0
+
+    target = windows[(index + offset) % len(windows)]
+    _activate_window(target)
+
+
+def _bring_all_to_front() -> None:
+    """Raise every visible window so they appear in front."""
+
+    for widget in _visible_windows():
+        _activate_window(widget)
+
+
+def _show_move_resize_dialog(widget: QtWidgets.QWidget) -> None:
+    """Prompt for explicit geometry settings and apply them to ``widget``."""
+
+    if not isinstance(widget, QtWidgets.QWidget):
+        return
+
+    dialog = QtWidgets.QDialog(widget)
+    dialog.setWindowTitle("Move && Resize")
+    dialog.setModal(True)
+
+    layout = QtWidgets.QFormLayout(dialog)
+    layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+    geometry = widget.geometry()
+    available = _available_geometry(widget)
+
+    min_width = max(200, widget.minimumWidth())
+    min_height = max(200, widget.minimumHeight())
+    width_hint = widget.sizeHint().width() if widget.sizeHint().width() > 0 else min_width
+    height_hint = widget.sizeHint().height() if widget.sizeHint().height() > 0 else min_height
+
+    width_max = max(min_width, available.width() if available is not None else min_width * 4)
+    height_max = max(min_height, available.height() if available is not None else min_height * 4)
+
+    width_value = max(min_width, min(width_max, geometry.width() or width_hint))
+    height_value = max(min_height, min(height_max, geometry.height() or height_hint))
+
+    x_spin = QtWidgets.QSpinBox(dialog)
+    x_spin.setRange(-10000, 10000)
+    x_spin.setValue(geometry.x())
+    layout.addRow("X position", x_spin)
+
+    y_spin = QtWidgets.QSpinBox(dialog)
+    y_spin.setRange(-10000, 10000)
+    y_spin.setValue(geometry.y())
+    layout.addRow("Y position", y_spin)
+
+    width_spin = QtWidgets.QSpinBox(dialog)
+    width_spin.setRange(min_width, width_max)
+    width_spin.setValue(width_value)
+    layout.addRow("Width", width_spin)
+
+    height_spin = QtWidgets.QSpinBox(dialog)
+    height_spin.setRange(min_height, height_max)
+    height_spin.setValue(height_value)
+    layout.addRow("Height", height_spin)
+
+    button_box = QtWidgets.QDialogButtonBox(
+        QtWidgets.QDialogButtonBox.StandardButton.Ok
+        | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+        parent=dialog,
+    )
+    layout.addRow(button_box)
+
+    button_box.accepted.connect(dialog.accept)
+    button_box.rejected.connect(dialog.reject)
+
+    if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+        return
+
+    new_width = width_spin.value()
+    new_height = height_spin.value()
+    new_x = x_spin.value()
+    new_y = y_spin.value()
+
+    if available is not None:
+        new_width = min(new_width, available.width())
+        new_height = min(new_height, available.height())
+        new_x = max(available.left(), min(new_x, available.right() - new_width))
+        new_y = max(available.top(), min(new_y, available.bottom() - new_height))
+
+    widget.showNormal()
+    widget.setGeometry(QtCore.QRect(new_x, new_y, new_width, new_height))
+    _activate_window(widget)
 
 
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
@@ -831,18 +1097,226 @@ def _ensure_menu_bar(target: QtWidgets.QWidget) -> QtWidgets.QMenuBar:
         if bar is None:
             bar = QtWidgets.QMenuBar(target)
             target.setMenuBar(bar)
-        return bar
+    else:
+        layout = target.layout()
+        if layout is None:
+            layout = QtWidgets.QVBoxLayout(target)
+            target.setLayout(layout)
 
-    layout = target.layout()
-    if layout is None:
-        layout = QtWidgets.QVBoxLayout(target)
-        target.setLayout(layout)
+        bar = getattr(layout, "menuBar", lambda: None)()
+        if bar is None:
+            bar = QtWidgets.QMenuBar(target)
+            layout.setMenuBar(bar)
 
-    bar = getattr(layout, "menuBar", lambda: None)()
-    if bar is None:
-        bar = QtWidgets.QMenuBar(target)
-        layout.setMenuBar(bar)
+    if sys.platform == "darwin":
+        try:
+            bar.setNativeMenuBar(True)
+        except Exception:
+            pass
+
     return bar
+
+
+class _WindowMenuManager(QtCore.QObject):
+    """Populate the shared Window menu with native-feeling actions."""
+
+    def __init__(self, menu: QtWidgets.QMenu, target: QtWidgets.QWidget) -> None:
+        super().__init__(menu)
+        self._menu = menu
+        self._target_ref = weakref.ref(target)
+        menu.aboutToShow.connect(self.rebuild)
+
+    def rebuild(self) -> None:
+        menu = self._menu
+        target = self._target_ref()
+        menu.clear()
+        if target is None:
+            placeholder = menu.addAction("No window")
+            if placeholder is not None:
+                placeholder.setEnabled(False)
+            return
+
+        style = getattr(target, "style", lambda: None)()
+        if style is None:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                style = app.style()
+
+        def _set_shortcut(
+            action: QtGui.QAction | None,
+            shortcut: QtGui.QKeySequence.StandardKey | str,
+        ) -> None:
+            if action is None:
+                return
+            try:
+                if isinstance(shortcut, QtGui.QKeySequence.StandardKey):
+                    action.setShortcut(QtGui.QKeySequence(shortcut))
+                else:
+                    action.setShortcut(QtGui.QKeySequence(shortcut))
+            except Exception:
+                pass
+
+        # Minimize ---------------------------------------------------------
+        minimize_action = menu.addAction("Minimize")
+        _apply_standard_icon(minimize_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton, style)
+        try:
+            minimize_attr = getattr(QtGui.QKeySequence.StandardKey, "Minimize")
+        except AttributeError:
+            minimize_attr = None
+        except Exception:
+            minimize_attr = None
+        try:
+            unknown_key = getattr(QtGui.QKeySequence.StandardKey, "UnknownKey")
+        except AttributeError:
+            unknown_key = None
+        except Exception:
+            unknown_key = None
+        minimize_shortcut: QtGui.QKeySequence.StandardKey | str
+        if minimize_attr is None or minimize_attr == unknown_key:
+            minimize_shortcut = "Meta+M" if sys.platform == "darwin" else "Ctrl+M"
+        else:
+            minimize_shortcut = minimize_attr
+        _set_shortcut(minimize_action, minimize_shortcut)
+        if minimize_action is not None:
+            if hasattr(target, "showMinimized"):
+                minimize_action.triggered.connect(target.showMinimized)
+            else:
+                minimize_action.setEnabled(False)
+
+        # Zoom / Maximize --------------------------------------------------
+        zoom_label = "Zoom" if sys.platform == "darwin" else "Maximize"
+        zoom_action = menu.addAction(zoom_label)
+        _apply_standard_icon(zoom_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton, style)
+        if zoom_action is not None:
+
+            def _toggle_zoom() -> None:
+                if not hasattr(target, "isMaximized"):
+                    zoom_action.setEnabled(False)
+                    return
+                try:
+                    if target.isMaximized():
+                        target.showNormal()
+                    else:
+                        target.showMaximized()
+                except Exception:
+                    pass
+
+            zoom_action.triggered.connect(_toggle_zoom)
+
+        # Fill -------------------------------------------------------------
+        fill_action = menu.addAction("Fill Screen")
+        _apply_standard_icon(fill_action, QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon, style)
+        if fill_action is not None:
+
+            def _fill_target() -> None:
+                _fill_window(target)
+
+            fill_action.triggered.connect(_fill_target)
+
+        # Center -----------------------------------------------------------
+        center_action = menu.addAction("Center on Screen")
+        _apply_standard_icon(center_action, QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton, style)
+        if center_action is not None:
+
+            def _center_target() -> None:
+                _center_window(target)
+
+            center_action.triggered.connect(_center_target)
+
+        # Move & Resize ----------------------------------------------------
+        move_action = menu.addAction("Move && Resize…")
+        _apply_standard_icon(move_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView, style)
+        if move_action is not None:
+
+            def _move_resize_target() -> None:
+                _show_move_resize_dialog(target)
+
+            move_action.triggered.connect(_move_resize_target)
+
+        # Full screen ------------------------------------------------------
+        full_screen_active = False
+        if hasattr(target, "isFullScreen"):
+            try:
+                full_screen_active = target.isFullScreen()
+            except Exception:
+                full_screen_active = False
+        full_screen_text = "Exit Full Screen" if full_screen_active else "Enter Full Screen"
+        full_screen_action = menu.addAction(full_screen_text)
+        _apply_standard_icon(full_screen_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton, style)
+        if full_screen_action is not None:
+            _set_shortcut(
+                full_screen_action,
+                QtGui.QKeySequence.StandardKey.FullScreen,
+            )
+
+            def _toggle_full_screen() -> None:
+                if not hasattr(target, "isFullScreen"):
+                    full_screen_action.setEnabled(False)
+                    return
+                try:
+                    if target.isFullScreen():
+                        target.showNormal()
+                    else:
+                        target.showFullScreen()
+                except Exception:
+                    pass
+                self.rebuild()
+
+            full_screen_action.triggered.connect(_toggle_full_screen)
+
+        # Navigation -------------------------------------------------------
+        menu.addSeparator()
+        next_action = menu.addAction("Next Window")
+        _apply_standard_icon(next_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowForward, style)
+        if next_action is not None:
+            _set_shortcut(
+                next_action,
+                QtGui.QKeySequence.StandardKey.NextChild,
+            )
+            next_action.triggered.connect(lambda: _cycle_window(+1))
+
+        prev_action = menu.addAction("Previous Window")
+        _apply_standard_icon(prev_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowBack, style)
+        if prev_action is not None:
+            _set_shortcut(
+                prev_action,
+                QtGui.QKeySequence.StandardKey.PreviousChild,
+            )
+            prev_action.triggered.connect(lambda: _cycle_window(-1))
+
+        bring_action = menu.addAction("Bring All to Front")
+        _apply_standard_icon(bring_action, QtWidgets.QStyle.StandardPixmap.SP_BrowserReload, style)
+        if bring_action is not None:
+            bring_action.triggered.connect(_bring_all_to_front)
+
+        # Window list ------------------------------------------------------
+        windows = _visible_windows()
+        menu.addSeparator()
+        if windows:
+            menu.addSection("Windows")
+            try:
+                active = QtWidgets.QApplication.activeWindow()
+            except Exception:
+                active = None
+            for widget in windows:
+                title = widget.windowTitle() or widget.objectName() or widget.__class__.__name__
+                entry = menu.addAction(title)
+                if entry is None:
+                    continue
+                icon = getattr(widget, "windowIcon", lambda: QtGui.QIcon())()
+                if icon is not None and not icon.isNull():
+                    entry.setIcon(icon)
+                entry.setCheckable(True)
+                entry.setChecked(widget is active)
+
+                def _activate_target(_: bool = False, w: QtWidgets.QWidget = widget) -> None:
+                    _activate_window(w)
+
+                entry.triggered.connect(_activate_target)
+        else:
+            placeholder = menu.addAction("No open windows")
+            if placeholder is not None:
+                placeholder.setEnabled(False)
 
 
 def install_standard_menu(
@@ -853,6 +1327,9 @@ def install_standard_menu(
     file_widget: QtWidgets.QWidget | None = None,
     splitter: QtWidgets.QSplitter | None = None,
     default_split_sizes: list[int] | tuple[int, int] | None = None,
+    open_file: Callable[[], None] | None = None,
+    open_folder: Callable[[], None] | None = None,
+    close_window: Callable[[], None] | None = None,
 ) -> QtWidgets.QMenuBar:
     """Attach the shared menu bar with theme, layout, and help entries."""
 
@@ -869,9 +1346,229 @@ def install_standard_menu(
     for action in to_remove:
         menu_bar.removeAction(action)
 
-    view_menu = menu_bar.addMenu("&View")
-    if view_menu is None:
-        return menu_bar
+    def _resolve_handler(
+        default: Callable[[], None] | None,
+        names: tuple[str, ...],
+    ) -> Callable[[], None] | None:
+        if callable(default):
+            return default
+        for name in names:
+            candidate = getattr(target, name, None)
+            if callable(candidate):
+                return candidate
+        return None
+
+    file_handler = _resolve_handler(
+        open_file,
+        (
+            "_open_files_from_menu",
+            "open_files",
+            "open_file",
+            "choose_files",
+            "choose_file",
+            "browse_files",
+            "browse_file",
+            "select_files",
+            "select_file",
+        ),
+    )
+    folder_handler = _resolve_handler(
+        open_folder,
+        (
+            "_open_folder_from_menu",
+            "open_folder",
+            "open_directory",
+            "open_dir",
+            "choose_folder",
+            "choose_directory",
+            "choose_dir",
+            "browse_folder",
+            "browse_directory",
+            "browse_dir",
+            "select_folder",
+            "select_directory",
+        ),
+    )
+
+    close_handler: Callable[[], None] | None = close_window if callable(close_window) else None
+    if close_handler is None:
+        candidate = getattr(target, "close", None)
+        close_handler = candidate if callable(candidate) else None
+
+    file_menu = QtWidgets.QMenu("&File", menu_bar)
+    file_menu.setObjectName("mw_shared_file")
+    first_action = menu_bar.actions()[0] if menu_bar.actions() else None
+    if first_action is not None:
+        menu_bar.insertMenu(first_action, file_menu)
+    else:
+        menu_bar.addMenu(file_menu)
+
+    open_file_action = file_menu.addAction("Open &File…")
+    if open_file_action is not None:
+        try:
+            open_file_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
+        except Exception:
+            pass
+        if file_handler is not None:
+            open_file_action.triggered.connect(file_handler)
+        else:
+            open_file_action.setEnabled(False)
+
+    open_folder_action = file_menu.addAction("Open F&older…")
+    if open_folder_action is not None:
+        shortcut = "Ctrl+Shift+O"
+        if sys.platform == "darwin":
+            shortcut = "Meta+Shift+O"
+        try:
+            open_folder_action.setShortcut(QtGui.QKeySequence(shortcut))
+        except Exception:
+            pass
+        if folder_handler is not None:
+            open_folder_action.triggered.connect(folder_handler)
+        else:
+            open_folder_action.setEnabled(False)
+
+    file_menu.addSeparator()
+
+    close_action = file_menu.addAction("&Close Window")
+    if close_action is not None:
+        try:
+            close_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Close))
+        except Exception:
+            pass
+        if close_handler is not None:
+            close_action.triggered.connect(close_handler)
+        else:
+            close_action.setEnabled(False)
+
+    quit_action = file_menu.addAction("&Quit")
+    if quit_action is not None:
+        try:
+            quit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
+        except Exception:
+            pass
+        try:
+            quit_role = QtGui.QAction.MenuRole.QuitRole  # type: ignore[attr-defined]
+        except AttributeError:
+            quit_role = None
+        if quit_role is not None:
+            try:
+                quit_action.setMenuRole(quit_role)
+            except Exception:
+                pass
+
+        def _quit_application() -> None:
+            app = QtWidgets.QApplication.instance()
+            if app is not None:
+                app.quit()
+            else:  # pragma: no cover - fallback for embedded usage
+                sys.exit(0)
+
+        quit_action.triggered.connect(_quit_application)
+
+    edit_menu = QtWidgets.QMenu("Edit" if sys.platform == "darwin" else "&Edit", menu_bar)
+    edit_menu.setObjectName("mw_shared_edit")
+    menu_bar.addMenu(edit_menu)
+
+    def _focused_widget() -> QtWidgets.QWidget | None:
+        widget = QtWidgets.QApplication.focusWidget()
+        while widget is not None and not widget.isEnabled():
+            widget = widget.parentWidget()
+        return widget
+
+    edit_actions: list[tuple[QtGui.QAction, tuple[str, ...]]] = []
+
+    def _invoke_focus(methods: tuple[str, ...]) -> None:
+        widget = _focused_widget()
+        if widget is None:
+            return
+        for name in methods:
+            target_method = getattr(widget, name, None)
+            if callable(target_method):
+                try:
+                    target_method()
+                except Exception:
+                    pass
+                break
+
+    def _add_edit_action(
+        label: str,
+        shortcut: QtGui.QKeySequence.StandardKey | str | None,
+        icon: QtWidgets.QStyle.StandardPixmap | None,
+        methods: tuple[str, ...],
+    ) -> None:
+        action = edit_menu.addAction(label)
+        if action is None:
+            return
+        if icon is not None:
+            _apply_standard_icon(action, icon)
+        if shortcut is not None:
+            try:
+                action.setShortcut(QtGui.QKeySequence(shortcut))
+            except Exception:
+                pass
+        action.triggered.connect(lambda checked=False, m=methods: _invoke_focus(m))
+        edit_actions.append((action, methods))
+
+    _add_edit_action(
+        "Undo",
+        QtGui.QKeySequence.StandardKey.Undo,
+        QtWidgets.QStyle.StandardPixmap.SP_ArrowBack,
+        ("undo",),
+    )
+    _add_edit_action(
+        "Redo",
+        QtGui.QKeySequence.StandardKey.Redo,
+        QtWidgets.QStyle.StandardPixmap.SP_ArrowForward,
+        ("redo",),
+    )
+    edit_menu.addSeparator()
+    _add_edit_action(
+        "Cut",
+        QtGui.QKeySequence.StandardKey.Cut,
+        QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton,
+        ("cut",),
+    )
+    _add_edit_action(
+        "Copy",
+        QtGui.QKeySequence.StandardKey.Copy,
+        QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView,
+        ("copy",),
+    )
+    _add_edit_action(
+        "Paste",
+        QtGui.QKeySequence.StandardKey.Paste,
+        QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton,
+        ("paste",),
+    )
+    edit_menu.addSeparator()
+    _add_edit_action(
+        "Select All",
+        QtGui.QKeySequence.StandardKey.SelectAll,
+        QtWidgets.QStyle.StandardPixmap.SP_DialogYesButton,
+        ("selectAll",),
+    )
+
+    def _update_edit_actions() -> None:
+        widget = _focused_widget()
+        for action, methods in edit_actions:
+            enabled = False
+            current = widget
+            while current is not None and not enabled:
+                if current.isEnabled():
+                    for name in methods:
+                        candidate = getattr(current, name, None)
+                        if callable(candidate):
+                            enabled = True
+                            break
+                current = current.parentWidget()
+            action.setEnabled(enabled)
+
+    edit_menu.aboutToShow.connect(_update_edit_actions)
+    _update_edit_actions()
+
+    view_menu = QtWidgets.QMenu("&View", menu_bar)
+    menu_bar.addMenu(view_menu)
     view_menu.setObjectName("mw_shared_view")
     theme_submenu = theme_manager().create_theme_menu(view_menu)
     if isinstance(theme_submenu, QtWidgets.QMenu):
@@ -923,14 +1620,38 @@ def install_standard_menu(
         if reset_action is not None:
             reset_action.triggered.connect(_reset_layout)
 
+    window_title = "Window" if sys.platform == "darwin" else "&Window"
+    window_menu = QtWidgets.QMenu(window_title, menu_bar)
+    menu_bar.addMenu(window_menu)
+    window_menu.setObjectName("mw_shared_window")
+    try:
+        window_role = QtGui.QAction.MenuRole.WindowRole  # type: ignore[attr-defined]
+    except AttributeError:
+        window_role = None
+    if window_role is not None:
+        try:
+            window_menu.menuAction().setMenuRole(window_role)
+        except Exception:
+            pass
+    if not hasattr(window_menu, "_mw_manager"):
+        window_menu._mw_manager = _WindowMenuManager(window_menu, target)  # type: ignore[attr-defined]
+
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
     menu_bar.addMenu(developer_menu)
 
-    help_menu = menu_bar.addMenu("&Help")
-    if help_menu is None:
-        return menu_bar
+    help_menu = QtWidgets.QMenu("&Help", menu_bar)
+    menu_bar.addMenu(help_menu)
     help_menu.setObjectName("mw_shared_help")
+    try:
+        help_role = QtGui.QAction.MenuRole.HelpMenuRole  # type: ignore[attr-defined]
+    except AttributeError:
+        help_role = None
+    if help_role is not None:
+        try:
+            help_menu.menuAction().setMenuRole(help_role)
+        except Exception:
+            pass
     if help_topic:
         help_action = help_menu.addAction("View Help")
         if help_action is not None:

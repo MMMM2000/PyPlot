@@ -1,9 +1,12 @@
 import os
 import math
 
+import pytest
+
 # Use an offscreen platform for headless testing environments
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 from PyQt6 import QtWidgets
 from matplotlib.figure import Figure
 

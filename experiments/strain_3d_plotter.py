@@ -225,7 +225,12 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         self.tab_widget.currentChanged.connect(self._update_fullscreen_state)
 
-        install_standard_menu(self, help_topic="strain_3d_plotter", console=self.log_view)
+        install_standard_menu(
+            self,
+            help_topic="strain_3d_plotter",
+            console=self.log_view,
+            open_file=self._choose_input_file,
+        )
         self._update_mode_state()
         self._update_manual_dimension_state()
 

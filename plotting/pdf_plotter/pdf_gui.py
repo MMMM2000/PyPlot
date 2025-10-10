@@ -17,25 +17,65 @@ try:  # optional dependency
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
-from ..utils import (
-    ensure_app_theme,
-    save_figure,
-    prepare_output_dir,
-    get_last_output_dir,
-    set_last_output_dir,
-    run_with_console,
-    arrange_top_layout,
-    set_readability,
-    apply_readability_fonts,
-    restore_backend_choice,
-    store_backend_choice,
-    selected_backend,
-    restore_png_dpi,
-    store_png_dpi,
-    create_file_widget,
-    show_plots,
-)  # type: ignore
+try:
+    from ..utils import (
+        ensure_app_theme,
+        save_figure,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+        arrange_top_layout,
+        set_readability,
+        apply_readability_fonts,
+        restore_backend_choice as _restore_backend_choice,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
+        create_file_widget,
+        show_plots,
+    )  # type: ignore
+except ImportError:
+    from ..utils import (  # type: ignore
+        ensure_app_theme,
+        save_figure,
+        prepare_output_dir,
+        get_last_output_dir,
+        set_last_output_dir,
+        run_with_console,
+        arrange_top_layout,
+        set_readability,
+        apply_readability_fonts,
+        store_backend_choice,
+        selected_backend,
+        restore_png_dpi,
+        store_png_dpi,
+        create_file_widget,
+        show_plots,
+    )
+    _restore_backend_choice = None  # type: ignore[assignment]
 from ..backends import wants_matplotlib, wants_origin
+
+
+if "_restore_backend_choice" not in globals() or _restore_backend_choice is None:  # type: ignore[name-defined]
+
+    def restore_backend_choice(
+        key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
+    ) -> str:
+        """Legacy fallback that selects ``default`` without persisting state."""
+
+        normalised = str(default or "matplotlib").lower()
+        values = [combo.itemText(idx).strip().lower() for idx in range(combo.count())]
+        if not values:
+            return normalised
+        if normalised not in values:
+            normalised = "matplotlib" if "matplotlib" in values else values[0]
+        combo.setCurrentIndex(values.index(normalised))
+        return normalised
+
+else:
+    restore_backend_choice = _restore_backend_choice  # type: ignore[assignment]
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 

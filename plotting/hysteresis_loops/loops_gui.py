@@ -8,30 +8,76 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.hysteresis_loops import core
-    from plotting.utils import (
-        ensure_app_theme,
-        create_file_widget,
-        run_with_console,
-        create_readability_group,
-        sync_readability,
-        arrange_top_layout,
-        restore_backend_choice,
-        store_backend_choice,
-        selected_backend,
-    )
+    try:
+        from plotting.utils import (
+            ensure_app_theme,
+            create_file_widget,
+            run_with_console,
+            create_readability_group,
+            sync_readability,
+            arrange_top_layout,
+            restore_backend_choice as _restore_backend_choice,
+            store_backend_choice,
+            selected_backend,
+        )
+    except ImportError:
+        from plotting.utils import (
+            ensure_app_theme,
+            create_file_widget,
+            run_with_console,
+            create_readability_group,
+            sync_readability,
+            arrange_top_layout,
+            store_backend_choice,
+            selected_backend,
+        )
+        _restore_backend_choice = None  # type: ignore[assignment]
 else:
     from . import core
-    from ..utils import (
-        ensure_app_theme,
-        create_file_widget,
-        run_with_console,
-        create_readability_group,
-        sync_readability,
-        arrange_top_layout,
-        restore_backend_choice,
-        store_backend_choice,
-        selected_backend,
-    )
+    try:
+        from ..utils import (
+            ensure_app_theme,
+            create_file_widget,
+            run_with_console,
+            create_readability_group,
+            sync_readability,
+            arrange_top_layout,
+            restore_backend_choice as _restore_backend_choice,
+            store_backend_choice,
+            selected_backend,
+        )
+    except ImportError:
+        from ..utils import (
+            ensure_app_theme,
+            create_file_widget,
+            run_with_console,
+            create_readability_group,
+            sync_readability,
+            arrange_top_layout,
+            store_backend_choice,
+            selected_backend,
+        )
+        _restore_backend_choice = None  # type: ignore[assignment]
+
+
+if "_restore_backend_choice" not in globals() or _restore_backend_choice is None:  # type: ignore[name-defined]
+
+    def restore_backend_choice(
+        key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
+    ) -> str:
+        """Legacy fallback that selects ``default`` without persisting state."""
+
+        normalised = str(default or "matplotlib").lower()
+        values = [combo.itemText(idx).strip().lower() for idx in range(combo.count())]
+        if not values:
+            return normalised
+        if normalised not in values:
+            normalised = "matplotlib" if "matplotlib" in values else values[0]
+        combo.setCurrentIndex(values.index(normalised))
+        return normalised
+
+else:
+    restore_backend_choice = _restore_backend_choice  # type: ignore[assignment]
 
 
 class SettingsDialog(QtWidgets.QDialog):

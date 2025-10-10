@@ -124,7 +124,13 @@ class StrainWorksheetUpdater(QtWidgets.QWidget):
         self.log_view.setPlaceholderText("Status messages will appear here…")
         layout.addWidget(self.log_view, 1)
 
-        install_standard_menu(self, help_topic="strain_updater", console=self.log_view)
+        install_standard_menu(
+            self,
+            help_topic="strain_updater",
+            console=self.log_view,
+            open_file=self._choose_strain_file,
+            open_folder=self._choose_output_folder,
+        )
 
     # ------------------------------------------------------------------ settings helpers
     def _load_settings(self) -> None:
@@ -182,6 +188,37 @@ class StrainWorksheetUpdater(QtWidgets.QWidget):
                 filename += ".xlsx"
             self.output_edit.setText(filename)
             self._save_settings()
+
+    def _choose_output_folder(self) -> None:
+        """Select an output directory via the shared File menu."""
+
+        current = self.output_edit.text().strip()
+        if current:
+            try:
+                start_dir = str(Path(current).expanduser().resolve().parent)
+            except Exception:
+                start_dir = str(Path.home())
+        elif self.strain_edit.text().strip():
+            try:
+                start_dir = str(Path(self.strain_edit.text().strip()).expanduser().resolve().parent)
+            except Exception:
+                start_dir = str(Path.home())
+        else:
+            start_dir = str(Path.home())
+
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select output folder",
+            start_dir,
+        )
+        if not directory:
+            return
+
+        suggestion = Path(directory) / (Path(current).name or "strain_updated.xlsx")
+        if not suggestion.suffix:
+            suggestion = suggestion.with_suffix(".xlsx")
+        self.output_edit.setText(str(suggestion))
+        self._save_settings()
 
     # ------------------------------------------------------------------ merge logic
     def _run_update(self) -> None:
