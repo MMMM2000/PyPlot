@@ -1,4 +1,7 @@
 import os
+import pytest
+
+pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 from PyQt6 import QtWidgets
 
 from data_logging.data_logger.data_logger import MainWindow
