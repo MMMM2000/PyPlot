@@ -601,6 +601,9 @@ temperatures are still recovered automatically. Even if a measurement has lost
 the `.VSM-Hys-Data` suffix entirely, the loader recognises the typical Lakeshore
 `Hys`/`T`/`a` tokens and imports the file when recursing through a folder tree,
 so stray copies still make it into the session without manual renaming.
+Status messages that occasionally sneak into the numeric block—such as Lakeshore
+warnings about failing to reach a target field—are discarded automatically so
+the remaining rows continue to load and the affected runs stay plottable.
 
 The loader understands both tidy column descriptions (`Column 0: …`) and the
 free-form headers produced by newer VSM exports, ignoring the lengthy

@@ -469,7 +469,17 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
     else:
         raise ValueError("No data rows detected in VSM file")
 
-    df = pd.DataFrame(data_rows, dtype=float)
+    numeric_rows: List[List[str]] = []
+    for row in data_rows:
+        if not row:
+            continue
+        if all(_looks_numeric(token) for token in row):
+            numeric_rows.append(row)
+
+    if not numeric_rows:
+        raise ValueError("No numeric data rows detected in VSM file")
+
+    df = pd.DataFrame(numeric_rows, dtype=float)
 
     width = df.shape[1]
     resolved: List[str] = []

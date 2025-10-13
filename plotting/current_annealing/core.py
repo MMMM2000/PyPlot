@@ -66,24 +66,23 @@ def load_file(path: str) -> pd.DataFrame:
 
     Returns a DataFrame with I_mA and R_Ohm columns.
     """
+    def _read(sep: str | None) -> pd.DataFrame:
+        return pd.read_csv(
+            path,
+            sep=sep,
+            engine="python",
+            header=None,
+            comment="#",
+            dtype=str,
+        )
+
     try:
-        df = pd.read_csv(
-            path,
-            sep=None,
-            engine="python",
-            header=None,
-            comment="#",
-            dtype=str,
-        )
+        df = _read(None)
     except (csv.Error, pd.errors.ParserError):
-        df = pd.read_csv(
-            path,
-            sep=r"\s+",
-            engine="python",
-            header=None,
-            comment="#",
-            dtype=str,
-        )
+        df = _read(r"\s+")
+    else:
+        if df.shape[1] > 3:
+            df = _read(r"\s+")
     if df.shape[1] < 3:
         raise ValueError(f"{path}: expected at least 3 columns (I, V, R)")
     df = df.iloc[:, :3].copy()
