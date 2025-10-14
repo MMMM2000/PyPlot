@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import math
+import numpy as np
 
 import importlib.util
 import sys
@@ -725,23 +726,54 @@ def test_toggle_line_visibility_updates_lines_and_state() -> None:
     temperature = -30.0
     angle = 45.0
     line = _DummyLine("45°")
-    axes = _DummyAxes()
-    canvas = _DummyCanvas()
-    tab_state = module.PlotTabState(axes=axes, canvas=canvas, lines={angle: line})
+
+    axes_primary = _DummyAxes()
+    canvas_primary = _DummyCanvas()
+    tab_state = module.PlotTabState(axes=axes_primary, canvas=canvas_primary, lines={angle: line})
     plotter._plot_tabs[temperature] = tab_state
+
+    axes_descriptor = _DummyAxes()
+    canvas_descriptor = _DummyCanvas()
+    descriptor = module.TabDescriptor(
+        kind="temperature",
+        title="Moment vs field",
+        root_label="-30 °C",
+        x_label="Field",
+        y_label="Moment",
+        canvas=canvas_descriptor,
+        axes=axes_descriptor,
+        lines={
+            ("angle", angle): module.GraphLineState(
+                key=("angle", angle),
+                label="45°",
+                line=line,
+                base_x=np.array([0.0, 1.0]),
+                base_y=np.array([0.0, 1.0]),
+            )
+        },
+        metadata={"temperature": temperature},
+    )
+    plotter._tab_descriptors = {object(): descriptor}
+    plotter._refresh_descriptor_legend = module.VSMPlotter._refresh_descriptor_legend.__get__(plotter)
 
     plotter._toggle_line_visibility(temperature, angle, False)
     assert plotter._line_visibility[temperature][angle] is False
     assert not line.visible
-    assert canvas.draw_calls == 1
-    assert axes.removed_calls == [True]
-    assert axes.legend_history[-1][0] == []
+    assert canvas_primary.draw_calls == 1
+    assert canvas_descriptor.draw_calls == 1
+    assert axes_primary.removed_calls == [True]
+    assert axes_primary.legend_history[-1][0] == []
+    assert axes_descriptor.legend_history == []
 
     plotter._toggle_line_visibility(temperature, angle, True)
     assert plotter._line_visibility[temperature][angle] is True
     assert line.visible
-    assert canvas.draw_calls == 2
-    handles, labels, _ = axes.legend_history[-1]
+    assert canvas_primary.draw_calls == 2
+    assert canvas_descriptor.draw_calls == 2
+    handles, labels, _ = axes_primary.legend_history[-1]
     assert handles == [line]
     assert labels == ["45°"]
+    handles_desc, labels_desc, _ = axes_descriptor.legend_history[-1]
+    assert handles_desc == [line]
+    assert labels_desc == ["45°"]
 

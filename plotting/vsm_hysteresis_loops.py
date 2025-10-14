@@ -61,12 +61,6 @@ class VSMMeasurement:
     data: pd.DataFrame
 
 
-try:
-    TRI_STATE_FLAG = QtCore.Qt.ItemFlag.ItemIsTristate
-except AttributeError:  # Qt 6.7 renamed the tristate flag
-    TRI_STATE_FLAG = getattr(QtCore.Qt.ItemFlag, "ItemIsAutoTristate", QtCore.Qt.ItemFlag(0))
-
-
 class AutoHideDockWidget(QtWidgets.QDockWidget):
     """Dock widget that mimics Origin's hover-to-expand panels."""
 
@@ -535,6 +529,33 @@ class PlotTabState:
     axes: Any
     canvas: FigureCanvas
     lines: Dict[float, Any]
+
+
+@dataclass
+class GraphLineState:
+    """Describe a plotted line within the embedded Matplotlib canvas."""
+
+    key: tuple[str, float | str]
+    label: str
+    line: Any
+    base_x: np.ndarray
+    base_y: np.ndarray
+    normalized: bool = False
+
+
+@dataclass
+class TabDescriptor:
+    """Capture metadata for a tabbed plot and its object manager bindings."""
+
+    kind: str
+    title: str
+    root_label: str
+    x_label: str
+    y_label: str
+    canvas: FigureCanvas
+    axes: Any
+    lines: Dict[tuple[str, float | str], GraphLineState]
+    metadata: Dict[str, Any]
 
 
 @dataclass
@@ -1254,8 +1275,11 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._last_rescale_enabled = False
         self._line_visibility: Dict[float, Dict[float, bool]] = {}
         self._plot_tabs: Dict[float, PlotTabState] = {}
-        self._object_items: Dict[tuple[float, float], QtWidgets.QTreeWidgetItem] = {}
-        self._temperature_items: Dict[float, QtWidgets.QTreeWidgetItem] = {}
+        self._tab_descriptors: Dict[QtWidgets.QWidget, TabDescriptor] = {}
+        self._object_items: Dict[
+            tuple[QtWidgets.QWidget, tuple[str, float | str]],
+            QtWidgets.QTreeWidgetItem,
+        ] = {}
         self._worksheet_models: Dict[Path, WorksheetModel] = {}
         self._plotted_series_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
@@ -1320,6 +1344,11 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.save_graph_button.clicked.connect(self._save_current_graph)
         action_row.addWidget(self.save_graph_button)
 
+        self.normalize_button = QtWidgets.QPushButton("Normalize Y")
+        self.normalize_button.setEnabled(False)
+        self.normalize_button.clicked.connect(self._normalize_current_graph)
+        action_row.addWidget(self.normalize_button)
+
         self.export_button = QtWidgets.QPushButton("Export TXT…")
         self.export_button.clicked.connect(self._export_txt)
         self.export_button.setEnabled(False)
@@ -1329,7 +1358,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         central_layout.addLayout(action_row)
 
         self.tab_widget = QtWidgets.QTabWidget()
-        self.tab_widget.currentChanged.connect(self._update_save_graph_enabled)
+        self.tab_widget.currentChanged.connect(self._handle_current_tab_changed)
         central_layout.addWidget(self.tab_widget, 1)
 
         self.setCentralWidget(central)
@@ -1743,10 +1772,16 @@ class VSMPlotter(QtWidgets.QMainWindow):
         tab: QtWidgets.QWidget,
         canvas: FigureCanvas,
         axes: Any,
+        descriptor: TabDescriptor | None = None,
     ) -> None:
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
+        if descriptor is not None:
+            self._tab_descriptors[tab] = descriptor
         self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        if self.tab_widget.currentWidget() is tab:
+            self._rebuild_object_manager_for_tab(tab)
 
     def _clear_tab_list(self, tabs: List[QtWidgets.QWidget]) -> None:
         for tab in tabs:
@@ -1755,14 +1790,31 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 self.tab_widget.removeTab(index)
             self._canvas_by_tab.pop(tab, None)
             self._axes_by_tab.pop(tab, None)
+            self._tab_descriptors.pop(tab, None)
+            for key in [key for key in self._object_items.keys() if key[0] is tab]:
+                self._object_items.pop(key, None)
         tabs.clear()
         self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
 
     def _update_save_graph_enabled(self, *_: object) -> None:
         current = self.tab_widget.currentWidget()
         enabled = bool(current and current in self._canvas_by_tab)
         self.save_graph_button.setEnabled(enabled)
 
+    def _update_normalize_enabled(self) -> None:
+        tab = self.tab_widget.currentWidget()
+        descriptor = self._tab_descriptors.get(tab) if tab is not None else None
+        enabled = bool(descriptor and descriptor.lines)
+        self.normalize_button.setEnabled(enabled)
+        self.popout_button.setEnabled(enabled)
+
+    def _handle_current_tab_changed(self, index: int) -> None:
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        tab = self.tab_widget.widget(index) if index >= 0 else None
+        self._rebuild_object_manager_for_tab(tab)
     # ------------------------------------------------------------------ data loading
     def _load_measurements(self, *, show_warning: bool = True) -> None:
         self.measurements.clear()
@@ -1774,6 +1826,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.tab_widget.clear()
         self._canvas_by_tab.clear()
         self._axes_by_tab.clear()
+        self._tab_descriptors.clear()
         self._update_save_graph_enabled()
         self.log_view.clear()
         self._last_prepared_groups = {}
@@ -1783,7 +1836,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._line_visibility = {}
         self._plot_tabs = {}
         self._object_items = {}
-        self._temperature_items = {}
         self._worksheet_models.clear()
         self._reset_object_manager()
         self.worksheet_tabs.clear()
@@ -1802,6 +1854,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.metrics_temperature_button.setEnabled(False)
         self.export_metrics_button.setEnabled(False)
         self._update_metric_controls()
+        self._update_normalize_enabled()
 
         paths = self._selected_paths()
         if not paths:
@@ -2014,14 +2067,15 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 prepared_groups[temperature] = prepared
 
         if not prepared_groups:
-            self._update_object_manager({})
+            self._reset_object_manager()
+            self._update_angle_overlay_options({})
             self._append_log(
                 "No numeric data matched the selected axes; nothing to plot."
             )
-            self.popout_button.setEnabled(False)
+            self._update_normalize_enabled()
             return
 
-        self._update_object_manager(prepared_groups)
+        self._update_angle_overlay_options(prepared_groups)
 
         rescale_enabled = self.rescale_checkbox.isChecked()
         rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
@@ -2115,7 +2169,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._last_rescale_info = rescale_info
         self._last_axes = (x_axis, y_axis)
         self._last_rescale_enabled = rescale_enabled
-        self.popout_button.setEnabled(True)
 
         backend_choice = self.backend_combo.currentText()
         render_matplotlib = wants_matplotlib(backend_choice)
@@ -2133,6 +2186,10 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         if not render_matplotlib and not export_origin:
             self._append_log("No backend selected; nothing generated.")
+
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
 
     def _compute_rescale_lookup(self, x_axis: str, y_axis: str) -> Dict[Path, RescaleResult]:
         grouped: Dict[float, List[VSMMeasurement]] = {}
@@ -2238,6 +2295,23 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 pass
 
         handled_canvases = {state.canvas for state in self._plot_tabs.values()}
+        for descriptor in self._tab_descriptors.values():
+            canvas = descriptor.canvas
+            if canvas in handled_canvases:
+                continue
+            self._apply_plot_theme(descriptor.axes)
+            legend = getattr(descriptor.axes, "legend_", None)
+            self._style_legend(legend)
+            try:
+                descriptor.axes.figure.tight_layout()
+            except Exception:  # pragma: no cover - backend differences
+                pass
+            try:
+                canvas.draw_idle()
+            except Exception:  # pragma: no cover - backend differences
+                pass
+            handled_canvases.add(canvas)
+
         for tab, axes in list(self._axes_by_tab.items()):
             canvas = self._canvas_by_tab.get(tab)
             if canvas is None or canvas in handled_canvases:
@@ -2276,12 +2350,43 @@ class VSMPlotter(QtWidgets.QMainWindow):
             except Exception:  # pragma: no cover - backend specific
                 pass
 
+    def _refresh_descriptor_legend(self, descriptor: TabDescriptor) -> None:
+        legend = getattr(descriptor.axes, "legend_", None)
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:  # pragma: no cover - matplotlib backend specific
+                pass
+
+        visible_states = [
+            state for state in descriptor.lines.values() if state.line.get_visible()
+        ]
+        if visible_states:
+            legend = descriptor.axes.legend(
+                [state.line for state in visible_states],
+                [state.label for state in visible_states],
+                loc="best",
+            )
+            self._apply_plot_theme(descriptor.axes)
+            self._style_legend(legend)
+        else:
+            legend = None
+            self._apply_plot_theme(descriptor.axes)
+
+        try:
+            descriptor.axes.figure.tight_layout()
+        except Exception:  # pragma: no cover - backend specific
+            pass
+        try:
+            descriptor.canvas.draw_idle()
+        except Exception:  # pragma: no cover - backend specific
+            pass
+
     def _reset_object_manager(self) -> None:
         self.object_tree.blockSignals(True)
         self.object_tree.clear()
         self.object_tree.blockSignals(False)
         self._object_items.clear()
-        self._temperature_items.clear()
         self._reset_overlay_controls()
 
     def _reset_overlay_controls(self) -> None:
@@ -2291,70 +2396,49 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.angle_overlay_button.setEnabled(False)
         self._update_metric_controls()
 
-    def _update_object_manager(
+    def _rebuild_object_manager_for_tab(
         self,
-        prepared_groups: Dict[float, List[tuple[VSMMeasurement, pd.DataFrame]]],
+        tab: QtWidgets.QWidget | None,
     ) -> None:
         self.object_tree.blockSignals(True)
         self.object_tree.clear()
         self._object_items.clear()
-        self._temperature_items.clear()
 
-        if not prepared_groups:
+        descriptor = self._tab_descriptors.get(tab) if tab is not None else None
+        if descriptor is None:
             self.object_tree.blockSignals(False)
-            self._reset_overlay_controls()
-            for key in list(self._line_visibility.keys()):
-                if key not in prepared_groups:
-                    del self._line_visibility[key]
             return
 
-        for temperature, entries in sorted(prepared_groups.items()):
-            parent = QtWidgets.QTreeWidgetItem([f"{temperature:g} °C"])
-            flags = parent.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
-            if TRI_STATE_FLAG:
-                flags |= TRI_STATE_FLAG
-            parent.setFlags(flags)
-            parent.setCheckState(0, QtCore.Qt.CheckState.Checked)
-            self.object_tree.addTopLevelItem(parent)
-            self._temperature_items[float(temperature)] = parent
+        root = QtWidgets.QTreeWidgetItem([descriptor.root_label])
+        root.setFlags(root.flags() & ~QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+        self.object_tree.addTopLevelItem(root)
 
-            visibility = self._line_visibility.setdefault(float(temperature), {})
-            seen_angles: set[float] = set()
-            for measurement, _ in entries:
-                if measurement.angle is None:
-                    continue
-                angle = float(measurement.angle)
-                if angle in seen_angles:
-                    continue
-                seen_angles.add(angle)
-                child = QtWidgets.QTreeWidgetItem([f"{angle:g}°"])
-                child.setFlags(
-                    child.flags()
-                    | QtCore.Qt.ItemFlag.ItemIsUserCheckable
-                    | QtCore.Qt.ItemFlag.ItemIsSelectable
-                )
-                child.setData(
-                    0,
-                    QtCore.Qt.ItemDataRole.UserRole,
-                    (float(temperature), angle),
-                )
-                state = QtCore.Qt.CheckState.Checked if visibility.get(angle, True) else QtCore.Qt.CheckState.Unchecked
-                child.setCheckState(0, state)
-                parent.addChild(child)
-                self._object_items[(float(temperature), angle)] = child
-
-            for missing in [key for key in visibility.keys() if key not in seen_angles]:
-                del visibility[missing]
-
-            if not seen_angles and TRI_STATE_FLAG:
-                parent.setFlags(parent.flags() & ~TRI_STATE_FLAG)
-                parent.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+        for key, line_state in sorted(
+            descriptor.lines.items(),
+            key=lambda item: item[1].label,
+        ):
+            child = QtWidgets.QTreeWidgetItem([line_state.label])
+            child.setFlags(
+                child.flags()
+                | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                | QtCore.Qt.ItemFlag.ItemIsSelectable
+            )
+            state = (
+                QtCore.Qt.CheckState.Checked
+                if line_state.line.get_visible()
+                else QtCore.Qt.CheckState.Unchecked
+            )
+            child.setCheckState(0, state)
+            child.setData(
+                0,
+                QtCore.Qt.ItemDataRole.UserRole,
+                (tab, key),
+            )
+            root.addChild(child)
+            self._object_items[(tab, key)] = child
 
         self.object_tree.expandAll()
         self.object_tree.blockSignals(False)
-        for stale_temp in [key for key in list(self._line_visibility.keys()) if key not in prepared_groups]:
-            del self._line_visibility[stale_temp]
-        self._update_angle_overlay_options(prepared_groups)
 
     def _update_angle_overlay_options(
         self,
@@ -2402,14 +2486,29 @@ class VSMPlotter(QtWidgets.QMainWindow):
     def _handle_object_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
         if column != 0:
             return
-        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not data:
+        payload = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not payload:
             return
-        temperature, angle = data
+        tab, key = payload
+        descriptor = self._tab_descriptors.get(tab)
+        if descriptor is None:
+            return
+        line_state = descriptor.lines.get(tuple(key))
+        if line_state is None:
+            return
         visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
-        visibility = self._line_visibility.setdefault(float(temperature), {})
-        visibility[float(angle)] = visible
-        self._toggle_line_visibility(float(temperature), float(angle), visible)
+        line_state.line.set_visible(visible)
+        if descriptor.kind == "temperature":
+            temperature = descriptor.metadata.get("temperature")
+            if isinstance(temperature, (int, float)):
+                visibility = self._line_visibility.setdefault(float(temperature), {})
+                try:
+                    _, angle_value = key
+                except (TypeError, ValueError):
+                    angle_value = None
+                if isinstance(angle_value, (int, float)):
+                    visibility[float(angle_value)] = visible
+        self._refresh_descriptor_legend(descriptor)
 
     def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
         tab_state = self._plot_tabs.get(float(temperature))
@@ -2420,6 +2519,23 @@ class VSMPlotter(QtWidgets.QMainWindow):
             return
         line.set_visible(visible)
         self._refresh_tab_legend(tab_state)
+
+        self._line_visibility.setdefault(float(temperature), {})[float(angle)] = visible
+
+        for tab, descriptor in self._tab_descriptors.items():
+            if descriptor.kind != "temperature":
+                continue
+            meta_temp = descriptor.metadata.get("temperature")
+            if not isinstance(meta_temp, (int, float)):
+                continue
+            if not math.isclose(float(meta_temp), float(temperature), rel_tol=0.0, abs_tol=1e-6):
+                continue
+            state = descriptor.lines.get(("angle", float(angle)))
+            if state is None:
+                continue
+            state.line.set_visible(visible)
+            self._refresh_descriptor_legend(descriptor)
+            break
 
     def _plot_angle_overlays(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
@@ -2439,32 +2555,18 @@ class VSMPlotter(QtWidgets.QMainWindow):
             )
             return
 
-        try:
-            import matplotlib.pyplot as plt
-        except Exception as exc:  # pragma: no cover - backend dependent
-            QtWidgets.QMessageBox.warning(
-                self,
-                "VSM Hysteresis Loops",
-                f"Matplotlib's interactive backend is unavailable: {exc}",
-            )
-            return
-
         x_axis, y_axis = self._last_axes
         rescale_enabled = self._last_rescale_enabled
         rescale_info = self._last_rescale_info if rescale_enabled else {}
         line_kwargs = self._line_style_kwargs()
 
-        count = len(angles)
-        cols = 2 if count > 1 else 1
-        rows = math.ceil(count / cols)
-        fig, axes = plt.subplots(rows, cols, squeeze=False)
-        axes_flat = list(axes.flat)
+        self._clear_tab_list(self._overlay_tab_widgets)
+        any_tab = False
 
-        for ax in axes_flat[count:]:
-            fig.delaxes(ax)
-
-        for index, angle in enumerate(angles):
-            ax = axes_flat[index]
+        for angle in angles:
+            fig = Figure(figsize=(11.5, 7.8))
+            ax = fig.add_subplot(111)
+            lines: Dict[tuple[str, float | str], GraphLineState] = {}
             plotted = False
             for temperature, entries in sorted(self._last_prepared_groups.items()):
                 for measurement, subset in entries:
@@ -2481,11 +2583,22 @@ class VSMPlotter(QtWidgets.QMainWindow):
                                 series_y = replacement
                             else:
                                 series_y = series_y * result.scale + result.offset
-                    ax.plot(
-                        subset[x_axis].to_numpy(),
-                        pd.to_numeric(series_y, errors="coerce").to_numpy(),
+                    numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                    numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
+                    if numeric_x.size == 0 or numeric_y.size == 0:
+                        continue
+                    line, = ax.plot(
+                        numeric_x,
+                        numeric_y,
                         label=f"{temperature:g} °C",
                         **line_kwargs,
+                    )
+                    lines[("temperature", float(temperature))] = GraphLineState(
+                        key=("temperature", float(temperature)),
+                        label=f"{temperature:g} °C",
+                        line=line,
+                        base_x=numeric_x,
+                        base_y=numeric_y,
                     )
                     plotted = True
             if plotted:
@@ -2497,7 +2610,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 if legend is not None:
                     self._style_legend(legend)
             else:
-                ax.set_axis_off()
                 ax.text(
                     0.5,
                     0.5,
@@ -2506,12 +2618,43 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     ha="center",
                     va="center",
                 )
+                self._apply_plot_theme(ax)
 
-        fig.tight_layout()
-        self._append_log(
-            "Opened Matplotlib window showing selected angles across temperatures."
-        )
-        plt.show()
+            try:
+                fig.tight_layout()
+            except Exception:  # pragma: no cover - backend dependent
+                pass
+
+            canvas = FigureCanvas(fig)
+            tab = QtWidgets.QWidget()
+            layout = QtWidgets.QVBoxLayout(tab)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.addWidget(canvas)
+            title = f"Angle {angle:g}° overlays"
+            descriptor = TabDescriptor(
+                kind="overlay",
+                title=f"{y_axis} vs {x_axis} at {angle:g}°",
+                root_label=title,
+                x_label=x_axis,
+                y_label=y_axis,
+                canvas=canvas,
+                axes=ax,
+                lines=lines,
+                metadata={"angle": float(angle)},
+            )
+            self.tab_widget.addTab(tab, title)
+            self._overlay_tab_widgets.append(tab)
+            self._register_plot_tab(tab, canvas, ax, descriptor)
+            any_tab = True
+
+        if any_tab:
+            self._append_log("Added angle overlay tabs to the viewer.")
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No overlays could be generated for the selected angles.",
+            )
 
     def _write_plotted_series(self, target_dir: Path) -> int:
         exported = 0
@@ -2584,17 +2727,27 @@ class VSMPlotter(QtWidgets.QMainWindow):
             fig = Figure(figsize=(11.5, 7.8))
             ax = fig.add_subplot(111)
             plotted = False
+            lines: Dict[tuple[str, float | str], GraphLineState] = {}
             for temperature, table in sorted(self._metrics_by_temperature.items()):
                 if column not in table.columns:
                     continue
                 subset = table[[angle_column, column]].dropna()
                 if subset.empty:
                     continue
-                ax.plot(
-                    subset[angle_column].to_numpy(),
-                    subset[column].to_numpy(),
+                numeric_x = subset[angle_column].to_numpy()
+                numeric_y = subset[column].to_numpy()
+                line, = ax.plot(
+                    numeric_x,
+                    numeric_y,
                     label=f"{temperature:g} °C",
                     **style,
+                )
+                lines[("temperature", float(temperature))] = GraphLineState(
+                    key=("temperature", float(temperature)),
+                    label=f"{temperature:g} °C",
+                    line=line,
+                    base_x=numeric_x,
+                    base_y=numeric_y,
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
@@ -2626,9 +2779,20 @@ class VSMPlotter(QtWidgets.QMainWindow):
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
             tab_title = f"{long_name} vs angle"
+            descriptor = TabDescriptor(
+                kind="metrics_angle",
+                title=tab_title,
+                root_label=tab_title,
+                x_label=x_label,
+                y_label=_format_column_with_unit(long_name, unit),
+                canvas=canvas,
+                axes=ax,
+                lines=lines,
+                metadata={"metric": long_name},
+            )
             self.tab_widget.addTab(tab, tab_title)
             self._metrics_angle_tabs.append(tab)
-            self._register_plot_tab(tab, canvas, ax)
+            self._register_plot_tab(tab, canvas, ax, descriptor)
             any_tab = True
 
         if any_tab:
@@ -2683,6 +2847,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
             fig = Figure(figsize=(11.5, 7.8))
             ax = fig.add_subplot(111)
             plotted = False
+            lines: Dict[tuple[str, float | str], GraphLineState] = {}
             for angle in angles:
                 table = self._metrics_by_angle.get(float(angle))
                 if table is None or column not in table.columns:
@@ -2690,11 +2855,20 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 subset = table[[temperature_column, column]].dropna()
                 if subset.empty:
                     continue
-                ax.plot(
-                    subset[temperature_column].to_numpy(),
-                    subset[column].to_numpy(),
+                numeric_x = subset[temperature_column].to_numpy()
+                numeric_y = subset[column].to_numpy()
+                line, = ax.plot(
+                    numeric_x,
+                    numeric_y,
                     label=f"{angle:g}°",
                     **style,
+                )
+                lines[("angle", float(angle))] = GraphLineState(
+                    key=("angle", float(angle)),
+                    label=f"{angle:g}°",
+                    line=line,
+                    base_x=numeric_x,
+                    base_y=numeric_y,
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
@@ -2726,9 +2900,20 @@ class VSMPlotter(QtWidgets.QMainWindow):
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
             tab_title = f"{long_name} vs temperature"
+            descriptor = TabDescriptor(
+                kind="metrics_temperature",
+                title=tab_title,
+                root_label=tab_title,
+                x_label=x_label,
+                y_label=_format_column_with_unit(long_name, unit),
+                canvas=canvas,
+                axes=ax,
+                lines=lines,
+                metadata={"metric": long_name},
+            )
             self.tab_widget.addTab(tab, tab_title)
             self._metrics_temperature_tabs.append(tab)
-            self._register_plot_tab(tab, canvas, ax)
+            self._register_plot_tab(tab, canvas, ax, descriptor)
             any_tab = True
 
         if any_tab:
@@ -2852,11 +3037,21 @@ class VSMPlotter(QtWidgets.QMainWindow):
             )
 
     def _open_matplotlib_window(self) -> None:
-        if not self._last_prepared_groups or not self._last_axes:
+        tab = self.tab_widget.currentWidget()
+        if tab is None:
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots before opening a Matplotlib window.",
+                "Select a plot tab before opening a Matplotlib window.",
+            )
+            return
+
+        descriptor = self._tab_descriptors.get(tab)
+        if descriptor is None or not descriptor.lines:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No Matplotlib plots are available for the selected tab.",
             )
             return
 
@@ -2870,60 +3065,64 @@ class VSMPlotter(QtWidgets.QMainWindow):
             )
             return
 
-        x_axis, y_axis = self._last_axes
-        rescale_enabled = self._last_rescale_enabled
-        rescale_info = self._last_rescale_info if rescale_enabled else {}
-        visibility = self._line_visibility
-        line_kwargs = self._line_style_kwargs()
-
-        created = False
-        for temperature, entries in sorted(self._last_prepared_groups.items()):
-            fig, ax = plt.subplots()
-            plotted = False
-            for measurement, subset in entries:
-                angle_visibility = visibility.get(temperature, {}).get(measurement.angle, True)
-                if not angle_visibility:
-                    continue
-                series_y = subset[y_axis]
-                if rescale_enabled:
-                    result = rescale_info.get(temperature, {}).get(measurement.path)
-                    if result is not None:
-                        if result.replacement is not None:
-                            series_y = result.replacement.reindex(subset.index)
-                        else:
-                            series_y = series_y * result.scale + result.offset
-                ax.plot(
-                    subset[x_axis].to_numpy(),
-                    pd.to_numeric(series_y, errors="coerce").to_numpy(),
-                    label=f"{measurement.angle:g}°",
-                    **line_kwargs,
-                )
-                plotted = True
-            ax.set_xlabel(x_axis)
-            ax.set_ylabel(y_axis)
-            ax.set_title(f"{y_axis} vs {x_axis} at {temperature:g} °C")
-            self._apply_plot_theme(ax)
-            if plotted:
-                legend = ax.legend(loc="best")
-                self._style_legend(legend)
-            try:  # pragma: no cover - backend dependent
-                fig.canvas.manager.set_window_title(f"{temperature:g} °C")
-            except Exception:
-                pass
-            fig.tight_layout()
-            created = created or plotted
-
-            if not plotted:
-                plt.close(fig)
+        fig, ax = plt.subplots()
+        plotted = False
+        for state in descriptor.lines.values():
+            if not state.line.get_visible():
                 continue
+            try:
+                color = state.line.get_color()
+            except Exception:
+                color = None
+            try:
+                linestyle = state.line.get_linestyle()
+            except Exception:
+                linestyle = "-"
+            try:
+                marker = state.line.get_marker()
+            except Exception:
+                marker = "None"
+            try:
+                markersize = state.line.get_markersize()
+            except Exception:
+                markersize = None
+            kwargs: Dict[str, Any] = {"label": state.label}
+            if color is not None:
+                kwargs["color"] = color
+            if linestyle is not None:
+                kwargs["linestyle"] = linestyle
+            if marker is not None and marker != "None":
+                kwargs["marker"] = marker
+            if markersize is not None:
+                kwargs["markersize"] = markersize
+            ax.plot(state.line.get_xdata(), state.line.get_ydata(), **kwargs)
+            plotted = True
 
-        if created:
+        ax.set_xlabel(descriptor.x_label)
+        ax.set_ylabel(descriptor.y_label)
+        ax.set_title(descriptor.title)
+        self._apply_plot_theme(ax)
+        if plotted:
+            legend = ax.legend(loc="best")
+            self._style_legend(legend)
+        try:  # pragma: no cover - backend dependent
+            fig.canvas.manager.set_window_title(descriptor.title)
+        except Exception:
+            pass
+        try:
+            fig.tight_layout()
+        except Exception:  # pragma: no cover - backend dependent
+            pass
+
+        if plotted:
             plt.show()
+            self._append_log(f"Opened Matplotlib window for '{descriptor.title}'.")
         else:
+            plt.close(fig)
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "No Matplotlib plots are available to display.",
+                "No Matplotlib plots are available for the selected tab.",
             )
 
     def _save_current_graph(self) -> None:
@@ -3008,6 +3207,65 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.settings.setValue("last_graph_dir", str(path.parent))
         self.settings.sync()
         self._append_log(f"Saved graph to {path}")
+
+    def _normalize_current_graph(self) -> None:
+        tab = self.tab_widget.currentWidget()
+        if tab is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Select a plot tab before normalizing.",
+            )
+            return
+
+        descriptor = self._tab_descriptors.get(tab)
+        if descriptor is None or not descriptor.lines:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "The selected tab does not contain a Matplotlib graph to normalize.",
+            )
+            return
+
+        if all(state.normalized for state in descriptor.lines.values()):
+            for state in descriptor.lines.values():
+                state.line.set_ydata(state.base_y)
+                state.normalized = False
+            self._refresh_descriptor_legend(descriptor)
+            self._append_log("Restored the original scaling for the current graph.")
+            return
+
+        updated = False
+        for state in descriptor.lines.values():
+            data = state.base_y
+            if data.size == 0:
+                continue
+            finite = data[np.isfinite(data)]
+            if finite.size == 0:
+                continue
+            max_value = np.max(np.abs(finite))
+            if max_value == 0:
+                continue
+            normalized = np.divide(
+                data,
+                max_value,
+                where=np.isfinite(data),
+                out=np.full_like(data, np.nan),
+            )
+            state.line.set_ydata(normalized)
+            state.normalized = True
+            updated = True
+
+        if not updated:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No numeric data was available to normalize for the selected tab.",
+            )
+            return
+
+        self._refresh_descriptor_legend(descriptor)
+        self._append_log("Normalized the current graph so each curve peaks at one.")
 
     def _export_txt(self) -> None:
         if not self.measurements:
@@ -3205,6 +3463,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
             ax = fig.add_subplot(111)
             visibility = self._line_visibility.setdefault(temperature, {})
             lines: Dict[float, Any] = {}
+            descriptor_lines: Dict[tuple[str, float | str], GraphLineState] = {}
             valid_angles: set[float] = set()
             for measurement, subset in entries:
                 angle = float(measurement.angle)
@@ -3217,15 +3476,24 @@ class VSMPlotter(QtWidgets.QMainWindow):
                             series_y = replacement
                         else:
                             series_y = series_y * result.scale + result.offset
+                numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
                 line, = ax.plot(
-                    subset[x_axis].to_numpy(),
-                    pd.to_numeric(series_y, errors="coerce").to_numpy(),
+                    numeric_x,
+                    numeric_y,
                     label=f"{measurement.angle:g}°",
                     **line_kwargs,
                 )
                 visible = visibility.get(angle, True)
                 line.set_visible(visible)
                 lines[angle] = line
+                descriptor_lines[("angle", angle)] = GraphLineState(
+                    key=("angle", angle),
+                    label=f"{measurement.angle:g}°",
+                    line=line,
+                    base_x=numeric_x,
+                    base_y=numeric_y,
+                )
                 valid_angles.add(angle)
 
             for angle in list(visibility.keys()):
@@ -3250,9 +3518,21 @@ class VSMPlotter(QtWidgets.QMainWindow):
             layout = QtWidgets.QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(canvas)
-            self.tab_widget.addTab(tab, f"{temperature:g} °C")
+            title = f"{temperature:g} °C"
+            descriptor = TabDescriptor(
+                kind="temperature",
+                title=f"{y_axis} vs {x_axis} at {temperature:g} °C",
+                root_label=title,
+                x_label=x_axis,
+                y_label=y_axis,
+                canvas=canvas,
+                axes=ax,
+                lines=descriptor_lines,
+                metadata={"temperature": float(temperature)},
+            )
+            self.tab_widget.addTab(tab, title)
             self._temperature_tab_widgets.append(tab)
-            self._register_plot_tab(tab, canvas, ax)
+            self._register_plot_tab(tab, canvas, ax, descriptor)
             if legend is None:
                 self._refresh_tab_legend(tab_state)
 
