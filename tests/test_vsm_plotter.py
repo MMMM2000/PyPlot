@@ -458,6 +458,54 @@ def test_apply_rescaling_symmetrises_targets() -> None:
     assert transformed.iloc[-1] == pytest.approx(base_result.target_right, rel=1e-6, abs=1e-9)
 
 
+def test_write_origin_ascii_includes_metadata(tmp_path: Path) -> None:
+    df = pd.DataFrame({
+        "Applied Field [Oe]": [0.0, 1.0],
+        "Moment [emu]": [0.1, 0.2],
+    })
+    path = tmp_path / "export.txt"
+    metadata = {
+        "temperature": -30.0,
+        "angle": 45.0,
+        "rescaled": True,
+        "source": "sample.VSM-Hys-Data",
+        "x_axis": "Applied Field [Oe]",
+        "y_axis": "Moment [emu]",
+        "summary": "Test export",
+    }
+    axis_roles = {"Applied Field [Oe]": "X axis", "Moment [emu]": "Y axis"}
+
+    module._write_origin_ascii(path, df, metadata=metadata, axis_roles=axis_roles)
+
+    lines = path.read_text().splitlines()
+    assert lines[0] == "# X Axis: Applied Field [Oe]"
+    assert lines[1] == "# Y Axis: Moment [emu]"
+    assert lines[2] == "# Test export"
+    assert lines[3].count("\t") == 1
+    assert lines[4].startswith("@L\tApplied Field")
+    assert "Moment" in lines[4]
+    assert lines[5].startswith("@U\tOe\t")
+    assert "emu" in lines[5]
+    assert "Temperature: -30" in lines[6]
+    assert "Angle: 45" in lines[6]
+    assert "Rescaled values" in lines[6]
+
+
+def test_calculate_metrics_returns_expected_values() -> None:
+    df = pd.DataFrame(
+        {
+            "Field": [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0],
+            "Moment": [-0.9, -0.4, -0.1, 0.2, 0.5, 0.8, 0.9],
+        }
+    )
+
+    result = module._calculate_metrics(df, "Field", "Moment")
+
+    assert result.coercivity == pytest.approx(-0.3333333333, rel=1e-6)
+    assert result.remanence == pytest.approx(0.2, rel=1e-6)
+    assert result.saturation == pytest.approx(0.9, rel=1e-6)
+
+
 class _FakeSheet:
     def __init__(self) -> None:
         self.data = None

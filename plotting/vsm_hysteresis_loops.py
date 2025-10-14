@@ -318,6 +318,263 @@ class PlotTabState:
     lines: Dict[float, Any]
 
 
+@dataclass
+class PlotSeriesExport:
+    """Describe a Matplotlib curve that can be exported as ASCII."""
+
+    temperature: float
+    angle: float
+    data: pd.DataFrame
+    x_axis: str
+    y_axis: str
+    rescaled: bool
+    source: Path
+
+
+@dataclass
+class MetricResult:
+    """Container for derived hysteresis properties."""
+
+    coercivity: float | None
+    remanence: float | None
+    saturation: float | None
+
+
+def _split_column_label(label: str) -> tuple[str, str]:
+    """Return the long name and unit extracted from ``label``."""
+
+    text = str(label or "").strip()
+    if not text:
+        return "Column", ""
+    if "[" in text and "]" in text:
+        name_part, unit_part = text.rsplit("[", 1)
+        unit_part = unit_part.rstrip("] ")
+        name_part = name_part.strip()
+        if name_part:
+            return name_part, unit_part.strip()
+    return text, ""
+
+
+def _origin_short_name(long_name: str, existing: set[str]) -> str:
+    """Create an Origin-friendly short name that avoids duplicates."""
+
+    candidate = re.sub(r"[^0-9A-Za-z]", "", long_name)
+    if not candidate:
+        candidate = "Col"
+    if candidate[0].isdigit():
+        candidate = f"C{candidate}"
+    base = candidate[:13] or candidate
+    choice = base
+    index = 2
+    while choice in existing:
+        suffix = f"_{index}"
+        trim = max(1, 13 - len(suffix))
+        choice = f"{base[:trim]}{suffix}"
+        index += 1
+    existing.add(choice)
+    return choice
+
+
+def _format_column_with_unit(label: str, unit: str) -> str:
+    unit = unit.strip()
+    return f"{label} [{unit}]" if unit else label
+
+
+def _format_metadata_comment(metadata: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    temperature = metadata.get("temperature")
+    if isinstance(temperature, (int, float)) and not math.isnan(temperature):
+        parts.append(f"Temperature: {temperature:g} °C")
+    angle = metadata.get("angle")
+    if isinstance(angle, (int, float)) and not math.isnan(angle):
+        parts.append(f"Angle: {angle:g} °")
+    summary = metadata.get("summary")
+    if summary:
+        parts.append(str(summary))
+    rescaled = metadata.get("rescaled")
+    if rescaled:
+        parts.append("Rescaled values")
+    source = metadata.get("source")
+    if source:
+        parts.append(f"Source: {source}")
+    return "; ".join(parts)
+
+
+def _write_origin_ascii(
+    path: Path,
+    df: pd.DataFrame,
+    *,
+    metadata: Dict[str, Any],
+    axis_roles: Dict[str, str] | None = None,
+) -> None:
+    """Write ``df`` to ``path`` with Origin-compatible header rows."""
+
+    axis_roles = axis_roles or {}
+    columns = [str(col) for col in df.columns]
+    long_names: List[str] = []
+    units: List[str] = []
+    comments: List[str] = []
+    short_names: List[str] = []
+    seen: set[str] = set()
+    base_comment = _format_metadata_comment(metadata)
+    for column in columns:
+        long_name, unit = _split_column_label(column)
+        long_names.append(long_name)
+        units.append(unit)
+        short_names.append(_origin_short_name(long_name or "Column", seen))
+        role = axis_roles.get(column)
+        if role and base_comment:
+            comments.append(f"{role}: {base_comment}")
+        elif role:
+            comments.append(role)
+        elif base_comment:
+            comments.append(base_comment)
+        else:
+            comments.append("")
+
+    metadata_lines: List[str] = []
+    x_axis = metadata.get("x_axis")
+    if x_axis:
+        metadata_lines.append(f"# X Axis: {x_axis}")
+    y_axis = metadata.get("y_axis")
+    if y_axis:
+        metadata_lines.append(f"# Y Axis: {y_axis}")
+    summary = metadata.get("summary")
+    if summary:
+        metadata_lines.append(f"# {summary}")
+
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        for line in metadata_lines:
+            handle.write(f"{line}\n")
+        handle.write("\t".join(short_names) + "\n")
+        handle.write("@L\t" + "\t".join(long_names) + "\n")
+        handle.write("@U\t" + "\t".join(units) + "\n")
+        handle.write("@C\t" + "\t".join(comments) + "\n")
+        df.to_csv(handle, sep="\t", index=False, header=False, na_rep="")
+
+
+def _interpolate_x_at_y(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
+    """Return the X coordinate where the curve crosses ``target`` on Y."""
+
+    closest: float | None = None
+    min_abs = float("inf")
+    for x0, y0, x1, y1 in zip(x_values[:-1], y_values[:-1], x_values[1:], y_values[1:]):
+        if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+            continue
+        if math.isclose(y0, target, rel_tol=1e-12, abs_tol=1e-12):
+            candidate = float(x0)
+        elif math.isclose(y1, target, rel_tol=1e-12, abs_tol=1e-12):
+            candidate = float(x1)
+        elif (y0 - target) * (y1 - target) > 0:
+            continue
+        elif math.isclose(y1, y0, rel_tol=1e-12, abs_tol=1e-12):
+            continue
+        else:
+            fraction = (target - y0) / (y1 - y0)
+            candidate = float(x0 + fraction * (x1 - x0))
+        magnitude = abs(candidate)
+        if magnitude < min_abs:
+            min_abs = magnitude
+            closest = candidate
+    return closest
+
+
+def _interpolate_y_at_x(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
+    """Return the Y coordinate where the curve crosses ``target`` on X."""
+
+    for x0, y0, x1, y1 in zip(x_values[:-1], y_values[:-1], x_values[1:], y_values[1:]):
+        if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+            continue
+        if math.isclose(x0, target, rel_tol=1e-12, abs_tol=1e-12):
+            return float(y0)
+        if math.isclose(x1, target, rel_tol=1e-12, abs_tol=1e-12):
+            return float(y1)
+        if (x0 - target) * (x1 - target) > 0:
+            continue
+        if math.isclose(x1, x0, rel_tol=1e-12, abs_tol=1e-12):
+            continue
+        fraction = (target - x0) / (x1 - x0)
+        return float(y0 + fraction * (y1 - y0))
+    return None
+
+
+def _calculate_metrics(subset: pd.DataFrame, x_axis: str, y_axis: str) -> MetricResult:
+    """Compute coercivity, remanence, and saturation magnetisation."""
+
+    if subset.empty:
+        return MetricResult(None, None, None)
+    ordered = subset[[x_axis, y_axis]].dropna().sort_values(by=x_axis)
+    if ordered.empty:
+        return MetricResult(None, None, None)
+    x_values = ordered[x_axis].to_numpy(dtype=float)
+    y_values = ordered[y_axis].to_numpy(dtype=float)
+    coercivity = _interpolate_x_at_y(x_values, y_values, target=0.0)
+    remanence = _interpolate_y_at_x(x_values, y_values, target=0.0)
+    if len(y_values) and np.any(np.isfinite(y_values)):
+        saturation = float(np.nanmax(y_values))
+    else:
+        saturation = None
+    return MetricResult(coercivity, remanence, saturation)
+
+
+def _aggregate_metrics(
+    records: Sequence[tuple[float, float, MetricResult]],
+    *,
+    x_unit: str,
+    y_unit: str,
+    temperature_unit: str = "°C",
+) -> tuple[Dict[float, pd.DataFrame], Dict[float, pd.DataFrame], Dict[str, str]]:
+    """Return metric tables grouped by temperature and angle."""
+
+    angle_label = _format_column_with_unit("Angle", "deg")
+    temperature_label = _format_column_with_unit("Temperature", temperature_unit)
+    coercivity_label = _format_column_with_unit("Coercivity", x_unit)
+    remanence_label = _format_column_with_unit("Remanence", y_unit)
+    saturation_label = _format_column_with_unit("Saturation Magnetization", y_unit)
+
+    by_temperature: Dict[float, List[Dict[str, float]]] = {}
+    by_angle: Dict[float, List[Dict[str, float]]] = {}
+
+    for temperature, angle, metrics in records:
+        row_temp = {
+            angle_label: angle,
+            coercivity_label: float(metrics.coercivity) if metrics.coercivity is not None else math.nan,
+            remanence_label: float(metrics.remanence) if metrics.remanence is not None else math.nan,
+            saturation_label: float(metrics.saturation) if metrics.saturation is not None else math.nan,
+        }
+        by_temperature.setdefault(temperature, []).append(row_temp)
+
+        row_angle = {
+            temperature_label: temperature,
+            coercivity_label: float(metrics.coercivity) if metrics.coercivity is not None else math.nan,
+            remanence_label: float(metrics.remanence) if metrics.remanence is not None else math.nan,
+            saturation_label: float(metrics.saturation) if metrics.saturation is not None else math.nan,
+        }
+        by_angle.setdefault(angle, []).append(row_angle)
+
+    temp_tables: Dict[float, pd.DataFrame] = {}
+    for temperature, rows in by_temperature.items():
+        df = pd.DataFrame(rows)
+        df = df.sort_values(by=angle_label)
+        temp_tables[temperature] = df
+
+    angle_tables: Dict[float, pd.DataFrame] = {}
+    for angle, rows in by_angle.items():
+        df = pd.DataFrame(rows)
+        df = df.sort_values(by=temperature_label)
+        angle_tables[angle] = df
+
+    column_map = {
+        "angle": angle_label,
+        "temperature": temperature_label,
+        "coercivity": coercivity_label,
+        "remanence": remanence_label,
+        "saturation": saturation_label,
+    }
+
+    return temp_tables, angle_tables, column_map
+
+
 def _normalise_column_name(raw: str, index: int) -> str:
     cleaned = re.sub(r"\\s+", " ", raw.strip())
     if not cleaned:
@@ -752,6 +1009,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self._plot_tabs: Dict[float, PlotTabState] = {}
         self._angle_checkboxes: Dict[float, Dict[float, QtWidgets.QCheckBox]] = {}
         self._angle_group_widgets: List[QtWidgets.QWidget] = []
+        self._plotted_series_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
+        self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
+        self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
+        self._metric_column_names: Dict[str, str] = {}
 
         self._build_ui()
         self._load_settings()
@@ -866,6 +1127,21 @@ class VSMPlotter(QtWidgets.QWidget):
         )
         self.angle_overlay_button.clicked.connect(self._plot_angle_overlays)
 
+        self.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle")
+        self.metrics_angle_button.setEnabled(False)
+        self.metrics_angle_button.clicked.connect(self._plot_metrics_vs_angle)
+        controls_layout.addWidget(self.metrics_angle_button)
+
+        self.metrics_temperature_button = QtWidgets.QPushButton("Plot metrics vs temperature")
+        self.metrics_temperature_button.setEnabled(False)
+        self.metrics_temperature_button.clicked.connect(self._plot_metrics_vs_temperature)
+        controls_layout.addWidget(self.metrics_temperature_button)
+
+        self.export_metrics_button = QtWidgets.QPushButton("Export metrics")
+        self.export_metrics_button.setEnabled(False)
+        self.export_metrics_button.clicked.connect(self._export_metrics)
+        controls_layout.addWidget(self.export_metrics_button)
+
         controls_layout.addWidget(QtWidgets.QLabel("TXT export mode"))
         self.export_mode_combo = QtWidgets.QComboBox()
         self.export_mode_combo.addItem("Original data", "original")
@@ -884,6 +1160,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.popout_button.clicked.connect(self._open_matplotlib_window)
         self.popout_button.setEnabled(False)
         button_row.addWidget(self.popout_button)
+        self.export_plot_button = QtWidgets.QPushButton("Export plotted data")
+        self.export_plot_button.clicked.connect(self._export_plotted_series)
+        self.export_plot_button.setEnabled(False)
+        button_row.addWidget(self.export_plot_button)
         self.export_txt_button = QtWidgets.QPushButton("Export TXT")
         self.export_txt_button.clicked.connect(self._export_txt)
         self.export_txt_button.setEnabled(False)
@@ -908,7 +1188,7 @@ class VSMPlotter(QtWidgets.QWidget):
         self.output_splitter.setStretchFactor(1, 1)
         self.output_splitter.setChildrenCollapsible(False)
 
-        install_standard_menu(
+        menu_bar = install_standard_menu(
             self,
             help_topic="vsm_hysteresis_loops",
             console=self.log_view,
@@ -918,6 +1198,12 @@ class VSMPlotter(QtWidgets.QWidget):
             splitter=self.output_splitter,
             default_split_sizes=[3, 1],
         )
+
+        export_menu = menu_bar.addMenu("Export")
+        export_plot_action = export_menu.addAction("Plotted series…")
+        export_plot_action.triggered.connect(self._export_plotted_series)
+        export_metrics_action = export_menu.addAction("Derived metrics…")
+        export_metrics_action.triggered.connect(self._export_metrics)
 
     def _load_settings(self) -> None:
         value = self.settings.value("last_path", "")
@@ -1035,6 +1321,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self._plot_tabs = {}
         self._angle_checkboxes = {}
         self._reset_angle_controls()
+        self._plotted_series_exports = {}
+        self._metrics_by_temperature = {}
+        self._metrics_by_angle = {}
+        self._metric_column_names = {}
         self.temperature_combo.blockSignals(True)
         self.temperature_combo.clear()
         self.temperature_combo.addItem("All temperatures", None)
@@ -1042,6 +1332,15 @@ class VSMPlotter(QtWidgets.QWidget):
         self.plot_button.setEnabled(False)
         self.export_txt_button.setEnabled(False)
         self.popout_button.setEnabled(False)
+        if hasattr(self, "export_plot_button"):
+            self.export_plot_button.setEnabled(False)
+        if hasattr(self, "metrics_angle_button"):
+            self.metrics_angle_button.setEnabled(False)
+        if hasattr(self, "metrics_temperature_button"):
+            self.metrics_temperature_button.setEnabled(False)
+        if hasattr(self, "export_metrics_button"):
+            self.export_metrics_button.setEnabled(False)
+        self._update_metric_controls()
 
         paths = self._selected_paths()
         if not paths:
@@ -1289,6 +1588,61 @@ class VSMPlotter(QtWidgets.QWidget):
                         f"{measurement.path.name}: rescaled {y_axis} with scale {result.scale:.3g}{inversion_note} "
                         f"and offset {result.offset:.3g}; targets {result.target_left:.3g} to {result.target_right:.3g}."
                     )
+
+        plot_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
+        metric_records: List[tuple[float, float, MetricResult]] = []
+        for temperature, entries in prepared_groups.items():
+            for measurement, subset in entries:
+                if measurement.angle is None:
+                    continue
+                export_subset = subset.copy()
+                rescale_applied = False
+                result = rescale_info.get(temperature, {}).get(measurement.path) if rescale_enabled else None
+                if rescale_enabled and result is not None:
+                    if result.replacement is not None:
+                        replacement = result.replacement.reindex(export_subset.index)
+                        export_subset[y_axis] = replacement.to_numpy()
+                        rescale_applied = True
+                    elif result.applied:
+                        export_subset[y_axis] = export_subset[y_axis] * result.scale + result.offset
+                        rescale_applied = True
+                if export_subset.empty:
+                    continue
+                key = (float(temperature), float(measurement.angle))
+                plot_exports[key] = PlotSeriesExport(
+                    temperature=float(temperature),
+                    angle=float(measurement.angle),
+                    data=export_subset[[x_axis, y_axis]].copy(),
+                    x_axis=x_axis,
+                    y_axis=y_axis,
+                    rescaled=rescale_applied,
+                    source=measurement.path,
+                )
+                metric_records.append(
+                    (
+                        float(temperature),
+                        float(measurement.angle),
+                        _calculate_metrics(export_subset[[x_axis, y_axis]], x_axis, y_axis),
+                    )
+                )
+
+        self._plotted_series_exports = plot_exports
+        if hasattr(self, "export_plot_button"):
+            self.export_plot_button.setEnabled(bool(self._plotted_series_exports))
+
+        _, x_unit = _split_column_label(x_axis)
+        _, y_unit = _split_column_label(y_axis)
+        if metric_records:
+            (
+                self._metrics_by_temperature,
+                self._metrics_by_angle,
+                self._metric_column_names,
+            ) = _aggregate_metrics(metric_records, x_unit=x_unit, y_unit=y_unit)
+        else:
+            self._metrics_by_temperature = {}
+            self._metrics_by_angle = {}
+            self._metric_column_names = {}
+        self._update_metric_controls()
 
         self._last_prepared_groups = prepared_groups
         self._last_rescale_info = rescale_info
@@ -1577,6 +1931,17 @@ class VSMPlotter(QtWidgets.QWidget):
         self.angle_overlay_button.setEnabled(
             has_angles and bool(self._last_prepared_groups)
         )
+        self._update_metric_controls()
+
+    def _update_metric_controls(self) -> None:
+        has_metrics = bool(getattr(self, "_metrics_by_temperature", {}))
+        if hasattr(self, "metrics_angle_button"):
+            self.metrics_angle_button.setEnabled(has_metrics)
+        if hasattr(self, "export_metrics_button"):
+            self.export_metrics_button.setEnabled(has_metrics)
+        has_angles = has_metrics and bool(self._selected_overlay_angles())
+        if hasattr(self, "metrics_temperature_button"):
+            self.metrics_temperature_button.setEnabled(has_angles)
 
     def _on_angle_checkbox_toggled(self, temperature: float, angle: float, checked: bool) -> None:
         self._toggle_line_visibility(temperature, angle, checked)
@@ -1689,6 +2054,348 @@ class VSMPlotter(QtWidgets.QWidget):
             "Opened Matplotlib window showing selected angles across temperatures."
         )
         plt.show()
+
+    def _export_plotted_series(self) -> None:
+        if not self._plotted_series_exports:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots before exporting plotted data.",
+            )
+            return
+
+        start_directory = (
+            str(self.last_export_path)
+            if self.last_export_path is not None
+            else self.path_edit.text()
+        )
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            start_directory or str(Path.home()),
+        )
+        if not directory:
+            return
+
+        suggestion = _clean_folder_name(
+            f"{self._metric_column_names.get('saturation', 'VSM_Plots')}"
+        ) or "VSM_Plots"
+        dialog = ExportOptionsDialog(self, Path(directory), suggestion=suggestion)
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        target_dir = dialog.selected_directory()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        for (temperature, angle), entry in sorted(self._plotted_series_exports.items()):
+            visible = self._line_visibility.get(temperature, {}).get(angle, True)
+            if not visible or entry.data.empty:
+                continue
+            temp_label = _temperature_subfolder_name(temperature)
+            angle_label = _clean_folder_name(f"Angle{angle:+g}deg")
+            x_label = _clean_folder_name(entry.x_axis) or "X"
+            y_label = _clean_folder_name(entry.y_axis) or "Y"
+            filename = target_dir / f"{temp_label}_{angle_label}_{y_label}_vs_{x_label}.txt"
+            counter = 2
+            while filename.exists():
+                filename = target_dir / f"{temp_label}_{angle_label}_{y_label}_vs_{x_label}_{counter}.txt"
+                counter += 1
+            metadata = {
+                "temperature": temperature,
+                "angle": angle,
+                "rescaled": entry.rescaled,
+                "source": entry.source.name,
+                "x_axis": entry.x_axis,
+                "y_axis": entry.y_axis,
+                "summary": "Hysteresis curve prepared for plotting",
+            }
+            axis_roles = {
+                entry.x_axis: "X axis",
+                entry.y_axis: "Y axis",
+            }
+            try:
+                _write_origin_ascii(filename, entry.data, metadata=metadata, axis_roles=axis_roles)
+            except Exception as exc:
+                self._append_log(f"Failed to export {entry.source.name}: {exc}")
+                continue
+            exported += 1
+
+        if exported:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                f"Exported {exported} plotted series to {target_dir}",
+            )
+            self._append_log(f"Exported {exported} plotted series to {target_dir}")
+            self.last_export_path = target_dir
+            self.settings.setValue("last_export_path", str(target_dir))
+            self.settings.sync()
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No plotted series matched the current visibility filters.",
+            )
+
+    def _plot_metrics_vs_angle(self) -> None:
+        if not self._metrics_by_temperature:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots to compute derived metrics first.",
+            )
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # pragma: no cover - backend dependent
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Hysteresis Loops",
+                f"Matplotlib's interactive backend is unavailable: {exc}",
+            )
+            return
+
+        column_map = self._metric_column_names
+        angle_column = column_map.get("angle")
+        if not angle_column:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No angle metadata is available for metric plots.",
+            )
+            return
+
+        metrics = ["coercivity", "remanence", "saturation"]
+        fig, axes = plt.subplots(len(metrics), 1, sharex=True)
+        if len(metrics) == 1:
+            axes = [axes]
+        style = self._line_style_kwargs()
+
+        for idx, metric in enumerate(metrics):
+            column = column_map.get(metric)
+            if not column:
+                continue
+            ax = axes[idx]
+            plotted = False
+            for temperature, table in sorted(self._metrics_by_temperature.items()):
+                if column not in table.columns:
+                    continue
+                subset = table[[angle_column, column]].dropna()
+                if subset.empty:
+                    continue
+                ax.plot(
+                    subset[angle_column].to_numpy(),
+                    subset[column].to_numpy(),
+                    label=f"{temperature:g} °C",
+                    **style,
+                )
+                plotted = True
+            long_name, unit = _split_column_label(column)
+            ax.set_ylabel(_format_column_with_unit(long_name, unit))
+            self._apply_plot_theme(ax)
+            if plotted:
+                legend = ax.legend(loc="best")
+                if legend is not None:
+                    self._style_legend(legend)
+            else:
+                ax.set_ylabel(_format_column_with_unit(long_name, unit))
+        long_angle, angle_unit = _split_column_label(angle_column)
+        axes[-1].set_xlabel(_format_column_with_unit(long_angle, angle_unit))
+        fig.tight_layout()
+        self._append_log("Opened Matplotlib window with metrics vs angle.")
+        plt.show()
+
+    def _plot_metrics_vs_temperature(self) -> None:
+        if not self._metrics_by_angle:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots to compute derived metrics first.",
+            )
+            return
+
+        angles = self._selected_overlay_angles()
+        if not angles:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Select at least one angle to plot metrics versus temperature.",
+            )
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:  # pragma: no cover - backend dependent
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Hysteresis Loops",
+                f"Matplotlib's interactive backend is unavailable: {exc}",
+            )
+            return
+
+        column_map = self._metric_column_names
+        temperature_column = column_map.get("temperature")
+        if not temperature_column:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No temperature metadata is available for metric plots.",
+            )
+            return
+
+        metrics = ["coercivity", "remanence", "saturation"]
+        fig, axes = plt.subplots(len(metrics), 1, sharex=True)
+        if len(metrics) == 1:
+            axes = [axes]
+        style = self._line_style_kwargs()
+
+        for idx, metric in enumerate(metrics):
+            column = column_map.get(metric)
+            if not column:
+                continue
+            ax = axes[idx]
+            plotted = False
+            for angle in angles:
+                table = self._metrics_by_angle.get(float(angle))
+                if table is None or column not in table.columns:
+                    continue
+                subset = table[[temperature_column, column]].dropna()
+                if subset.empty:
+                    continue
+                ax.plot(
+                    subset[temperature_column].to_numpy(),
+                    subset[column].to_numpy(),
+                    label=f"{angle:g}°",
+                    **style,
+                )
+                plotted = True
+            long_name, unit = _split_column_label(column)
+            ax.set_ylabel(_format_column_with_unit(long_name, unit))
+            self._apply_plot_theme(ax)
+            if plotted:
+                legend = ax.legend(loc="best")
+                if legend is not None:
+                    self._style_legend(legend)
+            else:
+                ax.set_ylabel(_format_column_with_unit(long_name, unit))
+        long_temp, temp_unit = _split_column_label(temperature_column)
+        axes[-1].set_xlabel(_format_column_with_unit(long_temp, temp_unit))
+        fig.tight_layout()
+        self._append_log("Opened Matplotlib window with metrics vs temperature.")
+        plt.show()
+
+    def _export_metrics(self) -> None:
+        if not self._metrics_by_temperature and not self._metrics_by_angle:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots to compute derived metrics first.",
+            )
+            return
+
+        start_directory = (
+            str(self.last_export_path)
+            if self.last_export_path is not None
+            else self.path_edit.text()
+        )
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select export folder",
+            start_directory or str(Path.home()),
+        )
+        if not directory:
+            return
+
+        dialog = ExportOptionsDialog(self, Path(directory), suggestion="VSM_Metrics")
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        target_dir = dialog.selected_directory()
+        target_dir.mkdir(parents=True, exist_ok=True)
+
+        exported = 0
+        angle_column = self._metric_column_names.get("angle")
+        temperature_column = self._metric_column_names.get("temperature")
+        metrics = [
+            self._metric_column_names.get("coercivity"),
+            self._metric_column_names.get("remanence"),
+            self._metric_column_names.get("saturation"),
+        ]
+
+        for temperature, table in sorted(self._metrics_by_temperature.items()):
+            if angle_column not in table.columns:
+                continue
+            data = table.dropna(how="all")
+            if data.empty:
+                continue
+            filename = target_dir / f"metrics_{_temperature_subfolder_name(temperature)}_vs_angle.txt"
+            counter = 2
+            while filename.exists():
+                filename = target_dir / f"metrics_{_temperature_subfolder_name(temperature)}_vs_angle_{counter}.txt"
+                counter += 1
+            metadata = {
+                "temperature": temperature,
+                "summary": "Derived hysteresis metrics vs angle",
+                "source": "VSM metrics aggregation",
+                "x_axis": angle_column,
+                "y_axis": ", ".join(filter(None, metrics)),
+            }
+            axis_roles = {angle_column: "Angle"}
+            try:
+                _write_origin_ascii(filename, data, metadata=metadata, axis_roles=axis_roles)
+            except Exception as exc:
+                self._append_log(f"Failed to export metrics for {temperature:g} °C: {exc}")
+                continue
+            exported += 1
+
+        selected_angles = self._selected_overlay_angles()
+        angle_targets = selected_angles or sorted(self._metrics_by_angle.keys())
+        for angle in angle_targets:
+            table = self._metrics_by_angle.get(float(angle))
+            if table is None or temperature_column not in table.columns:
+                continue
+            data = table.dropna(how="all")
+            if data.empty:
+                continue
+            angle_label = _clean_folder_name(f"Angle{float(angle):+g}deg")
+            filename = target_dir / f"metrics_{angle_label}_vs_temperature.txt"
+            counter = 2
+            while filename.exists():
+                filename = target_dir / f"metrics_{angle_label}_vs_temperature_{counter}.txt"
+                counter += 1
+            metadata = {
+                "angle": float(angle),
+                "summary": "Derived hysteresis metrics vs temperature",
+                "source": "VSM metrics aggregation",
+                "x_axis": temperature_column,
+                "y_axis": ", ".join(filter(None, metrics)),
+            }
+            axis_roles = {temperature_column: "Temperature"}
+            try:
+                _write_origin_ascii(filename, data, metadata=metadata, axis_roles=axis_roles)
+            except Exception as exc:
+                self._append_log(f"Failed to export metrics for {angle:g}°: {exc}")
+                continue
+            exported += 1
+
+        if exported:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                f"Exported {exported} metric table(s) to {target_dir}",
+            )
+            self._append_log(f"Exported {exported} metric table(s) to {target_dir}")
+            self.last_export_path = target_dir
+            self.settings.setValue("last_export_path", str(target_dir))
+            self.settings.sync()
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No derived metric tables were exported.",
+            )
 
     def _open_matplotlib_window(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
@@ -1837,44 +2544,56 @@ class VSMPlotter(QtWidgets.QWidget):
                 candidate = destination_dir / f"{base_name}_{counter}.txt"
                 counter += 1
             try:
+                export_rescaled = False
+                df_to_write = measurement.data.copy()
                 if rescale_requested:
-                    if measurement.path in rescale_lookup:
-                        result = rescale_lookup[measurement.path]
-                        if result.replacement is not None:
-                            if y_axis in measurement.data.columns:
-                                df_to_write = measurement.data.copy()
-                                numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
-                                updated = numeric.copy()
-                                updated.loc[result.replacement.index] = result.replacement.to_numpy()
-                                df_to_write[y_axis] = updated
-                            else:
-                                self._append_log(
-                                    f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
-                                )
-                                df_to_write = measurement.data
-                        elif not result.applied:
-                            self._append_log(
-                                f"{measurement.path.name}: insufficient variation to rescale {y_axis}; exported original values."
-                            )
-                            df_to_write = measurement.data
-                        else:
-                            df_to_write = measurement.data.copy()
-                            if y_axis in df_to_write.columns:
-                                numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
-                                df_to_write[y_axis] = numeric * result.scale + result.offset
-                            else:
-                                self._append_log(
-                                    f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
-                                )
-                                df_to_write = measurement.data
-                    else:
+                    result = rescale_lookup.get(measurement.path)
+                    if result is None:
                         self._append_log(
                             f"{measurement.path.name}: no rescale transform available; exported original values."
                         )
-                        df_to_write = measurement.data
-                else:
-                    df_to_write = measurement.data
-                df_to_write.to_csv(candidate, sep="\t", index=False)
+                    elif result.replacement is not None:
+                        if y_axis in df_to_write.columns:
+                            replacement = result.replacement.reindex(df_to_write.index)
+                            numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
+                            if not replacement.dropna().empty:
+                                numeric.loc[replacement.dropna().index] = replacement.dropna().to_numpy()
+                            df_to_write[y_axis] = numeric
+                            export_rescaled = True
+                        else:
+                            self._append_log(
+                                f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
+                            )
+                    elif not result.applied:
+                        self._append_log(
+                            f"{measurement.path.name}: insufficient variation to rescale {y_axis}; exported original values."
+                        )
+                    else:
+                        if y_axis in df_to_write.columns:
+                            numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
+                            df_to_write[y_axis] = numeric * result.scale + result.offset
+                            export_rescaled = True
+                        else:
+                            self._append_log(
+                                f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
+                            )
+
+                metadata = {
+                    "temperature": measurement.temperature,
+                    "angle": measurement.angle,
+                    "rescaled": export_rescaled,
+                    "source": measurement.path.name,
+                    "x_axis": x_axis,
+                    "y_axis": y_axis,
+                    "summary": "Full hysteresis measurement export",
+                }
+                axis_roles: Dict[str, str] = {}
+                if x_axis in df_to_write.columns:
+                    axis_roles[x_axis] = "X axis"
+                if y_axis in df_to_write.columns:
+                    axis_roles[y_axis] = "Y axis"
+
+                _write_origin_ascii(candidate, df_to_write, metadata=metadata, axis_roles=axis_roles)
                 exported += 1
             except Exception as exc:
                 self._append_log(f"Failed to export {measurement.path.name}: {exc}")

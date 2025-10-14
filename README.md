@@ -652,6 +652,26 @@ dedicated Matplotlib window where every curve is grouped by angle but coloured
 by temperature. Rescaling, dark-mode styling, and line/marker preferences carry
 over automatically, making it easy to build publication-ready comparisons.
 
+All TXT exports now include an Origin-friendly header block: the first four
+rows provide short names, long names, units, and comments (complete with the
+active X/Y axis, temperature, angle, and whether rescaling was applied). The new
+**Export plotted data** control produces one `.txt` file per visible curve using
+the same axis selections and rescale transforms that shaped the plot, so every
+Matplotlib tab can be recreated in Origin with the correct metadata in place.
+The menubar also gains an **Export** menu for quick access to plotted-series and
+metrics exports without hunting for the sidebar buttons.
+
+Derived properties—coercivity (field at zero magnetisation), remanence
+(magnetisation at zero field), and saturation magnetisation (maximum recorded
+moment)—are calculated whenever plots are generated. Use **Plot metrics vs
+angle** to visualise how those values evolve across rotations for each
+temperature, or select one or more angles and choose **Plot metrics vs
+temperature** to see how the same properties change as the sample warms. Each
+derived table can be written to disk via **Export metrics**, which creates
+Origin-ready worksheets grouped by temperature (metrics versus angle) and by the
+selected angles (metrics versus temperature) so downstream analyses have the
+expected labels, units, and context baked in.
+
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
 positive-field endpoint reaches the same maximum. The target extrema are derived
