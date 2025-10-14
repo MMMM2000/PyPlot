@@ -1249,6 +1249,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._overlay_tab_widgets: List[QtWidgets.QWidget] = []
         self._canvas_by_tab: Dict[QtWidgets.QWidget, FigureCanvas] = {}
         self._axes_by_tab: Dict[QtWidgets.QWidget, Any] = {}
+        self._last_graph_dir: Path | None = None
 
         self._build_ui()
         self._load_settings()
@@ -1310,6 +1311,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         central_layout.addLayout(action_row)
 
         self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget.currentChanged.connect(self._update_save_graph_enabled)
         central_layout.addWidget(self.tab_widget, 1)
 
         self.setCentralWidget(central)
@@ -1474,6 +1476,13 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 self.last_export_path = Path(export_path)
             except (TypeError, ValueError):
                 self.last_export_path = None
+
+        graph_dir = self.settings.value("last_graph_dir", "")
+        if isinstance(graph_dir, str) and graph_dir:
+            try:
+                self._last_graph_dir = Path(graph_dir)
+            except (TypeError, ValueError):
+                self._last_graph_dir = None
 
         backend = self.settings.value("backend", "Matplotlib")
         if isinstance(backend, str):
@@ -1710,6 +1719,31 @@ class VSMPlotter(QtWidgets.QMainWindow):
             f"Deleted {len(rows)} row(s) from {model._measurement.path.name}."
         )
         self._generate_plots()
+
+    def _register_plot_tab(
+        self,
+        tab: QtWidgets.QWidget,
+        canvas: FigureCanvas,
+        axes: Any,
+    ) -> None:
+        self._canvas_by_tab[tab] = canvas
+        self._axes_by_tab[tab] = axes
+        self._update_save_graph_enabled()
+
+    def _clear_tab_list(self, tabs: List[QtWidgets.QWidget]) -> None:
+        for tab in tabs:
+            index = self.tab_widget.indexOf(tab)
+            if index >= 0:
+                self.tab_widget.removeTab(index)
+            self._canvas_by_tab.pop(tab, None)
+            self._axes_by_tab.pop(tab, None)
+        tabs.clear()
+        self._update_save_graph_enabled()
+
+    def _update_save_graph_enabled(self, *_: object) -> None:
+        current = self.tab_widget.currentWidget()
+        enabled = bool(current and current in self._canvas_by_tab)
+        self.save_graph_button.setEnabled(enabled)
 
     # ------------------------------------------------------------------ data loading
     def _load_measurements(self, *, show_warning: bool = True) -> None:
@@ -2874,6 +2908,89 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 "VSM Hysteresis Loops",
                 "No Matplotlib plots are available to display.",
             )
+
+    def _save_current_graph(self) -> None:
+        tab = self.tab_widget.currentWidget()
+        if tab is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Select a plot tab before saving a graph.",
+            )
+            return
+
+        canvas = self._canvas_by_tab.get(tab)
+        if canvas is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "The selected tab does not contain a Matplotlib graph to save.",
+            )
+            return
+
+        index = self.tab_widget.currentIndex()
+        tab_label = self.tab_widget.tabText(index) if index >= 0 else ""
+        base_name = _clean_folder_name(tab_label or "VSM_Graph") or "VSM_Graph"
+
+        start_dir: Path | None = self._last_graph_dir or self.last_export_path
+        if start_dir is None:
+            path_text = self.path_edit.text().strip()
+            if path_text:
+                try:
+                    candidate = Path(path_text)
+                    start_dir = candidate if candidate.is_dir() else candidate.parent
+                except (OSError, ValueError):
+                    start_dir = None
+        if start_dir is None:
+            start_dir = Path.home()
+        elif not start_dir.exists() and not start_dir.parent.exists():
+            start_dir = Path.home()
+
+        if start_dir.is_file():
+            start_dir = start_dir.parent
+
+        default_path = start_dir / f"{base_name}.png"
+
+        filter_map = {
+            "PNG Image (*.png)": ".png",
+            "PDF Document (*.pdf)": ".pdf",
+            "SVG Image (*.svg)": ".svg",
+        }
+        filters = ";;".join(filter_map.keys()) + ";;All Files (*)"
+
+        filename, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save graph",
+            str(default_path),
+            filters,
+        )
+        if not filename:
+            return
+
+        path = Path(filename)
+        if not path.suffix:
+            extension = filter_map.get(selected_filter, "") or ".png"
+            path = path.with_suffix(extension)
+
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        try:
+            canvas.figure.savefig(path)
+        except Exception as exc:  # pragma: no cover - backend specific
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Hysteresis Loops",
+                f"Failed to save graph: {exc}",
+            )
+            return
+
+        self._last_graph_dir = path.parent
+        self.settings.setValue("last_graph_dir", str(path.parent))
+        self.settings.sync()
+        self._append_log(f"Saved graph to {path}")
 
     def _export_txt(self) -> None:
         if not self.measurements:
