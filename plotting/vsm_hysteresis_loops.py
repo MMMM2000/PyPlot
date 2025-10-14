@@ -2400,6 +2400,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         descriptor: TabDescriptor,
         *,
         symmetric: bool = False,
+        include_zero: bool = False,
     ) -> None:
         arrays: List[np.ndarray] = []
         for state in descriptor.lines.values():
@@ -2447,6 +2448,10 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 lower = min_y - padding
                 upper = max_y + padding
 
+        if include_zero:
+            lower = min(lower, 0.0)
+            upper = max(upper, 0.0)
+
         try:
             descriptor.axes.set_ylim(lower, upper)
         except Exception:  # pragma: no cover - backend specific
@@ -2485,7 +2490,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         for key, line_state in sorted(
             descriptor.lines.items(),
-            key=lambda item: item[1].label,
+            key=self._object_manager_sort_key,
         ):
             child = QtWidgets.QTreeWidgetItem([line_state.label])
             child.setFlags(
@@ -2509,6 +2514,30 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         self.object_tree.expandAll()
         self.object_tree.blockSignals(False)
+
+    @staticmethod
+    def _object_manager_sort_key(item: tuple[tuple[str, float | str], GraphLineState]) -> tuple[int, float | str, str]:
+        """Sort object manager entries numerically when possible."""
+
+        key, state = item
+        numeric: float | None = None
+
+        if isinstance(key, tuple) and len(key) == 2:
+            candidate = key[1]
+            if isinstance(candidate, (int, float)):
+                numeric = float(candidate)
+
+        if numeric is None:
+            match = re.search(r"-?\d+(?:\.\d+)?", state.label)
+            if match is not None:
+                try:
+                    numeric = float(match.group())
+                except ValueError:
+                    numeric = None
+
+        if numeric is not None:
+            return (0, numeric, state.label.lower())
+        return (1, state.label.lower(), state.label)
 
     def _update_angle_overlay_options(
         self,
@@ -3135,7 +3164,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
             )
             return
 
-        fig, ax = plt.subplots()
+        fig, ax = plt.subplots(constrained_layout=True)
         plotted = False
         for state in descriptor.lines.values():
             if not state.line.get_visible():
@@ -3180,7 +3209,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         except Exception:
             pass
         try:
-            fig.tight_layout()
+            fig.canvas.draw_idle()
         except Exception:  # pragma: no cover - backend dependent
             pass
 
@@ -3366,9 +3395,11 @@ class VSMPlotter(QtWidgets.QMainWindow):
         if restore_limits is not None:
             descriptor.stored_limits[_PRE_NORMALIZE_Y_KEY] = restore_limits
 
-        self._rescale_y_limits(descriptor, symmetric=True)
+        self._rescale_y_limits(descriptor, include_zero=True)
         self._refresh_descriptor_legend(descriptor, force_layout=True)
-        self._append_log("Normalized the current graph so each curve peaks at one.")
+        self._append_log(
+            "Normalized the current graph and rescaled the Y axis to fit the data."
+        )
 
     def _export_txt(self) -> None:
         if not self.measurements:

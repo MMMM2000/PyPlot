@@ -253,7 +253,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * The right-side **Object Manager** mirrors whichever plot tab is active—temperature
               loops, overlay comparisons, or derived metrics—so ticking/unticking a node only
               affects the visible curves while keeping Matplotlib pop-outs and Origin exports in
-              sync without regenerating plots.
+              sync without regenerating plots. Angles and temperatures are sorted numerically to
+              match the legends shown on each tab.
             * The **Worksheets** dock exposes editable pandas-backed tables for each measurement.
               Right-click rows to delete them, then hit **Generate plots** to refresh curves and
               metrics with the cleaned data.
@@ -264,11 +265,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               list and press **Plot selected angles across temperatures** to add comparison tabs
               directly to the main viewer.
             * Press **Generate plots** once the inputs look right. **Normalize Y** toggles the
-              active tab between raw and unit-scaled curves, automatically pins the Y axis to a
-              symmetric ±1 range, and restores the previous limits when you click it again.
-              **Open in Matplotlib** re-plots just the selected tab when you want desktop zoom tools,
-              and **Save graph…** captures that same tab (loops, overlays, or metrics) as PNG, PDF,
-              or SVG.
+              active tab between raw and unit-scaled curves, automatically rescales the axis based on
+              the resulting data (keeping zero in view), and restores the previous limits when you
+              click it again. **Open in Matplotlib** re-plots just the selected tab with constrained
+              layout when you want desktop zoom tools, and **Save graph…** captures that same tab
+              (loops, overlays, or metrics) as PNG, PDF, or SVG.
 
             ### Derived metrics
             * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
