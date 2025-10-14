@@ -234,6 +234,55 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "vsm_hysteresis_loops": {
+        "title": "VSM hysteresis loops",
+        "body": dedent(
+            """
+            ### Load data
+            1. Pick **Select files** or **Select folder** to decide how you want to browse.
+               Choose your Lakeshore `VSM-Hys-Data` exports and the dialog loads them
+               immediately—no extra **Load data** button required.
+            2. Adjust the X/Y axis drop-downs to choose which numeric columns to plot. The
+               selection is remembered between sessions, as are the backend choice, plot style,
+               and whether loop endpoints should be normalised.
+
+            ### Manage angles
+            * Use **Show angles…** to open a floating, always-on-top window listing every
+              temperature and its recorded angles. Ticking a box hides or reveals that curve in
+              every embedded Matplotlib tab, Matplotlib pop-out, and Origin export without
+              regenerating the plots.
+            * Open **Angle overlays…** to keep a selectable list of rotations for cross-temperature
+              comparisons and derived metric plots. The window stays on top so you can pin it while
+              exploring dense datasets, and it provides the **Plot selected angles across
+              temperatures** button for quick multi-temperature overlays.
+
+            ### Plotting and saving
+            * Press **Generate plots** once the axes look right. The left-hand styling controls let
+              you switch between line-only and line-plus-symbol traces, toggle the dark theme, and
+              open desktop Matplotlib windows when you need extra zooming tools.
+            * The **Save graph…** button captures the active tab (temperature plots or derived
+              metrics) straight to PNG, PDF, or SVG so figures can be dropped into reports without
+              leaving the application.
+
+            ### Derived metrics
+            * Click **Plot metrics vs angle** to add one tab per derived property (coercivity,
+              remanence, saturation) showing how each value varies with rotation for every
+              temperature.
+            * Select one or more angles in the overlays window and choose **Plot metrics vs
+              temperature** to create another set of metric tabs driven by the chosen rotations.
+              These tabs sit alongside the raw hysteresis loops and respond to the same theme and
+              save controls.
+
+            ### Exporting
+            * **Export TXT…** writes Origin-ready tables for either the full measurement columns or
+              just the axes used in the current plots. Enable the subfolder option to stage grouped
+              exports neatly.
+            * **Export metrics** saves the derived coercivity/remanence/saturation tables grouped by
+              temperature and by angle, complete with long names, units, and axis roles so Origin
+              picks them up automatically.
+            """
+        ).strip(),
+    },
     "plot_hsw_distribution": {
         "title": "HSW distribution",
         "body": dedent(

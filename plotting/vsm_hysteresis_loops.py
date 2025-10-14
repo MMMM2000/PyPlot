@@ -1041,6 +1041,12 @@ class VSMPlotter(QtWidgets.QWidget):
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
         self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
         self._metric_column_names: Dict[str, str] = {}
+        self._temperature_tab_widgets: List[QtWidgets.QWidget] = []
+        self._metrics_angle_tabs: List[QtWidgets.QWidget] = []
+        self._metrics_temperature_tabs: List[QtWidgets.QWidget] = []
+        self._overlay_tab_widgets: List[QtWidgets.QWidget] = []
+        self._canvas_by_tab: Dict[QtWidgets.QWidget, FigureCanvas] = {}
+        self._axes_by_tab: Dict[QtWidgets.QWidget, Any] = {}
 
         self._build_ui()
         self._load_settings()
@@ -1114,64 +1120,21 @@ class VSMPlotter(QtWidgets.QWidget):
         self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
         controls_layout.addWidget(self.dark_mode_checkbox)
 
-        self.angle_scroll = QtWidgets.QScrollArea()
-        self.angle_scroll.setWidgetResizable(True)
-        self.angle_scroll.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.angle_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.angle_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.angle_scroll.setMinimumHeight(260)
-        self.angle_container = QtWidgets.QWidget()
-        self.angle_layout = QtWidgets.QVBoxLayout(self.angle_container)
-        self.angle_layout.setContentsMargins(8, 4, 8, 4)
-        self.angle_layout.setSpacing(4)
-        self.angle_placeholder = QtWidgets.QLabel("Load data to configure visibility.")
-        self.angle_placeholder.setWordWrap(True)
-        self.angle_placeholder.setEnabled(False)
-        self.angle_layout.addWidget(self.angle_placeholder)
-        self.angle_layout.addStretch(1)
-        self.angle_scroll.setWidget(self.angle_container)
-        self.angle_scroll.setEnabled(False)
+        self._create_angle_visibility_window()
+        self._create_overlay_window()
 
-        self.angle_group = QtWidgets.QGroupBox("Show angles")
-        angle_group_layout = QtWidgets.QVBoxLayout(self.angle_group)
-        angle_group_layout.setContentsMargins(6, 6, 6, 6)
-        angle_group_layout.setSpacing(6)
-        angle_group_layout.addWidget(self.angle_scroll)
-        self.angle_group.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
+        angle_buttons = QtWidgets.QHBoxLayout()
+        angle_buttons.setSpacing(8)
+        self.angle_window_button = QtWidgets.QPushButton("Show angles…")
+        self.angle_window_button.setEnabled(False)
+        self.angle_window_button.clicked.connect(self._open_angle_window)
+        angle_buttons.addWidget(self.angle_window_button)
 
-        self.angle_overlay_group = QtWidgets.QGroupBox("Angle overlays")
-        overlay_layout = QtWidgets.QVBoxLayout(self.angle_overlay_group)
-        overlay_layout.setContentsMargins(6, 6, 6, 6)
-        overlay_layout.setSpacing(6)
-        self.angle_overlay_list = QtWidgets.QListWidget()
-        self.angle_overlay_list.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
-        )
-        self.angle_overlay_list.setMinimumHeight(260)
-        overlay_layout.addWidget(self.angle_overlay_list)
-        self.angle_overlay_button = QtWidgets.QPushButton(
-            "Plot selected angles across temperatures"
-        )
-        self.angle_overlay_button.setEnabled(False)
-        overlay_layout.addWidget(self.angle_overlay_button)
-        self.angle_overlay_group.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Expanding,
-        )
-
-        angle_sections = QtWidgets.QHBoxLayout()
-        angle_sections.setSpacing(8)
-        angle_sections.addWidget(self.angle_group, 1)
-        angle_sections.addWidget(self.angle_overlay_group, 1)
-        controls_layout.addLayout(angle_sections)
-
-        self.angle_overlay_list.itemSelectionChanged.connect(
-            self._update_overlay_button_state
-        )
-        self.angle_overlay_button.clicked.connect(self._plot_angle_overlays)
+        self.overlay_window_button = QtWidgets.QPushButton("Angle overlays…")
+        self.overlay_window_button.setEnabled(False)
+        self.overlay_window_button.clicked.connect(self._open_overlay_window)
+        angle_buttons.addWidget(self.overlay_window_button)
+        controls_layout.addLayout(angle_buttons)
 
         self.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle")
         self.metrics_angle_button.setEnabled(False)
@@ -1203,6 +1166,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.popout_button.clicked.connect(self._open_matplotlib_window)
         self.popout_button.setEnabled(False)
         button_row.addWidget(self.popout_button)
+        self.save_graph_button = QtWidgets.QPushButton("Save graph…")
+        self.save_graph_button.setEnabled(False)
+        self.save_graph_button.clicked.connect(self._save_current_graph)
+        button_row.addWidget(self.save_graph_button)
         self.export_button = QtWidgets.QPushButton("Export TXT…")
         self.export_button.clicked.connect(self._export_txt)
         self.export_button.setEnabled(False)
@@ -1221,7 +1188,9 @@ class VSMPlotter(QtWidgets.QWidget):
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setPlaceholderText("Load VSM measurements to display hysteresis loops…")
+        self.log_view.setPlaceholderText(
+            "Load VSM measurements to display hysteresis loops…"
+        )
         self.output_splitter.addWidget(self.log_view)
         self.output_splitter.setStretchFactor(0, 4)
         self.output_splitter.setStretchFactor(1, 1)
@@ -1243,6 +1212,192 @@ class VSMPlotter(QtWidgets.QWidget):
         export_data_action.triggered.connect(self._export_txt)
         export_metrics_action = export_menu.addAction("Derived metrics…")
         export_metrics_action.triggered.connect(self._export_metrics)
+
+    def _create_angle_visibility_window(self) -> None:
+        self.angle_window = QtWidgets.QWidget(self, QtCore.Qt.WindowType.Window)
+        self.angle_window.setWindowTitle("Angle visibility")
+        self.angle_window.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+        self.angle_window.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False
+        )
+        layout = QtWidgets.QVBoxLayout(self.angle_window)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.angle_scroll = QtWidgets.QScrollArea()
+        self.angle_scroll.setWidgetResizable(True)
+        self.angle_scroll.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.angle_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.angle_scroll.setVerticalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        )
+        self.angle_scroll.setMinimumSize(320, 420)
+        self.angle_container = QtWidgets.QWidget()
+        self.angle_layout = QtWidgets.QVBoxLayout(self.angle_container)
+        self.angle_layout.setContentsMargins(8, 4, 8, 4)
+        self.angle_layout.setSpacing(4)
+        self.angle_placeholder = QtWidgets.QLabel(
+            "Load data to configure visibility."
+        )
+        self.angle_placeholder.setWordWrap(True)
+        self.angle_placeholder.setEnabled(False)
+        self.angle_layout.addWidget(self.angle_placeholder)
+        self.angle_layout.addStretch(1)
+        self.angle_scroll.setWidget(self.angle_container)
+        self.angle_scroll.setEnabled(False)
+        layout.addWidget(self.angle_scroll, 1)
+
+        hint = QtWidgets.QLabel(
+            "Toggle angles to show or hide specific curves in generated plots."
+        )
+        hint.setWordWrap(True)
+        hint.setEnabled(False)
+        layout.addWidget(hint)
+
+        self.angle_window.hide()
+
+    def _create_overlay_window(self) -> None:
+        self.overlay_window = QtWidgets.QWidget(self, QtCore.Qt.WindowType.Window)
+        self.overlay_window.setWindowTitle("Angle overlays")
+        self.overlay_window.setWindowFlag(
+            QtCore.Qt.WindowType.WindowStaysOnTopHint, True
+        )
+        self.overlay_window.setAttribute(
+            QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False
+        )
+        layout = QtWidgets.QVBoxLayout(self.overlay_window)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(8)
+
+        self.angle_overlay_list = QtWidgets.QListWidget()
+        self.angle_overlay_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.angle_overlay_list.setMinimumSize(320, 420)
+        layout.addWidget(self.angle_overlay_list, 1)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.setSpacing(8)
+        self.angle_overlay_button = QtWidgets.QPushButton(
+            "Plot selected angles across temperatures"
+        )
+        self.angle_overlay_button.setEnabled(False)
+        self.angle_overlay_button.clicked.connect(self._plot_angle_overlays)
+        button_row.addWidget(self.angle_overlay_button)
+        layout.addLayout(button_row)
+
+        help_label = QtWidgets.QLabel(
+            "Use selected angles when plotting metrics versus temperature or "
+            "when exporting overlays."
+        )
+        help_label.setWordWrap(True)
+        help_label.setEnabled(False)
+        layout.addWidget(help_label)
+
+        self.angle_overlay_list.itemSelectionChanged.connect(
+            self._update_overlay_button_state
+        )
+
+        self.overlay_window.hide()
+
+    def _open_angle_window(self) -> None:
+        ensure_app_theme(self.angle_window)
+        self.angle_window.show()
+        self.angle_window.raise_()
+        self.angle_window.activateWindow()
+
+    def _open_overlay_window(self) -> None:
+        ensure_app_theme(self.overlay_window)
+        self.overlay_window.show()
+        self.overlay_window.raise_()
+        self.overlay_window.activateWindow()
+
+    def _remove_tab_widget(self, tab: QtWidgets.QWidget) -> None:
+        index = self.tab_widget.indexOf(tab)
+        if index != -1:
+            self.tab_widget.removeTab(index)
+        self._canvas_by_tab.pop(tab, None)
+        self._axes_by_tab.pop(tab, None)
+        tab.deleteLater()
+
+    def _clear_tab_list(self, tabs: List[QtWidgets.QWidget]) -> None:
+        for tab in list(tabs):
+            self._remove_tab_widget(tab)
+        tabs.clear()
+        self._update_save_graph_enabled()
+
+    def _register_plot_tab(
+        self,
+        tab: QtWidgets.QWidget,
+        canvas: FigureCanvas,
+        axes: Any,
+    ) -> None:
+        self._canvas_by_tab[tab] = canvas
+        self._axes_by_tab[tab] = axes
+        self._update_save_graph_enabled()
+
+    def _update_save_graph_enabled(self) -> None:
+        if hasattr(self, "save_graph_button"):
+            self.save_graph_button.setEnabled(bool(self._canvas_by_tab))
+
+    def _save_current_graph(self) -> None:
+        current = self.tab_widget.currentWidget()
+        if current is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No graph is currently selected.",
+            )
+            return
+        canvas = self._canvas_by_tab.get(current)
+        if canvas is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "The selected tab does not contain a Matplotlib plot.",
+            )
+            return
+
+        start_directory = (
+            str(self.last_export_path)
+            if self.last_export_path is not None
+            else self.path_edit.text()
+        )
+        filters = "PNG image (*.png);;PDF document (*.pdf);;SVG image (*.svg)"
+        filename, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save graph",
+            start_directory or str(Path.home()),
+            filters,
+        )
+        if not filename:
+            return
+
+        extension_map = {
+            "PNG image (*.png)": ".png",
+            "PDF document (*.pdf)": ".pdf",
+            "SVG image (*.svg)": ".svg",
+        }
+        path = Path(filename)
+        if not path.suffix:
+            path = path.with_suffix(extension_map.get(selected_filter, ".png"))
+
+        try:
+            canvas.figure.savefig(path)
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "VSM Hysteresis Loops",
+                f"Failed to save graph: {exc}",
+            )
+            return
+
+        self._append_log(f"Saved graph to {path}")
+        self.last_export_path = path.parent
+        self.settings.setValue("last_export_path", str(self.last_export_path))
+        self.settings.sync()
 
     def _load_settings(self) -> None:
         value = self.settings.value("last_path", "")
@@ -1358,7 +1513,14 @@ class VSMPlotter(QtWidgets.QWidget):
     # ------------------------------------------------------------------ data loading
     def _load_measurements(self, *, show_warning: bool = True) -> None:
         self.measurements.clear()
+        self._clear_tab_list(self._temperature_tab_widgets)
+        self._clear_tab_list(self._metrics_angle_tabs)
+        self._clear_tab_list(self._metrics_temperature_tabs)
+        self._clear_tab_list(self._overlay_tab_widgets)
         self.tab_widget.clear()
+        self._canvas_by_tab.clear()
+        self._axes_by_tab.clear()
+        self._update_save_graph_enabled()
         self.log_view.clear()
         self._last_prepared_groups = {}
         self._last_rescale_info = {}
@@ -1818,6 +1980,23 @@ class VSMPlotter(QtWidgets.QWidget):
             except Exception:  # pragma: no cover - backend differences
                 pass
 
+        handled_canvases = {state.canvas for state in self._plot_tabs.values()}
+        for tab, axes in list(self._axes_by_tab.items()):
+            canvas = self._canvas_by_tab.get(tab)
+            if canvas is None or canvas in handled_canvases:
+                continue
+            self._apply_plot_theme(axes)
+            legend = getattr(axes, "legend_", None)
+            self._style_legend(legend)
+            try:
+                axes.figure.tight_layout()
+            except Exception:  # pragma: no cover - backend differences
+                pass
+            try:
+                canvas.draw_idle()
+            except Exception:  # pragma: no cover - backend differences
+                pass
+
     def _refresh_tab_legend(self, tab_state: PlotTabState, *, draw: bool = True) -> None:
         legend = getattr(tab_state.axes, "legend_", None)
         if legend is not None:
@@ -1860,6 +2039,8 @@ class VSMPlotter(QtWidgets.QWidget):
             self.angle_placeholder.setVisible(True)
         if hasattr(self, "angle_scroll"):
             self.angle_scroll.setEnabled(False)
+        if hasattr(self, "angle_window_button"):
+            self.angle_window_button.setEnabled(False)
         self._reset_overlay_controls()
 
     def _reset_overlay_controls(self) -> None:
@@ -1870,6 +2051,8 @@ class VSMPlotter(QtWidgets.QWidget):
         self.angle_overlay_list.blockSignals(False)
         if hasattr(self, "angle_overlay_button"):
             self.angle_overlay_button.setEnabled(False)
+        if hasattr(self, "overlay_window_button"):
+            self.overlay_window_button.setEnabled(False)
 
     def _update_angle_controls(
         self,
@@ -1879,6 +2062,8 @@ class VSMPlotter(QtWidgets.QWidget):
             return
         self._clear_angle_group_widgets()
         self._angle_checkboxes = {}
+        if hasattr(self, "angle_window_button"):
+            self.angle_window_button.setEnabled(bool(prepared_groups))
         if not prepared_groups:
             if hasattr(self, "angle_placeholder"):
                 self.angle_placeholder.setVisible(True)
@@ -1957,6 +2142,8 @@ class VSMPlotter(QtWidgets.QWidget):
             self.angle_overlay_list.addItem(item)
             if angle in selected_angles:
                 item.setSelected(True)
+        if hasattr(self, "overlay_window_button"):
+            self.overlay_window_button.setEnabled(bool(available_angles))
         self.angle_overlay_list.blockSignals(False)
         self._update_overlay_button_state()
 
@@ -2149,16 +2336,6 @@ class VSMPlotter(QtWidgets.QWidget):
             )
             return
 
-        try:
-            import matplotlib.pyplot as plt
-        except Exception as exc:  # pragma: no cover - backend dependent
-            QtWidgets.QMessageBox.warning(
-                self,
-                "VSM Hysteresis Loops",
-                f"Matplotlib's interactive backend is unavailable: {exc}",
-            )
-            return
-
         column_map = self._metric_column_names
         angle_column = column_map.get("angle")
         if not angle_column:
@@ -2170,16 +2347,19 @@ class VSMPlotter(QtWidgets.QWidget):
             return
 
         metrics = ["coercivity", "remanence", "saturation"]
-        fig, axes = plt.subplots(len(metrics), 1, sharex=True)
-        if len(metrics) == 1:
-            axes = [axes]
+        self._clear_tab_list(self._metrics_angle_tabs)
         style = self._line_style_kwargs()
+        any_tab = False
 
-        for idx, metric in enumerate(metrics):
+        long_angle, angle_unit = _split_column_label(angle_column)
+        x_label = _format_column_with_unit(long_angle, angle_unit)
+
+        for metric in metrics:
             column = column_map.get(metric)
             if not column:
                 continue
-            ax = axes[idx]
+            fig = Figure(figsize=(11.5, 7.8))
+            ax = fig.add_subplot(111)
             plotted = False
             for temperature, table in sorted(self._metrics_by_temperature.items()):
                 if column not in table.columns:
@@ -2195,19 +2375,47 @@ class VSMPlotter(QtWidgets.QWidget):
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
+            ax.set_xlabel(x_label)
             ax.set_ylabel(_format_column_with_unit(long_name, unit))
+            ax.set_title(f"{long_name} vs angle")
             self._apply_plot_theme(ax)
             if plotted:
                 legend = ax.legend(loc="best")
                 if legend is not None:
                     self._style_legend(legend)
             else:
-                ax.set_ylabel(_format_column_with_unit(long_name, unit))
-        long_angle, angle_unit = _split_column_label(angle_column)
-        axes[-1].set_xlabel(_format_column_with_unit(long_angle, angle_unit))
-        fig.tight_layout()
-        self._append_log("Opened Matplotlib window with metrics vs angle.")
-        plt.show()
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No data available for this metric.",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+            try:
+                fig.tight_layout()
+            except Exception:  # pragma: no cover - backend dependent
+                pass
+
+            canvas = FigureCanvas(fig)
+            tab = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.addWidget(canvas)
+            tab_title = f"{long_name} vs angle"
+            self.tab_widget.addTab(tab, tab_title)
+            self._metrics_angle_tabs.append(tab)
+            self._register_plot_tab(tab, canvas, ax)
+            any_tab = True
+
+        if any_tab:
+            self._append_log("Added metric tabs versus angle to the viewer.")
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No metric plots could be generated for the selected data.",
+            )
 
     def _plot_metrics_vs_temperature(self) -> None:
         if not self._metrics_by_angle:
@@ -2227,16 +2435,6 @@ class VSMPlotter(QtWidgets.QWidget):
             )
             return
 
-        try:
-            import matplotlib.pyplot as plt
-        except Exception as exc:  # pragma: no cover - backend dependent
-            QtWidgets.QMessageBox.warning(
-                self,
-                "VSM Hysteresis Loops",
-                f"Matplotlib's interactive backend is unavailable: {exc}",
-            )
-            return
-
         column_map = self._metric_column_names
         temperature_column = column_map.get("temperature")
         if not temperature_column:
@@ -2248,16 +2446,19 @@ class VSMPlotter(QtWidgets.QWidget):
             return
 
         metrics = ["coercivity", "remanence", "saturation"]
-        fig, axes = plt.subplots(len(metrics), 1, sharex=True)
-        if len(metrics) == 1:
-            axes = [axes]
+        self._clear_tab_list(self._metrics_temperature_tabs)
         style = self._line_style_kwargs()
+        any_tab = False
 
-        for idx, metric in enumerate(metrics):
+        long_temp, temp_unit = _split_column_label(temperature_column)
+        x_label = _format_column_with_unit(long_temp, temp_unit)
+
+        for metric in metrics:
             column = column_map.get(metric)
             if not column:
                 continue
-            ax = axes[idx]
+            fig = Figure(figsize=(11.5, 7.8))
+            ax = fig.add_subplot(111)
             plotted = False
             for angle in angles:
                 table = self._metrics_by_angle.get(float(angle))
@@ -2274,19 +2475,47 @@ class VSMPlotter(QtWidgets.QWidget):
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
+            ax.set_xlabel(x_label)
             ax.set_ylabel(_format_column_with_unit(long_name, unit))
+            ax.set_title(f"{long_name} vs temperature")
             self._apply_plot_theme(ax)
             if plotted:
                 legend = ax.legend(loc="best")
                 if legend is not None:
                     self._style_legend(legend)
             else:
-                ax.set_ylabel(_format_column_with_unit(long_name, unit))
-        long_temp, temp_unit = _split_column_label(temperature_column)
-        axes[-1].set_xlabel(_format_column_with_unit(long_temp, temp_unit))
-        fig.tight_layout()
-        self._append_log("Opened Matplotlib window with metrics vs temperature.")
-        plt.show()
+                ax.text(
+                    0.5,
+                    0.5,
+                    "No data available for this metric.",
+                    ha="center",
+                    va="center",
+                    transform=ax.transAxes,
+                )
+            try:
+                fig.tight_layout()
+            except Exception:  # pragma: no cover - backend dependent
+                pass
+
+            canvas = FigureCanvas(fig)
+            tab = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.addWidget(canvas)
+            tab_title = f"{long_name} vs temperature"
+            self.tab_widget.addTab(tab, tab_title)
+            self._metrics_temperature_tabs.append(tab)
+            self._register_plot_tab(tab, canvas, ax)
+            any_tab = True
+
+        if any_tab:
+            self._append_log("Added metric tabs versus temperature to the viewer.")
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No metric plots could be generated for the selected angles.",
+            )
 
     def _export_metrics(self) -> None:
         if not self._metrics_by_temperature and not self._metrics_by_angle:
@@ -2655,6 +2884,10 @@ class VSMPlotter(QtWidgets.QWidget):
         y_axis: str,
         rescale_enabled: bool,
     ) -> None:
+        self._clear_tab_list(self._temperature_tab_widgets)
+        self._clear_tab_list(self._metrics_angle_tabs)
+        self._clear_tab_list(self._metrics_temperature_tabs)
+        self._clear_tab_list(self._overlay_tab_widgets)
         self.tab_widget.setVisible(True)
         self._plot_tabs = {}
         for temperature in list(self._line_visibility.keys()):
@@ -2712,6 +2945,8 @@ class VSMPlotter(QtWidgets.QWidget):
             layout.setContentsMargins(0, 0, 0, 0)
             layout.addWidget(canvas)
             self.tab_widget.addTab(tab, f"{temperature:g} °C")
+            self._temperature_tab_widgets.append(tab)
+            self._register_plot_tab(tab, canvas, ax)
             if legend is None:
                 self._refresh_tab_legend(tab_state)
 

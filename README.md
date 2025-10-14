@@ -633,25 +633,26 @@ sample**, but every numeric column advertised in the header is available and the
 dialog remembers your most recent axis selections between sessions. Set the
 temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
-concentrate on a single group. The angle visibility and overlay controls now
-share a single row so each panel can stretch vertically, keeping the
-temperature/angle checkboxes readable even when many runs are loaded. Once data
-arrives, every temperature gains a collapsible **Show angles** group whose
-checkboxes hide or reveal traces in the embedded Matplotlib canvas, pop-out
-windows, and Origin exports simultaneously without regenerating plots. The
-Matplotlib tabs remain on the right-hand side of the window with a console log
-below; they are fully resizable and the splitter ratio is persisted between
-sessions. A **Matplotlib style** selector toggles between plain line plots and
-line-plus-symbol traces, a **Dark plot theme** checkbox recolours both embedded
-and pop-out Matplotlib figures to match the rest of the UI, and the **Open in
-Matplotlib** button still clones the current tabs into interactive desktop
-windows for quick zooming or annotation outside the embedded canvas. Use the
-**Angle overlays** panel to highlight a set of rotations and compare how the
-loops evolve with temperature. Select one or more angles and click **Plot
-selected angles across temperatures** to open a dedicated Matplotlib window
-where every curve is grouped by angle but coloured by temperature. Rescaling,
-dark-mode styling, and line/marker preferences carry over automatically, making
-it easy to build publication-ready comparisons.
+concentrate on a single group. Click **Show angles…** to open a floating,
+stay-on-top window that lists every temperature alongside the angles it
+contains—toggling a checkbox instantly hides or reveals the matching traces in
+the embedded Matplotlib canvases, any Matplotlib pop-outs, and Origin exports
+without regenerating plots. The companion **Angle overlays…** window keeps a
+selectable list of rotations for cross-temperature comparisons and for the
+derived-metric temperature plots; it stays on top just like the visibility
+window, so you can pin it while exploring dense datasets. The Matplotlib tabs
+remain on the right-hand side of the window with a console log below; they are
+fully resizable and the splitter ratio is persisted between sessions. Styling
+controls still sit on the left: choose between line-only and line-plus-symbol
+traces, enable the **Dark plot theme** to recolour every embedded figure, and
+launch interactive desktop windows with **Open in Matplotlib** whenever you need
+extra annotation tools. A new **Save graph…** button captures the active tab
+straight to PNG, PDF, or SVG so figures can be dropped into reports without
+leaving the application. Inside the overlays window you can highlight a set of
+rotations and use **Plot selected angles across temperatures** to open a
+comparison window where each curve is grouped by angle but coloured by
+temperature. Rescaling, dark-mode styling, and line/marker preferences carry
+over automatically, making it easy to build publication-ready comparisons.
 
 All TXT exports now include an Origin-friendly header block: the first four
 rows provide short names, long names, units, and comments (complete with the
@@ -666,14 +667,16 @@ axis roles automatically when you import the generated text files.
 
 Derived properties—coercivity (field at zero magnetisation), remanence
 (magnetisation at zero field), and saturation magnetisation (maximum recorded
-moment)—are calculated whenever plots are generated. Use **Plot metrics vs
-angle** to visualise how those values evolve across rotations for each
-temperature, or select one or more angles and choose **Plot metrics vs
-temperature** to see how the same properties change as the sample warms. Each
-derived table can be written to disk via **Export metrics**, which creates
-Origin-ready worksheets grouped by temperature (metrics versus angle) and by the
-selected angles (metrics versus temperature) so downstream analyses have the
-expected labels, units, and context baked in.
+moment)—are calculated whenever plots are generated. **Plot metrics vs angle**
+now creates one tab per metric inside the main viewer, and **Plot metrics vs
+temperature** adds another set of tabs (again one per metric) driven by the
+angles selected in the overlays window, so the comparisons sit alongside the raw
+hysteresis loops instead of launching a separate Matplotlib window. The new
+**Save graph…** action works on those metric tabs as well, making it trivial to
+snapshot the derived curves. Each derived table can still be written to disk via
+**Export metrics**, which creates Origin-ready worksheets grouped by temperature
+(metrics versus angle) and by the selected angles (metrics versus temperature)
+so downstream analyses have the expected labels, units, and context baked in.
 
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
