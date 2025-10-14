@@ -6,7 +6,7 @@ import logging
 import math
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence, Tuple
@@ -556,6 +556,11 @@ class TabDescriptor:
     axes: Any
     lines: Dict[tuple[str, float | str], GraphLineState]
     metadata: Dict[str, Any]
+    layout_initialized: bool = False
+    stored_limits: Dict[str, tuple[float, float]] = field(default_factory=dict)
+
+
+_PRE_NORMALIZE_Y_KEY = "pre_normalize_y"
 
 
 @dataclass
@@ -1778,6 +1783,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._axes_by_tab[tab] = axes
         if descriptor is not None:
             self._tab_descriptors[tab] = descriptor
+            self._refresh_descriptor_legend(descriptor, force_layout=True)
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         if self.tab_widget.currentWidget() is tab:
@@ -2350,7 +2356,12 @@ class VSMPlotter(QtWidgets.QMainWindow):
             except Exception:  # pragma: no cover - backend specific
                 pass
 
-    def _refresh_descriptor_legend(self, descriptor: TabDescriptor) -> None:
+    def _refresh_descriptor_legend(
+        self,
+        descriptor: TabDescriptor,
+        *,
+        force_layout: bool = False,
+    ) -> None:
         legend = getattr(descriptor.axes, "legend_", None)
         if legend is not None:
             try:
@@ -2373,12 +2384,71 @@ class VSMPlotter(QtWidgets.QMainWindow):
             legend = None
             self._apply_plot_theme(descriptor.axes)
 
-        try:
-            descriptor.axes.figure.tight_layout()
-        except Exception:  # pragma: no cover - backend specific
-            pass
+        if force_layout or not descriptor.layout_initialized:
+            try:
+                descriptor.axes.figure.tight_layout()
+            except Exception:  # pragma: no cover - backend specific
+                pass
+            descriptor.layout_initialized = True
         try:
             descriptor.canvas.draw_idle()
+        except Exception:  # pragma: no cover - backend specific
+            pass
+
+    def _rescale_y_limits(
+        self,
+        descriptor: TabDescriptor,
+        *,
+        symmetric: bool = False,
+    ) -> None:
+        arrays: List[np.ndarray] = []
+        for state in descriptor.lines.values():
+            if not state.line.get_visible():
+                continue
+            data = np.asarray(state.line.get_ydata(), dtype=float)
+            if data.size == 0:
+                continue
+            finite = data[np.isfinite(data)]
+            if finite.size == 0:
+                continue
+            arrays.append(finite)
+
+        if not arrays:
+            return
+
+        combined = np.concatenate(arrays)
+        finite = combined[np.isfinite(combined)]
+        if finite.size == 0:
+            return
+
+        min_y = float(np.min(finite))
+        max_y = float(np.max(finite))
+
+        if symmetric:
+            bound = max(abs(min_y), abs(max_y))
+            if not math.isfinite(bound):
+                return
+            if bound == 0:
+                bound = 1.0
+            padding = max(bound * 0.05, 0.05)
+            lower = -bound - padding
+            upper = bound + padding
+        else:
+            if not math.isfinite(min_y) or not math.isfinite(max_y):
+                return
+            span = max_y - min_y
+            if span == 0:
+                reference = max(abs(max_y), abs(min_y), 1.0)
+                padding = reference * 0.05
+                lower = min_y - padding
+                upper = max_y + padding
+            else:
+                padding = max(span * 0.05, 0.05)
+                lower = min_y - padding
+                upper = max_y + padding
+
+        try:
+            descriptor.axes.set_ylim(lower, upper)
         except Exception:  # pragma: no cover - backend specific
             pass
 
@@ -3231,11 +3301,40 @@ class VSMPlotter(QtWidgets.QMainWindow):
             for state in descriptor.lines.values():
                 state.line.set_ydata(state.base_y)
                 state.normalized = False
-            self._refresh_descriptor_legend(descriptor)
+
+            stored_limits = descriptor.stored_limits.pop(_PRE_NORMALIZE_Y_KEY, None)
+            if (
+                stored_limits is not None
+                and len(stored_limits) == 2
+                and all(math.isfinite(value) for value in stored_limits)
+            ):
+                try:
+                    descriptor.axes.set_ylim(*stored_limits)
+                except Exception:  # pragma: no cover - backend specific
+                    pass
+            else:
+                self._rescale_y_limits(descriptor)
+
+            self._refresh_descriptor_legend(descriptor, force_layout=True)
             self._append_log("Restored the original scaling for the current graph.")
             return
 
         updated = False
+        restore_limits: tuple[float, float] | None = None
+        if _PRE_NORMALIZE_Y_KEY not in descriptor.stored_limits:
+            try:
+                current_limits = descriptor.axes.get_ylim()
+            except Exception:  # pragma: no cover - backend specific
+                current_limits = None
+            if (
+                isinstance(current_limits, tuple)
+                and len(current_limits) == 2
+                and all(isinstance(value, (int, float)) for value in current_limits)
+            ):
+                lower, upper = float(current_limits[0]), float(current_limits[1])
+                if math.isfinite(lower) and math.isfinite(upper):
+                    restore_limits = (lower, upper)
+
         for state in descriptor.lines.values():
             data = state.base_y
             if data.size == 0:
@@ -3264,7 +3363,11 @@ class VSMPlotter(QtWidgets.QMainWindow):
             )
             return
 
-        self._refresh_descriptor_legend(descriptor)
+        if restore_limits is not None:
+            descriptor.stored_limits[_PRE_NORMALIZE_Y_KEY] = restore_limits
+
+        self._rescale_y_limits(descriptor, symmetric=True)
+        self._refresh_descriptor_legend(descriptor, force_layout=True)
         self._append_log("Normalized the current graph so each curve peaks at one.")
 
     def _export_txt(self) -> None:

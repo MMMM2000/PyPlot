@@ -264,9 +264,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               list and press **Plot selected angles across temperatures** to add comparison tabs
               directly to the main viewer.
             * Press **Generate plots** once the inputs look right. **Normalize Y** toggles the
-              active tab between raw and unit-scaled curves, **Open in Matplotlib** re-plots just
-              the selected tab when you want desktop zoom tools, and **Save graph…** captures that
-              same tab (loops, overlays, or metrics) as PNG, PDF, or SVG.
+              active tab between raw and unit-scaled curves, automatically pins the Y axis to a
+              symmetric ±1 range, and restores the previous limits when you click it again.
+              **Open in Matplotlib** re-plots just the selected tab when you want desktop zoom tools,
+              and **Save graph…** captures that same tab (loops, overlays, or metrics) as PNG, PDF,
+              or SVG.
 
             ### Derived metrics
             * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
