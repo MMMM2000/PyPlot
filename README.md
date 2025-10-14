@@ -579,7 +579,7 @@ The exported columns are:
 Magnetic hysteresis runs captured with the Lakeshore VSM can now be reviewed in
 bulk from **VSM Hysteresis Loops** (launcher **Plotting** tab or `python -m
 plotting.vsm_hysteresis_loops`). Point the tool at a folder of `VSM-Hys-Data`
-files or pick individual measurements, then load them into the session. Folder mode now
+files or pick individual measurements and they load straight into the session. Folder mode now
 recursively scans through subdirectories—matching the Lakeshore exports in a
 case-insensitive way—so an entire sweep organised by
 temperature/angle folders can be loaded in one go without extra browsing. Files
@@ -633,33 +633,36 @@ sample**, but every numeric column advertised in the header is available and the
 dialog remembers your most recent axis selections between sessions. Set the
 temperature filter to `All temperatures` to build a tab per temperature, each
 containing every angle trace for that run, or pick a specific temperature to
-concentrate on a single group. The angle visibility controls now live alongside
-the other settings on the left: once data is loaded, each temperature gains a
-collapsible **Show angles** section whose checkboxes hide or reveal traces in the
-embedded Matplotlib canvas, pop-out windows, and Origin exports simultaneously
-without regenerating plots. The Matplotlib tabs remain on the right-hand side of
-the window with a console log below; they are fully resizable and the splitter
-ratio is persisted between sessions. A **Matplotlib style** selector toggles
-between plain line plots and line-plus-symbol traces, a new **Dark plot theme**
-checkbox recolours both embedded and pop-out Matplotlib figures to match the rest
-of the UI, and the **Open in Matplotlib** button still clones the current tabs
-into interactive desktop windows for quick zooming or annotation outside the
-embedded canvas.
-Use the **Angle overlays** panel beneath the visibility controls to highlight a
-set of rotations and compare how the loops evolve with temperature. Select one
-or more angles and click **Plot selected angles across temperatures** to open a
-dedicated Matplotlib window where every curve is grouped by angle but coloured
-by temperature. Rescaling, dark-mode styling, and line/marker preferences carry
-over automatically, making it easy to build publication-ready comparisons.
+concentrate on a single group. The angle visibility and overlay controls now
+share a single row so each panel can stretch vertically, keeping the
+temperature/angle checkboxes readable even when many runs are loaded. Once data
+arrives, every temperature gains a collapsible **Show angles** group whose
+checkboxes hide or reveal traces in the embedded Matplotlib canvas, pop-out
+windows, and Origin exports simultaneously without regenerating plots. The
+Matplotlib tabs remain on the right-hand side of the window with a console log
+below; they are fully resizable and the splitter ratio is persisted between
+sessions. A **Matplotlib style** selector toggles between plain line plots and
+line-plus-symbol traces, a **Dark plot theme** checkbox recolours both embedded
+and pop-out Matplotlib figures to match the rest of the UI, and the **Open in
+Matplotlib** button still clones the current tabs into interactive desktop
+windows for quick zooming or annotation outside the embedded canvas. Use the
+**Angle overlays** panel to highlight a set of rotations and compare how the
+loops evolve with temperature. Select one or more angles and click **Plot
+selected angles across temperatures** to open a dedicated Matplotlib window
+where every curve is grouped by angle but coloured by temperature. Rescaling,
+dark-mode styling, and line/marker preferences carry over automatically, making
+it easy to build publication-ready comparisons.
 
 All TXT exports now include an Origin-friendly header block: the first four
 rows provide short names, long names, units, and comments (complete with the
-active X/Y axis, temperature, angle, and whether rescaling was applied). The new
-**Export plotted data** control produces one `.txt` file per visible curve using
-the same axis selections and rescale transforms that shaped the plot, so every
-Matplotlib tab can be recreated in Origin with the correct metadata in place.
-The menubar also gains an **Export** menu for quick access to plotted-series and
-metrics exports without hunting for the sidebar buttons.
+active X/Y axis, temperature, angle, and whether rescaling was applied). The
+single **Export TXT…** action exposes both whole-table and plot-ready exports—
+choose **All columns** to archive the entire measurement (optionally rescaled)
+or switch to **Plot axes only** to write just the X/Y pairs that are currently
+visible in the Matplotlib tabs. The export dialog also lets you stage the files
+inside a dedicated subfolder so grouped curves remain easy to spot when multiple
+angles feed a single figure, and Origin still picks up long names, units, and
+axis roles automatically when you import the generated text files.
 
 Derived properties—coercivity (field at zero magnetisation), remanence
 (magnetisation at zero field), and saturation magnetisation (maximum recorded

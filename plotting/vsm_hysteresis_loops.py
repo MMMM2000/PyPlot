@@ -919,12 +919,20 @@ def _parse_angle(path: Path) -> float | None:
 class ExportOptionsDialog(QtWidgets.QDialog):
     """Prompt for optional subfolder creation when exporting TXT files."""
 
-    def __init__(self, parent: QtWidgets.QWidget | None, base_directory: Path, *, suggestion: str = "") -> None:
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        base_directory: Path,
+        *,
+        suggestion: str = "",
+        allow_plot_axes: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("TXT Export Options")
         self.base_directory = Path(base_directory)
         self._selected_directory = self.base_directory
         self._suggestion = _clean_folder_name(suggestion) or "VSM_Export"
+        self._allow_plot_axes = allow_plot_axes
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -943,6 +951,22 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         layout.addWidget(self.subfolder_edit)
 
         self.subfolder_checkbox.toggled.connect(self._toggle_subfolder)
+
+        scope_label = QtWidgets.QLabel("Columns to export")
+        layout.addWidget(scope_label)
+
+        self.scope_combo = QtWidgets.QComboBox()
+        self.scope_combo.addItem("All columns", "all")
+        plot_index = self.scope_combo.count()
+        self.scope_combo.addItem("Plot axes only", "plot_axes")
+        if not self._allow_plot_axes:
+            model = self.scope_combo.model()
+            if hasattr(model, "item"):
+                item = model.item(plot_index)
+                if item is not None:
+                    item.setEnabled(False)
+            self.scope_combo.setCurrentIndex(0)
+        layout.addWidget(self.scope_combo)
 
         button_box = QtWidgets.QDialogButtonBox(
             QtWidgets.QDialogButtonBox.StandardButton.Ok
@@ -980,6 +1004,10 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
     def selected_directory(self) -> Path:
         return self._selected_directory
+
+    def selected_scope(self) -> str:
+        data = self.scope_combo.currentData()
+        return str(data or "all")
 
 class VSMPlotter(QtWidgets.QWidget):
     """Render hysteresis loops for VSM-HYS-DATA files."""
@@ -1040,6 +1068,7 @@ class VSMPlotter(QtWidgets.QWidget):
         controls_layout.addLayout(mode_layout)
 
         self.path_edit = QtWidgets.QLineEdit()
+        self.path_edit.editingFinished.connect(self._handle_manual_path_entry)
         browse_button = QtWidgets.QPushButton("Browse…")
         browse_button.clicked.connect(self._choose_input)
         path_row = QtWidgets.QHBoxLayout()
@@ -1085,14 +1114,12 @@ class VSMPlotter(QtWidgets.QWidget):
         self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
         controls_layout.addWidget(self.dark_mode_checkbox)
 
-        angle_label = QtWidgets.QLabel("Show angles")
-        controls_layout.addWidget(angle_label)
         self.angle_scroll = QtWidgets.QScrollArea()
         self.angle_scroll.setWidgetResizable(True)
         self.angle_scroll.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        self.angle_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.angle_scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.angle_scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.angle_scroll.setMaximumHeight(220)
+        self.angle_scroll.setMinimumHeight(260)
         self.angle_container = QtWidgets.QWidget()
         self.angle_layout = QtWidgets.QVBoxLayout(self.angle_container)
         self.angle_layout.setContentsMargins(8, 4, 8, 4)
@@ -1104,23 +1131,42 @@ class VSMPlotter(QtWidgets.QWidget):
         self.angle_layout.addStretch(1)
         self.angle_scroll.setWidget(self.angle_container)
         self.angle_scroll.setEnabled(False)
-        controls_layout.addWidget(self.angle_scroll)
+
+        self.angle_group = QtWidgets.QGroupBox("Show angles")
+        angle_group_layout = QtWidgets.QVBoxLayout(self.angle_group)
+        angle_group_layout.setContentsMargins(6, 6, 6, 6)
+        angle_group_layout.setSpacing(6)
+        angle_group_layout.addWidget(self.angle_scroll)
+        self.angle_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
 
         self.angle_overlay_group = QtWidgets.QGroupBox("Angle overlays")
         overlay_layout = QtWidgets.QVBoxLayout(self.angle_overlay_group)
-        overlay_layout.setContentsMargins(6, 4, 6, 4)
-        overlay_layout.setSpacing(4)
+        overlay_layout.setContentsMargins(6, 6, 6, 6)
+        overlay_layout.setSpacing(6)
         self.angle_overlay_list = QtWidgets.QListWidget()
         self.angle_overlay_list.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.angle_overlay_list.setMinimumHeight(260)
         overlay_layout.addWidget(self.angle_overlay_list)
         self.angle_overlay_button = QtWidgets.QPushButton(
             "Plot selected angles across temperatures"
         )
         self.angle_overlay_button.setEnabled(False)
         overlay_layout.addWidget(self.angle_overlay_button)
-        controls_layout.addWidget(self.angle_overlay_group)
+        self.angle_overlay_group.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+
+        angle_sections = QtWidgets.QHBoxLayout()
+        angle_sections.setSpacing(8)
+        angle_sections.addWidget(self.angle_group, 1)
+        angle_sections.addWidget(self.angle_overlay_group, 1)
+        controls_layout.addLayout(angle_sections)
 
         self.angle_overlay_list.itemSelectionChanged.connect(
             self._update_overlay_button_state
@@ -1149,9 +1195,6 @@ class VSMPlotter(QtWidgets.QWidget):
         controls_layout.addWidget(self.export_mode_combo)
 
         button_row = QtWidgets.QHBoxLayout()
-        self.load_button = QtWidgets.QPushButton("Load data")
-        self.load_button.clicked.connect(self._load_measurements)
-        button_row.addWidget(self.load_button)
         self.plot_button = QtWidgets.QPushButton("Generate plots")
         self.plot_button.clicked.connect(self._generate_plots)
         self.plot_button.setEnabled(False)
@@ -1160,14 +1203,10 @@ class VSMPlotter(QtWidgets.QWidget):
         self.popout_button.clicked.connect(self._open_matplotlib_window)
         self.popout_button.setEnabled(False)
         button_row.addWidget(self.popout_button)
-        self.export_plot_button = QtWidgets.QPushButton("Export plotted data")
-        self.export_plot_button.clicked.connect(self._export_plotted_series)
-        self.export_plot_button.setEnabled(False)
-        button_row.addWidget(self.export_plot_button)
-        self.export_txt_button = QtWidgets.QPushButton("Export TXT")
-        self.export_txt_button.clicked.connect(self._export_txt)
-        self.export_txt_button.setEnabled(False)
-        button_row.addWidget(self.export_txt_button)
+        self.export_button = QtWidgets.QPushButton("Export TXT…")
+        self.export_button.clicked.connect(self._export_txt)
+        self.export_button.setEnabled(False)
+        button_row.addWidget(self.export_button)
         controls_layout.addLayout(button_row)
 
         controls_layout.addStretch(1)
@@ -1200,8 +1239,8 @@ class VSMPlotter(QtWidgets.QWidget):
         )
 
         export_menu = menu_bar.addMenu("Export")
-        export_plot_action = export_menu.addAction("Plotted series…")
-        export_plot_action.triggered.connect(self._export_plotted_series)
+        export_data_action = export_menu.addAction("TXT data…")
+        export_data_action.triggered.connect(self._export_txt)
         export_metrics_action = export_menu.addAction("Derived metrics…")
         export_metrics_action.triggered.connect(self._export_metrics)
 
@@ -1280,6 +1319,7 @@ class VSMPlotter(QtWidgets.QWidget):
             )
             if directory:
                 self.path_edit.setText(directory)
+                self._load_measurements(show_warning=False)
         else:
             files, _ = QtWidgets.QFileDialog.getOpenFileNames(
                 self,
@@ -1289,7 +1329,14 @@ class VSMPlotter(QtWidgets.QWidget):
             )
             if files:
                 self.path_edit.setText(";".join(files))
+                self._load_measurements(show_warning=False)
         self._save_settings()
+
+    def _handle_manual_path_entry(self) -> None:
+        text = self.path_edit.text().strip()
+        if not text:
+            return
+        self._load_measurements(show_warning=False)
 
     def _open_files_from_menu(self) -> None:
         self.file_radio.setChecked(True)
@@ -1309,7 +1356,7 @@ class VSMPlotter(QtWidgets.QWidget):
         return [Path(part) for part in text.split(";") if part]
 
     # ------------------------------------------------------------------ data loading
-    def _load_measurements(self) -> None:
+    def _load_measurements(self, *, show_warning: bool = True) -> None:
         self.measurements.clear()
         self.tab_widget.clear()
         self.log_view.clear()
@@ -1330,10 +1377,9 @@ class VSMPlotter(QtWidgets.QWidget):
         self.temperature_combo.addItem("All temperatures", None)
         self.temperature_combo.blockSignals(False)
         self.plot_button.setEnabled(False)
-        self.export_txt_button.setEnabled(False)
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(False)
         self.popout_button.setEnabled(False)
-        if hasattr(self, "export_plot_button"):
-            self.export_plot_button.setEnabled(False)
         if hasattr(self, "metrics_angle_button"):
             self.metrics_angle_button.setEnabled(False)
         if hasattr(self, "metrics_temperature_button"):
@@ -1344,7 +1390,10 @@ class VSMPlotter(QtWidgets.QWidget):
 
         paths = self._selected_paths()
         if not paths:
-            QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Select at least one VSM file to load.")
+            if show_warning:
+                QtWidgets.QMessageBox.warning(
+                    self, "VSM Hysteresis Loops", "Select at least one VSM file to load."
+                )
             return
 
         total_loaded = 0
@@ -1437,7 +1486,8 @@ class VSMPlotter(QtWidgets.QWidget):
             self._populate_axis_combos(candidate_columns)
 
         self.plot_button.setEnabled(plottable > 0)
-        self.export_txt_button.setEnabled(True)
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(True)
         self._save_settings()
 
     def _populate_axis_combos(self, labels: List[str]) -> None:
@@ -1627,8 +1677,6 @@ class VSMPlotter(QtWidgets.QWidget):
                 )
 
         self._plotted_series_exports = plot_exports
-        if hasattr(self, "export_plot_button"):
-            self.export_plot_button.setEnabled(bool(self._plotted_series_exports))
 
         _, x_unit = _split_column_label(x_axis)
         _, y_unit = _split_column_label(y_axis)
@@ -2055,38 +2103,7 @@ class VSMPlotter(QtWidgets.QWidget):
         )
         plt.show()
 
-    def _export_plotted_series(self) -> None:
-        if not self._plotted_series_exports:
-            QtWidgets.QMessageBox.information(
-                self,
-                "VSM Hysteresis Loops",
-                "Generate plots before exporting plotted data.",
-            )
-            return
-
-        start_directory = (
-            str(self.last_export_path)
-            if self.last_export_path is not None
-            else self.path_edit.text()
-        )
-        directory = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Select export folder",
-            start_directory or str(Path.home()),
-        )
-        if not directory:
-            return
-
-        suggestion = _clean_folder_name(
-            f"{self._metric_column_names.get('saturation', 'VSM_Plots')}"
-        ) or "VSM_Plots"
-        dialog = ExportOptionsDialog(self, Path(directory), suggestion=suggestion)
-        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
-            return
-
-        target_dir = dialog.selected_directory()
-        target_dir.mkdir(parents=True, exist_ok=True)
-
+    def _write_plotted_series(self, target_dir: Path) -> int:
         exported = 0
         for (temperature, angle), entry in sorted(self._plotted_series_exports.items()):
             visible = self._line_visibility.get(temperature, {}).get(angle, True)
@@ -2121,22 +2138,7 @@ class VSMPlotter(QtWidgets.QWidget):
                 continue
             exported += 1
 
-        if exported:
-            QtWidgets.QMessageBox.information(
-                self,
-                "VSM Hysteresis Loops",
-                f"Exported {exported} plotted series to {target_dir}",
-            )
-            self._append_log(f"Exported {exported} plotted series to {target_dir}")
-            self.last_export_path = target_dir
-            self.settings.setValue("last_export_path", str(target_dir))
-            self.settings.sync()
-        else:
-            QtWidgets.QMessageBox.information(
-                self,
-                "VSM Hysteresis Loops",
-                "No plotted series matched the current visibility filters.",
-            )
+        return exported
 
     def _plot_metrics_vs_angle(self) -> None:
         if not self._metrics_by_temperature:
@@ -2495,12 +2497,42 @@ class VSMPlotter(QtWidgets.QWidget):
             self,
             base_dir,
             suggestion=_suggest_export_subfolder(self.measurements),
+            allow_plot_axes=bool(self._plotted_series_exports),
         )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return
 
         target_dir = dialog.selected_directory()
         target_dir.mkdir(parents=True, exist_ok=True)
+
+        scope = dialog.selected_scope()
+
+        if scope == "plot_axes":
+            if not self._plotted_series_exports:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "VSM Hysteresis Loops",
+                    "Generate plots before exporting plotted axes.",
+                )
+                return
+            exported = self._write_plotted_series(target_dir)
+            if exported:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "VSM Hysteresis Loops",
+                    f"Exported {exported} plotted series to {target_dir}",
+                )
+                self._append_log(f"Exported {exported} plotted series to {target_dir}")
+                self.last_export_path = target_dir
+                self.settings.setValue("last_export_path", str(target_dir))
+                self.settings.sync()
+            else:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "VSM Hysteresis Loops",
+                    "No plotted series matched the current visibility filters.",
+                )
+            return
 
         unique_temperatures = {
             measurement.temperature
