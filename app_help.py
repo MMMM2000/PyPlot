@@ -239,47 +239,47 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "body": dedent(
             """
             ### Load data
-            1. Pick **Select files** or **Select folder** to decide how you want to browse.
-               Choose your Lakeshore `VSM-Hys-Data` exports and the dialog loads them
-               immediately—no extra **Load data** button required.
-            2. Adjust the X/Y axis drop-downs to choose which numeric columns to plot. The
-               selection is remembered between sessions, as are the backend choice, plot style,
-               and whether loop endpoints should be normalised.
+            1. Use **Browse files…** or **Browse folder…** to point at your Lakeshore
+               `VSM-Hys-Data` exports. Selected items load immediately and populate every dock—no
+               extra **Load data** step required.
+            2. Tune the X/Y axis selectors in the **Graph Settings** dock. Your axis choices,
+               backend preference, plot style, dark-theme toggle, and normalise-endpoints option are
+               remembered across sessions.
 
-            ### Manage angles
-            * Use **Show angles…** to open a floating, always-on-top window listing every
-              temperature and its recorded angles. Ticking a box hides or reveals that curve in
-              every embedded Matplotlib tab, Matplotlib pop-out, and Origin export without
-              regenerating the plots.
-            * Open **Angle overlays…** to keep a selectable list of rotations for cross-temperature
-              comparisons and derived metric plots. The window stays on top so you can pin it while
-              exploring dense datasets, and it provides the **Plot selected angles across
-              temperatures** button for quick multi-temperature overlays.
+            ### Explore the workspace
+            * The left auto-hide docks mirror Origin’s layout with a **Project Explorer** (double
+              click a measurement to jump to its temperature tab) and a running **Message Log** of
+              parser decisions.
+            * The right-side **Object Manager** lists temperatures with their angles. Tick/untick
+              entries to hide or reveal curves across every Matplotlib tab, pop-out window, and
+              Origin export without regenerating plots.
+            * The **Worksheets** dock exposes editable pandas-backed tables for each measurement.
+              Right-click rows to delete them, then hit **Generate plots** to refresh curves and
+              metrics with the cleaned data.
 
-            ### Plotting and saving
-            * Press **Generate plots** once the axes look right. The left-hand styling controls let
-              you switch between line-only and line-plus-symbol traces, toggle the dark theme, and
-              open desktop Matplotlib windows when you need extra zooming tools.
-            * The **Save graph…** button captures the active tab (temperature plots or derived
-              metrics) straight to PNG, PDF, or SVG so figures can be dropped into reports without
-              leaving the application.
+            ### Configure plots and overlays
+            * The **Graph Settings** dock bundles backend selection, rescale toggles, dark mode,
+              TXT export preferences, and the overlay picker. Multi-select angles in the overlay
+              list and press **Plot selected angles across temperatures** to add comparison tabs to
+              the main viewer.
+            * Press **Generate plots** once the inputs look right. Use **Open in Matplotlib** when
+              you want desktop zoom tools, and **Save graph…** to capture the active tab (loops,
+              overlays, or metrics) as PNG, PDF, or SVG.
 
             ### Derived metrics
-            * Click **Plot metrics vs angle** to add one tab per derived property (coercivity,
-              remanence, saturation) showing how each value varies with rotation for every
-              temperature.
-            * Select one or more angles in the overlays window and choose **Plot metrics vs
-              temperature** to create another set of metric tabs driven by the chosen rotations.
-              These tabs sit alongside the raw hysteresis loops and respond to the same theme and
-              save controls.
+            * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
+              saturation) showing how each temperature behaves across rotations.
+            * Pick one or more angles in the overlay list and choose **Plot metrics vs temperature**
+              to build another set of tabs driven by the selected rotations. All tabs obey the same
+              styling, theme, and save controls as the main plots.
 
             ### Exporting
-            * **Export TXT…** writes Origin-ready tables for either the full measurement columns or
-              just the axes used in the current plots. Enable the subfolder option to stage grouped
-              exports neatly.
+            * **Export TXT…** writes Origin-ready tables for either the entire measurement columns or
+              just the axes used in the current plots, with short/long names, units, comments, and
+              axis roles set automatically. Enable the subfolder option to group multi-file exports.
             * **Export metrics** saves the derived coercivity/remanence/saturation tables grouped by
-              temperature and by angle, complete with long names, units, and axis roles so Origin
-              picks them up automatically.
+              temperature and by angle so downstream Origin sessions pick up long names, units, and
+              comments without manual edits.
             """
         ).strip(),
     },
@@ -413,28 +413,6 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
-    "experiment_vsm_origin_workbench": {
-        "title": "VSM Origin Workbench",
-        "body": dedent(
-            """
-            ### Layout overview
-            * Launch the workbench from the launcher’s **Experiments** tab (enable it from the **Develop** menu).
-            * The central plot mirrors the standard hysteresis-loop viewer. Docks on the left expose the Project Explorer and Message Log; the right dock mirrors Origin’s Object Manager; the bottom dock lists editable worksheets.
-            * Click the pin icon to keep a dock visible, unpin it to enable auto-hide on hover, or use the float button to pop the panel out into an always-on-top window.
-
-            ### Loading data
-            1. Choose one or more `VSM-Hys-Data` files (or point to a folder) and click **Load data**.
-            2. The Project Explorer groups loops by temperature and angle. Worksheet tabs mirror each measurement so you can review or edit the numeric tables.
-            3. Double-click a worksheet cell to edit it in place or right-click a selection and choose **Delete selected rows** to remove bad readings before plotting.
-
-            ### Plotting
-            * Pick the X/Y axes, optionally enable **Normalise loop endpoints**, and toggle the dark theme if you prefer a graphite background.
-            * Click **Plot loops** to refresh the Matplotlib canvas. Use the Object Manager tree to hide or show individual angles without regenerating the plot.
-            * The **Angle overlays** panel opens a dedicated Matplotlib window comparing selected angles across all temperatures so you can inspect thermal trends quickly.
-            """
-        ).strip(),
-    },
-
     "logger_current_annealing": {
         "title": "Serial current annealing logger",
         "body": dedent(

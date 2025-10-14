@@ -1934,8 +1934,20 @@ def developer_options() -> _DeveloperOptions:
     return _DEVELOPER_OPTIONS
 
 
-def ensure_app_theme(app: QtWidgets.QApplication) -> None:
-    """Apply the stored theme preference to ``app``."""
+def ensure_app_theme(app: QtWidgets.QApplication | QtWidgets.QWidget) -> None:
+    """Apply the stored theme preference to ``app``.
+
+    Some call sites historically passed a top-level widget instead of the
+    QApplication instance. Guard against that by resolving the active
+    QApplication when a QWidget is supplied so we never try to treat a widget as
+    the application object.
+    """
+
+    if isinstance(app, QtWidgets.QWidget):
+        resolved = QtWidgets.QApplication.instance()
+        if resolved is None:
+            return
+        app = resolved
 
     theme_manager().apply(app)
 

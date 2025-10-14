@@ -197,7 +197,7 @@ return figures.
 The menu bar also adds a **Develop** section. Enable **Keep File Selections**
 to reopen plotting dialogs with the same files pre-selected—handy when you are
 tweaking settings over multiple runs. Toggle **Show Experiments Tab** to expose
-prototype utilities such as the VSM Origin Workbench while keeping the launcher
+prototype utilities such as the Origin clone prototype while keeping the launcher
 focused on production tools by default.
 
 Temperature-sensitivity plots now match between Matplotlib and Origin: each
@@ -528,10 +528,6 @@ Each microwire (composition + draw/piece) becomes a single row with English
 headers tailored for analytics. The builder selects the 1000 mA measurement and
 the lowest available current for each microwire, generates optional plots with
 the familiar red/blue styling, and records provenance back to the source files.
-### VSM Origin Workbench (experimental)
-
-Enable the Experiments tab from the launcher’s **Develop** menu and launch **VSM Origin Workbench** to explore a Lakeshore-inspired layout. The central canvas reuses the hysteresis plotting pipeline while dock widgets on the left and right mirror Origin’s Project Explorer, Message Log, and Object Manager. Each dock can be pinned, auto-hidden, or floated as an always-on-top window so you can recreate your preferred workspace. Every imported loop also appears as an editable worksheet: double-click cells to tweak values, right-click to remove rows, and replot to see the adjustments reflected in the overlay.
-
 ### Origin Clone (prototype)
 
 The new **Origin Clone (Prototype)** experiment scales the concept up to a general-purpose Origin-style desktop. Launch it from the Experiments tab to open a tabbed MDI workspace backed by Matplotlib and pandas. Key features include:
@@ -627,32 +623,11 @@ relabelling. The inline header detection now triggers only after the
 `@@End of Header.` marker, which prevents the lengthy instrument configuration
 tables that precede the columns block from overriding the real column labels.
 
-Choose your preferred backend (Matplotlib, Origin, or both) and select the axes
-to plot—defaults focus on **Applied Field** versus **Signal parallel with
-sample**, but every numeric column advertised in the header is available and the
-dialog remembers your most recent axis selections between sessions. Set the
-temperature filter to `All temperatures` to build a tab per temperature, each
-containing every angle trace for that run, or pick a specific temperature to
-concentrate on a single group. Click **Show angles…** to open a floating,
-stay-on-top window that lists every temperature alongside the angles it
-contains—toggling a checkbox instantly hides or reveals the matching traces in
-the embedded Matplotlib canvases, any Matplotlib pop-outs, and Origin exports
-without regenerating plots. The companion **Angle overlays…** window keeps a
-selectable list of rotations for cross-temperature comparisons and for the
-derived-metric temperature plots; it stays on top just like the visibility
-window, so you can pin it while exploring dense datasets. The Matplotlib tabs
-remain on the right-hand side of the window with a console log below; they are
-fully resizable and the splitter ratio is persisted between sessions. Styling
-controls still sit on the left: choose between line-only and line-plus-symbol
-traces, enable the **Dark plot theme** to recolour every embedded figure, and
-launch interactive desktop windows with **Open in Matplotlib** whenever you need
-extra annotation tools. A new **Save graph…** button captures the active tab
-straight to PNG, PDF, or SVG so figures can be dropped into reports without
-leaving the application. Inside the overlays window you can highlight a set of
-rotations and use **Plot selected angles across temperatures** to open a
-comparison window where each curve is grouped by angle but coloured by
-temperature. Rescaling, dark-mode styling, and line/marker preferences carry
-over automatically, making it easy to build publication-ready comparisons.
+The workspace now mirrors the Origin-style experiment so the frequently used panels are only ever a hover away. The left-hand docks host the Project Explorer and Message Log, the right dock mirrors Origin's Object Manager with a temperature/angle tree, and the bottom dock lists editable worksheets backed by the loaded dataframes. The new **Graph Settings** dock replaces the old side panel entirely: backend selection, temperature filters, axis pickers, style/rescale/dark-theme toggles, TXT export controls, and the angle-overlay picker all sit together and inherit the same pin/auto-hide/floating behaviour. Select files or point to a folder and the measurements load immediately—the Project Explorer groups them by temperature and rotation, and every loop appears in the Worksheets dock so you can tweak cells or delete rows before regenerating the plots.
+
+The Object Manager tree supersedes the floating “Show angles…” dialog. Toggling an angle hides or reveals the corresponding curve across the embedded Matplotlib tabs, any pop-out windows, and Origin exports without forcing a replot. The angle picker in the Graph Settings dock replaces the old overlays window: multi-select one or more rotations and choose **Plot selected angles across temperatures** to add a comparison tab to the main viewer. Styling, rescale decisions, and the dark theme propagate automatically, and the always-available **Save graph…** action captures whichever tab is active—temperature plots, overlays, or derived metrics—as PNG, PDF, or SVG for quick reporting.
+
+Editable worksheets stay in sync with the plots. Right-click inside a worksheet tab to delete the selected rows, then hit **Generate plots** to recalc the curves and derived metrics with the cleaned data. The Project Explorer’s double-click handler jumps straight to the matching temperature tab so navigating dense batches stays effortless.
 
 All TXT exports now include an Origin-friendly header block: the first four
 rows provide short names, long names, units, and comments (complete with the
@@ -670,7 +645,7 @@ Derived properties—coercivity (field at zero magnetisation), remanence
 moment)—are calculated whenever plots are generated. **Plot metrics vs angle**
 now creates one tab per metric inside the main viewer, and **Plot metrics vs
 temperature** adds another set of tabs (again one per metric) driven by the
-angles selected in the overlays window, so the comparisons sit alongside the raw
+angles selected in the Graph Settings overlay list, so the comparisons sit alongside the raw
 hysteresis loops instead of launching a separate Matplotlib window. The new
 **Save graph…** action works on those metric tabs as well, making it trivial to
 snapshot the derived curves. Each derived table can still be written to disk via
