@@ -61,14 +61,32 @@ class VSMMeasurement:
     data: pd.DataFrame
 
 
+try:
+    TRI_STATE_FLAG = QtCore.Qt.ItemFlag.ItemIsTristate
+except AttributeError:  # Qt 6.7 renamed the tristate flag
+    TRI_STATE_FLAG = getattr(QtCore.Qt.ItemFlag, "ItemIsAutoTristate", QtCore.Qt.ItemFlag(0))
+
+
 class AutoHideDockWidget(QtWidgets.QDockWidget):
     """Dock widget that mimics Origin's hover-to-expand panels."""
 
-    def __init__(self, title: str, parent: QtWidgets.QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str,
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        object_name: str | None = None,
+    ) -> None:
         super().__init__(title, parent)
         self._auto_hide = False
         self._last_width = 260
         self._rebuilding = False
+        if object_name:
+            self.setObjectName(object_name)
+        else:
+            safe = re.sub(r"[^0-9A-Za-z]+", "", title.title())
+            if safe:
+                self.setObjectName(f"{safe}Dock")
         self.setFeatures(
             QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
@@ -1320,14 +1338,14 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
         self.project_tree.header().setStretchLastSection(True)
         self.project_tree.itemDoubleClicked.connect(self._focus_measurement_tab)
-        project_dock = AutoHideDockWidget("Project Explorer", self)
+        project_dock = AutoHideDockWidget("Project Explorer", self, object_name="projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
-        log_dock = AutoHideDockWidget("Message Log", self)
+        log_dock = AutoHideDockWidget("Message Log", self, object_name="messageLogDock")
         log_dock.setWidget(self.log_view)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, log_dock)
         self.tabifyDockWidget(project_dock, log_dock)
@@ -1337,12 +1355,12 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.object_tree.setHeaderLabels(["Object Manager"])
         self.object_tree.setColumnCount(1)
         self.object_tree.itemChanged.connect(self._handle_object_item_changed)
-        object_dock = AutoHideDockWidget("Object Manager", self)
+        object_dock = AutoHideDockWidget("Object Manager", self, object_name="objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
 
         self.worksheet_tabs = QtWidgets.QTabWidget()
-        worksheet_dock = AutoHideDockWidget("Worksheets", self)
+        worksheet_dock = AutoHideDockWidget("Worksheets", self, object_name="worksheetsDock")
         worksheet_dock.setWidget(self.worksheet_tabs)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, worksheet_dock)
 
@@ -1441,7 +1459,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
         graph_layout.addWidget(export_group)
         graph_layout.addStretch(1)
 
-        graph_dock = AutoHideDockWidget("Graph Settings", self)
+        graph_dock = AutoHideDockWidget("Graph Settings", self, object_name="graphSettingsDock")
         graph_dock.setWidget(graph_settings_widget)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
         self.tabifyDockWidget(project_dock, graph_dock)
@@ -2292,11 +2310,10 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         for temperature, entries in sorted(prepared_groups.items()):
             parent = QtWidgets.QTreeWidgetItem([f"{temperature:g} °C"])
-            parent.setFlags(
-                parent.flags()
-                | QtCore.Qt.ItemFlag.ItemIsTristate
-                | QtCore.Qt.ItemFlag.ItemIsUserCheckable
-            )
+            flags = parent.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            if TRI_STATE_FLAG:
+                flags |= TRI_STATE_FLAG
+            parent.setFlags(flags)
             parent.setCheckState(0, QtCore.Qt.CheckState.Checked)
             self.object_tree.addTopLevelItem(parent)
             self._temperature_items[float(temperature)] = parent
@@ -2329,8 +2346,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
             for missing in [key for key in visibility.keys() if key not in seen_angles]:
                 del visibility[missing]
 
-            if not seen_angles:
-                parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsTristate)
+            if not seen_angles and TRI_STATE_FLAG:
+                parent.setFlags(parent.flags() & ~TRI_STATE_FLAG)
                 parent.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
 
         self.object_tree.expandAll()
