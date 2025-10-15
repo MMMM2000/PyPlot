@@ -763,6 +763,7 @@ class TabDescriptor:
 
 
 _PRE_NORMALIZE_Y_KEY = "pre_normalize_y"
+_NORMALIZABLE_TAB_KINDS = {"temperature", "overlay"}
 
 
 @dataclass
@@ -2213,9 +2214,14 @@ class VSMPlotter(QtWidgets.QMainWindow):
     def _update_normalize_enabled(self) -> None:
         tab = self.tab_widget.currentWidget()
         descriptor = self._tab_descriptors.get(tab) if tab is not None else None
-        enabled = bool(descriptor and descriptor.lines)
-        self.normalize_button.setEnabled(enabled)
-        self.popout_button.setEnabled(enabled)
+        can_popout = bool(descriptor and descriptor.lines)
+        can_normalize = bool(
+            descriptor
+            and descriptor.lines
+            and descriptor.kind in _NORMALIZABLE_TAB_KINDS
+        )
+        self.normalize_button.setEnabled(can_normalize)
+        self.popout_button.setEnabled(can_popout)
 
     def _handle_current_tab_changed(self, index: int) -> None:
         self._update_save_graph_enabled()
@@ -3939,6 +3945,14 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 self,
                 "VSM Hysteresis Loops",
                 "The selected tab does not contain a Matplotlib graph to normalize.",
+            )
+            return
+
+        if descriptor.kind not in _NORMALIZABLE_TAB_KINDS:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Normalization is only available for hysteresis loops and angle overlays.",
             )
             return
 

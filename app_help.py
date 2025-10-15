@@ -266,12 +266,15 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               TXT export preferences, and the overlay picker. Multi-select angles in the overlay
               list and press **Plot selected angles across temperatures** to add comparison tabs
               directly to the main viewer.
-            * Press **Generate plots** once the inputs look right. **Normalize Y** toggles the
-              active tab between raw and unit-scaled curves, automatically rescales the axis around
-              the span of the normalised data (symmetrically whenever the curves cross zero), and
-              restores the previous limits when you click it again. **Open in Matplotlib** re-plots just the selected tab with constrained
-              layout when you want desktop zoom tools, and **Save graph…** captures that same tab
-              (loops, overlays, or metrics) as PNG, PDF, or SVG.
+            * Press **Generate plots** once the inputs look right. **Normalize Y** (available on
+              hysteresis-loop and angle-overlay tabs) toggles the active curves between raw and
+              unit-scaled data, automatically rescales the axis around the span of the normalised
+              samples (symmetrically whenever the curves cross zero), and restores the previous
+              limits when you click it again. Derived-metric tabs remain in their native units so
+              comparisons such as saturation versus angle stay meaningful. **Open in Matplotlib**
+              re-plots just the selected tab with constrained layout when you want desktop zoom
+              tools, and **Save graph…** captures that same tab (loops, overlays, or metrics) as
+              PNG, PDF, or SVG.
 
             ### Derived metrics
             * Coercivity and remanence pair the closest positive and negative zero crossings
