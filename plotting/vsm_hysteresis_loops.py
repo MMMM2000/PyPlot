@@ -17,17 +17,23 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from plotting.backends import wants_matplotlib, wants_origin
-from plotting.utils import ensure_app_theme, install_standard_menu, origin_session, schedule_origin_release
+from plotting.base_plotter import (
+    BasePlotWindow,
+    GraphLineState,
+    GraphSelectionDialog,
+    PlotTabState,
+    TabDescriptor,
+)
+from plotting.utils import ensure_app_theme, origin_session, schedule_origin_release
 
 HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
-ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
-TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?)(?:-\d+)*)", re.IGNORECASE)
+ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)°)(?:-\d+)*)", re.IGNORECASE)
+TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)°)(?:-\d+)*)", re.IGNORECASE)
 VSM_FILE_TOKEN_RE = re.compile(r"vsm-hys-data(?:$|[^0-9a-z])")
-FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
-ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
-SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)?)", re.IGNORECASE)
+FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
+ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
+SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
 FOLDER_SANITIZE_RE = re.compile(r"[^0-9A-Za-z._-]+")
 
 TEMPERATURE_COLUMN_CANDIDATES = [
@@ -724,44 +730,8 @@ def _find_vsm_files(directory: Path) -> List[Path]:
     return sorted(unique.values())
 
 
-@dataclass
-class PlotTabState:
-    """Track Matplotlib artefacts for a rendered temperature tab."""
-
-    axes: Any
-    canvas: FigureCanvas
-    lines: Dict[float, Any]
-
-
-@dataclass
-class GraphLineState:
-    """Describe a plotted line within the embedded Matplotlib canvas."""
-
-    key: tuple[str, float | str]
-    label: str
-    line: Any
-    base_x: np.ndarray
-    base_y: np.ndarray
-    normalized: bool = False
-
-
-@dataclass
-class TabDescriptor:
-    """Capture metadata for a tabbed plot and its object manager bindings."""
-
-    kind: str
-    title: str
-    root_label: str
-    x_label: str
-    y_label: str
-    canvas: FigureCanvas
-    axes: Any
-    lines: Dict[tuple[str, float | str], GraphLineState]
-    metadata: Dict[str, Any]
-    layout_initialized: bool = False
-    stored_limits: Dict[str, tuple[float, float]] = field(default_factory=dict)
-
-
+_BASE_Y_LABEL_KEY = "base_y_label"
+_BASE_TITLE_KEY = "base_title"
 _PRE_NORMALIZE_Y_KEY = "pre_normalize_y"
 _NORMALIZABLE_TAB_KINDS = {"temperature", "overlay"}
 
@@ -830,6 +800,18 @@ def _origin_short_name(long_name: str, existing: set[str]) -> str:
 def _format_column_with_unit(label: str, unit: str) -> str:
     unit = unit.strip()
     return f"{label} [{unit}]" if unit else label
+
+
+def _normalized_axis_label(label: str) -> str:
+    """Return a normalised Y axis label without unit suffix."""
+
+    base_label, _ = _split_column_label(label)
+    cleaned = base_label.strip()
+    if not cleaned:
+        cleaned = "Signal"
+    if cleaned.lower().startswith("normalized"):
+        return cleaned
+    return f"Normalized {cleaned}".strip()
 
 
 def _format_metadata_comment(metadata: Dict[str, Any]) -> str:
@@ -1546,7 +1528,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         allow_plot_axes: bool = True,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("TXT Export Options")
+        self.setWindowTitle("TXT Data Export")
         self.base_directory = Path(base_directory)
         self._selected_directory = self.base_directory
         self._suggestion = _clean_folder_name(suggestion) or "VSM_Export"
@@ -1570,19 +1552,21 @@ class ExportOptionsDialog(QtWidgets.QDialog):
 
         self.subfolder_checkbox.toggled.connect(self._toggle_subfolder)
 
-        scope_label = QtWidgets.QLabel("Columns to export")
+        scope_label = QtWidgets.QLabel("Data to export")
         layout.addWidget(scope_label)
 
         self.scope_combo = QtWidgets.QComboBox()
-        self.scope_combo.addItem("All columns", "all")
-        plot_index = self.scope_combo.count()
-        self.scope_combo.addItem("Plot axes only", "plot_axes")
+        self.scope_combo.addItem("Visible plotted series", "plot_axes")
+        plot_index = self.scope_combo.count() - 1
+        self.scope_combo.addItem("All plotted series (including hidden)", "all")
         if not self._allow_plot_axes:
             model = self.scope_combo.model()
             if hasattr(model, "item"):
                 item = model.item(plot_index)
                 if item is not None:
                     item.setEnabled(False)
+            self.scope_combo.setCurrentIndex(self.scope_combo.count() - 1)
+        else:
             self.scope_combo.setCurrentIndex(0)
         layout.addWidget(self.scope_combo)
 
@@ -1610,7 +1594,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
             if not cleaned:
                 QtWidgets.QMessageBox.warning(
                     self,
-                    "TXT Export Options",
+                    "TXT Data Export",
                     "Provide a folder name or disable subfolder creation.",
                 )
                 return
@@ -1627,14 +1611,13 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         data = self.scope_combo.currentData()
         return str(data or "all")
 
-class VSMPlotter(QtWidgets.QMainWindow):
+
+class VSMPlotter(BasePlotWindow):
     """Render hysteresis loops for VSM-HYS-DATA files."""
 
-    def __init__(self) -> None:
-        super().__init__()
-        self.setWindowTitle("VSM Hysteresis Loops")
-        self.resize(1480, 940)
+    help_topic = "vsm_hysteresis_loops"
 
+    def __init__(self) -> None:
         self.logger = logging.getLogger("vsm_hysteresis_loops")
         self.logger.setLevel(logging.INFO)
         self.settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
@@ -1652,12 +1635,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._last_axes: tuple[str, str] | None = None
         self._last_rescale_enabled = False
         self._line_visibility: Dict[float, Dict[float, bool]] = {}
-        self._plot_tabs: Dict[float, PlotTabState] = {}
-        self._tab_descriptors: Dict[QtWidgets.QWidget, TabDescriptor] = {}
-        self._object_items: Dict[
-            tuple[QtWidgets.QWidget, tuple[str, float | str]],
-            QtWidgets.QTreeWidgetItem,
-        ] = {}
         self._worksheet_models: Dict[Path, WorksheetModel] = {}
         self._plotted_series_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
@@ -1667,220 +1644,30 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._metric_debug_tables: Dict[str, Dict[float, pd.DataFrame]] = {}
         self._metric_debug_columns: Dict[str, Dict[str, str]] = {}
         self._metric_debug_windows: Dict[str, MetricDebugWindow] = {}
-        self._temperature_tab_widgets: List[QtWidgets.QWidget] = []
-        self._metrics_angle_tabs: List[QtWidgets.QWidget] = []
-        self._metrics_temperature_tabs: List[QtWidgets.QWidget] = []
-        self._overlay_tab_widgets: List[QtWidgets.QWidget] = []
-        self._canvas_by_tab: Dict[QtWidgets.QWidget, FigureCanvas] = {}
-        self._axes_by_tab: Dict[QtWidgets.QWidget, Any] = {}
         self._last_graph_dir: Path | None = None
 
-        self._build_ui()
+        super().__init__(title="VSM Hysteresis Loops")
+        self.resize(1480, 940)
         self._load_settings()
 
+    def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
+        return AutoHideDockWidget(title, self, object_name=object_name)
 
-    def _build_ui(self) -> None:
-        central = QtWidgets.QWidget()
-        central_layout = QtWidgets.QVBoxLayout(central)
-        central_layout.setContentsMargins(12, 12, 12, 12)
-        central_layout.setSpacing(10)
-
-        controls = QtWidgets.QWidget()
-        controls_layout = QtWidgets.QGridLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(6)
-
-        controls_layout.addWidget(QtWidgets.QLabel("Data sources"), 0, 0)
-        self.path_edit = QtWidgets.QLineEdit()
-        self.path_edit.setPlaceholderText("Select VSM files or a folder…")
-        self.path_edit.editingFinished.connect(self._handle_manual_path_entry)
-        controls_layout.addWidget(self.path_edit, 0, 1, 1, 3)
-
-        self.browse_files_button = QtWidgets.QPushButton("Browse files…")
-        self.browse_files_button.clicked.connect(self._choose_files)
-        controls_layout.addWidget(self.browse_files_button, 0, 4)
-
-        self.browse_folder_button = QtWidgets.QPushButton("Browse folder…")
-        self.browse_folder_button.clicked.connect(self._choose_folder)
-        controls_layout.addWidget(self.browse_folder_button, 0, 5)
-
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(2, 1)
-
-        central_layout.addWidget(controls)
-
-        action_row = QtWidgets.QHBoxLayout()
-        self.plot_button = QtWidgets.QPushButton("Generate plots")
-        self.plot_button.clicked.connect(self._generate_plots)
-        self.plot_button.setEnabled(False)
-        action_row.addWidget(self.plot_button)
-
-        self.popout_button = QtWidgets.QPushButton("Open in Matplotlib")
-        self.popout_button.clicked.connect(self._open_matplotlib_window)
-        self.popout_button.setEnabled(False)
-        action_row.addWidget(self.popout_button)
-
-        self.save_graph_button = QtWidgets.QPushButton("Save graph…")
-        self.save_graph_button.setEnabled(False)
-        self.save_graph_button.clicked.connect(self._save_current_graph)
-        action_row.addWidget(self.save_graph_button)
-
-        self.normalize_button = QtWidgets.QPushButton("Normalize Y")
-        self.normalize_button.setEnabled(False)
-        self.normalize_button.clicked.connect(self._normalize_current_graph)
-        action_row.addWidget(self.normalize_button)
-
-        self.export_button = QtWidgets.QPushButton("Export TXT…")
-        self.export_button.clicked.connect(self._export_txt)
-        self.export_button.setEnabled(False)
-        action_row.addWidget(self.export_button)
-
-        action_row.addStretch(1)
-        central_layout.addLayout(action_row)
-
-        self.tab_widget = QtWidgets.QTabWidget()
-        self.tab_widget.currentChanged.connect(self._handle_current_tab_changed)
-        central_layout.addWidget(self.tab_widget, 1)
-
-        self.setCentralWidget(central)
-
-        self._log_has_unread_errors = False
-        self.project_tree = QtWidgets.QTreeWidget()
-        self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
-        self.project_tree.header().setStretchLastSection(True)
-        self.project_tree.itemDoubleClicked.connect(self._focus_measurement_tab)
-        project_dock = AutoHideDockWidget("Project Explorer", self, object_name="projectExplorerDock")
-        project_dock.setWidget(self.project_tree)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
-
-        self.log_view = QtWidgets.QPlainTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(2000)
-        log_dock = AutoHideDockWidget("Message Log", self, object_name="messageLogDock")
-        log_dock.setWidget(self.log_view)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, log_dock)
-        self.tabifyDockWidget(project_dock, log_dock)
+    def _after_base_ui_created(
+        self,
+        *,
+        project_dock: QtWidgets.QDockWidget,
+        log_dock: QtWidgets.QDockWidget,
+        graph_dock: QtWidgets.QDockWidget,
+    ) -> None:
         project_dock.raise_()
+        self.tabifyDockWidget(project_dock, log_dock)
+        self.tabifyDockWidget(project_dock, graph_dock)
         self.message_log_dock = log_dock
         self.log_view.installEventFilter(self)
         log_dock.visibilityChanged.connect(self._handle_log_visibility)
 
-        self.object_tree = QtWidgets.QTreeWidget()
-        self.object_tree.setHeaderLabels(["Object Manager"])
-        self.object_tree.setColumnCount(1)
-        self.object_tree.itemChanged.connect(self._handle_object_item_changed)
-        object_dock = AutoHideDockWidget("Object Manager", self, object_name="objectManagerDock")
-        object_dock.setWidget(self.object_tree)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
-
-        self.worksheet_tabs = QtWidgets.QTabWidget()
-        worksheet_dock = AutoHideDockWidget("Worksheets", self, object_name="worksheetsDock")
-        worksheet_dock.setWidget(self.worksheet_tabs)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, worksheet_dock)
-
-        graph_settings_widget = QtWidgets.QWidget()
-        graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
-        graph_layout.setContentsMargins(8, 8, 8, 8)
-        graph_layout.setSpacing(12)
-
-        axes_group = QtWidgets.QGroupBox("Axes and filters")
-        axes_form = QtWidgets.QFormLayout(axes_group)
-        axes_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        self.backend_combo = QtWidgets.QComboBox()
-        self.backend_combo.addItems(["Matplotlib", "Origin", "Both"])
-        axes_form.addRow("Backend", self.backend_combo)
-
-        self.temperature_combo = QtWidgets.QComboBox()
-        self.temperature_combo.addItem("All temperatures", None)
-        axes_form.addRow("Temperature", self.temperature_combo)
-
-        self.x_axis_combo = QtWidgets.QComboBox()
-        self.y_axis_combo = QtWidgets.QComboBox()
-        self.x_axis_combo.currentTextChanged.connect(self._store_axis_selection)
-        self.y_axis_combo.currentTextChanged.connect(self._store_axis_selection)
-        axes_form.addRow("X axis", self.x_axis_combo)
-        axes_form.addRow("Y axis", self.y_axis_combo)
-
-        graph_layout.addWidget(axes_group)
-
-        appearance_group = QtWidgets.QGroupBox("Appearance")
-        appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
-        appearance_layout.setContentsMargins(8, 8, 8, 8)
-        self.style_combo = QtWidgets.QComboBox()
-        self.style_combo.addItem("Line", "line")
-        self.style_combo.addItem("Line + symbols", "line_markers")
-        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style"))
-        appearance_layout.addWidget(self.style_combo)
-
-        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme")
-        self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
-        self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
-        appearance_layout.addWidget(self.dark_mode_checkbox)
-        graph_layout.addWidget(appearance_group)
-
-        overlay_group = QtWidgets.QGroupBox("Angle overlays")
-        overlay_layout = QtWidgets.QVBoxLayout(overlay_group)
-        overlay_layout.setContentsMargins(8, 8, 8, 8)
-        self.angle_overlay_list = QtWidgets.QListWidget()
-        self.angle_overlay_list.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
-        )
-        overlay_layout.addWidget(self.angle_overlay_list, 1)
-        overlay_hint = QtWidgets.QLabel(
-            "Select rotations to compare across temperatures or when exporting overlays."
-        )
-        overlay_hint.setWordWrap(True)
-        overlay_layout.addWidget(overlay_hint)
-        self.angle_overlay_button = QtWidgets.QPushButton(
-            "Plot selected angles across temperatures"
-        )
-        self.angle_overlay_button.setEnabled(False)
-        self.angle_overlay_button.clicked.connect(self._plot_angle_overlays)
-        overlay_layout.addWidget(self.angle_overlay_button)
-        graph_layout.addWidget(overlay_group, 1)
-
-        metrics_group = QtWidgets.QGroupBox("Derived metrics")
-        metrics_layout = QtWidgets.QVBoxLayout(metrics_group)
-        metrics_layout.setContentsMargins(8, 8, 8, 8)
-        self.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle")
-        self.metrics_angle_button.setEnabled(False)
-        self.metrics_angle_button.clicked.connect(self._plot_metrics_vs_angle)
-        metrics_layout.addWidget(self.metrics_angle_button)
-        self.metrics_temperature_button = QtWidgets.QPushButton("Plot metrics vs temperature")
-        self.metrics_temperature_button.setEnabled(False)
-        self.metrics_temperature_button.clicked.connect(self._plot_metrics_vs_temperature)
-        metrics_layout.addWidget(self.metrics_temperature_button)
-        self.export_metrics_button = QtWidgets.QPushButton("Export metrics")
-        self.export_metrics_button.setEnabled(False)
-        self.export_metrics_button.clicked.connect(self._export_metrics)
-        metrics_layout.addWidget(self.export_metrics_button)
-        graph_layout.addWidget(metrics_group)
-
-        export_group = QtWidgets.QGroupBox("TXT export mode")
-        export_layout = QtWidgets.QVBoxLayout(export_group)
-        export_layout.setContentsMargins(8, 8, 8, 8)
-        self.export_mode_combo = QtWidgets.QComboBox()
-        self.export_mode_combo.addItem("Original data", "original")
-        self.export_mode_combo.addItem("Rescaled data", "rescaled")
-        export_layout.addWidget(self.export_mode_combo)
-        graph_layout.addWidget(export_group)
-        graph_layout.addStretch(1)
-
-        graph_dock = AutoHideDockWidget("Graph Settings", self, object_name="graphSettingsDock")
-        graph_dock.setWidget(graph_settings_widget)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
-        self.tabifyDockWidget(project_dock, graph_dock)
-
-        menu_bar = install_standard_menu(
-            self,
-            help_topic="vsm_hysteresis_loops",
-            console=self.log_view,
-            open_file=self._open_files_from_menu,
-            open_folder=self._open_folder_from_menu,
-            close_window=self.close,
-        )
-
+    def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
         export_menu = menu_bar.addMenu("Export")
         export_data_action = export_menu.addAction("TXT data…")
         export_data_action.triggered.connect(self._export_txt)
@@ -1908,9 +1695,77 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     partial(self._show_metric_debug, "remanence")
                 )
 
+    def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
+        axes_group = QtWidgets.QGroupBox("Axes and filters")
+        axes_form = QtWidgets.QFormLayout(axes_group)
+        axes_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+
+        self.temperature_combo = QtWidgets.QComboBox()
+        self.temperature_combo.addItem("All temperatures", None)
+        axes_form.addRow("Temperature", self.temperature_combo)
+
+        self.x_axis_combo = QtWidgets.QComboBox()
+        self.y_axis_combo = QtWidgets.QComboBox()
+        self.x_axis_combo.currentTextChanged.connect(self._store_axis_selection)
+        self.y_axis_combo.currentTextChanged.connect(self._store_axis_selection)
+        axes_form.addRow("X axis", self.x_axis_combo)
+        axes_form.addRow("Y axis", self.y_axis_combo)
+
+        layout.addWidget(axes_group)
+
+        appearance_group = QtWidgets.QGroupBox("Appearance")
+        appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
+        appearance_layout.setContentsMargins(8, 8, 8, 8)
+        self.style_combo = QtWidgets.QComboBox()
+        self.style_combo.addItem("Line", "line")
+        self.style_combo.addItem("Line + symbols", "line_markers")
+        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style"))
+        appearance_layout.addWidget(self.style_combo)
+
+        self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme")
+        self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
+        self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
+        appearance_layout.addWidget(self.dark_mode_checkbox)
+        layout.addWidget(appearance_group)
+
+        overlay_group = QtWidgets.QGroupBox("Angle overlays")
+        overlay_layout = QtWidgets.QVBoxLayout(overlay_group)
+        overlay_layout.setContentsMargins(8, 8, 8, 8)
+        self.angle_overlay_list = QtWidgets.QListWidget()
+        self.angle_overlay_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        overlay_layout.addWidget(self.angle_overlay_list, 1)
+        overlay_hint = QtWidgets.QLabel(
+            "Select rotations to compare across temperatures or when exporting overlays."
+        )
+        overlay_hint.setWordWrap(True)
+        overlay_layout.addWidget(overlay_hint)
+        self.angle_overlay_button = QtWidgets.QPushButton(
+            "Plot selected angles across temperatures"
+        )
+        self.angle_overlay_button.setEnabled(False)
+        self.angle_overlay_button.clicked.connect(self._plot_angle_overlays)
+        overlay_layout.addWidget(self.angle_overlay_button)
+        layout.addWidget(overlay_group, 1)
+
+        metrics_group = QtWidgets.QGroupBox("Derived metrics")
+        metrics_layout = QtWidgets.QVBoxLayout(metrics_group)
+        metrics_layout.setContentsMargins(8, 8, 8, 8)
+        self.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle")
+        self.metrics_angle_button.setEnabled(False)
+        self.metrics_angle_button.clicked.connect(self._plot_metrics_vs_angle)
+        metrics_layout.addWidget(self.metrics_angle_button)
+        self.metrics_temperature_button = QtWidgets.QPushButton("Plot metrics vs temperature")
+        self.metrics_temperature_button.setEnabled(False)
+        self.metrics_temperature_button.clicked.connect(self._plot_metrics_vs_temperature)
+        metrics_layout.addWidget(self.metrics_temperature_button)
+        layout.addWidget(metrics_group)
+
         self.angle_overlay_list.itemSelectionChanged.connect(
             self._update_overlay_button_state
         )
+
 
     def _load_settings(self) -> None:
         sources = self.settings.value("sources", "")
@@ -1930,20 +1785,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 self._last_graph_dir = Path(graph_dir)
             except (TypeError, ValueError):
                 self._last_graph_dir = None
-
-        backend = self.settings.value("backend", "Matplotlib")
-        if isinstance(backend, str):
-            index = self.backend_combo.findText(
-                backend, QtCore.Qt.MatchFlag.MatchFixedString
-            )
-            if index >= 0:
-                self.backend_combo.setCurrentIndex(index)
-
-        export_mode = self.settings.value("export_mode", "original")
-        if isinstance(export_mode, str):
-            index = self.export_mode_combo.findData(export_mode)
-            if index >= 0:
-                self.export_mode_combo.setCurrentIndex(index)
 
         style_value = self.settings.value("plot_style", "line")
         if isinstance(style_value, str):
@@ -1973,8 +1814,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
     def _save_settings(self) -> None:
         self.settings.setValue("sources", self.path_edit.text())
-        self.settings.setValue("backend", self.backend_combo.currentText())
-        self.settings.setValue("export_mode", self.export_mode_combo.currentData())
         self.settings.setValue("plot_style", self.style_combo.currentData())
         self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
         if self.last_export_path:
@@ -2037,27 +1876,30 @@ class VSMPlotter(QtWidgets.QMainWindow):
             return []
         return [Path(part) for part in text.split(";") if part]
 
-    def _focus_measurement_tab(
-        self, item: QtWidgets.QTreeWidgetItem, column: int
-    ) -> None:
-        if column != 0:
-            return
-        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not data:
-            return
-        temperature, _path = data
-        if temperature is None:
-            return
-        target_label = f"{temperature:g}"
-        for index in range(self.tab_widget.count()):
-            label = self.tab_widget.tabText(index)
-            if label.startswith(target_label):
-                self.tab_widget.setCurrentIndex(index)
-                break
-
     def _populate_project_tree(self) -> None:
         self.project_tree.blockSignals(True)
         self.project_tree.clear()
+        self._graph_tree_items.clear()
+        self._worksheet_tree_items.clear()
+
+        graphs_root = QtWidgets.QTreeWidgetItem(["Graphs", ""])
+        graphs_root.setFlags(graphs_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+        graphs_root.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("group", "graphs"))
+        graphs_root.setExpanded(True)
+        self.project_tree.addTopLevelItem(graphs_root)
+        self._graph_tree_root = graphs_root
+
+        worksheets_root = QtWidgets.QTreeWidgetItem(["Worksheets", ""])
+        worksheets_root.setFlags(
+            worksheets_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
+        )
+        worksheets_root.setData(
+            0, QtCore.Qt.ItemDataRole.UserRole, ("group", "worksheets")
+        )
+        worksheets_root.setExpanded(True)
+        self.project_tree.addTopLevelItem(worksheets_root)
+        self._worksheet_tree_root = worksheets_root
+
         groups: Dict[float | None, QtWidgets.QTreeWidgetItem] = {}
         for measurement in sorted(
             self.measurements,
@@ -2076,14 +1918,15 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     else f"{measurement.temperature:g} °C"
                 )
                 parent = QtWidgets.QTreeWidgetItem([label, ""])
+                parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
+                parent.setExpanded(True)
                 parent.setData(
                     0,
                     QtCore.Qt.ItemDataRole.UserRole,
-                    (measurement.temperature, None),
+                    ("worksheet_group", measurement.temperature),
                 )
-                parent.setExpanded(True)
                 groups[temp_key] = parent
-                self.project_tree.addTopLevelItem(parent)
+                worksheets_root.addChild(parent)
 
             angle_label = (
                 "Unknown angle"
@@ -2095,43 +1938,325 @@ class VSMPlotter(QtWidgets.QMainWindow):
             child.setData(
                 0,
                 QtCore.Qt.ItemDataRole.UserRole,
-                (measurement.temperature, measurement.path),
+                ("worksheet", measurement.path),
             )
             parent.addChild(child)
+            self._worksheet_tree_items[measurement.path] = child
 
         self.project_tree.expandAll()
         self.project_tree.blockSignals(False)
 
+
     def _populate_worksheets(self) -> None:
-        self.worksheet_tabs.clear()
         self._worksheet_models.clear()
         for measurement in self.measurements:
             model = WorksheetModel(measurement)
             self._worksheet_models[measurement.path] = model
-            view = QtWidgets.QTableView()
-            view.setModel(model)
-            view.setSelectionBehavior(
-                QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
-            )
-            view.setSelectionMode(
-                QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
-            )
-            view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
-            view.customContextMenuRequested.connect(
-                lambda pos, table=view: self._open_table_menu(table, pos)
-            )
-            view.horizontalHeader().setStretchLastSection(True)
-            view.verticalHeader().setVisible(False)
+            widget = self._worksheet_tabs_open.get(measurement.path)
+            if widget is not None:
+                view = getattr(widget, "_worksheet_view", None)
+                if isinstance(view, QtWidgets.QTableView):
+                    view.setModel(model)
+        for path in list(self._worksheet_tree_items.keys()):
+            self._update_worksheet_item_state(path)
 
-            container = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.addWidget(view)
+    def _handle_project_item_double_click(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        column: int,
+    ) -> None:
+        if column != 0:
+            return
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not data:
+            return
+        role = data[0]
+        if role == "graph":
+            tab = data[1]
+            if isinstance(tab, QtWidgets.QWidget):
+                self._show_tab(tab)
+        elif role == "worksheet":
+            path = data[1]
+            if isinstance(path, Path):
+                self._open_worksheet_tab(path)
+        elif role == "worksheet_group":
+            item.setExpanded(not item.isExpanded())
 
-            tab_name = measurement.path.stem
-            if measurement.temperature is not None and measurement.angle is not None:
-                tab_name = f"{measurement.temperature:g}°C @ {measurement.angle:g}°"
-            self.worksheet_tabs.addTab(container, tab_name)
+    def _update_worksheet_item_state(self, path: Path) -> None:
+        item = self._worksheet_tree_items.get(path)
+        if item is None:
+            return
+        widget = self._worksheet_tabs_open.get(path)
+        visible = False
+        if widget is not None:
+            index = self.tab_widget.indexOf(widget)
+            if index >= 0:
+                try:
+                    visible = self.tab_widget.isTabVisible(index)
+                except Exception:
+                    visible = widget.isVisible()
+        palette = self.project_tree.palette()
+        base_color = palette.color(QtGui.QPalette.ColorRole.Text)
+        if visible:
+            brush = QtGui.QBrush(base_color)
+        else:
+            dim_color = QtGui.QColor(base_color)
+            dim_color = dim_color.lighter(160)
+            brush = QtGui.QBrush(dim_color)
+        item.setForeground(0, brush)
+        item.setForeground(1, brush)
+
+    def _create_worksheet_tab(self, path: Path, model: WorksheetModel) -> QtWidgets.QWidget:
+        view = QtWidgets.QTableView()
+        view.setModel(model)
+        view.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        view.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(
+            lambda pos, table=view: self._open_table_menu(table, pos)
+        )
+        view.horizontalHeader().setStretchLastSection(True)
+        view.verticalHeader().setVisible(False)
+
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(view)
+        setattr(container, "_worksheet_view", view)
+
+        tab_label = path.stem or "Worksheet"
+        measurement = model._measurement
+        if measurement.temperature is not None and measurement.angle is not None:
+            tab_label = f"{measurement.temperature:g}°C @ {measurement.angle:g}°"
+
+        index = self.tab_widget.addTab(container, tab_label)
+        self.tab_widget.setCurrentIndex(index)
+        self._worksheet_tabs_open[path] = container
+        self._tab_to_worksheet_path[container] = path
+        self._set_tab_visibility(container, True)
+        return container
+
+    def _open_worksheet_tab(self, path: Path) -> None:
+        model = self._worksheet_models.get(path)
+        if model is None:
+            return
+        widget = self._worksheet_tabs_open.get(path)
+        if widget is None:
+            widget = self._create_worksheet_tab(path, model)
+        index = self.tab_widget.indexOf(widget)
+        if index >= 0:
+            self._set_tab_visibility(widget, True)
+            self.tab_widget.setCurrentIndex(index)
+        self._update_worksheet_item_state(path)
+        self._update_tab_buttons()
+
+    def _show_tab(self, tab: QtWidgets.QWidget) -> None:
+        index = self.tab_widget.indexOf(tab)
+        if index < 0:
+            return
+        self._set_tab_visibility(tab, True)
+        self.tab_widget.setCurrentIndex(index)
+        self._update_tab_buttons()
+
+    def _ensure_graph_tree_item(self, tab: QtWidgets.QWidget, descriptor: TabDescriptor) -> None:
+        if self._graph_tree_root is None:
+            return
+        item = self._graph_tree_items.get(tab)
+        label = descriptor.root_label or descriptor.title
+        detail = descriptor.title
+        if item is None:
+            item = QtWidgets.QTreeWidgetItem([label, detail])
+            item.setData(
+                0,
+                QtCore.Qt.ItemDataRole.UserRole,
+                ("graph", tab),
+            )
+            self._graph_tree_root.addChild(item)
+            self._graph_tree_items[tab] = item
+        else:
+            item.setText(0, label)
+            item.setText(1, detail)
+        self._style_graph_item(item, self._is_tab_visible(tab))
+
+    def _update_graph_tree_for_tab(self, tab: QtWidgets.QWidget) -> None:
+        descriptor = self._tab_descriptors.get(tab)
+        item = self._graph_tree_items.get(tab)
+        if descriptor is None or item is None:
+            return
+        item.setText(0, descriptor.root_label or descriptor.title)
+        item.setText(1, descriptor.title)
+        self._style_graph_item(item, self._is_tab_visible(tab))
+
+    @staticmethod
+    def _style_graph_item(item: QtWidgets.QTreeWidgetItem, visible: bool) -> None:
+        font = item.font(0)
+        font.setItalic(not visible)
+        item.setFont(0, font)
+        item.setFont(1, font)
+
+    def _is_tab_visible(self, tab: QtWidgets.QWidget) -> bool:
+        index = self.tab_widget.indexOf(tab)
+        if index < 0:
+            return False
+        try:
+            return self.tab_widget.isTabVisible(index)
+        except Exception:
+            return tab.isVisible()
+
+    def _set_tab_visibility(self, tab: QtWidgets.QWidget, visible: bool) -> None:
+        index = self.tab_widget.indexOf(tab)
+        if index < 0:
+            return
+        try:
+            self.tab_widget.setTabVisible(index, visible)
+        except Exception:
+            tab.setVisible(visible)
+        if visible:
+            self._hidden_tabs.discard(tab)
+        else:
+            self._hidden_tabs.add(tab)
+        if tab in self._tab_descriptors:
+            self._update_graph_tree_for_tab(tab)
+        else:
+            path = self._tab_to_worksheet_path.get(tab)
+            if path is not None:
+                self._update_worksheet_item_state(path)
+
+    def _find_alternate_tab_index(self, current_index: int) -> int | None:
+        count = self.tab_widget.count()
+        for offset in range(1, count):
+            forward = (current_index + offset) % count
+            if self._is_tab_visible(self.tab_widget.widget(forward)):
+                return forward
+        return None
+
+    def _minimize_tab(self, tab: QtWidgets.QWidget) -> None:
+        index = self.tab_widget.indexOf(tab)
+        if index < 0:
+            return
+        next_index = None
+        if self.tab_widget.currentWidget() is tab:
+            next_index = self._find_alternate_tab_index(index)
+        self._set_tab_visibility(tab, False)
+        if next_index is not None:
+            self.tab_widget.setCurrentIndex(next_index)
+        self._update_tab_buttons()
+        if tab in self._tab_descriptors:
+            self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+
+        if not self._tab_descriptors:
+            self.export_button.setEnabled(False)
+            self.open_origin_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+        path = self._tab_to_worksheet_path.get(tab)
+        if path is not None:
+            self._update_worksheet_item_state(path)
+
+    def _close_tab(self, tab: QtWidgets.QWidget) -> None:
+        descriptor = self._tab_descriptors.pop(tab, None)
+        index = self.tab_widget.indexOf(tab)
+        if index >= 0:
+            self.tab_widget.removeTab(index)
+        self._canvas_by_tab.pop(tab, None)
+        self._axes_by_tab.pop(tab, None)
+        self._hidden_tabs.discard(tab)
+
+        if tab in self._graph_tree_items:
+            item = self._graph_tree_items.pop(tab)
+            parent = item.parent()
+            if parent is not None:
+                parent.removeChild(item)
+            else:
+                index = self.project_tree.indexOfTopLevelItem(item)
+                if index >= 0:
+                    self.project_tree.takeTopLevelItem(index)
+        for collection in (
+            self._temperature_tab_widgets,
+            self._metrics_angle_tabs,
+            self._metrics_temperature_tabs,
+            self._overlay_tab_widgets,
+        ):
+            if tab in collection:
+                collection.remove(tab)
+
+        if descriptor is not None and descriptor.kind == "temperature":
+            temperature = descriptor.metadata.get("temperature")
+            if isinstance(temperature, (int, float)):
+                self._plot_tabs.pop(float(temperature), None)
+                self._line_visibility.pop(float(temperature), None)
+
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        self._update_tab_buttons()
+        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+
+        if not self._tab_descriptors:
+            self.export_button.setEnabled(False)
+            self.open_origin_button.setEnabled(False)
+
+    def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
+        self.project_tree.blockSignals(True)
+        self.project_tree.clearSelection()
+        target_item: QtWidgets.QTreeWidgetItem | None = None
+        if tab is not None:
+            descriptor = self._tab_descriptors.get(tab)
+            if descriptor is not None:
+                target_item = self._graph_tree_items.get(tab)
+            else:
+                path = self._tab_to_worksheet_path.get(tab)
+                if path is not None:
+                    target_item = self._worksheet_tree_items.get(path)
+        if target_item is not None:
+            self.project_tree.setCurrentItem(target_item)
+            self.project_tree.scrollToItem(target_item)
+        self.project_tree.blockSignals(False)
+
+    def _update_tab_buttons(self) -> None:
+        tab_bar = self.tab_widget.tabBar()
+        if tab_bar is None:
+            return
+        for index in range(self.tab_widget.count()):
+            button = tab_bar.tabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide)
+            if button is not None and bool(button.property("mw_tab_controls")):
+                tab_bar.setTabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide, None)
+
+        current_index = self.tab_widget.currentIndex()
+        if current_index < 0:
+            return
+        tab = self.tab_widget.widget(current_index)
+        if tab is None:
+            return
+
+        container = QtWidgets.QWidget()
+        container.setProperty("mw_tab_controls", True)
+        layout = QtWidgets.QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        minimize_button = QtWidgets.QToolButton(container)
+        minimize_button.setText("-")
+        minimize_button.setAutoRaise(True)
+        minimize_button.setToolTip("Hide this tab")
+        minimize_button.clicked.connect(lambda _, t=tab: self._minimize_tab(t))
+        layout.addWidget(minimize_button)
+
+        if tab in self._tab_descriptors:
+            close_button = QtWidgets.QToolButton(container)
+            close_button.setText("x")
+            close_button.setAutoRaise(True)
+            close_button.setToolTip("Close this graph tab")
+            close_button.clicked.connect(lambda _, t=tab: self._close_tab(t))
+            layout.addWidget(close_button)
+
+        tab_bar.setTabButton(
+            current_index,
+            QtWidgets.QTabBar.ButtonPosition.RightSide,
+            container,
+        )
 
     def _open_table_menu(
         self, table: QtWidgets.QTableView, pos: QtCore.QPoint
@@ -2170,12 +2295,16 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
         if descriptor is not None:
+            descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
+            descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
             self._tab_descriptors[tab] = descriptor
             self._refresh_descriptor_legend(descriptor, force_layout=True)
+            self._ensure_graph_tree_item(tab, descriptor)
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         if self.tab_widget.currentWidget() is tab:
             self._rebuild_object_manager_for_tab(tab)
+        self._update_tab_buttons()
 
     def _clear_tab_list(self, tabs: List[QtWidgets.QWidget]) -> None:
         for tab in tabs:
@@ -2184,13 +2313,33 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 self.tab_widget.removeTab(index)
             self._canvas_by_tab.pop(tab, None)
             self._axes_by_tab.pop(tab, None)
-            self._tab_descriptors.pop(tab, None)
+            descriptor = self._tab_descriptors.pop(tab, None)
+            if descriptor is not None:
+                item = self._graph_tree_items.pop(tab, None)
+                if item is not None:
+                    parent = item.parent()
+                    if parent is not None:
+                        parent.removeChild(item)
+                    else:
+                        index = self.project_tree.indexOfTopLevelItem(item)
+                        if index >= 0:
+                            self.project_tree.takeTopLevelItem(index)
             for key in [key for key in self._object_items.keys() if key[0] is tab]:
                 self._object_items.pop(key, None)
+            path = self._tab_to_worksheet_path.pop(tab, None)
+            if path is not None:
+                self._worksheet_tabs_open.pop(path, None)
+                self._update_worksheet_item_state(path)
+            self._hidden_tabs.discard(tab)
         tabs.clear()
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+
+        if not self._tab_descriptors:
+            self.export_button.setEnabled(False)
+            self.open_origin_button.setEnabled(False)
+        self._update_tab_buttons()
 
     def _update_save_graph_enabled(self, *_: object) -> None:
         current = self.tab_widget.currentWidget()
@@ -2214,6 +2363,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._update_normalize_enabled()
         tab = self.tab_widget.widget(index) if index >= 0 else None
         self._rebuild_object_manager_for_tab(tab)
+        self._focus_tree_on_tab(tab)
+        self._update_tab_buttons()
     # ------------------------------------------------------------------ data loading
     def _load_measurements(self, *, show_warning: bool = True) -> None:
         self.measurements.clear()
@@ -2237,7 +2388,13 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._object_items = {}
         self._worksheet_models.clear()
         self._reset_object_manager()
-        self.worksheet_tabs.clear()
+        self._graph_tree_root = None
+        self._worksheet_tree_root = None
+        self._graph_tree_items.clear()
+        self._worksheet_tree_items.clear()
+        self._worksheet_tabs_open.clear()
+        self._tab_to_worksheet_path.clear()
+        self._hidden_tabs.clear()
         self._plotted_series_exports = {}
         self._metrics_by_temperature = {}
         self._metrics_by_angle = {}
@@ -2248,12 +2405,13 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.temperature_combo.blockSignals(False)
         self.plot_button.setEnabled(False)
         self.export_button.setEnabled(False)
+        self.open_origin_button.setEnabled(False)
         self.popout_button.setEnabled(False)
         self.metrics_angle_button.setEnabled(False)
         self.metrics_temperature_button.setEnabled(False)
-        self.export_metrics_button.setEnabled(False)
         self._update_metric_controls()
         self._update_normalize_enabled()
+        self._update_tab_buttons()
 
         paths = self._selected_paths()
         if not paths:
@@ -2364,9 +2522,9 @@ class VSMPlotter(QtWidgets.QMainWindow):
     def _populate_axis_combos(self, labels: List[str]) -> None:
         numeric_labels = [label for label in labels if label]
         preferred_x = [
-            "Applied Field [Oe]",
             "Applied Field",
             "Applied Field For Plot",
+            "Applied Field [Oe]",
         ]
         preferred_y = [
             "Signal X direction [emu]",
@@ -2427,6 +2585,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Select X and Y axes for plotting.")
             return
 
+        self.open_origin_button.setEnabled(False)
+        self.export_button.setEnabled(False)
         target_temp = self.temperature_combo.currentData()
         groups: Dict[float, List[VSMMeasurement]] = {}
         for measurement in self.measurements:
@@ -2681,6 +2841,18 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     },
                     inplace=True,
                 )
+                desired_columns = [
+                    x_column_label,
+                    y_column_label,
+                    angle_label,
+                    raw_first_label,
+                    raw_second_label,
+                    sym_neg_label,
+                    sym_pos_label,
+                    original_label,
+                    corrected_label,
+                ]
+                df = df[[column for column in desired_columns if column in df.columns]]
                 tables[temperature] = df
 
             column_map = {
@@ -2720,26 +2892,19 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._last_axes = (x_axis, y_axis)
         self._last_rescale_enabled = rescale_enabled
 
-        backend_choice = self.backend_combo.currentText()
-        render_matplotlib = wants_matplotlib(backend_choice)
-        export_origin = wants_origin(backend_choice)
-
         self.tab_widget.clear()
+        self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
 
-        if render_matplotlib:
-            self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
-        else:
-            self.tab_widget.setVisible(False)
-
-        if export_origin:
-            self._export_origin(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
-
-        if not render_matplotlib and not export_origin:
-            self._append_log("No backend selected; nothing generated.")
+        self.open_origin_button.setEnabled(bool(prepared_groups))
+        self.export_button.setEnabled(True)
 
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+
+        if not self._tab_descriptors:
+            self.export_button.setEnabled(False)
+            self.open_origin_button.setEnabled(False)
 
     def _handle_metric_debug_closed(self, metric: str, *_: Any) -> None:
         self._metric_debug_windows.pop(metric, None)
@@ -3094,7 +3259,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 numeric = float(candidate)
 
         if numeric is None:
-            match = re.search(r"-?\d+(?:\.\d+)?", state.label)
+            match = re.search(r"-?\d+(?:\.\d+)°", state.label)
             if match is not None:
                 try:
                     numeric = float(match.group())
@@ -3145,7 +3310,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
         has_metrics = bool(getattr(self, "_metrics_by_temperature", {}))
         has_angles = has_metrics and bool(self._selected_overlay_angles())
         self.metrics_angle_button.setEnabled(has_metrics)
-        self.export_metrics_button.setEnabled(has_metrics)
         self.metrics_temperature_button.setEnabled(has_metrics and has_angles)
 
     def _handle_object_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
@@ -3321,40 +3485,84 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 "No overlays could be generated for the selected angles.",
             )
 
-    def _write_plotted_series(self, target_dir: Path) -> int:
+
+    def _write_plotted_series(
+        self,
+        target_dir: Path,
+        descriptors: Sequence[TabDescriptor],
+        *,
+        include_hidden: bool = False,
+    ) -> int:
         exported = 0
-        for (temperature, angle), entry in sorted(self._plotted_series_exports.items()):
-            visible = self._line_visibility.get(temperature, {}).get(angle, True)
-            if not visible or entry.data.empty:
-                continue
-            temp_label = _temperature_subfolder_name(temperature)
-            angle_label = _clean_folder_name(f"Angle{angle:+g}deg")
-            x_label = _clean_folder_name(entry.x_axis) or "X"
-            y_label = _clean_folder_name(entry.y_axis) or "Y"
-            filename = target_dir / f"{temp_label}_{angle_label}_{y_label}_vs_{x_label}.txt"
-            counter = 2
-            while filename.exists():
-                filename = target_dir / f"{temp_label}_{angle_label}_{y_label}_vs_{x_label}_{counter}.txt"
-                counter += 1
-            metadata = {
-                "temperature": temperature,
-                "angle": angle,
-                "rescaled": entry.rescaled,
-                "source": entry.source.name,
-                "x_axis": entry.x_axis,
-                "y_axis": entry.y_axis,
-                "summary": "Hysteresis curve prepared for plotting",
-            }
-            axis_roles = {
-                entry.x_axis: "X axis",
-                entry.y_axis: "Y axis",
-            }
-            try:
-                _write_origin_ascii(filename, entry.data, metadata=metadata, axis_roles=axis_roles)
-            except Exception as exc:
-                self._append_log(f"Failed to export {entry.source.name}: {exc}")
-                continue
-            exported += 1
+        for descriptor in descriptors:
+            temperature = descriptor.metadata.get("temperature")
+            if isinstance(temperature, (int, float)):
+                base_dir = target_dir / _temperature_subfolder_name(float(temperature))
+            else:
+                base_label = _clean_folder_name(descriptor.root_label or descriptor.title) or "Plot"
+                base_dir = target_dir / base_label
+            base_dir.mkdir(parents=True, exist_ok=True)
+
+            for state in descriptor.lines.values():
+                if not include_hidden and not state.line.get_visible():
+                    continue
+                x_data = np.asarray(state.line.get_xdata(), dtype=float)
+                y_data = np.asarray(state.line.get_ydata(), dtype=float)
+                if x_data.size == 0 or y_data.size == 0 or x_data.shape != y_data.shape:
+                    continue
+
+                data_frame = pd.DataFrame({
+                    descriptor.x_label: x_data,
+                    descriptor.y_label: y_data,
+                })
+
+                series_label = _clean_folder_name(state.label) or "Series"
+                x_label_clean = _clean_folder_name(descriptor.x_label) or "X"
+                y_label_clean = _clean_folder_name(descriptor.y_label) or "Y"
+                filename = base_dir / f"{series_label}_{y_label_clean}_vs_{x_label_clean}.txt"
+                counter = 2
+                while filename.exists():
+                    filename = base_dir / f"{series_label}_{y_label_clean}_vs_{x_label_clean}_{counter}.txt"
+                    counter += 1
+
+                metadata = {
+                    "title": descriptor.title,
+                    "series": state.label,
+                    "normalized": state.normalized,
+                    "x_axis": descriptor.x_label,
+                    "y_axis": descriptor.y_label,
+                }
+                if isinstance(temperature, (int, float)):
+                    metadata["temperature"] = float(temperature)
+
+                angle_value = None
+                key = state.key
+                if isinstance(key, tuple) and len(key) == 2:
+                    angle_value = key[1]
+                    if isinstance(angle_value, (int, float)):
+                        metadata["angle"] = float(angle_value)
+
+                entry = None
+                if isinstance(temperature, (int, float)) and isinstance(angle_value, (int, float)):
+                    entry = self._plotted_series_exports.get((float(temperature), float(angle_value)))
+                if entry is not None:
+                    metadata["source"] = entry.source.name
+                    metadata["rescaled"] = entry.rescaled
+
+                axis_roles = {
+                    descriptor.x_label: "X axis",
+                    descriptor.y_label: "Y axis",
+                }
+
+                try:
+                    _write_origin_ascii(filename, data_frame, metadata=metadata, axis_roles=axis_roles)
+                except Exception as exc:
+                    self._append_log(
+                        f"Failed to export {state.label!r} from {descriptor.title}: {exc}"
+                    )
+                    continue
+
+                exported += 1
 
         return exported
 
@@ -3873,6 +4081,20 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.settings.sync()
         self._append_log(f"Saved graph to {path}")
 
+    def _descriptor_title_for_labels(self, descriptor: TabDescriptor, y_label: str) -> str:
+        """Return a title string that reflects ``descriptor`` and ``y_label``."""
+
+        x_label = descriptor.x_label
+        if descriptor.kind == "temperature":
+            temperature = descriptor.metadata.get("temperature")
+            if isinstance(temperature, (int, float)):
+                return f"{y_label} vs {x_label} at {float(temperature):g} °C"
+        if descriptor.kind == "overlay":
+            angle = descriptor.metadata.get("angle")
+            if isinstance(angle, (int, float)):
+                return f"{y_label} vs {x_label} at {float(angle):g}°"
+        return f"{y_label} vs {x_label}"
+
     def _normalize_current_graph(self) -> None:
         tab = self.tab_widget.currentWidget()
         if tab is None:
@@ -3900,10 +4122,21 @@ class VSMPlotter(QtWidgets.QMainWindow):
             )
             return
 
+        descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
+        descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
+
         if all(state.normalized for state in descriptor.lines.values()):
             for state in descriptor.lines.values():
                 state.line.set_ydata(state.base_y)
                 state.normalized = False
+
+            original_label = descriptor.metadata.get(_BASE_Y_LABEL_KEY, descriptor.y_label)
+            descriptor.y_label = str(original_label or descriptor.y_label)
+            descriptor.axes.set_ylabel(descriptor.y_label)
+            original_title = descriptor.metadata.get(_BASE_TITLE_KEY, descriptor.title)
+            descriptor.title = str(original_title or descriptor.title)
+            descriptor.axes.set_title(descriptor.title)
+            self._update_graph_tree_for_tab(tab)
 
             stored_limits = descriptor.stored_limits.pop(_PRE_NORMALIZE_Y_KEY, None)
             if (
@@ -3987,14 +4220,60 @@ class VSMPlotter(QtWidgets.QMainWindow):
             and overall_max > 0.0
         )
         self._rescale_y_limits(descriptor, symmetric=symmetric)
+        base_label = descriptor.metadata.get(_BASE_Y_LABEL_KEY, descriptor.y_label)
+        descriptor.y_label = _normalized_axis_label(base_label or descriptor.y_label)
+        descriptor.axes.set_ylabel(descriptor.y_label)
+        descriptor.title = self._descriptor_title_for_labels(descriptor, descriptor.y_label)
+        descriptor.axes.set_title(descriptor.title)
+        self._update_graph_tree_for_tab(tab)
         self._refresh_descriptor_legend(descriptor, force_layout=True)
         self._append_log(
             "Normalized the current graph and rescaled the Y axis to fit the data."
         )
 
+
     def _export_txt(self) -> None:
-        if not self.measurements:
-            QtWidgets.QMessageBox.warning(self, "VSM Hysteresis Loops", "Load VSM measurements first.")
+        if not self._tab_descriptors:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots before exporting TXT data.",
+            )
+            return
+
+        entries: List[tuple[str, str, QtWidgets.QWidget, TabDescriptor]] = []
+        for tab, descriptor in self._tab_descriptors.items():
+            if not descriptor.lines:
+                continue
+            label = descriptor.root_label or descriptor.title
+            entries.append((label, descriptor.title, tab, descriptor))
+
+        if not entries:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No plotted data is available to export.",
+            )
+            return
+
+        selection_dialog = GraphSelectionDialog(
+            self,
+            entries=[(label, detail, tab) for label, detail, tab, _ in entries],
+            title="Select Data to Export",
+            prompt="Choose which plotted data to export as TXT files.",
+            current=self.tab_widget.currentWidget(),
+        )
+        if selection_dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        selected_tabs = selection_dialog.selected_tabs()
+        selected_descriptors = [descriptor for label, detail, tab, descriptor in entries if tab in selected_tabs]
+        if not selected_descriptors:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No plotted data was selected for export.",
+            )
             return
 
         start_directory = (
@@ -4010,151 +4289,37 @@ class VSMPlotter(QtWidgets.QMainWindow):
         if not directory:
             return
 
-        base_dir = Path(directory)
-        dialog = ExportOptionsDialog(
-            self,
-            base_dir,
-            suggestion=_suggest_export_subfolder(self.measurements),
-            allow_plot_axes=bool(self._plotted_series_exports),
+        any_visible = any(
+            any(state.line.get_visible() for state in descriptor.lines.values())
+            for descriptor in selected_descriptors
         )
-        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+
+        options_dialog = ExportOptionsDialog(
+            self,
+            Path(directory),
+            suggestion=_suggest_export_subfolder(self.measurements),
+            allow_plot_axes=any_visible,
+        )
+        if options_dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return
 
-        target_dir = dialog.selected_directory()
+        target_dir = options_dialog.selected_directory()
         target_dir.mkdir(parents=True, exist_ok=True)
+        scope = options_dialog.selected_scope()
+        include_hidden = scope == "all"
 
-        scope = dialog.selected_scope()
-
-        if scope == "plot_axes":
-            if not self._plotted_series_exports:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "VSM Hysteresis Loops",
-                    "Generate plots before exporting plotted axes.",
-                )
-                return
-            exported = self._write_plotted_series(target_dir)
-            if exported:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "VSM Hysteresis Loops",
-                    f"Exported {exported} plotted series to {target_dir}",
-                )
-                self._append_log(f"Exported {exported} plotted series to {target_dir}")
-                self.last_export_path = target_dir
-                self.settings.setValue("last_export_path", str(target_dir))
-                self.settings.sync()
-            else:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "VSM Hysteresis Loops",
-                    "No plotted series matched the current visibility filters.",
-                )
-            return
-
-        unique_temperatures = {
-            measurement.temperature
-            for measurement in self.measurements
-            if measurement.temperature is not None
-        }
-        separate_by_temp = len(unique_temperatures) > 1
-
-        export_mode = self.export_mode_combo.currentData()
-        rescale_requested = export_mode == "rescaled"
-        x_axis = self.x_axis_combo.currentText()
-        y_axis = self.y_axis_combo.currentText()
-        if rescale_requested and (not x_axis or not y_axis):
-            QtWidgets.QMessageBox.warning(
-                self,
-                "VSM Hysteresis Loops",
-                "Select X and Y axes before exporting rescaled data.",
-            )
-            rescale_requested = False
-
-        rescale_lookup: Dict[Path, RescaleResult] = {}
-        if rescale_requested:
-            rescale_lookup = self._compute_rescale_lookup(x_axis, y_axis)
-            if not rescale_lookup:
-                self._append_log(
-                    "Rescaled export requested but no transforms could be calculated; exporting original data."
-                )
-                rescale_requested = False
-
-        exported = 0
-        for measurement in self.measurements:
-            base_name = measurement.path.stem or f"measurement_{exported + 1}"
-            destination_dir = target_dir
-            if separate_by_temp and measurement.temperature is not None:
-                subfolder = _temperature_subfolder_name(measurement.temperature)
-                destination_dir = target_dir / subfolder
-                destination_dir.mkdir(parents=True, exist_ok=True)
-            candidate = destination_dir / f"{base_name}.txt"
-            counter = 2
-            while candidate.exists():
-                candidate = destination_dir / f"{base_name}_{counter}.txt"
-                counter += 1
-            try:
-                export_rescaled = False
-                df_to_write = measurement.data.copy()
-                if rescale_requested:
-                    result = rescale_lookup.get(measurement.path)
-                    if result is None:
-                        self._append_log(
-                            f"{measurement.path.name}: no rescale transform available; exported original values."
-                        )
-                    elif result.replacement is not None:
-                        if y_axis in df_to_write.columns:
-                            replacement = result.replacement.reindex(df_to_write.index)
-                            numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
-                            if not replacement.dropna().empty:
-                                numeric.loc[replacement.dropna().index] = replacement.dropna().to_numpy()
-                            df_to_write[y_axis] = numeric
-                            export_rescaled = True
-                        else:
-                            self._append_log(
-                                f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
-                            )
-                    elif not result.applied:
-                        self._append_log(
-                            f"{measurement.path.name}: insufficient variation to rescale {y_axis}; exported original values."
-                        )
-                    else:
-                        if y_axis in df_to_write.columns:
-                            numeric = pd.to_numeric(df_to_write[y_axis], errors="coerce")
-                            df_to_write[y_axis] = numeric * result.scale + result.offset
-                            export_rescaled = True
-                        else:
-                            self._append_log(
-                                f"{measurement.path.name}: Y axis '{y_axis}' not present; exported original values."
-                            )
-
-                metadata = {
-                    "temperature": measurement.temperature,
-                    "angle": measurement.angle,
-                    "rescaled": export_rescaled,
-                    "source": measurement.path.name,
-                    "x_axis": x_axis,
-                    "y_axis": y_axis,
-                    "summary": "Full hysteresis measurement export",
-                }
-                axis_roles: Dict[str, str] = {}
-                if x_axis in df_to_write.columns:
-                    axis_roles[x_axis] = "X axis"
-                if y_axis in df_to_write.columns:
-                    axis_roles[y_axis] = "Y axis"
-
-                _write_origin_ascii(candidate, df_to_write, metadata=metadata, axis_roles=axis_roles)
-                exported += 1
-            except Exception as exc:
-                self._append_log(f"Failed to export {measurement.path.name}: {exc}")
-
-        if exported:
+        exported_series = self._write_plotted_series(
+            target_dir,
+            selected_descriptors,
+            include_hidden=include_hidden,
+        )
+        if exported_series:
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                f"Exported {exported} measurement(s) to {target_dir}",
+                f"Exported {exported_series} data series to {target_dir}",
             )
-            self._append_log(f"Exported {exported} measurement(s) to {target_dir}")
+            self._append_log(f"Exported {exported_series} data series to {target_dir}")
             self.last_export_path = target_dir
             self.settings.setValue("last_export_path", str(target_dir))
             self.settings.sync()
@@ -4162,8 +4327,82 @@ class VSMPlotter(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "No files were exported."
+                "No plotted data matched the current visibility filters.",
             )
+
+
+    def _open_origin_prompt(self) -> None:
+        if not self._last_prepared_groups or not self._last_axes:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Generate plots before sending data to Origin.",
+            )
+            return
+
+        entries: List[tuple[str, str, QtWidgets.QWidget, TabDescriptor]] = []
+        for tab, descriptor in self._tab_descriptors.items():
+            if descriptor.kind != "temperature" or not descriptor.lines:
+                continue
+            label = descriptor.root_label or descriptor.title
+            entries.append((label, descriptor.title, tab, descriptor))
+
+        if not entries:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No temperature plots are available to open in Origin.",
+            )
+            return
+
+        dialog = GraphSelectionDialog(
+            self,
+            entries=[(label, detail, tab) for label, detail, tab, _ in entries],
+            title="Open in Origin",
+            prompt="Select which temperature plots to open in Origin.",
+            current=self.tab_widget.currentWidget(),
+        )
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        selected_tabs = dialog.selected_tabs()
+        selected_temperatures: List[float] = []
+        for label, detail, tab, descriptor in entries:
+            if tab not in selected_tabs:
+                continue
+            temperature = descriptor.metadata.get("temperature")
+            if isinstance(temperature, (int, float)):
+                selected_temperatures.append(float(temperature))
+
+        if not selected_temperatures:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "No temperature plots were selected for Origin.",
+            )
+            return
+
+        x_axis, y_axis = self._last_axes
+        selected_prepared = {
+            temp: self._last_prepared_groups.get(temp)
+            for temp in selected_temperatures
+            if temp in self._last_prepared_groups
+        }
+        selected_prepared = {k: v for k, v in selected_prepared.items() if v}
+        if not selected_prepared:
+            QtWidgets.QMessageBox.information(
+                self,
+                "VSM Hysteresis Loops",
+                "Selected plots are no longer available. Generate plots again and retry.",
+            )
+            return
+
+        rescale_info = {
+            temp: self._last_rescale_info.get(temp, {})
+            for temp in selected_prepared.keys()
+        }
+
+        self._export_origin(selected_prepared, rescale_info, x_axis, y_axis, self._last_rescale_enabled)
 
     def _render_matplotlib(
         self,
@@ -4234,6 +4473,11 @@ class VSMPlotter(QtWidgets.QMainWindow):
             if lines:
                 legend = ax.legend(loc="best")
                 self._style_legend(legend)
+
+            try:
+                fig.tight_layout()
+            except Exception:
+                pass
 
             canvas = FigureCanvas(fig)
             tab_state = PlotTabState(axes=ax, canvas=canvas, lines=lines)
