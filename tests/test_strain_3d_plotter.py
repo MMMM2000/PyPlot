@@ -7,13 +7,13 @@ import sys
 
 import pytest
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "experiments" / "strain_3d_plotter.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent / "plotting" / "strain_3d_plot.py"
 
 try:
-    spec = importlib.util.spec_from_file_location("strain_3d_plotter", MODULE_PATH)
+    spec = importlib.util.spec_from_file_location("strain_3d_plot", MODULE_PATH)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    sys.modules["strain_3d_plotter"] = module
+    sys.modules["strain_3d_plot"] = module
     spec.loader.exec_module(module)
 except ImportError as exc:  # pragma: no cover - environment guard
     pytest.skip(f"Strain 3D plotter dependencies missing: {exc}", allow_module_level=True)

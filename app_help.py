@@ -32,7 +32,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * **Double-click** any file in the list to open it in Explorer/Finder for quick
               inspection.
 
-            ### Developer menu essentials
+            ### Develop menu essentials
             * **Keep File Selections** – when iterating on a dataset, enable this so the dialog
               reopens with your previous file list intact.
             * **Show Experiments Tab** – exposes prototypes (the PyVISA annealing logger and the
@@ -89,13 +89,46 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
                while the selected window opens so you can return here without relaunching the
                program. New windows are tracked automatically and the launcher warns you if
                closing it would also close child dialogs.
-            3. Use **Developer → Show Experiments Tab** to reveal or hide the prototype list and
-               **Developer → Keep File Selections** if you want plotting dialogs to reopen with
+            3. Use **Develop → Show Experiments Tab** to reveal or hide the prototype list and
+               **Develop → Keep File Selections** if you want plotting dialogs to reopen with
                the same input files pre-selected. The experiments currently bundle the PyVISA
                annealing logger and the Microwire Data Builder.
             4. The **View** menu mirrors other windows—switch theme, collapse the file browser or
                console, and reset splitter sizes when needed. **File → Exit** quits the launcher
                after confirming there are no unsaved child windows.
+            """
+        ).strip(),
+    },
+    "origin_clone": {
+        "title": "Origin Clone prototype",
+        "body": dedent(
+            """
+            ### Welcome to the Origin Clone
+            This experiment mirrors Origin's tabbed workspace with project, object, message,
+            and console panes. Use **File → New Workbook** to start from a blank sheet or
+            **File → Import Data…** to load CSV, TSV, or Excel files into editable worksheets.
+
+            ### Working with worksheets
+            * The toolbar above each sheet inserts or deletes rows and columns.
+            * Click a column header to select it; multi-select with Ctrl/Cmd to choose X and Y
+              inputs for plotting.
+            * Double-click the worksheet name in the Project Explorer to refocus it if several
+              windows are open.
+
+            ### Plotting and analysis
+            * Choose **Plot → Quick Line Plot** to draw the selected columns (first as X, the rest
+              as Y) in a Matplotlib figure. **Plot → Plot All vs First Column** graphs every
+              column against the first.
+            * **Analysis → Column Statistics** logs quick descriptive stats to the Message Log.
+
+            ### Object manager & console
+            * The Object Manager lists worksheet columns or graph layers, keeping their types and
+              sizes visible while you work.
+            * The dockable Python console exposes the project environment (``app``) and pandas as
+              ``pd`` for light scripting. Results and errors print straight into the console pane.
+
+            Auto-hide controls on each dock let you pin panes open, collapse them to slim tabs, or
+            float them as independent always-on-top tool windows—just like Origin.
             """
         ).strip(),
     },
@@ -198,6 +231,75 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             2. Tweak axis ranges, legend placement, and font sizes from the **Readability** pane.
             3. Use the data table to hide or reveal individual curves before plotting, keeping the
                output focused on the comparisons you need.
+            """
+        ).strip(),
+    },
+    "vsm_hysteresis_loops": {
+        "title": "VSM hysteresis loops",
+        "body": dedent(
+            """
+            ### Load data
+            1. Use **Browse files…** or **Browse folder…** to point at your Lakeshore
+               `VSM-Hys-Data` exports. Selected items load immediately and populate every dock—no
+               extra **Load data** step required.
+            2. Tune the X/Y axis selectors in the **Graph Settings** dock. Your axis choices,
+               backend preference, plot style, dark-theme toggle, and normalise-endpoints option are
+               remembered across sessions.
+
+            ### Explore the workspace
+            * The left auto-hide docks mirror Origin’s layout with a **Project Explorer** (double
+              click a measurement to jump to its temperature tab) and a running **Message Log** of
+              parser decisions. Unread errors (missing files, parsing issues, or metrics that could
+              not be computed) turn the dock tab red until you hover or pin it open, making it easy
+              to spot issues even when the panel is collapsed.
+            * The right-side **Object Manager** mirrors whichever plot tab is active—temperature
+              loops, overlay comparisons, or derived metrics—so ticking/unticking a node only
+              affects the visible curves while keeping Matplotlib pop-outs and Origin exports in
+              sync without regenerating plots. Angles and temperatures are sorted numerically to
+              match the legends shown on each tab.
+            * The **Worksheets** dock exposes editable pandas-backed tables for each measurement.
+              Right-click rows to delete them, then hit **Generate plots** to refresh curves and
+              metrics with the cleaned data.
+
+            ### Configure plots and overlays
+            * The **Graph Settings** dock bundles backend selection, rescale toggles, dark mode,
+              TXT export preferences, and the overlay picker. Multi-select angles in the overlay
+              list and press **Plot selected angles across temperatures** to add comparison tabs
+              directly to the main viewer.
+            * Press **Generate plots** once the inputs look right. **Normalize Y** toggles the
+              active tab between raw and unit-scaled curves, automatically rescales the axis around
+              the span of the normalised data (symmetrically whenever the curves cross zero), and
+              restores the previous limits when you click it again. **Open in Matplotlib** re-plots just the selected tab with constrained
+              layout when you want desktop zoom tools, and **Save graph…** captures that same tab
+              (loops, overlays, or metrics) as PNG, PDF, or SVG.
+
+            ### Derived metrics
+            * Coercivity and remanence pair the closest positive and negative zero crossings
+              before symmetrising them, and the analysis walks the samples in acquisition order
+              so the intercepts mirror what you see on screen even when sweeps double back. Noisy
+              outer segments cannot inflate the reported magnitudes while asymmetric loops still
+              produce balanced ±Hc and ±Mr for plotting.
+            * Zero-crossing detection adapts to each loop’s scale—if the data only grazes the axis
+              the plotter interpolates from the nearest neighbours, and when no trustworthy value
+              exists an error entry is pushed to the Message Log (highlighting the dock) so you can
+              inspect the worksheet straight away.
+            * Need to double-check those numbers? Choose **Develop → Coercivity debug…** or
+              **Develop → Remanence debug…** to open a floating inspector with one tab per
+              temperature listing the raw negative/positive crossings, the symmetrised ± pairs, and
+              a quick plot comparing the original and corrected curves versus angle.
+            * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
+              saturation) showing how each temperature behaves across rotations.
+            * Pick one or more angles in the overlay list and choose **Plot metrics vs temperature**
+              to build another set of tabs driven by the selected rotations. All tabs obey the same
+              styling, theme, and save controls as the main plots.
+
+            ### Exporting
+            * **Export TXT…** writes Origin-ready tables for either the entire measurement columns or
+              just the axes used in the current plots, with short/long names, units, comments, and
+              axis roles set automatically. Enable the subfolder option to group multi-file exports.
+            * **Export metrics** saves the derived coercivity/remanence/saturation tables grouped by
+              temperature and by angle so downstream Origin sessions pick up long names, units, and
+              comments without manual edits.
             """
         ).strip(),
     },
@@ -357,42 +459,6 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Notes
             * The shared menu bar provides theme controls, console visibility toggles, and this
               help entry for quick reference.
-            """
-        ).strip(),
-    },
-    "logger_pyvisa_current_annealing": {
-        "title": "PyVISA current annealing logger",
-        "body": dedent(
-            """
-            ### Connect to the instrument
-            * Open the logger from the launcher’s **Experiments** tab (enable it from the
-              **Developer** menu). The window mirrors the serial logger but communicates via
-              VISA.
-            1. Click **Refresh** to enumerate VISA resources. Devices discovered by NI-VISA or
-               ``pyvisa-py`` appear alongside serial bridges (`ASRL…`).
-            2. Pick the instrument, adjust the log directory and filename if required, and press
-               **Connect**. The dialog remembers the previous selections between sessions.
-
-            ### Configure the annealing sequence
-            * Set **Max**, **Step**, and **Interval** to describe the ramp. The live time estimate
-              updates immediately when you adjust any parameter or loop count.
-            * Specify the **Dwell** time at the peak and choose how many loops to execute. Set the
-              loop count to `∞` for continuous operation. Toggle **Reverse to zero after max** to
-              force a return to zero between loops.
-
-            ### Run and monitor
-            * Press **Start annealing** to begin the scripted ramp. Voltage, current, and
-              resistance are logged with timestamps, and resistance traces update live.
-            * **Reverse current now** initiates an immediate ramp-down. **Stop annealing** ends the
-              process gracefully while keeping the data file intact.
-            * Contact-loss detection mirrors the serial logger: it requires sustained zero current
-              readings before aborting and prompts you when the supply reaches 30 V.
-
-            ### Extras
-            * The standalone **Start Log/Stop Log** buttons let you capture instrument telemetry
-              without running a ramp.
-            * Appearance and layout controls live under the **View** menu, and this manual is
-              always available from **Help → View Help**.
             """
         ).strip(),
     },

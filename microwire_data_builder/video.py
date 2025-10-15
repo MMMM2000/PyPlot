@@ -16,13 +16,13 @@ import numpy as np
 
 MICRO_SIGN = "\u00b5"
 
-sys.modules.setdefault("experiments.microwire_data_builder.video", sys.modules.get(__name__))
+sys.modules.setdefault("microwire_data_builder.video", sys.modules.get(__name__))
 _METRIC_PATTERN = re.compile(r"(-?\d+(?:[.,]\d+)?)")
 
 try:
     from .ocr import ensure_tesseract_available
 except ImportError:
-    module_name = "experiments.microwire_data_builder.ocr"
+    module_name = "microwire_data_builder.ocr"
     module_path = Path(__file__).with_name("ocr.py")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec and spec.loader:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import math
+import numpy as np
 
 import importlib.util
 import sys
@@ -10,12 +11,12 @@ import sys
 import pandas as pd
 import pytest
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "experiments" / "vsm_plotter.py"
+MODULE_PATH = Path(__file__).resolve().parent.parent / "plotting" / "vsm_hysteresis_loops.py"
 
-spec = importlib.util.spec_from_file_location("vsm_plotter", MODULE_PATH)
+spec = importlib.util.spec_from_file_location("vsm_hysteresis_loops", MODULE_PATH)
 assert spec and spec.loader
 module = importlib.util.module_from_spec(spec)
-sys.modules["vsm_plotter"] = module
+sys.modules["vsm_hysteresis_loops"] = module
 try:
     spec.loader.exec_module(module)  # type: ignore[call-arg]
 except ImportError as exc:  # pragma: no cover - environment guard
@@ -458,6 +459,128 @@ def test_apply_rescaling_symmetrises_targets() -> None:
     assert transformed.iloc[-1] == pytest.approx(base_result.target_right, rel=1e-6, abs=1e-9)
 
 
+def test_write_origin_ascii_includes_metadata(tmp_path: Path) -> None:
+    df = pd.DataFrame({
+        "Applied Field [Oe]": [0.0, 1.0],
+        "Moment [emu]": [0.1, 0.2],
+    })
+    path = tmp_path / "export.txt"
+    metadata = {
+        "temperature": -30.0,
+        "angle": 45.0,
+        "rescaled": True,
+        "source": "sample.VSM-Hys-Data",
+        "x_axis": "Applied Field [Oe]",
+        "y_axis": "Moment [emu]",
+        "summary": "Test export",
+    }
+    axis_roles = {"Applied Field [Oe]": "X axis", "Moment [emu]": "Y axis"}
+
+    module._write_origin_ascii(path, df, metadata=metadata, axis_roles=axis_roles)
+
+    lines = path.read_text().splitlines()
+    assert lines[0] == "# X Axis: Applied Field [Oe]"
+    assert lines[1] == "# Y Axis: Moment [emu]"
+    assert lines[2] == "# Test export"
+    assert lines[3].count("\t") == 1
+    assert lines[4].startswith("@L\tApplied Field")
+    assert "Moment" in lines[4]
+    assert lines[5].startswith("@U\tOe\t")
+    assert "emu" in lines[5]
+    assert "Temperature: -30" in lines[6]
+    assert "Angle: 45" in lines[6]
+    assert "Rescaled values" in lines[6]
+
+
+def test_calculate_metrics_returns_expected_values() -> None:
+    df = pd.DataFrame(
+        {
+            "Field": [-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0],
+            "Moment": [-0.9, -0.4, -0.1, 0.2, 0.5, 0.8, 0.9],
+        }
+    )
+
+    result = module._calculate_metrics(df, "Field", "Moment")
+
+    assert result.coercivity == pytest.approx(0.3333333333, rel=1e-6)
+    assert result.remanence == pytest.approx(0.2, rel=1e-6)
+    assert result.saturation == pytest.approx(0.9, rel=1e-6)
+    assert result.coercivity_pair is not None
+    assert result.remanence_pair is not None
+    neg_hc, pos_hc = result.coercivity_pair
+    neg_mr, pos_mr = result.remanence_pair
+    assert neg_hc == pytest.approx(-result.coercivity, rel=1e-6)
+    assert pos_hc == pytest.approx(result.coercivity, rel=1e-6)
+    assert neg_mr == pytest.approx(-result.remanence, rel=1e-6)
+    assert pos_mr == pytest.approx(result.remanence, rel=1e-6)
+
+
+def test_calculate_metrics_records_symmetrised_pairs() -> None:
+    df = pd.DataFrame(
+        {
+            "Field": [-150.0, -120.0, -90.0, -30.0, 0.0, 0.0, 30.0, 90.0, 120.0, 150.0],
+            "Moment": [-0.5, 0.0, 0.35, 0.6, 0.7, -0.65, -0.3, 0.0, -0.2, 0.45],
+        }
+    )
+
+    result = module._calculate_metrics(df, "Field", "Moment")
+
+    expected_hc = (abs(-120.0) + abs(90.0)) / 2.0
+    expected_mr = (0.7 + 0.65) / 2.0
+    assert result.coercivity == pytest.approx(expected_hc, rel=1e-6)
+    assert result.remanence == pytest.approx(expected_mr, rel=1e-6)
+    assert result.coercivity_pair == pytest.approx((-expected_hc, expected_hc), rel=1e-6)
+    assert result.remanence_pair == pytest.approx((-expected_mr, expected_mr), rel=1e-6)
+    assert result.coercivity_raw_pair == pytest.approx((-120.0, 90.0), rel=1e-6)
+    assert result.remanence_raw_pair == pytest.approx((-0.65, 0.7), rel=1e-6)
+
+
+def test_coercivity_prefers_smallest_magnitude_crossings() -> None:
+    field = np.array([-300.0, -60.0, -10.0, 5.0, 20.0, 200.0])
+    moment = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
+
+    value = module._interpolate_x_at_y(field, moment)
+
+    # The closest zero-crossing magnitudes are ~2.5 (negative) and 12.5 (positive),
+    # so the symmetrised coercivity should reflect their average.
+    assert value == pytest.approx(7.5, rel=1e-6)
+
+
+def test_coercivity_symmetrises_mismatched_crossings() -> None:
+    field = np.array([-120.0, -110.0, -5.0, 5.0, 80.0, 90.0])
+    moment = np.array([-0.4, 0.4, 0.05, -0.05, -0.3, 0.3])
+
+    value = module._interpolate_x_at_y(field, moment)
+
+    expected = (110.0 + 90.0) / 2.0
+    assert value == pytest.approx(expected, rel=1e-6)
+
+
+def test_collect_crossings_handles_axis_graze() -> None:
+    field = np.array([-3.0, -1.0, -0.2, -0.05, 0.8, 1.6])
+    moment = np.array([-1.2, -0.5, -0.08, -0.01, 0.3, 0.9])
+
+    crossings = module._collect_crossings_x_at_y(field, moment)
+
+    assert crossings, "Expected a fallback zero-crossing candidate to be generated"
+    assert any(value < 0.0 for value in crossings)
+
+    magnitude = module._interpolate_x_at_y(field, moment)
+
+    assert magnitude is not None
+    assert magnitude == pytest.approx(0.0285714286, rel=1e-6)
+
+
+def test_remanence_symmetrises_mismatched_crossings() -> None:
+    field = np.array([-5.0, -1.0, 0.0, 1.0, 5.0, 0.0])
+    moment = np.array([-0.8, -0.2, 0.4, 0.6, 0.9, -0.5])
+
+    value = module._interpolate_y_at_x(field, moment)
+
+    expected = (0.4 + 0.5) / 2.0
+    assert value == pytest.approx(expected, rel=1e-6)
+
+
 class _FakeSheet:
     def __init__(self) -> None:
         self.data = None
@@ -677,23 +800,54 @@ def test_toggle_line_visibility_updates_lines_and_state() -> None:
     temperature = -30.0
     angle = 45.0
     line = _DummyLine("45°")
-    axes = _DummyAxes()
-    canvas = _DummyCanvas()
-    tab_state = module.PlotTabState(axes=axes, canvas=canvas, lines={angle: line})
+
+    axes_primary = _DummyAxes()
+    canvas_primary = _DummyCanvas()
+    tab_state = module.PlotTabState(axes=axes_primary, canvas=canvas_primary, lines={angle: line})
     plotter._plot_tabs[temperature] = tab_state
+
+    axes_descriptor = _DummyAxes()
+    canvas_descriptor = _DummyCanvas()
+    descriptor = module.TabDescriptor(
+        kind="temperature",
+        title="Moment vs field",
+        root_label="-30 °C",
+        x_label="Field",
+        y_label="Moment",
+        canvas=canvas_descriptor,
+        axes=axes_descriptor,
+        lines={
+            ("angle", angle): module.GraphLineState(
+                key=("angle", angle),
+                label="45°",
+                line=line,
+                base_x=np.array([0.0, 1.0]),
+                base_y=np.array([0.0, 1.0]),
+            )
+        },
+        metadata={"temperature": temperature},
+    )
+    plotter._tab_descriptors = {object(): descriptor}
+    plotter._refresh_descriptor_legend = module.VSMPlotter._refresh_descriptor_legend.__get__(plotter)
 
     plotter._toggle_line_visibility(temperature, angle, False)
     assert plotter._line_visibility[temperature][angle] is False
     assert not line.visible
-    assert canvas.draw_calls == 1
-    assert axes.removed_calls == [True]
-    assert axes.legend_history[-1][0] == []
+    assert canvas_primary.draw_calls == 1
+    assert canvas_descriptor.draw_calls == 1
+    assert axes_primary.removed_calls == [True]
+    assert axes_primary.legend_history[-1][0] == []
+    assert axes_descriptor.legend_history == []
 
     plotter._toggle_line_visibility(temperature, angle, True)
     assert plotter._line_visibility[temperature][angle] is True
     assert line.visible
-    assert canvas.draw_calls == 2
-    handles, labels, _ = axes.legend_history[-1]
+    assert canvas_primary.draw_calls == 2
+    assert canvas_descriptor.draw_calls == 2
+    handles, labels, _ = axes_primary.legend_history[-1]
     assert handles == [line]
     assert labels == ["45°"]
+    handles_desc, labels_desc, _ = axes_descriptor.legend_history[-1]
+    assert handles_desc == [line]
+    assert labels_desc == ["45°"]
 

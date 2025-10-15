@@ -11,12 +11,7 @@ import sys
 import pandas as pd
 import pytest
 
-CORE_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "experiments"
-    / "microwire_data_builder"
-    / "core.py"
-)
+CORE_PATH = Path(__file__).resolve().parent.parent / "microwire_data_builder" / "core.py"
 
 spec = importlib.util.spec_from_file_location("microwire_data_builder_core", CORE_PATH)
 assert spec and spec.loader
