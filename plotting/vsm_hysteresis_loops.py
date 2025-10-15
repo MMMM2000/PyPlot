@@ -583,6 +583,8 @@ class MetricResult:
     coercivity: float | None
     remanence: float | None
     saturation: float | None
+    coercivity_pair: tuple[float, float] | None = None
+    remanence_pair: tuple[float, float] | None = None
 
 
 def _split_column_label(label: str) -> tuple[str, str]:
@@ -698,9 +700,31 @@ def _write_origin_ascii(
         df.to_csv(handle, sep="\t", index=False, header=False, na_rep="")
 
 
-def _interpolate_x_at_y(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
-    """Return the average magnitude of the outer ``target`` crossings on Y."""
+def _symmetrise_crossings(candidates: Sequence[float]) -> tuple[float | None, tuple[float, float] | None]:
+    positives = sorted((value for value in candidates if value > 0.0), key=abs, reverse=True)
+    negatives = sorted((value for value in candidates if value < 0.0), key=abs, reverse=True)
+    zeros = [value for value in candidates if math.isclose(value, 0.0, rel_tol=1e-12, abs_tol=1e-12)]
 
+    if positives and negatives:
+        pos = abs(positives[0])
+        neg = abs(negatives[0])
+        magnitude = (pos + neg) / 2.0
+        return float(magnitude), (-float(magnitude), float(magnitude))
+
+    if positives:
+        magnitude = float(abs(positives[0]))
+        return magnitude, (-magnitude, magnitude)
+    if negatives:
+        magnitude = float(abs(negatives[0]))
+        return magnitude, (-magnitude, magnitude)
+    if zeros:
+        return 0.0, (0.0, 0.0)
+    return None, None
+
+
+def _collect_crossings_x_at_y(
+    x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0
+) -> List[float]:
     candidates: List[float] = []
 
     def _record(value: float) -> None:
@@ -736,42 +760,47 @@ def _interpolate_x_at_y(x_values: np.ndarray, y_values: np.ndarray, target: floa
         candidate = float(x0 + fraction * (x1 - x0))
         _record(candidate)
 
-    if not candidates:
-        return None
-
-    magnitudes = sorted(
-        (abs(value) for value in candidates if math.isfinite(value)),
-        reverse=True,
-    )
-    if not magnitudes:
-        return None
-
-    non_zero = [value for value in magnitudes if value > 1e-9]
-    if non_zero:
-        magnitudes = non_zero
-
-    if len(magnitudes) >= 2:
-        return float(np.mean(magnitudes[:2]))
-    return float(magnitudes[0])
+    return candidates
 
 
-def _interpolate_y_at_x(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
-    """Return the Y coordinate where the curve crosses ``target`` on X."""
+def _collect_crossings_y_at_x(
+    x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0
+) -> List[float]:
+    candidates: List[float] = []
 
     for x0, y0, x1, y1 in zip(x_values[:-1], y_values[:-1], x_values[1:], y_values[1:]):
         if any(math.isnan(v) for v in (x0, x1, y0, y1)):
             continue
         if math.isclose(x0, target, rel_tol=1e-12, abs_tol=1e-12):
-            return float(y0)
+            candidates.append(float(y0))
+            continue
         if math.isclose(x1, target, rel_tol=1e-12, abs_tol=1e-12):
-            return float(y1)
+            candidates.append(float(y1))
+            continue
         if (x0 - target) * (x1 - target) > 0:
             continue
         if math.isclose(x1, x0, rel_tol=1e-12, abs_tol=1e-12):
             continue
         fraction = (target - x0) / (x1 - x0)
-        return float(y0 + fraction * (y1 - y0))
-    return None
+        candidates.append(float(y0 + fraction * (y1 - y0)))
+
+    return candidates
+
+
+def _interpolate_x_at_y(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
+    """Return a symmetrised coercivity estimate for ``target`` crossings on Y."""
+
+    candidates = _collect_crossings_x_at_y(x_values, y_values, target)
+    value, _ = _symmetrise_crossings(candidates)
+    return value
+
+
+def _interpolate_y_at_x(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
+    """Return a symmetrised remanence estimate for ``target`` crossings on X."""
+
+    candidates = _collect_crossings_y_at_x(x_values, y_values, target)
+    value, _ = _symmetrise_crossings(candidates)
+    return value
 
 
 def _calculate_metrics(subset: pd.DataFrame, x_axis: str, y_axis: str) -> MetricResult:
@@ -784,13 +813,15 @@ def _calculate_metrics(subset: pd.DataFrame, x_axis: str, y_axis: str) -> Metric
         return MetricResult(None, None, None)
     x_values = ordered[x_axis].to_numpy(dtype=float)
     y_values = ordered[y_axis].to_numpy(dtype=float)
-    coercivity = _interpolate_x_at_y(x_values, y_values, target=0.0)
-    remanence = _interpolate_y_at_x(x_values, y_values, target=0.0)
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+    coercivity, coercivity_pair = _symmetrise_crossings(coercivity_candidates)
+    remanence_candidates = _collect_crossings_y_at_x(x_values, y_values, target=0.0)
+    remanence, remanence_pair = _symmetrise_crossings(remanence_candidates)
     if len(y_values) and np.any(np.isfinite(y_values)):
         saturation = float(np.nanmax(y_values))
     else:
         saturation = None
-    return MetricResult(coercivity, remanence, saturation)
+    return MetricResult(coercivity, remanence, saturation, coercivity_pair, remanence_pair)
 
 
 def _aggregate_metrics(

@@ -272,6 +272,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               (loops, overlays, or metrics) as PNG, PDF, or SVG.
 
             ### Derived metrics
+            * Coercivity and remanence sample the outer positive and negative crossings
+              independently and average their magnitudes, so asymmetric loops yield
+              symmetrical ±Hc and ±Mr before plotting the positive value.
             * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
               saturation) showing how each temperature behaves across rotations.
             * Pick one or more angles in the overlay list and choose **Plot metrics vs temperature**

@@ -505,6 +505,32 @@ def test_calculate_metrics_returns_expected_values() -> None:
     assert result.coercivity == pytest.approx(0.3333333333, rel=1e-6)
     assert result.remanence == pytest.approx(0.2, rel=1e-6)
     assert result.saturation == pytest.approx(0.9, rel=1e-6)
+    assert result.coercivity_pair is not None
+    assert result.remanence_pair is not None
+    neg_hc, pos_hc = result.coercivity_pair
+    neg_mr, pos_mr = result.remanence_pair
+    assert neg_hc == pytest.approx(-result.coercivity, rel=1e-6)
+    assert pos_hc == pytest.approx(result.coercivity, rel=1e-6)
+    assert neg_mr == pytest.approx(-result.remanence, rel=1e-6)
+    assert pos_mr == pytest.approx(result.remanence, rel=1e-6)
+
+
+def test_calculate_metrics_records_symmetrised_pairs() -> None:
+    df = pd.DataFrame(
+        {
+            "Field": [-150.0, -120.0, -90.0, -30.0, 0.0, 0.0, 30.0, 90.0, 120.0, 150.0],
+            "Moment": [-0.5, 0.0, 0.35, 0.6, 0.7, -0.65, -0.3, 0.0, -0.2, 0.45],
+        }
+    )
+
+    result = module._calculate_metrics(df, "Field", "Moment")
+
+    expected_hc = (abs(-120.0) + abs(90.0)) / 2.0
+    expected_mr = (0.7 + 0.65) / 2.0
+    assert result.coercivity == pytest.approx(expected_hc, rel=1e-6)
+    assert result.remanence == pytest.approx(expected_mr, rel=1e-6)
+    assert result.coercivity_pair == pytest.approx((-expected_hc, expected_hc), rel=1e-6)
+    assert result.remanence_pair == pytest.approx((-expected_mr, expected_mr), rel=1e-6)
 
 
 def test_coercivity_prefers_outer_crossings() -> None:
@@ -514,6 +540,26 @@ def test_coercivity_prefers_outer_crossings() -> None:
     value = module._interpolate_x_at_y(field, moment)
 
     assert value == pytest.approx(4.5, rel=1e-6)
+
+
+def test_coercivity_symmetrises_mismatched_crossings() -> None:
+    field = np.array([-120.0, -110.0, -5.0, 5.0, 80.0, 90.0])
+    moment = np.array([-0.4, 0.4, 0.05, -0.05, -0.3, 0.3])
+
+    value = module._interpolate_x_at_y(field, moment)
+
+    expected = (110.0 + 90.0) / 2.0
+    assert value == pytest.approx(expected, rel=1e-6)
+
+
+def test_remanence_symmetrises_mismatched_crossings() -> None:
+    field = np.array([-5.0, -1.0, 0.0, 1.0, 5.0, 0.0])
+    moment = np.array([-0.8, -0.2, 0.4, 0.6, 0.9, -0.5])
+
+    value = module._interpolate_y_at_x(field, moment)
+
+    expected = (0.4 + 0.5) / 2.0
+    assert value == pytest.approx(expected, rel=1e-6)
 
 
 class _FakeSheet:

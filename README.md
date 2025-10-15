@@ -642,7 +642,10 @@ axis roles automatically when you import the generated text files.
 
 Derived properties—coercivity (field magnitude where the loop last crosses zero), remanence
 (magnetisation at zero field), and saturation magnetisation (maximum recorded
-moment)—are calculated whenever plots are generated. **Plot metrics vs angle**
+moment)—are calculated whenever plots are generated. Coercivity and remanence now
+sample the outermost positive and negative crossings independently and then average
+their magnitudes, so asymmetric loops produce symmetrical ±Hc and ±Mr pairs before
+the positive half is stored for plots and exports. **Plot metrics vs angle**
 now creates one tab per metric inside the main viewer, and **Plot metrics vs
 temperature** adds another set of tabs (again one per metric) driven by the
 angles selected in the Graph Settings overlay list, so the comparisons sit alongside the raw
