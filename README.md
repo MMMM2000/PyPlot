@@ -673,22 +673,6 @@ curves versus angle so any anomalies stand out immediately. Because the windows 
 automatically after every **Generate plots** run, they double as live debugging consoles
 when you tweak smoothing, rescaling, or data edits.
 
-Enable **Normalise Y axis endpoints** to automatically scale every loop in a
-temperature group so the negative-field endpoint shares a common minimum and the
-positive-field endpoint reaches the same maximum. The target extrema are derived
-from the global minima and maxima across the group and then mirrored about zero,
-so even traces whose edge segments are almost flat (such as the 90° run in the
-sample data) are stretched using their measured variation instead of collapsing
-into a horizontal line. The
-“near-zero” detection now adapts to the scale of the measurement, meaning true
-zero-degree runs and other tiny spans still participate in the rescale instead of
-being skipped. A synthetic gradient is only injected when a sweep is genuinely
-constant. Each transform is logged per file—either the scale/offset pair or a note
-that a gradient was generated—and those same values feed the Matplotlib, Origin,
-and TXT outputs, keeping the on-screen plots and exported data in sync. Leave the
-option unchecked to plot the raw measurements if you prefer to inspect the
-measured values.
-
 OriginPro exports mirror the same grouping, creating a workbook for each
 temperature, writing a sheet per angle with the selected axes, and building a
 line graph that overlays every angle trace with a labelled legend. The graph

@@ -1813,13 +1813,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
         appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style"))
         appearance_layout.addWidget(self.style_combo)
 
-        self.rescale_checkbox = QtWidgets.QCheckBox("Normalise Y axis endpoints")
-        self.rescale_checkbox.setToolTip(
-            "Scale each curve so the negative-field and positive-field endpoints share\n"
-            "a common minimum/maximum across all angles for the same temperature."
-        )
-        appearance_layout.addWidget(self.rescale_checkbox)
-
         self.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme")
         self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
         self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
@@ -1958,12 +1951,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
             if index >= 0:
                 self.style_combo.setCurrentIndex(index)
 
-        rescale_value = self.settings.value("rescale_y", False)
-        if isinstance(rescale_value, bool):
-            self.rescale_checkbox.setChecked(rescale_value)
-        elif rescale_value is not None:
-            self.rescale_checkbox.setChecked(bool(rescale_value))
-
         dark_value = self.settings.value("plot_dark_mode", False)
         if isinstance(dark_value, bool):
             self.dark_mode_checkbox.setChecked(dark_value)
@@ -1989,7 +1976,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.settings.setValue("backend", self.backend_combo.currentText())
         self.settings.setValue("export_mode", self.export_mode_combo.currentData())
         self.settings.setValue("plot_style", self.style_combo.currentData())
-        self.settings.setValue("rescale_y", self.rescale_checkbox.isChecked())
         self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
@@ -2490,40 +2476,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         self._update_angle_overlay_options(prepared_groups)
 
-        rescale_enabled = self.rescale_checkbox.isChecked()
         rescale_info: Dict[float, Dict[Path, RescaleResult]] = {}
-        if rescale_enabled:
-            for temperature, entries in prepared_groups.items():
-                rescale_map = _apply_rescaling(
-                    [(measurement.path, subset) for measurement, subset in entries],
-                    x_axis,
-                    y_axis,
-                )
-                if not rescale_map:
-                    self._append_log(
-                        f"{temperature:g} °C: unable to compute rescaling for {y_axis}; keeping original values."
-                    )
-                    continue
-                rescale_info[temperature] = rescale_map
-                for measurement, _ in entries:
-                    result = rescale_map.get(measurement.path)
-                    if result is None:
-                        continue
-                    if result.replacement is not None:
-                        self._append_log(
-                            f"{measurement.path.name}: generated gradient for {y_axis} spanning {result.target_left:.3g} to {result.target_right:.3g}."
-                        )
-                        continue
-                    if not result.applied:
-                        self._append_log(
-                            f"{measurement.path.name}: insufficient variation to rescale {y_axis}; original values kept at {result.source_left:.3g}."
-                        )
-                        continue
-                    inversion_note = " (inverted)" if result.scale < 0 else ""
-                    self._append_log(
-                        f"{measurement.path.name}: rescaled {y_axis} with scale {result.scale:.3g}{inversion_note} "
-                        f"and offset {result.offset:.3g}; targets {result.target_left:.3g} to {result.target_right:.3g}."
-                    )
+        rescale_enabled = False
 
         plot_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
         metric_records: List[tuple[float, float, MetricResult]] = []
@@ -2535,16 +2489,6 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 if measurement.angle is None:
                     continue
                 export_subset = subset.copy()
-                rescale_applied = False
-                result = rescale_info.get(temperature, {}).get(measurement.path) if rescale_enabled else None
-                if rescale_enabled and result is not None:
-                    if result.replacement is not None:
-                        replacement = result.replacement.reindex(export_subset.index)
-                        export_subset[y_axis] = replacement.to_numpy()
-                        rescale_applied = True
-                    elif result.applied:
-                        export_subset[y_axis] = export_subset[y_axis] * result.scale + result.offset
-                        rescale_applied = True
                 if export_subset.empty:
                     continue
                 key = (float(temperature), float(measurement.angle))
@@ -2554,7 +2498,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     data=export_subset[[x_axis, y_axis]].copy(),
                     x_axis=x_axis,
                     y_axis=y_axis,
-                    rescaled=rescale_applied,
+                    rescaled=False,
                     source=measurement.path,
                 )
                 metrics = _calculate_metrics(
