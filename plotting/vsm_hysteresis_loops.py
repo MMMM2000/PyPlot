@@ -16,6 +16,8 @@ import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.legend import Legend
+from matplotlib.lines import Line2D
 
 from plotting.base_plotter import (
     BasePlotWindow,
@@ -1645,6 +1647,8 @@ class VSMPlotter(BasePlotWindow):
         self._metric_debug_columns: Dict[str, Dict[str, str]] = {}
         self._metric_debug_windows: Dict[str, MetricDebugWindow] = {}
         self._last_graph_dir: Path | None = None
+        self._field_direction_enabled = False
+        self._direction_legends: Dict[Any, Legend] = {}
 
         super().__init__(title="VSM Hysteresis Loops")
         self.resize(1480, 940)
@@ -1726,6 +1730,15 @@ class VSMPlotter(BasePlotWindow):
         self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
         self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
         appearance_layout.addWidget(self.dark_mode_checkbox)
+        self.field_direction_button = QtWidgets.QPushButton(
+            "Highlight field direction"
+        )
+        self.field_direction_button.setCheckable(True)
+        self.field_direction_button.setToolTip(
+            "Use solid lines for increasing magnetic field and dashed lines for decreasing segments."
+        )
+        self.field_direction_button.toggled.connect(self._handle_field_direction_toggle)
+        appearance_layout.addWidget(self.field_direction_button)
         layout.addWidget(appearance_group)
 
         overlay_group = QtWidgets.QGroupBox("Angle overlays")
@@ -1765,6 +1778,177 @@ class VSMPlotter(BasePlotWindow):
         self.angle_overlay_list.itemSelectionChanged.connect(
             self._update_overlay_button_state
         )
+
+
+    def _handle_field_direction_toggle(self, checked: bool) -> None:
+        previous = self._field_direction_enabled
+        if previous == checked:
+            return
+        self._set_field_direction_enabled(checked, update_button=False)
+        description = (
+            "Enable field-direction highlighting"
+            if checked
+            else "Disable field-direction highlighting"
+        )
+        self._record_history_action(
+            description,
+            undo=lambda prev=previous: self._set_field_direction_enabled(prev),
+            redo=lambda current=checked: self._set_field_direction_enabled(current),
+        )
+
+    def _set_field_direction_enabled(
+        self,
+        enabled: bool,
+        *,
+        update_button: bool = True,
+    ) -> None:
+        self._field_direction_enabled = bool(enabled)
+        if update_button and hasattr(self, "field_direction_button"):
+            self.field_direction_button.blockSignals(True)
+            self.field_direction_button.setChecked(self._field_direction_enabled)
+            self.field_direction_button.blockSignals(False)
+        for descriptor in list(self._tab_descriptors.values()):
+            self._apply_direction_split_to_descriptor(descriptor)
+            self._refresh_descriptor_legend(descriptor, force_layout=True)
+
+    def _apply_direction_split_to_descriptor(self, descriptor: TabDescriptor) -> None:
+        if not descriptor.lines:
+            self._update_direction_legend(descriptor, False)
+            return
+        for state in descriptor.lines.values():
+            self._apply_direction_split_to_state(descriptor, state)
+
+    def _apply_direction_split_to_state(
+        self,
+        descriptor: TabDescriptor,
+        state: GraphLineState,
+    ) -> None:
+        self._clear_state_extra_lines(state)
+        x_data = np.asarray(state.x_data(), dtype=float)
+        y_data = np.asarray(state.y_data(), dtype=float)
+        if (
+            x_data.size == 0
+            or y_data.size == 0
+            or x_data.shape != y_data.shape
+            or not np.isfinite(x_data).any()
+        ):
+            if x_data.size and y_data.size:
+                state.line.set_data(x_data, y_data)
+            self._apply_default_line_style(state.line)
+            return
+
+        if not self._field_direction_enabled:
+            state.line.set_data(x_data, y_data)
+            self._apply_default_line_style(state.line)
+            return
+
+        half = x_data.size // 2
+        if half == 0 or half >= x_data.size:
+            state.line.set_data(x_data, y_data)
+            self._apply_default_line_style(state.line)
+            return
+
+        x_first = x_data[:half]
+        y_first = y_data[:half]
+        x_second = x_data[half:]
+        y_second = y_data[half:]
+
+        direction_first = self._segment_direction(x_first)
+        direction_second = self._segment_direction(x_second)
+
+        get_attr = getattr
+        color = get_attr(state.line, "get_color", lambda: None)()
+        linewidth = get_attr(state.line, "get_linewidth", lambda: None)()
+        marker = get_attr(state.line, "get_marker", lambda: "None")()
+        markersize = get_attr(state.line, "get_markersize", lambda: None)()
+
+        state.line.set_data(x_first, y_first)
+        state.line.set_linestyle("-" if direction_first >= 0 else "--")
+        if color is not None:
+            state.line.set_color(color)
+        if linewidth is not None:
+            state.line.set_linewidth(linewidth)
+        if marker is not None:
+            state.line.set_marker(marker)
+            if markersize is not None and marker != "None":
+                state.line.set_markersize(markersize)
+
+        extra_line = Line2D(x_second, y_second)
+        if color is not None:
+            extra_line.set_color(color)
+        extra_line.set_linestyle("-" if direction_second >= 0 else "--")
+        if linewidth is not None:
+            extra_line.set_linewidth(linewidth)
+        if marker is not None:
+            extra_line.set_marker(marker)
+            if markersize is not None and marker != "None":
+                extra_line.set_markersize(markersize)
+        extra_line.set_label("_direction_segment")
+        extra_line.set_visible(state.line.get_visible())
+        descriptor.axes.add_line(extra_line)
+        state.extra_lines = [extra_line]
+
+    @staticmethod
+    def _segment_direction(values: np.ndarray) -> int:
+        diffs = np.diff(values)
+        finite = diffs[np.isfinite(diffs)]
+        if finite.size == 0:
+            return 0
+        total = float(np.sum(finite))
+        if total > 0:
+            return 1
+        if total < 0:
+            return -1
+        return 0
+
+    def _clear_state_extra_lines(self, state: GraphLineState) -> None:
+        for line in state.extra_lines:
+            try:
+                line.remove()
+            except Exception:
+                pass
+        state.extra_lines.clear()
+
+    def _apply_default_line_style(self, line: Any) -> None:
+        style = self._line_style_kwargs()
+        line.set_linestyle(style.get("linestyle", "-"))
+        marker = style.get("marker")
+        if marker:
+            line.set_marker(marker)
+            line.set_markersize(style.get("markersize", line.get_markersize()))
+        else:
+            line.set_marker("None")
+
+    def _update_direction_legend(self, descriptor: TabDescriptor, enabled: bool) -> None:
+        axes = descriptor.axes
+        legend = self._direction_legends.pop(axes, None)
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:
+                pass
+        if not enabled or not descriptor.lines:
+            return
+
+        color = self._direction_reference_color(descriptor)
+        handles = [
+            Line2D([], [], color=color, linestyle="-", label="Increasing H"),
+            Line2D([], [], color=color, linestyle="--", label="Decreasing H"),
+        ]
+        legend = Legend(axes, handles, [handle.get_label() for handle in handles], loc="lower left")
+        axes.add_artist(legend)
+        self._style_legend(legend)
+        self._direction_legends[axes] = legend
+
+    def _direction_reference_color(self, descriptor: TabDescriptor) -> str:
+        for state in descriptor.lines.values():
+            try:
+                color = state.line.get_color()
+            except Exception:
+                color = None
+            if color:
+                return str(color)
+        return "#404040"
 
 
     def _load_settings(self) -> None:
@@ -2298,8 +2482,27 @@ class VSMPlotter(BasePlotWindow):
             descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
             self._tab_descriptors[tab] = descriptor
+            if self._field_direction_enabled:
+                self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
             self._ensure_graph_tree_item(tab, descriptor)
+            if not self._history.is_replaying:
+                info_holder: Dict[str, Any] = {"info": None}
+
+                def _undo_creation() -> None:
+                    info_holder["info"] = self._remove_tab_internal(tab)
+
+                def _redo_creation() -> None:
+                    info = info_holder.get("info")
+                    if info is not None:
+                        self._restore_tab_from_info(info)
+
+                title = descriptor.root_label or descriptor.title or "Plot"
+                self._record_history_action(
+                    f"Add tab {title}",
+                    undo=_undo_creation,
+                    redo=_redo_creation,
+                )
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         if self.tab_widget.currentWidget() is tab:
@@ -3065,6 +3268,9 @@ class VSMPlotter(BasePlotWindow):
             except Exception:  # pragma: no cover - backend differences
                 pass
 
+        for legend in list(self._direction_legends.values()):
+            self._style_legend(legend)
+
     def _refresh_tab_legend(self, tab_state: PlotTabState, *, draw: bool = True) -> None:
         legend = getattr(tab_state.axes, "legend_", None)
         if legend is not None:
@@ -3125,6 +3331,7 @@ class VSMPlotter(BasePlotWindow):
             descriptor.canvas.draw_idle()
         except Exception:  # pragma: no cover - backend specific
             pass
+        self._update_direction_legend(descriptor, self._field_direction_enabled)
 
     def _rescale_y_limits(
         self,
@@ -3137,7 +3344,7 @@ class VSMPlotter(BasePlotWindow):
         for state in descriptor.lines.values():
             if not state.line.get_visible():
                 continue
-            data = np.asarray(state.line.get_ydata(), dtype=float)
+            data = np.asarray(state.y_data(), dtype=float)
             if data.size == 0:
                 continue
             finite = data[np.isfinite(data)]
@@ -3325,19 +3532,42 @@ class VSMPlotter(BasePlotWindow):
         line_state = descriptor.lines.get(tuple(key))
         if line_state is None:
             return
-        visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
-        line_state.line.set_visible(visible)
-        if descriptor.kind == "temperature":
-            temperature = descriptor.metadata.get("temperature")
-            if isinstance(temperature, (int, float)):
-                visibility = self._line_visibility.setdefault(float(temperature), {})
+        new_visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
+        old_visible = line_state.line.get_visible()
+        if new_visible == old_visible:
+            return
+
+        def _apply(flag: bool) -> None:
+            for segment in line_state.iter_lines():
                 try:
-                    _, angle_value = key
-                except (TypeError, ValueError):
-                    angle_value = None
-                if isinstance(angle_value, (int, float)):
-                    visibility[float(angle_value)] = visible
-        self._refresh_descriptor_legend(descriptor)
+                    segment.set_visible(flag)
+                except Exception:
+                    pass
+            if descriptor.kind == "temperature":
+                temperature = descriptor.metadata.get("temperature")
+                if isinstance(temperature, (int, float)):
+                    visibility = self._line_visibility.setdefault(float(temperature), {})
+                    try:
+                        _, angle_value = key
+                    except (TypeError, ValueError):
+                        angle_value = None
+                    if isinstance(angle_value, (int, float)):
+                        visibility[float(angle_value)] = flag
+            item.blockSignals(True)
+            item.setCheckState(
+                0,
+                QtCore.Qt.CheckState.Checked if flag else QtCore.Qt.CheckState.Unchecked,
+            )
+            item.blockSignals(False)
+            self._refresh_descriptor_legend(descriptor)
+
+        _apply(new_visible)
+        action = "Show" if new_visible else "Hide"
+        self._record_history_action(
+            f"{action} {line_state.label}",
+            undo=lambda: _apply(old_visible),
+            redo=lambda: _apply(new_visible),
+        )
 
     def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
         tab_state = self._plot_tabs.get(float(temperature))
@@ -3346,7 +3576,10 @@ class VSMPlotter(BasePlotWindow):
         line = tab_state.lines.get(float(angle))
         if line is None:
             return
-        line.set_visible(visible)
+        try:
+            line.set_visible(visible)
+        except Exception:
+            pass
         self._refresh_tab_legend(tab_state)
 
         self._line_visibility.setdefault(float(temperature), {})[float(angle)] = visible
@@ -3362,9 +3595,32 @@ class VSMPlotter(BasePlotWindow):
             state = descriptor.lines.get(("angle", float(angle)))
             if state is None:
                 continue
-            state.line.set_visible(visible)
+            for segment in state.iter_lines():
+                try:
+                    segment.set_visible(visible)
+                except Exception:
+                    pass
             self._refresh_descriptor_legend(descriptor)
             break
+
+    def _after_tab_removed(self, info: Any) -> None:  # type: ignore[override]
+        super()._after_tab_removed(info)
+        axes = getattr(info, "axes", None)
+        legend = None
+        if axes is not None:
+            legend = self._direction_legends.pop(axes, None)
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:
+                pass
+
+    def _after_tab_restored(self, info: Any) -> None:  # type: ignore[override]
+        super()._after_tab_restored(info)
+        descriptor = getattr(info, "descriptor", None)
+        if isinstance(descriptor, TabDescriptor):
+            self._apply_direction_split_to_descriptor(descriptor)
+            self._refresh_descriptor_legend(descriptor, force_layout=True)
 
     def _plot_angle_overlays(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
@@ -3428,6 +3684,8 @@ class VSMPlotter(BasePlotWindow):
                         line=line,
                         base_x=numeric_x,
                         base_y=numeric_y,
+                        full_x=numeric_x,
+                        full_y=numeric_y,
                     )
                     plotted = True
             if plotted:
@@ -3506,8 +3764,8 @@ class VSMPlotter(BasePlotWindow):
             for state in descriptor.lines.values():
                 if not include_hidden and not state.line.get_visible():
                     continue
-                x_data = np.asarray(state.line.get_xdata(), dtype=float)
-                y_data = np.asarray(state.line.get_ydata(), dtype=float)
+                x_data = np.asarray(state.x_data(), dtype=float)
+                y_data = np.asarray(state.y_data(), dtype=float)
                 if x_data.size == 0 or y_data.size == 0 or x_data.shape != y_data.shape:
                     continue
 
@@ -3621,6 +3879,8 @@ class VSMPlotter(BasePlotWindow):
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
+                    full_x=numeric_x,
+                    full_y=numeric_y,
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
@@ -3742,6 +4002,8 @@ class VSMPlotter(BasePlotWindow):
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
+                    full_x=numeric_x,
+                    full_y=numeric_y,
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
@@ -3968,7 +4230,7 @@ class VSMPlotter(BasePlotWindow):
                 kwargs["marker"] = marker
             if markersize is not None:
                 kwargs["markersize"] = markersize
-            ax.plot(state.line.get_xdata(), state.line.get_ydata(), **kwargs)
+            ax.plot(state.x_data(), state.y_data(), **kwargs)
             plotted = True
 
         ax.set_xlabel(descriptor.x_label)
@@ -4129,6 +4391,10 @@ class VSMPlotter(BasePlotWindow):
             for state in descriptor.lines.values():
                 state.line.set_ydata(state.base_y)
                 state.normalized = False
+                try:
+                    state.full_y = np.asarray(state.base_y, dtype=float)
+                except Exception:
+                    state.full_y = state.base_y
 
             original_label = descriptor.metadata.get(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.y_label = str(original_label or descriptor.y_label)
@@ -4151,6 +4417,7 @@ class VSMPlotter(BasePlotWindow):
             else:
                 self._rescale_y_limits(descriptor)
 
+            self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
             self._append_log("Restored the original scaling for the current graph.")
             return
@@ -4191,6 +4458,10 @@ class VSMPlotter(BasePlotWindow):
             )
             state.line.set_ydata(normalized)
             state.normalized = True
+            try:
+                state.full_y = np.asarray(normalized, dtype=float)
+            except Exception:
+                state.full_y = normalized
             updated = True
 
             finite_normalized = normalized[np.isfinite(normalized)]
@@ -4226,6 +4497,7 @@ class VSMPlotter(BasePlotWindow):
         descriptor.title = self._descriptor_title_for_labels(descriptor, descriptor.y_label)
         descriptor.axes.set_title(descriptor.title)
         self._update_graph_tree_for_tab(tab)
+        self._apply_direction_split_to_descriptor(descriptor)
         self._refresh_descriptor_legend(descriptor, force_layout=True)
         self._append_log(
             "Normalized the current graph and rescaled the Y axis to fit the data."
@@ -4457,6 +4729,8 @@ class VSMPlotter(BasePlotWindow):
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
+                    full_x=numeric_x,
+                    full_y=numeric_y,
                 )
                 valid_angles.add(angle)
 

@@ -1624,6 +1624,10 @@ def install_standard_menu(
     window_menu = QtWidgets.QMenu(window_title, menu_bar)
     menu_bar.addMenu(window_menu)
     window_menu.setObjectName("mw_shared_window")
+    if not window_menu.actions():
+        placeholder = window_menu.addAction("No windows available")
+        if placeholder is not None:
+            placeholder.setEnabled(False)
     try:
         window_role = QtGui.QAction.MenuRole.WindowRole  # type: ignore[attr-defined]
     except AttributeError:

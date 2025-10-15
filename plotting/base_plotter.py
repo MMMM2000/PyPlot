@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -29,6 +29,102 @@ class GraphLineState:
     base_x: Any
     base_y: Any
     normalized: bool = False
+    extra_lines: List[Any] = field(default_factory=list)
+    full_x: Any | None = None
+    full_y: Any | None = None
+
+    def iter_lines(self) -> Iterable[Any]:
+        """Yield all Matplotlib line objects associated with this state."""
+
+        yield self.line
+        yield from self.extra_lines
+
+    def x_data(self) -> Any:
+        """Return the full X data for this plotted series."""
+
+        return self.full_x if self.full_x is not None else self.line.get_xdata()
+
+    def y_data(self) -> Any:
+        """Return the full Y data for this plotted series."""
+
+        return self.full_y if self.full_y is not None else self.line.get_ydata()
+
+
+@dataclass
+class _HistoryEntry:
+    description: str
+    undo: Callable[[], None]
+    redo: Callable[[], None]
+
+
+class _HistoryManager:
+    """Lightweight undo/redo stack for plot interactions."""
+
+    def __init__(self) -> None:
+        self._entries: List[_HistoryEntry] = []
+        self._index: int = 0
+        self._replaying = False
+
+    def clear(self) -> None:
+        if self._replaying:
+            return
+        self._entries.clear()
+        self._index = 0
+
+    @property
+    def is_replaying(self) -> bool:
+        return self._replaying
+
+    def record(self, description: str, undo: Callable[[], None], redo: Callable[[], None]) -> None:
+        if self._replaying:
+            return
+        entry = _HistoryEntry(description=description, undo=undo, redo=redo)
+        if self._index < len(self._entries):
+            del self._entries[self._index :]
+        self._entries.append(entry)
+        self._index += 1
+
+    def can_undo(self) -> bool:
+        return not self._replaying and self._index > 0
+
+    def can_redo(self) -> bool:
+        return not self._replaying and self._index < len(self._entries)
+
+    def undo(self) -> None:
+        if not self.can_undo():
+            return
+        self._index -= 1
+        entry = self._entries[self._index]
+        self._replaying = True
+        try:
+            entry.undo()
+        finally:
+            self._replaying = False
+
+    def redo(self) -> None:
+        if not self.can_redo():
+            return
+        entry = self._entries[self._index]
+        self._index += 1
+        self._replaying = True
+        try:
+            entry.redo()
+        finally:
+            self._replaying = False
+
+
+@dataclass
+class _RemovedTabInfo:
+    tab: QtWidgets.QWidget
+    index: int
+    title: str
+    icon: QtGui.QIcon | None
+    descriptor: TabDescriptor | None
+    canvas: FigureCanvas | None
+    axes: Any | None
+    worksheet_path: Path | None
+    was_hidden: bool
+    was_current: bool
 
 
 @dataclass
@@ -193,6 +289,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         self._hidden_tabs: set[QtWidgets.QWidget] = set()
 
         self._log_has_unread_errors = False
+        self._history = _HistoryManager()
 
         self._build_base_ui()
 
@@ -437,6 +534,25 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         else:
             self._hidden_tabs.add(tab)
 
+    def _record_history_action(
+        self,
+        description: str,
+        *,
+        undo: Callable[[], None],
+        redo: Callable[[], None],
+    ) -> None:
+        if self._history.is_replaying:
+            return
+        self._history.record(description, undo, redo)
+
+    def undo(self) -> None:
+        self._history.undo()
+        self._update_tab_buttons()
+
+    def redo(self) -> None:
+        self._history.redo()
+        self._update_tab_buttons()
+
     def _update_tab_buttons(self) -> None:
         tab_bar = self.tab_widget.tabBar()
         if tab_bar is None:
@@ -484,13 +600,36 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         index = self.tab_widget.indexOf(tab)
         if index < 0:
             return
-        next_index = None
-        if self.tab_widget.currentWidget() is tab:
-            next_index = self._find_alternate_tab_index(index)
-        self._set_tab_visibility(tab, False)
-        if next_index is not None:
-            self.tab_widget.setCurrentIndex(next_index)
-        self._update_tab_buttons()
+        previous_widget = self.tab_widget.currentWidget()
+        alternate_index = None
+        if previous_widget is tab:
+            alternate_index = self._find_alternate_tab_index(index)
+        alternate_widget = (
+            self.tab_widget.widget(alternate_index) if alternate_index is not None else None
+        )
+
+        def _apply_hide() -> None:
+            self._set_tab_visibility(tab, False)
+            target = alternate_widget if alternate_widget is not None else previous_widget
+            if target is not None and target is not tab:
+                target_index = self.tab_widget.indexOf(target)
+                if target_index >= 0 and self._is_tab_visible(target):
+                    self.tab_widget.setCurrentIndex(target_index)
+            self._update_tab_buttons()
+
+        def _restore() -> None:
+            self._set_tab_visibility(tab, True)
+            restored_index = self.tab_widget.indexOf(tab)
+            if restored_index >= 0:
+                self.tab_widget.setCurrentIndex(restored_index)
+            self._update_tab_buttons()
+
+        _apply_hide()
+        self._record_history_action(
+            f"Hide tab {self.tab_widget.tabText(index)}",
+            undo=_restore,
+            redo=_apply_hide,
+        )
 
     def _find_alternate_tab_index(self, current_index: int) -> int | None:
         count = self.tab_widget.count()
@@ -501,26 +640,95 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         return None
 
     def _close_tab(self, tab: QtWidgets.QWidget) -> None:
+        info = self._remove_tab_internal(tab)
+        if info is None:
+            return
+
+        def _redo() -> None:
+            self._remove_tab_internal(tab)
+
+        def _undo() -> None:
+            self._restore_tab_from_info(info)
+
+        self._record_history_action(f"Close tab {info.title}", undo=_undo, redo=_redo)
+        self._update_tab_buttons()
+
+    def _remove_tab_internal(self, tab: QtWidgets.QWidget) -> _RemovedTabInfo | None:
         index = self.tab_widget.indexOf(tab)
-        if index >= 0:
-            self.tab_widget.removeTab(index)
-        self._hidden_tabs.discard(tab)
-        self._tab_descriptors.pop(tab, None)
-        self._canvas_by_tab.pop(tab, None)
-        self._axes_by_tab.pop(tab, None)
-        descriptor_item = self._graph_tree_items.pop(tab, None)
-        if descriptor_item is not None:
-            parent = descriptor_item.parent()
+        if index < 0:
+            return None
+        title = self.tab_widget.tabText(index)
+        icon = self.tab_widget.tabIcon(index)
+        descriptor = self._tab_descriptors.pop(tab, None)
+        canvas = self._canvas_by_tab.pop(tab, None)
+        axes = self._axes_by_tab.pop(tab, None)
+        item = self._graph_tree_items.pop(tab, None)
+        if item is not None:
+            parent = item.parent()
             if parent is not None:
-                parent.removeChild(descriptor_item)
+                parent.removeChild(item)
             else:
-                top_index = self.project_tree.indexOfTopLevelItem(descriptor_item)
+                top_index = self.project_tree.indexOfTopLevelItem(item)
                 if top_index >= 0:
                     self.project_tree.takeTopLevelItem(top_index)
-        path = self._tab_to_worksheet_path.pop(tab, None)
-        if path is not None:
-            self._worksheet_tabs_open.pop(path, None)
+        worksheet_path = self._tab_to_worksheet_path.pop(tab, None)
+        if worksheet_path is not None:
+            self._worksheet_tabs_open.pop(worksheet_path, None)
+            self._update_worksheet_item_state(worksheet_path)
+        was_hidden = tab in self._hidden_tabs
+        self._hidden_tabs.discard(tab)
+        was_current = self.tab_widget.currentWidget() is tab
+        self.tab_widget.removeTab(index)
+        info = _RemovedTabInfo(
+            tab=tab,
+            index=index,
+            title=title,
+            icon=icon,
+            descriptor=descriptor,
+            canvas=canvas,
+            axes=axes,
+            worksheet_path=worksheet_path,
+            was_hidden=was_hidden,
+            was_current=was_current,
+        )
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+        self._after_tab_removed(info)
+        return info
+
+    def _restore_tab_from_info(self, info: _RemovedTabInfo) -> None:
+        insert_index = min(info.index, self.tab_widget.count())
+        self.tab_widget.insertTab(insert_index, info.tab, info.title)
+        if info.icon is not None:
+            self.tab_widget.setTabIcon(insert_index, info.icon)
+        if info.descriptor is not None:
+            self._register_plot_tab(info.tab, info.canvas, info.axes, info.descriptor)
+        else:
+            if info.canvas is not None:
+                self._canvas_by_tab[info.tab] = info.canvas
+            if info.axes is not None:
+                self._axes_by_tab[info.tab] = info.axes
+        if info.worksheet_path is not None:
+            self._worksheet_tabs_open[info.worksheet_path] = info.tab
+            self._tab_to_worksheet_path[info.tab] = info.worksheet_path
+            self._update_worksheet_item_state(info.worksheet_path)
+        self._set_tab_visibility(info.tab, not info.was_hidden)
+        if info.was_current or not info.was_hidden:
+            restored_index = self.tab_widget.indexOf(info.tab)
+            if restored_index >= 0:
+                self.tab_widget.setCurrentIndex(restored_index)
         self._update_tab_buttons()
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+        self._after_tab_restored(info)
+
+    def _after_tab_removed(self, info: _RemovedTabInfo) -> None:
+        _ = info
+
+    def _after_tab_restored(self, info: _RemovedTabInfo) -> None:
+        _ = info
 
     # ------------------------------------------------------------------ state helpers
     def _handle_current_tab_changed(self, index: int) -> None:
