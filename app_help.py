@@ -280,9 +280,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               outer segments cannot inflate the reported magnitudes while asymmetric loops still
               produce balanced ±Hc and ±Mr for plotting.
             * Zero-crossing detection adapts to each loop’s scale—if the data only grazes the axis
-              the plotter interpolates from the nearest neighbours, and when no trustworthy value
-              exists an error entry is pushed to the Message Log (highlighting the dock) so you can
-              inspect the worksheet straight away.
+              the plotter interpolates from the nearest neighbours, and the tolerance follows the
+              actual field/moment magnitudes instead of assuming at least ±1 units. Micro-emu traces
+              therefore keep their intercepts instead of collapsing to zero, and when no trustworthy
+              value exists an error entry is pushed to the Message Log (highlighting the dock) so
+              you can inspect the worksheet straight away.
             * Need to double-check those numbers? Choose **Develop → Coercivity debug…** or
               **Develop → Remanence debug…** to open a floating inspector with one tab per
               temperature listing the raw negative/positive crossings, the symmetrised ± pairs, and

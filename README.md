@@ -660,7 +660,7 @@ snapshot the derived curves. Each derived table can still be written to disk via
 (metrics versus angle) and by the selected angles (metrics versus temperature)
 so downstream analyses have the expected labels, units, and context baked in.
 
-Zero-crossing detection adapts to each loop’s scale, so slight offsets or sparse sampling no longer leave coercivity or remanence blank. When the data only grazes the axis the plotter estimates the crossing from the nearest neighbours, and if it still cannot produce a trustworthy value an error entry lands in the Message Log (with the dock highlighted) so you can review the raw worksheet immediately.
+Zero-crossing detection adapts to each loop’s scale, so slight offsets or sparse sampling no longer leave coercivity or remanence blank. The tolerance now tracks the actual field/moment magnitudes instead of assuming at least ±1 units, which means micro-emu traces and lightly biased loops still yield accurate intercepts without collapsing everything to zero. When the data only grazes the axis the plotter estimates the crossing from the nearest neighbours, and if it still cannot produce a trustworthy value an error entry lands in the Message Log (with the dock highlighted) so you can review the raw worksheet immediately.
 
 When you need to audit the calculations, pick **Develop → Coercivity debug…** or
 **Develop → Remanence debug…** from the menu bar. Each floating inspector mirrors

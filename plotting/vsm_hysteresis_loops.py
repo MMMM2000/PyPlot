@@ -950,7 +950,7 @@ def _collect_crossings_x_at_y(
         if not math.isfinite(value):
             return
         for existing in candidates:
-            tolerance = max(1e-9, 1e-6 * max(abs(existing), abs(value), 1.0))
+            tolerance = max(1e-12, 1e-6 * max(abs(existing), abs(value)))
             if math.isclose(existing, value, abs_tol=tolerance):
                 return
         candidates.append(value)
@@ -960,8 +960,8 @@ def _collect_crossings_x_at_y(
             continue
         delta0 = y0 - target
         delta1 = y1 - target
-        scale = max(abs(y0), abs(y1), abs(target), 1.0)
-        zero_tol = max(1e-9, 1e-4 * scale)
+        scale = max(abs(y0), abs(y1), abs(target))
+        zero_tol = max(1e-12, 1e-6 * scale)
         if abs(delta0) <= zero_tol:
             delta0 = 0.0
         if abs(delta1) <= zero_tol:
@@ -988,7 +988,7 @@ def _collect_crossings_x_at_y(
         finite_x = x_values[finite_mask]
         if finite_y.size:
             scale = float(np.max(np.abs(finite_y))) if np.any(np.isfinite(finite_y)) else 0.0
-            threshold = max(1e-9, 0.02 * scale)
+            threshold = max(1e-12, 0.02 * scale)
             distances = np.abs(finite_y - target)
             min_index = int(np.argmin(distances))
             if distances[min_index] <= threshold:
@@ -1006,8 +1006,8 @@ def _collect_crossings_x_at_y(
                         continue
                     fraction = (target - y0) / (y1 - y0)
                     candidate = float(x0 + fraction * (x1 - x0))
-                    segment_min = min(x0, x1) - 1e-9
-                    segment_max = max(x0, x1) + 1e-9
+                    segment_min = min(x0, x1) - 1e-12
+                    segment_max = max(x0, x1) + 1e-12
                     if segment_min <= candidate <= segment_max:
                         _record(candidate)
 
@@ -1023,7 +1023,7 @@ def _collect_crossings_y_at_x(
         if not math.isfinite(value):
             return
         for existing in candidates:
-            tolerance = max(1e-9, 1e-6 * max(abs(existing), abs(value), 1.0))
+            tolerance = max(1e-12, 1e-6 * max(abs(existing), abs(value)))
             if math.isclose(existing, value, abs_tol=tolerance):
                 return
         candidates.append(value)
@@ -1033,8 +1033,8 @@ def _collect_crossings_y_at_x(
             continue
         delta0 = x0 - target
         delta1 = x1 - target
-        scale = max(abs(x0), abs(x1), abs(target), 1.0)
-        zero_tol = max(1e-9, 1e-4 * scale)
+        scale = max(abs(x0), abs(x1), abs(target))
+        zero_tol = max(1e-12, 1e-6 * scale)
         if abs(delta0) <= zero_tol:
             delta0 = 0.0
         if abs(delta1) <= zero_tol:
@@ -1061,7 +1061,7 @@ def _collect_crossings_y_at_x(
         finite_y = y_values[finite_mask]
         if finite_x.size:
             scale = float(np.max(np.abs(finite_x))) if np.any(np.isfinite(finite_x)) else 0.0
-            threshold = max(1e-9, 0.02 * scale)
+            threshold = max(1e-12, 0.02 * scale)
             distances = np.abs(finite_x - target)
             min_index = int(np.argmin(distances))
             if distances[min_index] <= threshold:
@@ -1079,8 +1079,8 @@ def _collect_crossings_y_at_x(
                         continue
                     fraction = (target - x0) / (x1 - x0)
                     candidate = float(y0 + fraction * (y1 - y0))
-                    segment_min = min(x0, x1) - 1e-9
-                    segment_max = max(x0, x1) + 1e-9
+                    segment_min = min(x0, x1) - 1e-12
+                    segment_max = max(x0, x1) + 1e-12
                     if segment_min <= target <= segment_max:
                         _record(candidate)
 
