@@ -502,9 +502,18 @@ def test_calculate_metrics_returns_expected_values() -> None:
 
     result = module._calculate_metrics(df, "Field", "Moment")
 
-    assert result.coercivity == pytest.approx(-0.3333333333, rel=1e-6)
+    assert result.coercivity == pytest.approx(0.3333333333, rel=1e-6)
     assert result.remanence == pytest.approx(0.2, rel=1e-6)
     assert result.saturation == pytest.approx(0.9, rel=1e-6)
+
+
+def test_coercivity_prefers_outer_crossings() -> None:
+    field = np.array([-5.0, -4.0, -0.1, 0.1, 4.0, 5.0])
+    moment = np.array([-1.0, 1.0, 0.01, -0.01, -1.0, 1.0])
+
+    value = module._interpolate_x_at_y(field, moment)
+
+    assert value == pytest.approx(4.5, rel=1e-6)
 
 
 class _FakeSheet:

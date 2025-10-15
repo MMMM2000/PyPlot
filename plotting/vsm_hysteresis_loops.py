@@ -699,29 +699,60 @@ def _write_origin_ascii(
 
 
 def _interpolate_x_at_y(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
-    """Return the X coordinate where the curve crosses ``target`` on Y."""
+    """Return the average magnitude of the outer ``target`` crossings on Y."""
 
-    closest: float | None = None
-    min_abs = float("inf")
+    candidates: List[float] = []
+
+    def _record(value: float) -> None:
+        if not math.isfinite(value):
+            return
+        for existing in candidates:
+            if math.isclose(existing, value, rel_tol=1e-9, abs_tol=1e-9):
+                return
+        candidates.append(value)
+
     for x0, y0, x1, y1 in zip(x_values[:-1], y_values[:-1], x_values[1:], y_values[1:]):
         if any(math.isnan(v) for v in (x0, x1, y0, y1)):
             continue
-        if math.isclose(y0, target, rel_tol=1e-12, abs_tol=1e-12):
-            candidate = float(x0)
-        elif math.isclose(y1, target, rel_tol=1e-12, abs_tol=1e-12):
-            candidate = float(x1)
-        elif (y0 - target) * (y1 - target) > 0:
+        delta0 = y0 - target
+        delta1 = y1 - target
+        if math.isclose(delta0, 0.0, rel_tol=1e-12, abs_tol=1e-12):
+            delta0 = 0.0
+        if math.isclose(delta1, 0.0, rel_tol=1e-12, abs_tol=1e-12):
+            delta1 = 0.0
+        if delta0 == 0.0 and delta1 == 0.0:
             continue
-        elif math.isclose(y1, y0, rel_tol=1e-12, abs_tol=1e-12):
+        if delta0 == 0.0:
+            _record(float(x0))
             continue
-        else:
-            fraction = (target - y0) / (y1 - y0)
-            candidate = float(x0 + fraction * (x1 - x0))
-        magnitude = abs(candidate)
-        if magnitude < min_abs:
-            min_abs = magnitude
-            closest = candidate
-    return closest
+        if delta1 == 0.0:
+            _record(float(x1))
+            continue
+        if delta0 * delta1 > 0:
+            continue
+        if math.isclose(y1, y0, rel_tol=1e-12, abs_tol=1e-12):
+            continue
+        fraction = (target - y0) / (y1 - y0)
+        candidate = float(x0 + fraction * (x1 - x0))
+        _record(candidate)
+
+    if not candidates:
+        return None
+
+    magnitudes = sorted(
+        (abs(value) for value in candidates if math.isfinite(value)),
+        reverse=True,
+    )
+    if not magnitudes:
+        return None
+
+    non_zero = [value for value in magnitudes if value > 1e-9]
+    if non_zero:
+        magnitudes = non_zero
+
+    if len(magnitudes) >= 2:
+        return float(np.mean(magnitudes[:2]))
+    return float(magnitudes[0])
 
 
 def _interpolate_y_at_x(x_values: np.ndarray, y_values: np.ndarray, target: float = 0.0) -> float | None:
@@ -3349,6 +3380,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
             return
 
         updated = False
+        overall_min: float | None = None
+        overall_max: float | None = None
         restore_limits: tuple[float, float] | None = None
         if _PRE_NORMALIZE_Y_KEY not in descriptor.stored_limits:
             try:
@@ -3384,6 +3417,15 @@ class VSMPlotter(QtWidgets.QMainWindow):
             state.normalized = True
             updated = True
 
+            finite_normalized = normalized[np.isfinite(normalized)]
+            if finite_normalized.size:
+                min_value = float(np.min(finite_normalized))
+                max_value = float(np.max(finite_normalized))
+                if overall_min is None or min_value < overall_min:
+                    overall_min = min_value
+                if overall_max is None or max_value > overall_max:
+                    overall_max = max_value
+
         if not updated:
             QtWidgets.QMessageBox.information(
                 self,
@@ -3395,7 +3437,13 @@ class VSMPlotter(QtWidgets.QMainWindow):
         if restore_limits is not None:
             descriptor.stored_limits[_PRE_NORMALIZE_Y_KEY] = restore_limits
 
-        self._rescale_y_limits(descriptor, include_zero=True)
+        symmetric = (
+            overall_min is not None
+            and overall_max is not None
+            and overall_min < 0.0
+            and overall_max > 0.0
+        )
+        self._rescale_y_limits(descriptor, symmetric=symmetric)
         self._refresh_descriptor_legend(descriptor, force_layout=True)
         self._append_log(
             "Normalized the current graph and rescaled the Y axis to fit the data."
