@@ -911,34 +911,35 @@ def _symmetrise_crossings(
     tuple[float, float] | None,
     tuple[float | None, float | None] | None,
 ]:
-    positives = sorted((value for value in candidates if value > 0.0), key=abs)
-    negatives = sorted((value for value in candidates if value < 0.0), key=abs)
-    zeros = [value for value in candidates if math.isclose(value, 0.0, rel_tol=1e-12, abs_tol=1e-12)]
+    finite_candidates = [float(value) for value in candidates if math.isfinite(value)]
+    if not finite_candidates:
+        return None, None, None
 
-    raw_pair: tuple[float | None, float | None] | None = None
+    positives = sorted((value for value in finite_candidates if value > 0.0), key=abs)
+    negatives = sorted((value for value in finite_candidates if value < 0.0), key=abs)
 
     if positives and negatives:
         pos_value = positives[0]
         neg_value = negatives[0]
-        raw_pair = (float(neg_value), float(pos_value))
-        pos = abs(pos_value)
-        neg = abs(neg_value)
-        magnitude = (pos + neg) / 2.0
+        magnitude = (abs(pos_value) + abs(neg_value)) / 2.0
         sym_pair = (-float(magnitude), float(magnitude))
+        raw_pair = (float(neg_value), float(pos_value))
         return float(magnitude), sym_pair, raw_pair
 
-    if positives:
-        magnitude = float(abs(positives[0]))
-        raw_pair = (None, float(positives[0]))
-        return magnitude, (-magnitude, magnitude), raw_pair
-    if negatives:
-        magnitude = float(abs(negatives[0]))
-        raw_pair = (float(negatives[0]), None)
-        return magnitude, (-magnitude, magnitude), raw_pair
-    if zeros:
-        raw_pair = (0.0, 0.0)
-        return 0.0, (0.0, 0.0), raw_pair
-    return None, None, None
+    ordered = sorted(finite_candidates, key=lambda value: (abs(value), value))
+    if len(ordered) >= 2:
+        first, second = ordered[:2]
+        magnitude = (abs(first) + abs(second)) / 2.0
+        sym_pair = (-float(magnitude), float(magnitude))
+        raw_pair = (float(min(first, second)), float(max(first, second)))
+        return float(magnitude), sym_pair, raw_pair
+
+    only = ordered[0]
+    magnitude = abs(only)
+    sym_pair = (-float(magnitude), float(magnitude))
+    if math.isclose(magnitude, 0.0, rel_tol=1e-12, abs_tol=1e-12):
+        return 0.0, (0.0, 0.0), (0.0, 0.0)
+    return float(magnitude), sym_pair, (float(only), None)
 
 
 def _collect_crossings_x_at_y(
@@ -2581,50 +2582,44 @@ class VSMPlotter(QtWidgets.QMainWindow):
                         level="error",
                     )
 
-                raw_neg = math.nan
-                raw_pos = math.nan
+                raw_first = math.nan
+                raw_second = math.nan
+                raw_values: List[float] = []
                 if metrics.coercivity_raw_pair:
-                    neg_value, pos_value = metrics.coercivity_raw_pair
-                    if neg_value is not None and math.isfinite(neg_value):
-                        raw_neg = float(neg_value)
-                    if pos_value is not None and math.isfinite(pos_value):
-                        raw_pos = float(pos_value)
+                    first_value, second_value = metrics.coercivity_raw_pair
+                    if first_value is not None and math.isfinite(first_value):
+                        raw_first = float(first_value)
+                        raw_values.append(float(first_value))
+                    if second_value is not None and math.isfinite(second_value):
+                        raw_second = float(second_value)
+                        raw_values.append(float(second_value))
 
                 sym_neg = math.nan
                 sym_pos = math.nan
+                corrected = math.nan
                 if metrics.coercivity_pair:
                     neg_value, pos_value = metrics.coercivity_pair
                     if neg_value is not None and math.isfinite(neg_value):
                         sym_neg = float(neg_value)
                     if pos_value is not None and math.isfinite(pos_value):
                         sym_pos = float(pos_value)
+                        corrected = float(pos_value)
 
                 original = math.nan
-                if metrics.coercivity_raw_pair:
-                    neg_value, pos_value = metrics.coercivity_raw_pair
-                    candidates = [
-                        value
-                        for value in (pos_value, neg_value)
-                        if value is not None and math.isfinite(value)
-                    ]
-                    if candidates:
-                        positive_candidates = [value for value in candidates if value >= 0]
-                        if positive_candidates:
-                            original = float(positive_candidates[0])
-                        else:
-                            original = float(abs(candidates[0]))
-
-                corrected = math.nan
-                if metrics.coercivity_pair:
-                    _, pos_value = metrics.coercivity_pair
-                    if pos_value is not None and math.isfinite(pos_value):
-                        corrected = float(pos_value)
+                if raw_values:
+                    positive_candidates = [value for value in raw_values if value >= 0]
+                    if positive_candidates:
+                        original = float(min(positive_candidates, key=abs))
+                    else:
+                        original = float(min(abs(value) for value in raw_values))
 
                 coercivity_debug_entries.setdefault(float(temperature), []).append(
                     {
                         "angle": float(measurement.angle),
-                        "raw_neg": raw_neg,
-                        "raw_pos": raw_pos,
+                        "x_column": x_axis,
+                        "y_column": y_axis,
+                        "raw_first": raw_first,
+                        "raw_second": raw_second,
                         "sym_neg": sym_neg,
                         "sym_pos": sym_pos,
                         "original": original,
@@ -2632,50 +2627,44 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     }
                 )
 
-                rem_raw_neg = math.nan
-                rem_raw_pos = math.nan
+                rem_raw_first = math.nan
+                rem_raw_second = math.nan
+                rem_raw_values: List[float] = []
                 if metrics.remanence_raw_pair:
-                    neg_value, pos_value = metrics.remanence_raw_pair
-                    if neg_value is not None and math.isfinite(neg_value):
-                        rem_raw_neg = float(neg_value)
-                    if pos_value is not None and math.isfinite(pos_value):
-                        rem_raw_pos = float(pos_value)
+                    first_value, second_value = metrics.remanence_raw_pair
+                    if first_value is not None and math.isfinite(first_value):
+                        rem_raw_first = float(first_value)
+                        rem_raw_values.append(float(first_value))
+                    if second_value is not None and math.isfinite(second_value):
+                        rem_raw_second = float(second_value)
+                        rem_raw_values.append(float(second_value))
 
                 rem_sym_neg = math.nan
                 rem_sym_pos = math.nan
+                rem_corrected = math.nan
                 if metrics.remanence_pair:
                     neg_value, pos_value = metrics.remanence_pair
                     if neg_value is not None and math.isfinite(neg_value):
                         rem_sym_neg = float(neg_value)
                     if pos_value is not None and math.isfinite(pos_value):
                         rem_sym_pos = float(pos_value)
+                        rem_corrected = float(pos_value)
 
                 rem_original = math.nan
-                if metrics.remanence_raw_pair:
-                    neg_value, pos_value = metrics.remanence_raw_pair
-                    candidates = [
-                        value
-                        for value in (pos_value, neg_value)
-                        if value is not None and math.isfinite(value)
-                    ]
-                    if candidates:
-                        positive_candidates = [value for value in candidates if value >= 0]
-                        if positive_candidates:
-                            rem_original = float(positive_candidates[0])
-                        else:
-                            rem_original = float(abs(candidates[0]))
-
-                rem_corrected = math.nan
-                if metrics.remanence_pair:
-                    _, pos_value = metrics.remanence_pair
-                    if pos_value is not None and math.isfinite(pos_value):
-                        rem_corrected = float(pos_value)
+                if rem_raw_values:
+                    positive_candidates = [value for value in rem_raw_values if value >= 0]
+                    if positive_candidates:
+                        rem_original = float(min(positive_candidates, key=abs))
+                    else:
+                        rem_original = float(min(abs(value) for value in rem_raw_values))
 
                 remanence_debug_entries.setdefault(float(temperature), []).append(
                     {
                         "angle": float(measurement.angle),
-                        "raw_neg": rem_raw_neg,
-                        "raw_pos": rem_raw_pos,
+                        "x_column": x_axis,
+                        "y_column": y_axis,
+                        "raw_first": rem_raw_first,
+                        "raw_second": rem_raw_second,
                         "sym_neg": rem_sym_neg,
                         "sym_pos": rem_sym_pos,
                         "original": rem_original,
@@ -2702,6 +2691,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
             entries: Dict[float, List[Dict[str, float]]],
             unit: str,
             metric_key: str,
+            x_label: str,
+            y_label: str,
         ) -> tuple[Dict[float, pd.DataFrame], Dict[str, str]]:
             if not entries:
                 return {}, {}
@@ -2710,8 +2701,12 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 return {}, {}
             metric_label = spec["label"]
             angle_label = _format_column_with_unit("Angle", "deg")
-            raw_neg_label = _format_column_with_unit("Raw crossing (-)", unit)
-            raw_pos_label = _format_column_with_unit("Raw crossing (+)", unit)
+            x_label = str(x_label)
+            y_label = str(y_label)
+            x_column_label = f"X column ({x_label})"
+            y_column_label = f"Y column ({y_label})"
+            raw_first_label = _format_column_with_unit("Crossing 1", unit)
+            raw_second_label = _format_column_with_unit("Crossing 2", unit)
             sym_neg_label = _format_column_with_unit("Symmetrised (-)", unit)
             sym_pos_label = _format_column_with_unit("Symmetrised (+)", unit)
             metric_lower = metric_label.lower()
@@ -2725,8 +2720,10 @@ class VSMPlotter(QtWidgets.QMainWindow):
                 df.rename(
                     columns={
                         "angle": angle_label,
-                        "raw_neg": raw_neg_label,
-                        "raw_pos": raw_pos_label,
+                        "x_column": x_column_label,
+                        "y_column": y_column_label,
+                        "raw_first": raw_first_label,
+                        "raw_second": raw_second_label,
                         "sym_neg": sym_neg_label,
                         "sym_pos": sym_pos_label,
                         "original": original_label,
@@ -2738,8 +2735,10 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
             column_map = {
                 "angle": angle_label,
-                "raw_neg": raw_neg_label,
-                "raw_pos": raw_pos_label,
+                "x_column": x_column_label,
+                "y_column": y_column_label,
+                "raw_first": raw_first_label,
+                "raw_second": raw_second_label,
                 "sym_neg": sym_neg_label,
                 "sym_pos": sym_pos_label,
                 "original": original_label,
@@ -2753,7 +2752,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
             ("coercivity", coercivity_debug_entries, x_unit),
             ("remanence", remanence_debug_entries, y_unit),
         ):
-            tables, columns = _build_debug_payload(entries, unit, metric_key)
+            tables, columns = _build_debug_payload(entries, unit, metric_key, x_axis, y_axis)
             self._metric_debug_tables[metric_key] = tables
             self._metric_debug_columns[metric_key] = columns
 

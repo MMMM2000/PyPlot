@@ -645,8 +645,9 @@ axis roles automatically when you import the generated text files.
 Derived properties—coercivity (field magnitude where the loop last crosses zero), remanence
 (magnetisation at zero field), and saturation magnetisation (maximum recorded
 moment)—are calculated whenever plots are generated. Coercivity and remanence now
-pair the closest positive/negative zero crossings before symmetrising them, and the
-analysis walks the acquisition order instead of re-sorting by field so the intercepts
+pair the closest positive/negative zero crossings before symmetrising them, averaging the
+absolute magnitude of the two nearest intercepts even when both sit on the same side of zero,
+and the analysis walks the acquisition order instead of re-sorting by field so the intercepts
 match the curves you see on screen even when sweeps double back on themselves. Outlying
 segments or minor loops cannot inflate the reported magnitudes while asymmetric traces
 still yield balanced ±Hc and ±Mr pairs for plots and exports. **Plot metrics vs angle**
@@ -665,8 +666,9 @@ Zero-crossing detection adapts to each loop’s scale, so slight offsets or spar
 When you need to audit the calculations, pick **Develop → Coercivity debug…** or
 **Develop → Remanence debug…** from the menu bar. Each floating inspector mirrors
 Origin’s worksheet workflow: every temperature in the current session gets its own tab
-with the raw negative/positive crossings, the symmetrised ± values, and both the original
-and corrected magnitudes. A Matplotlib panel underneath plots the original and corrected
+with the source X/Y column names, both raw zero-crossing values (even if they share the
+same sign), the symmetrised ± pairs, and the original versus corrected magnitudes.
+A Matplotlib panel underneath plots the original and corrected
 curves versus angle so any anomalies stand out immediately. Because the windows update
 automatically after every **Generate plots** run, they double as live debugging consoles
 when you tweak smoothing, rescaling, or data edits.

@@ -275,10 +275,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
 
             ### Derived metrics
             * Coercivity and remanence pair the closest positive and negative zero crossings
-              before symmetrising them, and the analysis walks the samples in acquisition order
-              so the intercepts mirror what you see on screen even when sweeps double back. Noisy
-              outer segments cannot inflate the reported magnitudes while asymmetric loops still
-              produce balanced ±Hc and ±Mr for plotting.
+              before symmetrising them, averaging the absolute magnitude of the two nearest
+              intercepts even when they land on the same side of zero. The analysis walks the
+              samples in acquisition order so the intercepts mirror what you see on screen even
+              when sweeps double back. Noisy outer segments cannot inflate the reported
+              magnitudes while asymmetric loops still produce balanced ±Hc and ±Mr for plotting.
             * Zero-crossing detection adapts to each loop’s scale—if the data only grazes the axis
               the plotter interpolates from the nearest neighbours, and the tolerance follows the
               actual field/moment magnitudes instead of assuming at least ±1 units. Micro-emu traces
@@ -287,8 +288,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               you can inspect the worksheet straight away.
             * Need to double-check those numbers? Choose **Develop → Coercivity debug…** or
               **Develop → Remanence debug…** to open a floating inspector with one tab per
-              temperature listing the raw negative/positive crossings, the symmetrised ± pairs, and
-              a quick plot comparing the original and corrected curves versus angle.
+              temperature listing the source X/Y columns, both raw zero-crossing values (even if
+              they share the same sign), the symmetrised ± pairs, and a quick plot comparing the
+              original and corrected curves versus angle.
             * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
               saturation) showing how each temperature behaves across rotations.
             * Pick one or more angles in the overlay list and choose **Plot metrics vs temperature**
