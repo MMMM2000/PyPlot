@@ -275,6 +275,10 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Coercivity and remanence sample the outer positive and negative crossings
               independently and average their magnitudes, so asymmetric loops yield
               symmetrical ±Hc and ±Mr before plotting the positive value.
+            * Need to double-check those numbers? Choose **Develop → Coercivity debug…** to open a
+              floating inspector with one tab per temperature listing the raw negative/positive
+              crossings, the symmetrised ±Hc pair, and a quick plot comparing the original and
+              corrected coercivity curves versus angle.
             * **Plot metrics vs angle** produces one tab per metric (coercivity, remanence,
               saturation) showing how each temperature behaves across rotations.
             * Pick one or more angles in the overlay list and choose **Plot metrics vs temperature**

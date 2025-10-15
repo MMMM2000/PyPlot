@@ -274,6 +274,177 @@ class WorksheetModel(QtCore.QAbstractTableModel):
         return True
 
 
+class _MetricDebugTab(QtWidgets.QWidget):
+    """Container widget showing raw and symmetrised coercivity data for one temperature."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        self.table = QtWidgets.QTableWidget()
+        self.table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.verticalHeader().setVisible(False)
+        layout.addWidget(self.table, 1)
+
+        figure = Figure(figsize=(5, 3))
+        self.canvas = FigureCanvas(figure)
+        self.axes = figure.add_subplot(111)
+        layout.addWidget(self.canvas, 1)
+
+    @staticmethod
+    def _format_value(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                return ""
+            return f"{value:.6g}"
+        return str(value)
+
+    def update_frame(
+        self,
+        temperature: float,
+        dataframe: pd.DataFrame,
+        columns: Dict[str, str],
+    ) -> None:
+        headers = list(dataframe.columns)
+        self.table.setColumnCount(len(headers))
+        self.table.setHorizontalHeaderLabels(headers)
+        self.table.setRowCount(len(dataframe))
+
+        for row_index, (_, row) in enumerate(dataframe.iterrows()):
+            for column_index, header in enumerate(headers):
+                value = row.get(header)
+                item = QtWidgets.QTableWidgetItem(self._format_value(value))
+                item.setTextAlignment(
+                    QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter
+                )
+                self.table.setItem(row_index, column_index, item)
+        self.table.resizeColumnsToContents()
+        self.table.horizontalHeader().setStretchLastSection(True)
+
+        self.axes.clear()
+        angle_label = columns.get("angle")
+        original_label = columns.get("original")
+        corrected_label = columns.get("corrected")
+        if (
+            angle_label
+            and original_label
+            and corrected_label
+            and not dataframe.empty
+            and angle_label in dataframe
+        ):
+            angles = dataframe[angle_label].to_numpy(dtype=float)
+            original = dataframe[original_label].to_numpy(dtype=float)
+            corrected = dataframe[corrected_label].to_numpy(dtype=float)
+
+            if np.any(np.isfinite(original)):
+                self.axes.plot(
+                    angles,
+                    original,
+                    marker="o",
+                    linestyle="-",
+                    label="Original",
+                )
+            if np.any(np.isfinite(corrected)):
+                self.axes.plot(
+                    angles,
+                    corrected,
+                    marker="s",
+                    linestyle="-",
+                    label="Corrected",
+                )
+
+            if np.any(np.isfinite(original)) or np.any(np.isfinite(corrected)):
+                self.axes.set_xlabel(angle_label)
+                self.axes.set_ylabel(corrected_label)
+                self.axes.legend()
+                self.axes.grid(True, alpha=0.3)
+                self.axes.set_title(f"Coercivity vs angle @ {temperature:g} °C")
+        try:
+            self.canvas.figure.tight_layout()
+        except Exception:
+            pass
+        self.canvas.draw_idle()
+
+
+class MetricDebugWindow(QtWidgets.QDialog):
+    """Floating inspector that exposes the raw coercivity crossings per temperature."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Coercivity Debugger")
+        self.setWindowModality(QtCore.Qt.WindowModality.NonModal)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        self._empty_label = QtWidgets.QLabel(
+            "Generate plots to inspect raw coercivity crossings."
+        )
+        self._empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(self._empty_label)
+
+        self.tab_widget = QtWidgets.QTabWidget()
+        layout.addWidget(self.tab_widget, 1)
+
+        self._tabs: Dict[float, _MetricDebugTab] = {}
+
+        self.resize(820, 620)
+
+    def update_data(
+        self,
+        tables: Dict[float, pd.DataFrame],
+        columns: Dict[str, str],
+    ) -> None:
+        if not tables:
+            self.tab_widget.hide()
+            self._empty_label.show()
+            for temperature, tab in list(self._tabs.items()):
+                index = self.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.tab_widget.removeTab(index)
+                self._tabs.pop(temperature, None)
+            return
+
+        self._empty_label.hide()
+        self.tab_widget.show()
+
+        target_temps = sorted(tables.keys())
+        for temperature, tab in list(self._tabs.items()):
+            if temperature not in tables:
+                index = self.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.tab_widget.removeTab(index)
+                self._tabs.pop(temperature, None)
+
+        for temperature in target_temps:
+            tab = self._tabs.get(temperature)
+            if tab is None:
+                tab = _MetricDebugTab(self)
+                self._tabs[temperature] = tab
+                self.tab_widget.addTab(tab, f"{temperature:g} °C")
+            else:
+                index = self.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.tab_widget.setTabText(index, f"{temperature:g} °C")
+            tab.update_frame(temperature, tables[temperature], columns)
+
+        if target_temps:
+            first_temp = target_temps[0]
+            tab = self._tabs.get(first_temp)
+            if tab is not None:
+                index = self.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.tab_widget.setCurrentIndex(index)
+
+
 @dataclass
 class RescaleResult:
     """Describe the linear transform used to align hysteresis endpoints."""
@@ -585,6 +756,8 @@ class MetricResult:
     saturation: float | None
     coercivity_pair: tuple[float, float] | None = None
     remanence_pair: tuple[float, float] | None = None
+    coercivity_raw_pair: tuple[float | None, float | None] | None = None
+    remanence_raw_pair: tuple[float | None, float | None] | None = None
 
 
 def _split_column_label(label: str) -> tuple[str, str]:
@@ -700,26 +873,41 @@ def _write_origin_ascii(
         df.to_csv(handle, sep="\t", index=False, header=False, na_rep="")
 
 
-def _symmetrise_crossings(candidates: Sequence[float]) -> tuple[float | None, tuple[float, float] | None]:
+def _symmetrise_crossings(
+    candidates: Sequence[float],
+) -> tuple[
+    float | None,
+    tuple[float, float] | None,
+    tuple[float | None, float | None] | None,
+]:
     positives = sorted((value for value in candidates if value > 0.0), key=abs, reverse=True)
     negatives = sorted((value for value in candidates if value < 0.0), key=abs, reverse=True)
     zeros = [value for value in candidates if math.isclose(value, 0.0, rel_tol=1e-12, abs_tol=1e-12)]
 
+    raw_pair: tuple[float | None, float | None] | None = None
+
     if positives and negatives:
-        pos = abs(positives[0])
-        neg = abs(negatives[0])
+        pos_value = positives[0]
+        neg_value = negatives[0]
+        raw_pair = (float(neg_value), float(pos_value))
+        pos = abs(pos_value)
+        neg = abs(neg_value)
         magnitude = (pos + neg) / 2.0
-        return float(magnitude), (-float(magnitude), float(magnitude))
+        sym_pair = (-float(magnitude), float(magnitude))
+        return float(magnitude), sym_pair, raw_pair
 
     if positives:
         magnitude = float(abs(positives[0]))
-        return magnitude, (-magnitude, magnitude)
+        raw_pair = (None, float(positives[0]))
+        return magnitude, (-magnitude, magnitude), raw_pair
     if negatives:
         magnitude = float(abs(negatives[0]))
-        return magnitude, (-magnitude, magnitude)
+        raw_pair = (float(negatives[0]), None)
+        return magnitude, (-magnitude, magnitude), raw_pair
     if zeros:
-        return 0.0, (0.0, 0.0)
-    return None, None
+        raw_pair = (0.0, 0.0)
+        return 0.0, (0.0, 0.0), raw_pair
+    return None, None, None
 
 
 def _collect_crossings_x_at_y(
@@ -791,7 +979,7 @@ def _interpolate_x_at_y(x_values: np.ndarray, y_values: np.ndarray, target: floa
     """Return a symmetrised coercivity estimate for ``target`` crossings on Y."""
 
     candidates = _collect_crossings_x_at_y(x_values, y_values, target)
-    value, _ = _symmetrise_crossings(candidates)
+    value, _, _ = _symmetrise_crossings(candidates)
     return value
 
 
@@ -799,7 +987,7 @@ def _interpolate_y_at_x(x_values: np.ndarray, y_values: np.ndarray, target: floa
     """Return a symmetrised remanence estimate for ``target`` crossings on X."""
 
     candidates = _collect_crossings_y_at_x(x_values, y_values, target)
-    value, _ = _symmetrise_crossings(candidates)
+    value, _, _ = _symmetrise_crossings(candidates)
     return value
 
 
@@ -814,14 +1002,22 @@ def _calculate_metrics(subset: pd.DataFrame, x_axis: str, y_axis: str) -> Metric
     x_values = ordered[x_axis].to_numpy(dtype=float)
     y_values = ordered[y_axis].to_numpy(dtype=float)
     coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
-    coercivity, coercivity_pair = _symmetrise_crossings(coercivity_candidates)
+    coercivity, coercivity_pair, coercivity_raw = _symmetrise_crossings(coercivity_candidates)
     remanence_candidates = _collect_crossings_y_at_x(x_values, y_values, target=0.0)
-    remanence, remanence_pair = _symmetrise_crossings(remanence_candidates)
+    remanence, remanence_pair, remanence_raw = _symmetrise_crossings(remanence_candidates)
     if len(y_values) and np.any(np.isfinite(y_values)):
         saturation = float(np.nanmax(y_values))
     else:
         saturation = None
-    return MetricResult(coercivity, remanence, saturation, coercivity_pair, remanence_pair)
+    return MetricResult(
+        coercivity,
+        remanence,
+        saturation,
+        coercivity_pair,
+        remanence_pair,
+        coercivity_raw,
+        remanence_raw,
+    )
 
 
 def _aggregate_metrics(
@@ -1352,6 +1548,10 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
         self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
         self._metric_column_names: Dict[str, str] = {}
+        self._metric_results: Dict[tuple[float, float], MetricResult] = {}
+        self._metric_debug_tables: Dict[float, pd.DataFrame] = {}
+        self._metric_debug_columns: Dict[str, str] = {}
+        self._metric_debug_window: "MetricDebugWindow" | None = None
         self._temperature_tab_widgets: List[QtWidgets.QWidget] = []
         self._metrics_angle_tabs: List[QtWidgets.QWidget] = []
         self._metrics_temperature_tabs: List[QtWidgets.QWidget] = []
@@ -1574,6 +1774,19 @@ class VSMPlotter(QtWidgets.QMainWindow):
         export_data_action.triggered.connect(self._export_txt)
         export_metrics_action = export_menu.addAction("Derived metrics…")
         export_metrics_action.triggered.connect(self._export_metrics)
+
+        developer_menu: QtWidgets.QMenu | None = None
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if menu is not None and menu.objectName() == "mw_shared_developer":
+                developer_menu = menu
+                break
+        if developer_menu is not None:
+            developer_menu.addSeparator()
+            debug_action = developer_menu.addAction("Coercivity debug…")
+            if debug_action is not None:
+                debug_action.setObjectName("mw_vsm_coercivity_debug")
+                debug_action.triggered.connect(self._show_metric_debug)
 
         self.angle_overlay_list.itemSelectionChanged.connect(
             self._update_overlay_button_state
@@ -2182,6 +2395,8 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         plot_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
         metric_records: List[tuple[float, float, MetricResult]] = []
+        debug_entries: Dict[float, List[Dict[str, float]]] = {}
+        self._metric_results = {}
         for temperature, entries in prepared_groups.items():
             for measurement, subset in entries:
                 if measurement.angle is None:
@@ -2209,12 +2424,67 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     rescaled=rescale_applied,
                     source=measurement.path,
                 )
+                metrics = _calculate_metrics(
+                    export_subset[[x_axis, y_axis]], x_axis, y_axis
+                )
                 metric_records.append(
                     (
                         float(temperature),
                         float(measurement.angle),
-                        _calculate_metrics(export_subset[[x_axis, y_axis]], x_axis, y_axis),
+                        metrics,
                     )
+                )
+                self._metric_results[key] = metrics
+
+                raw_neg = math.nan
+                raw_pos = math.nan
+                if metrics.coercivity_raw_pair:
+                    neg_value, pos_value = metrics.coercivity_raw_pair
+                    if neg_value is not None and math.isfinite(neg_value):
+                        raw_neg = float(neg_value)
+                    if pos_value is not None and math.isfinite(pos_value):
+                        raw_pos = float(pos_value)
+
+                sym_neg = math.nan
+                sym_pos = math.nan
+                if metrics.coercivity_pair:
+                    neg_value, pos_value = metrics.coercivity_pair
+                    if neg_value is not None and math.isfinite(neg_value):
+                        sym_neg = float(neg_value)
+                    if pos_value is not None and math.isfinite(pos_value):
+                        sym_pos = float(pos_value)
+
+                original = math.nan
+                if metrics.coercivity_raw_pair:
+                    neg_value, pos_value = metrics.coercivity_raw_pair
+                    candidates = [
+                        value
+                        for value in (pos_value, neg_value)
+                        if value is not None and math.isfinite(value)
+                    ]
+                    if candidates:
+                        positive_candidates = [value for value in candidates if value >= 0]
+                        if positive_candidates:
+                            original = float(positive_candidates[0])
+                        else:
+                            original = float(abs(candidates[0]))
+
+                corrected = math.nan
+                if metrics.coercivity_pair:
+                    _, pos_value = metrics.coercivity_pair
+                    if pos_value is not None and math.isfinite(pos_value):
+                        corrected = float(pos_value)
+
+                debug_entries.setdefault(float(temperature), []).append(
+                    {
+                        "angle": float(measurement.angle),
+                        "raw_neg": raw_neg,
+                        "raw_pos": raw_pos,
+                        "sym_neg": sym_neg,
+                        "sym_pos": sym_pos,
+                        "original": original,
+                        "corrected": corrected,
+                    }
                 )
 
         self._plotted_series_exports = plot_exports
@@ -2231,6 +2501,55 @@ class VSMPlotter(QtWidgets.QMainWindow):
             self._metrics_by_temperature = {}
             self._metrics_by_angle = {}
             self._metric_column_names = {}
+
+        if debug_entries:
+            angle_label = _format_column_with_unit("Angle", "deg")
+            raw_neg_label = _format_column_with_unit("Raw crossing (-)", x_unit)
+            raw_pos_label = _format_column_with_unit("Raw crossing (+)", x_unit)
+            sym_neg_label = _format_column_with_unit("Symmetrised (-)", x_unit)
+            sym_pos_label = _format_column_with_unit("Symmetrised (+)", x_unit)
+            original_label = _format_column_with_unit("Original coercivity", x_unit)
+            corrected_label = _format_column_with_unit("Corrected coercivity", x_unit)
+
+            self._metric_debug_columns = {
+                "angle": angle_label,
+                "raw_neg": raw_neg_label,
+                "raw_pos": raw_pos_label,
+                "sym_neg": sym_neg_label,
+                "sym_pos": sym_pos_label,
+                "original": original_label,
+                "corrected": corrected_label,
+            }
+
+            debug_tables: Dict[float, pd.DataFrame] = {}
+            for temperature, rows in debug_entries.items():
+                df = pd.DataFrame(rows)
+                df = df.sort_values(by="angle")
+                df.rename(
+                    columns={
+                        "angle": angle_label,
+                        "raw_neg": raw_neg_label,
+                        "raw_pos": raw_pos_label,
+                        "sym_neg": sym_neg_label,
+                        "sym_pos": sym_pos_label,
+                        "original": original_label,
+                        "corrected": corrected_label,
+                    },
+                    inplace=True,
+                )
+                debug_tables[temperature] = df
+            self._metric_debug_tables = debug_tables
+        else:
+            self._metric_debug_tables = {}
+            self._metric_debug_columns = {}
+
+        if self._metric_debug_window is not None:
+            ensure_app_theme(self._metric_debug_window)
+            self._metric_debug_window.update_data(
+                self._metric_debug_tables,
+                self._metric_debug_columns,
+            )
+
         self._update_metric_controls()
 
         self._last_prepared_groups = prepared_groups
@@ -2258,6 +2577,24 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+
+    def _handle_metric_debug_closed(self, *_: Any) -> None:
+        self._metric_debug_window = None
+
+    def _show_metric_debug(self) -> None:
+        if self._metric_debug_window is None:
+            window = MetricDebugWindow(self)
+            window.destroyed.connect(self._handle_metric_debug_closed)
+            self._metric_debug_window = window
+
+        window = self._metric_debug_window
+        if window is None:
+            return
+        ensure_app_theme(window)
+        window.update_data(self._metric_debug_tables, self._metric_debug_columns)
+        window.show()
+        window.raise_()
+        window.activateWindow()
 
     def _compute_rescale_lookup(self, x_axis: str, y_axis: str) -> Dict[Path, RescaleResult]:
         grouped: Dict[float, List[VSMMeasurement]] = {}

@@ -531,6 +531,8 @@ def test_calculate_metrics_records_symmetrised_pairs() -> None:
     assert result.remanence == pytest.approx(expected_mr, rel=1e-6)
     assert result.coercivity_pair == pytest.approx((-expected_hc, expected_hc), rel=1e-6)
     assert result.remanence_pair == pytest.approx((-expected_mr, expected_mr), rel=1e-6)
+    assert result.coercivity_raw_pair == pytest.approx((-120.0, 90.0), rel=1e-6)
+    assert result.remanence_raw_pair == pytest.approx((-0.65, 0.7), rel=1e-6)
 
 
 def test_coercivity_prefers_outer_crossings() -> None:

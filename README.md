@@ -656,6 +656,15 @@ snapshot the derived curves. Each derived table can still be written to disk via
 (metrics versus angle) and by the selected angles (metrics versus temperature)
 so downstream analyses have the expected labels, units, and context baked in.
 
+When you need to audit the coercivity calculations, pick **Develop → Coercivity debug…**
+from the menu bar. The floating inspector mirrors Origin’s worksheet workflow: it
+creates a tab for every temperature in the current session, each containing a table
+with the raw negative/positive field crossings, the symmetrised ±Hc values, and both
+the original and corrected coercivity magnitudes. A Matplotlib panel underneath plots
+the original and corrected coercivity curves versus angle so any anomalies stand out
+immediately. Because the window updates automatically after every **Generate plots** run,
+it doubles as a live debugging console when you tweak smoothing, rescaling, or data edits.
+
 Enable **Normalise Y axis endpoints** to automatically scale every loop in a
 temperature group so the negative-field endpoint shares a common minimum and the
 positive-field endpoint reaches the same maximum. The target extrema are derived
