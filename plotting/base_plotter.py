@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Sequence, Tuple
@@ -163,7 +162,7 @@ class GraphSelectionDialog(QtWidgets.QDialog):
         super().accept()
 
 
-class BasePlotWindow(QtWidgets.QMainWindow, ABC):
+class BasePlotWindow(QtWidgets.QMainWindow):
     """Shared UI frame used by plotting tools."""
 
     help_topic: str = "plotter"
@@ -198,45 +197,35 @@ class BasePlotWindow(QtWidgets.QMainWindow, ABC):
         self._build_base_ui()
 
     # ------------------------------------------------------------------ abstract hooks
-    @abstractmethod
     def _handle_manual_path_entry(self) -> None:
-        """Validate manually entered sources."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _choose_files(self) -> None:
-        """Prompt for one or more files."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _choose_folder(self) -> None:
-        """Prompt for a folder."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _generate_plots(self) -> None:
-        """Generate plot data from currently loaded sources."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _open_matplotlib_window(self) -> None:
-        """Pop out the current tab into a Matplotlib window."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _save_current_graph(self) -> None:
-        """Export the current graph to an image file."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _normalize_current_graph(self) -> None:
-        """Toggle normalization for the active plot."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _export_txt(self) -> None:
-        """Export plotted data to ASCII."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _open_origin_prompt(self) -> None:
-        """Trigger Origin output workflow."""
+        raise NotImplementedError
 
-    @abstractmethod
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
-        """Allow subclasses to augment the graph-settings panel."""
+        raise NotImplementedError
 
     # ------------------------------------------------------------------ base UI
     def _build_base_ui(self) -> None:
