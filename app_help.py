@@ -274,9 +274,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               (loops, overlays, or metrics) as PNG, PDF, or SVG.
 
             ### Derived metrics
-            * Coercivity and remanence sample the outer positive and negative crossings
-              independently and average their magnitudes, so asymmetric loops yield
-              symmetrical ±Hc and ±Mr before plotting the positive value.
+            * Coercivity and remanence pair the closest positive and negative zero crossings
+              before symmetrising them, so noisy outer segments cannot inflate the reported
+              magnitudes while asymmetric loops still produce balanced ±Hc and ±Mr for plotting.
             * Zero-crossing detection adapts to each loop’s scale—if the data only grazes the axis
               the plotter interpolates from the nearest neighbours, and when no trustworthy value
               exists an error entry is pushed to the Message Log (highlighting the dock) so you can

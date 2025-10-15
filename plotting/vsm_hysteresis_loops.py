@@ -894,8 +894,8 @@ def _symmetrise_crossings(
     tuple[float, float] | None,
     tuple[float | None, float | None] | None,
 ]:
-    positives = sorted((value for value in candidates if value > 0.0), key=abs, reverse=True)
-    negatives = sorted((value for value in candidates if value < 0.0), key=abs, reverse=True)
+    positives = sorted((value for value in candidates if value > 0.0), key=abs)
+    negatives = sorted((value for value in candidates if value < 0.0), key=abs)
     zeros = [value for value in candidates if math.isclose(value, 0.0, rel_tol=1e-12, abs_tol=1e-12)]
 
     raw_pair: tuple[float | None, float | None] | None = None

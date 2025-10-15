@@ -535,13 +535,15 @@ def test_calculate_metrics_records_symmetrised_pairs() -> None:
     assert result.remanence_raw_pair == pytest.approx((-0.65, 0.7), rel=1e-6)
 
 
-def test_coercivity_prefers_outer_crossings() -> None:
-    field = np.array([-5.0, -4.0, -0.1, 0.1, 4.0, 5.0])
-    moment = np.array([-1.0, 1.0, 0.01, -0.01, -1.0, 1.0])
+def test_coercivity_prefers_smallest_magnitude_crossings() -> None:
+    field = np.array([-300.0, -60.0, -10.0, 5.0, 20.0, 200.0])
+    moment = np.array([-1.0, 1.0, -1.0, 1.0, -1.0, 1.0])
 
     value = module._interpolate_x_at_y(field, moment)
 
-    assert value == pytest.approx(4.5, rel=1e-6)
+    # The closest zero-crossing magnitudes are ~2.5 (negative) and 12.5 (positive),
+    # so the symmetrised coercivity should reflect their average.
+    assert value == pytest.approx(7.5, rel=1e-6)
 
 
 def test_coercivity_symmetrises_mismatched_crossings() -> None:
