@@ -23,7 +23,7 @@ import pandas as pd
 try:
     from .video import extract_video_metrics
 except ImportError:
-    module_name = "experiments.microwire_data_builder.video"
+    module_name = "microwire_data_builder.video"
     module_path = Path(__file__).with_name("video.py")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec and spec.loader:
@@ -37,7 +37,7 @@ except ImportError:
 try:
     from .manual_diameters import MANUAL_DIAMETER_OVERRIDES
 except ImportError:
-    module_name = "experiments.microwire_data_builder.manual_diameters"
+    module_name = "microwire_data_builder.manual_diameters"
     module_path = Path(__file__).with_name("manual_diameters.py")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec and spec.loader:
@@ -51,7 +51,7 @@ except ImportError:
 try:
     from .ocr import ensure_tesseract_available
 except ImportError:
-    module_name = "experiments.microwire_data_builder.ocr"
+    module_name = "microwire_data_builder.ocr"
     module_path = Path(__file__).with_name("ocr.py")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec and spec.loader:
@@ -62,7 +62,7 @@ except ImportError:
     else:
         raise
 
-sys.modules.setdefault("experiments.microwire_data_builder.core", sys.modules.get(__name__))
+sys.modules.setdefault("microwire_data_builder.core", sys.modules.get(__name__))
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 

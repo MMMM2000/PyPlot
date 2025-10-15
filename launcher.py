@@ -21,7 +21,10 @@ from plotting.stress_dependence import stress_gui
 from plotting.stress_sensitivity import sens_gui
 from plotting.temperature_dependence import temp_dep_gui
 from plotting.temperature_sensitivity import temp_gui
+from plotting.vsm_hysteresis_loops import main as vsm_loops_main
+from plotting.strain_3d_plot import main as strain_3d_plot_main
 from plotting.utils import ensure_app_theme, install_standard_menu, developer_options
+from microwire_data_builder import main as microwire_builder_main
 from experiments import EXPERIMENTS
 
 
@@ -33,12 +36,14 @@ PLOTTERS: Dict[str, LauncherFactory] = {
     "Hsw Load Compare": load_compare_gui.main,
     "Maxion Continuous": maxion_gui.main,
     "Hsw Distribution": distribution_gui.main,
+    "Strain 3D Plot": strain_3d_plot_main,
     "Temperature Sensitivity": temp_gui.main,
     "Temperature Dependence": temp_dep_gui.main,
     "Stress Sensitivity": sens_gui.main,
     "Current Annealing": current_anneal_gui.main,
     "PDF Plotter": pdf_gui.main,
     "Hysteresis Loops": loops_gui.main,
+    "VSM Hysteresis Loops": vsm_loops_main,
 }
 
 LOGGERS: Dict[str, LauncherFactory] = {
@@ -48,6 +53,10 @@ LOGGERS: Dict[str, LauncherFactory] = {
 
 EMULATORS: Dict[str, LauncherFactory] = {
     "Universal Serial Emulator": virtual_serial_emulator_gui.main,
+}
+
+BUILDERS: Dict[str, LauncherFactory] = {
+    "Microwire Data Builder": microwire_builder_main,
 }
 
 
@@ -96,9 +105,12 @@ class MasterLauncher(QtWidgets.QWidget):
         self.log_tab = QtWidgets.QWidget()
         self.plot_tab = QtWidgets.QWidget()
         self.emu_tab = QtWidgets.QWidget()
+        self.builder_tab = QtWidgets.QWidget()
         self.tabs.addTab(self.log_tab, "Loggers")
         self.tabs.addTab(self.plot_tab, "Plotting")
         self.tabs.addTab(self.emu_tab, "Emulators")
+        if BUILDERS:
+            self.tabs.addTab(self.builder_tab, "Builders")
         self.exp_tab = QtWidgets.QWidget()
         self._experiments_index: int | None = None
 
@@ -114,6 +126,10 @@ class MasterLauncher(QtWidgets.QWidget):
         emu_layout = QtWidgets.QVBoxLayout(self.emu_tab)
         emu_layout.addWidget(self.emu_list)
 
+        self.builder_list = QtWidgets.QListWidget()
+        builder_layout = QtWidgets.QVBoxLayout(self.builder_tab)
+        builder_layout.addWidget(self.builder_list)
+
         self.exp_list = QtWidgets.QListWidget()
         exp_layout = QtWidgets.QVBoxLayout(self.exp_tab)
         exp_layout.addWidget(self.exp_list)
@@ -123,6 +139,8 @@ class MasterLauncher(QtWidgets.QWidget):
             "plotters": PLOTTERS,
             "emulators": EMULATORS,
         }
+        if BUILDERS:
+            self._registry["builders"] = BUILDERS
         if EXPERIMENTS:
             self._registry["experiments"] = EXPERIMENTS
 
@@ -131,6 +149,8 @@ class MasterLauncher(QtWidgets.QWidget):
             "plotters": "Plotting",
             "emulators": "Emulators",
         }
+        if BUILDERS:
+            self._category_labels["builders"] = "Builders"
         if "experiments" in self._registry:
             self._category_labels["experiments"] = "Experiments"
 
@@ -139,6 +159,8 @@ class MasterLauncher(QtWidgets.QWidget):
             "plotters": self.plot_list,
             "emulators": self.emu_list,
         }
+        if BUILDERS:
+            self._list_widgets["builders"] = self.builder_list
         if "experiments" in self._registry:
             self._list_widgets["experiments"] = self.exp_list
 
@@ -169,21 +191,24 @@ class MasterLauncher(QtWidgets.QWidget):
 
         self.main_layout.addLayout(button_row)
 
-        menu_bar = install_standard_menu(self, help_topic="launcher")
-        file_menu = menu_bar.addMenu("&File")
-        if file_menu is None:
-            file_menu = QtWidgets.QMenu("&File", self)
-            menu_bar.addMenu(file_menu)
-        exit_action = file_menu.addAction("E&xit")
-        if exit_action is not None:
-            exit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
-            exit_action.triggered.connect(self.close)
-
+        menu_bar = install_standard_menu(
+            self,
+            help_topic="launcher",
+            close_window=self._close_launcher,
+        )
         sort_menu = menu_bar.addMenu("&Sort")
         if sort_menu is None:
             sort_menu = QtWidgets.QMenu("&Sort", self)
             menu_bar.addMenu(sort_menu)
         self._install_sort_menu(sort_menu)
+
+    def _close_launcher(self) -> None:
+        """Close hook that satisfies :func:`install_standard_menu`."""
+
+        # ``QWidget.close`` returns ``bool`` and Pylance/Pyright expect the menu
+        # callback to return ``None``.  We call the underlying method but
+        # intentionally drop the return value to keep the type contract tidy.
+        self.close()
 
     def _restore_launcher(self) -> None:
         if self._closing:
@@ -300,6 +325,8 @@ class MasterLauncher(QtWidgets.QWidget):
             return self.plot_list
         if current is self.emu_tab:
             return self.emu_list
+        if current is self.builder_tab:
+            return self.builder_list
         if current is self.exp_tab:
             return self.exp_list
         return None
@@ -452,6 +479,14 @@ class MasterLauncher(QtWidgets.QWidget):
             item = self.emu_list.currentItem()
             if item is None:
                 QtWidgets.QMessageBox.warning(self, "No selection", "Please select an emulator")
+                return
+        elif self.tabs.currentWidget() is self.builder_tab:
+            category = "builders"
+            item = self.builder_list.currentItem()
+            if item is None:
+                QtWidgets.QMessageBox.warning(
+                    self, "No selection", "Please select a builder tool"
+                )
                 return
         elif self.tabs.currentWidget() is self.exp_tab:
             category = "experiments"

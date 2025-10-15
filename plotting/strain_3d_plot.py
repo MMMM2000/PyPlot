@@ -23,7 +23,7 @@ from plotting.utils import (
     schedule_origin_release,
 )
 
-from experiments.microwire_data_builder.core import _parse_numeric, _parse_strain_float
+from microwire_data_builder.core import _parse_numeric, _parse_strain_float
 
 
 def _clean_header(value: object) -> str:
@@ -117,12 +117,12 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Strain Plot Explorer")
+        self.setWindowTitle("Strain 3D Plot")
         self.resize(1480, 980)
 
-        self.logger = logging.getLogger("strain_3d_plotter")
+        self.logger = logging.getLogger("strain_3d_plot")
         self.logger.setLevel(logging.INFO)
-        self.settings = QtCore.QSettings("MicrowireLab", "Strain3DPlotter")
+        self.settings = QtCore.QSettings("MicrowireLab", "Strain3DPlot")
         self._floating_windows: list[QtWidgets.QMainWindow] = []
 
         self._build_ui()
@@ -227,7 +227,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         install_standard_menu(
             self,
-            help_topic="strain_3d_plotter",
+            help_topic="strain_3d_plot",
             console=self.log_view,
             open_file=self._choose_input_file,
         )
@@ -348,7 +348,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
 
         path = Path(self.input_edit.text().strip())
         if not path.exists():
-            QtWidgets.QMessageBox.warning(self, "Strain Plot Explorer", "Please select an existing file.")
+            QtWidgets.QMessageBox.warning(self, "Strain 3D Plot", "Please select an existing file.")
             return
 
         try:
@@ -356,14 +356,14 @@ class Strain3DPlotter(QtWidgets.QWidget):
         except Exception as exc:  # pragma: no cover - user feedback
             QtWidgets.QMessageBox.critical(
                 self,
-                "Strain Plot Explorer",
+                "Strain 3D Plot",
                 f"Failed to read worksheet:\n{exc}",
             )
             return
 
         df = df.dropna(how="all")
         if df.empty:
-            QtWidgets.QMessageBox.information(self, "Strain Plot Explorer", "The worksheet does not contain any data.")
+            QtWidgets.QMessageBox.information(self, "Strain 3D Plot", "The worksheet does not contain any data.")
             return
 
         columns = list(df.columns)
@@ -376,7 +376,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if strain_idx is None:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Strain Plot Explorer",
+                "Strain 3D Plot",
                 "Could not locate a strain column. Ensure the header contains 'strain'.",
             )
             return
@@ -423,7 +423,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if not records:
             QtWidgets.QMessageBox.information(
                 self,
-                "Strain Plot Explorer",
+                "Strain 3D Plot",
                 "No rows with strain measurements were found in the worksheet.",
             )
             return
@@ -505,7 +505,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
             if not include_2d and not include_3d:
                 QtWidgets.QMessageBox.information(
                     self,
-                    "Strain Plot Explorer",
+                    "Strain 3D Plot",
                     "Enable at least one automatic plot type (2D or 3D).",
                 )
                 return []
@@ -513,7 +513,7 @@ class Strain3DPlotter(QtWidgets.QWidget):
             if not configs:
                 QtWidgets.QMessageBox.information(
                     self,
-                    "Strain Plot Explorer",
+                    "Strain 3D Plot",
                     "No combinations with strain were available for the selected plot types.",
                 )
             return configs
@@ -525,14 +525,14 @@ class Strain3DPlotter(QtWidgets.QWidget):
         if not x_axis or not y_axis:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Strain Plot Explorer",
+                "Strain 3D Plot",
                 "Select at least X and Y axes for manual plotting.",
             )
             return []
         if dimension == 3 and not z_axis:
             QtWidgets.QMessageBox.warning(
                 self,
-                "Strain Plot Explorer",
+                "Strain 3D Plot",
                 "Select a Z axis for 3D plotting or switch to 2D mode.",
             )
             return []
@@ -698,7 +698,7 @@ class PlotWindow(QtWidgets.QMainWindow):
         dimension: int,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"{title} — Strain Plot Explorer")
+        self.setWindowTitle(f"{title} — Strain 3D Plot")
         self._subset = subset.copy()
         self._combo = combo
         self._dimension = dimension
