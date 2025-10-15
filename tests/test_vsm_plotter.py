@@ -554,6 +554,21 @@ def test_coercivity_symmetrises_mismatched_crossings() -> None:
     assert value == pytest.approx(expected, rel=1e-6)
 
 
+def test_collect_crossings_handles_axis_graze() -> None:
+    field = np.array([-3.0, -1.0, -0.2, -0.05, 0.8, 1.6])
+    moment = np.array([-1.2, -0.5, -0.08, -0.01, 0.3, 0.9])
+
+    crossings = module._collect_crossings_x_at_y(field, moment)
+
+    assert crossings, "Expected a fallback zero-crossing candidate to be generated"
+    assert any(value < 0.0 for value in crossings)
+
+    magnitude = module._interpolate_x_at_y(field, moment)
+
+    assert magnitude is not None
+    assert magnitude == pytest.approx(0.0285714286, rel=1e-6)
+
+
 def test_remanence_symmetrises_mismatched_crossings() -> None:
     field = np.array([-5.0, -1.0, 0.0, 1.0, 5.0, 0.0])
     moment = np.array([-0.8, -0.2, 0.4, 0.6, 0.9, -0.5])

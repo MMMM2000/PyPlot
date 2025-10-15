@@ -249,7 +249,9 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Explore the workspace
             * The left auto-hide docks mirror Origin’s layout with a **Project Explorer** (double
               click a measurement to jump to its temperature tab) and a running **Message Log** of
-              parser decisions.
+              parser decisions. Unread errors (missing files, parsing issues, or metrics that could
+              not be computed) turn the dock tab red until you hover or pin it open, making it easy
+              to spot issues even when the panel is collapsed.
             * The right-side **Object Manager** mirrors whichever plot tab is active—temperature
               loops, overlay comparisons, or derived metrics—so ticking/unticking a node only
               affects the visible curves while keeping Matplotlib pop-outs and Origin exports in
@@ -275,6 +277,10 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Coercivity and remanence sample the outer positive and negative crossings
               independently and average their magnitudes, so asymmetric loops yield
               symmetrical ±Hc and ±Mr before plotting the positive value.
+            * Zero-crossing detection adapts to each loop’s scale—if the data only grazes the axis
+              the plotter interpolates from the nearest neighbours, and when no trustworthy value
+              exists an error entry is pushed to the Message Log (highlighting the dock) so you can
+              inspect the worksheet straight away.
             * Need to double-check those numbers? Choose **Develop → Coercivity debug…** to open a
               floating inspector with one tab per temperature listing the raw negative/positive
               crossings, the symmetrised ±Hc pair, and a quick plot comparing the original and

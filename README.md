@@ -627,6 +627,8 @@ The workspace now mirrors the Origin-style experiment so the frequently used pan
 
 The Object Manager tree supersedes the floating “Show angles…” dialog and now mirrors whichever plot tab is active—temperature loops, angle overlays, or derived metrics—so hiding a node only affects the curves you are currently inspecting while keeping exports in sync. Angles and temperatures are sorted numerically, matching the way you read the legend. The angle picker in the Graph Settings dock replaces the old overlays window: multi-select rotations and choose **Plot selected angles across temperatures** to spawn overlay tabs inside the viewer instead of launching a separate Matplotlib window. Styling, rescale decisions, and the dark theme propagate automatically, and the always-available **Save graph…** action captures the active tab—temperature plots, overlays, or derived metrics—as PNG, PDF, or SVG for quick reporting. New tabs immediately apply the same layout pass used after visibility changes, so axis labels and titles are positioned correctly from the first render. The companion **Normalize Y** button divides each visible curve by its own peak, then rescales the axis around the resulting span (symmetrically if the data crosses zero) so the figure neither zooms out nor wastes empty space, and it still remembers the previous limits so a second click restores the original scale without nudging the canvas. **Open in Matplotlib** re-plots the selected tab into a floating window using Matplotlib’s constrained layout so titles and axis labels remain visible when you detach a comparison for closer inspection.
 
+The Message Log dock now highlights itself in red whenever an error is recorded—for example when a measurement fails to parse or a loop lacks the crossings required to compute coercivity. Hover over the tab or pin it open to acknowledge the message and the highlight clears automatically, so it is obvious when something in the workflow needs attention even while the panel is collapsed.
+
 Editable worksheets stay in sync with the plots. Right-click inside a worksheet tab to delete the selected rows, then hit **Generate plots** to recalc the curves and derived metrics with the cleaned data. The Project Explorer’s double-click handler jumps straight to the matching temperature tab so navigating dense batches stays effortless.
 
 All TXT exports now include an Origin-friendly header block: the first four
@@ -655,6 +657,8 @@ snapshot the derived curves. Each derived table can still be written to disk via
 **Export metrics**, which creates Origin-ready worksheets grouped by temperature
 (metrics versus angle) and by the selected angles (metrics versus temperature)
 so downstream analyses have the expected labels, units, and context baked in.
+
+Zero-crossing detection adapts to each loop’s scale, so slight offsets or sparse sampling no longer leave coercivity or remanence blank. When the data only grazes the axis the plotter estimates the crossing from the nearest neighbours, and if it still cannot produce a trustworthy value an error entry lands in the Message Log (with the dock highlighted) so you can review the raw worksheet immediately.
 
 When you need to audit the coercivity calculations, pick **Develop → Coercivity debug…**
 from the menu bar. The floating inspector mirrors Origin’s worksheet workflow: it

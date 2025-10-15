@@ -9,7 +9,7 @@ import sys
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Sequence, Tuple
 
 import pandas as pd
 import numpy as np
@@ -97,9 +97,9 @@ class AutoHideDockWidget(QtWidgets.QDockWidget):
         layout = QtWidgets.QHBoxLayout(bar)
         layout.setContentsMargins(6, 0, 4, 0)
         layout.setSpacing(4)
-        label = QtWidgets.QLabel(title)
-        label.setObjectName("dockTitleLabel")
-        layout.addWidget(label)
+        self._title_label = QtWidgets.QLabel(title)
+        self._title_label.setObjectName("dockTitleLabel")
+        layout.addWidget(self._title_label)
         layout.addStretch(1)
 
         self.pin_button = QtWidgets.QToolButton()
@@ -123,6 +123,7 @@ class AutoHideDockWidget(QtWidgets.QDockWidget):
 
         self.setTitleBarWidget(bar)
         self._rebuilding = False
+        self._alert_active = False
 
     def _handle_pin_toggle(self, checked: bool) -> None:
         self.set_auto_hide(not checked)
@@ -174,6 +175,19 @@ class AutoHideDockWidget(QtWidgets.QDockWidget):
         self.setMinimumWidth(160)
         self.setMaximumWidth(16777215)
         self.resize(self._last_width, self.height())
+
+    def set_alert(self, enabled: bool) -> None:
+        """Toggle a visual alert state for the dock title."""
+
+        if not hasattr(self, "_title_label"):
+            return
+        if getattr(self, "_alert_active", False) == enabled:
+            return
+        self._alert_active = enabled
+        if enabled:
+            self._title_label.setStyleSheet("color: #b3261e; font-weight: 600;")
+        else:
+            self._title_label.setStyleSheet("")
 
 
 class WorksheetModel(QtCore.QAbstractTableModel):
@@ -919,7 +933,8 @@ def _collect_crossings_x_at_y(
         if not math.isfinite(value):
             return
         for existing in candidates:
-            if math.isclose(existing, value, rel_tol=1e-9, abs_tol=1e-9):
+            tolerance = max(1e-9, 1e-6 * max(abs(existing), abs(value), 1.0))
+            if math.isclose(existing, value, abs_tol=tolerance):
                 return
         candidates.append(value)
 
@@ -928,9 +943,11 @@ def _collect_crossings_x_at_y(
             continue
         delta0 = y0 - target
         delta1 = y1 - target
-        if math.isclose(delta0, 0.0, rel_tol=1e-12, abs_tol=1e-12):
+        scale = max(abs(y0), abs(y1), abs(target), 1.0)
+        zero_tol = max(1e-9, 1e-4 * scale)
+        if abs(delta0) <= zero_tol:
             delta0 = 0.0
-        if math.isclose(delta1, 0.0, rel_tol=1e-12, abs_tol=1e-12):
+        if abs(delta1) <= zero_tol:
             delta1 = 0.0
         if delta0 == 0.0 and delta1 == 0.0:
             continue
@@ -948,6 +965,35 @@ def _collect_crossings_x_at_y(
         candidate = float(x0 + fraction * (x1 - x0))
         _record(candidate)
 
+    if not candidates:
+        finite_mask = np.isfinite(y_values)
+        finite_y = y_values[finite_mask]
+        finite_x = x_values[finite_mask]
+        if finite_y.size:
+            scale = float(np.max(np.abs(finite_y))) if np.any(np.isfinite(finite_y)) else 0.0
+            threshold = max(1e-9, 0.02 * scale)
+            distances = np.abs(finite_y - target)
+            min_index = int(np.argmin(distances))
+            if distances[min_index] <= threshold:
+                x0 = float(finite_x[min_index])
+                y0 = float(finite_y[min_index])
+                neighbours: List[int] = []
+                if min_index > 0:
+                    neighbours.append(min_index - 1)
+                if min_index + 1 < finite_x.size:
+                    neighbours.append(min_index + 1)
+                for neighbour in neighbours:
+                    x1 = float(finite_x[neighbour])
+                    y1 = float(finite_y[neighbour])
+                    if not math.isfinite(y1) or math.isclose(y1, y0, rel_tol=1e-12, abs_tol=1e-12):
+                        continue
+                    fraction = (target - y0) / (y1 - y0)
+                    candidate = float(x0 + fraction * (x1 - x0))
+                    segment_min = min(x0, x1) - 1e-9
+                    segment_max = max(x0, x1) + 1e-9
+                    if segment_min <= candidate <= segment_max:
+                        _record(candidate)
+
     return candidates
 
 
@@ -956,21 +1002,70 @@ def _collect_crossings_y_at_x(
 ) -> List[float]:
     candidates: List[float] = []
 
+    def _record(value: float) -> None:
+        if not math.isfinite(value):
+            return
+        for existing in candidates:
+            tolerance = max(1e-9, 1e-6 * max(abs(existing), abs(value), 1.0))
+            if math.isclose(existing, value, abs_tol=tolerance):
+                return
+        candidates.append(value)
+
     for x0, y0, x1, y1 in zip(x_values[:-1], y_values[:-1], x_values[1:], y_values[1:]):
         if any(math.isnan(v) for v in (x0, x1, y0, y1)):
             continue
-        if math.isclose(x0, target, rel_tol=1e-12, abs_tol=1e-12):
-            candidates.append(float(y0))
+        delta0 = x0 - target
+        delta1 = x1 - target
+        scale = max(abs(x0), abs(x1), abs(target), 1.0)
+        zero_tol = max(1e-9, 1e-4 * scale)
+        if abs(delta0) <= zero_tol:
+            delta0 = 0.0
+        if abs(delta1) <= zero_tol:
+            delta1 = 0.0
+        if delta0 == 0.0 and delta1 == 0.0:
             continue
-        if math.isclose(x1, target, rel_tol=1e-12, abs_tol=1e-12):
-            candidates.append(float(y1))
+        if delta0 == 0.0:
+            _record(float(y0))
             continue
-        if (x0 - target) * (x1 - target) > 0:
+        if delta1 == 0.0:
+            _record(float(y1))
+            continue
+        if delta0 * delta1 > 0:
             continue
         if math.isclose(x1, x0, rel_tol=1e-12, abs_tol=1e-12):
             continue
         fraction = (target - x0) / (x1 - x0)
-        candidates.append(float(y0 + fraction * (y1 - y0)))
+        candidate = float(y0 + fraction * (y1 - y0))
+        _record(candidate)
+
+    if not candidates:
+        finite_mask = np.isfinite(x_values)
+        finite_x = x_values[finite_mask]
+        finite_y = y_values[finite_mask]
+        if finite_x.size:
+            scale = float(np.max(np.abs(finite_x))) if np.any(np.isfinite(finite_x)) else 0.0
+            threshold = max(1e-9, 0.02 * scale)
+            distances = np.abs(finite_x - target)
+            min_index = int(np.argmin(distances))
+            if distances[min_index] <= threshold:
+                x0 = float(finite_x[min_index])
+                y0 = float(finite_y[min_index])
+                neighbours: List[int] = []
+                if min_index > 0:
+                    neighbours.append(min_index - 1)
+                if min_index + 1 < finite_x.size:
+                    neighbours.append(min_index + 1)
+                for neighbour in neighbours:
+                    x1 = float(finite_x[neighbour])
+                    y1 = float(finite_y[neighbour])
+                    if not math.isfinite(x1) or math.isclose(x1, x0, rel_tol=1e-12, abs_tol=1e-12):
+                        continue
+                    fraction = (target - x0) / (x1 - x0)
+                    candidate = float(y0 + fraction * (y1 - y0))
+                    segment_min = min(x0, x1) - 1e-9
+                    segment_max = max(x0, x1) + 1e-9
+                    if segment_min <= target <= segment_max:
+                        _record(candidate)
 
     return candidates
 
@@ -1630,6 +1725,7 @@ class VSMPlotter(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
 
+        self._log_has_unread_errors = False
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
         self.project_tree.header().setStretchLastSection(True)
@@ -1646,6 +1742,9 @@ class VSMPlotter(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, log_dock)
         self.tabifyDockWidget(project_dock, log_dock)
         project_dock.raise_()
+        self.message_log_dock = log_dock
+        self.log_view.installEventFilter(self)
+        log_dock.visibilityChanged.connect(self._handle_log_visibility)
 
         self.object_tree = QtWidgets.QTreeWidget()
         self.object_tree.setHeaderLabels(["Object Manager"])
@@ -2435,6 +2534,25 @@ class VSMPlotter(QtWidgets.QMainWindow):
                     )
                 )
                 self._metric_results[key] = metrics
+
+                if metrics.coercivity is None or metrics.coercivity_pair is None:
+                    self._append_log(
+                        (
+                            "Unable to determine coercivity for "
+                            f"{measurement.path.name} at {temperature:g} °C and "
+                            f"{float(measurement.angle):g}°; no zero crossings found."
+                        ),
+                        level="error",
+                    )
+                if metrics.remanence is None or metrics.remanence_pair is None:
+                    self._append_log(
+                        (
+                            "Unable to determine remanence for "
+                            f"{measurement.path.name} at {temperature:g} °C and "
+                            f"{float(measurement.angle):g}°; no zero crossings found."
+                        ),
+                        level="error",
+                    )
 
                 raw_neg = math.nan
                 raw_pos = math.nan
@@ -4243,9 +4361,45 @@ class VSMPlotter(QtWidgets.QMainWindow):
     def _escape_origin_text(self, text: str) -> str:
         return text.replace("\"", "''")
 
-    def _append_log(self, message: str) -> None:
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if obj is self.log_view and event.type() in {
+            QtCore.QEvent.Type.Show,
+            QtCore.QEvent.Type.FocusIn,
+        }:
+            self._clear_log_alert()
+        return super().eventFilter(obj, event)
+
+    def _handle_log_visibility(self, visible: bool) -> None:
+        if visible:
+            self._clear_log_alert()
+
+    def _clear_log_alert(self) -> None:
+        if getattr(self, "message_log_dock", None) is None:
+            return
+        if getattr(self, "_log_has_unread_errors", False):
+            self._log_has_unread_errors = False
+        self.message_log_dock.set_alert(False)
+
+    def _append_log(self, message: str, *, level: Literal["info", "error"] = "info") -> None:
+        derived_level = level
+        if derived_level == "info":
+            lowered = message.lower()
+            if lowered.startswith("failed") or lowered.startswith("error") or lowered.startswith("unable"):
+                derived_level = "error"
+
         self.log_view.appendPlainText(message)
-        self.logger.info(message)
+        dock = getattr(self, "message_log_dock", None)
+        if derived_level == "error":
+            self.logger.error(message)
+            visible = bool(dock and self.log_view.isVisible() and dock.isVisible())
+            if visible:
+                self._clear_log_alert()
+            else:
+                self._log_has_unread_errors = True
+                if dock is not None:
+                    dock.set_alert(True)
+        else:
+            self.logger.info(message)
 
 def main() -> QtWidgets.QWidget | None:  # pragma: no cover - launcher helper
     app = QtWidgets.QApplication.instance()
