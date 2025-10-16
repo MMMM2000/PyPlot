@@ -407,7 +407,7 @@ class GraphSelectionDialog(QtWidgets.QDialog):
         super().accept()
 
 
-class BasePlotWindow(QtWidgets.QMainWindow):
+class PyPlotWindow(QtWidgets.QMainWindow):
     """Shared UI frame used by plotting tools."""
 
     help_topic: str = "plotter"
@@ -423,6 +423,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         ".xls",
         ".xlsm",
         ".json",
+        ".vsm-hys-data",
     )
 
     def __init__(self, *, title: str) -> None:
@@ -489,6 +490,9 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         raise NotImplementedError
 
     def _choose_folder(self) -> None:
+        raise NotImplementedError
+
+    def _load_data(self) -> None:
         raise NotImplementedError
 
     def _generate_plots(self) -> None:
@@ -583,6 +587,11 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         central_layout.addWidget(self._script_panel_container)
 
         action_row = QtWidgets.QHBoxLayout()
+        self.load_data_button = QtWidgets.QPushButton("Load data")
+        self.load_data_button.setEnabled(False)
+        self.load_data_button.clicked.connect(self._load_data)
+        action_row.addWidget(self.load_data_button)
+
         self.plot_button = QtWidgets.QPushButton("Generate plots")
         self.plot_button.clicked.connect(self._generate_plots)
         self.plot_button.setEnabled(False)
@@ -1137,6 +1146,16 @@ class BasePlotWindow(QtWidgets.QMainWindow):
                 worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
                 workbook.worksheets = [worksheet.key]
                 return workbook, [worksheet]
+            if suffix == ".vsm-hys-data":
+                try:
+                    text = path.read_text(errors="ignore").splitlines()
+                except Exception:
+                    text = []
+                frame = pd.DataFrame({"value": text})
+                workbook = self._build_workbook_shell(path)
+                worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
+                workbook.worksheets = [worksheet.key]
+                return workbook, [worksheet]
         except Exception as exc:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -1152,12 +1171,28 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         return None
 
     def _read_delimited_file(self, path: Path, suffix: str) -> pd.DataFrame | None:
-        if suffix == ".tsv":
-            frame = pd.read_csv(path, sep="\t")
-        elif suffix == ".csv":
-            frame = pd.read_csv(path)
-        else:
-            frame = pd.read_csv(path, sep=None, engine="python")
+        try:
+            if suffix == ".tsv":
+                frame = pd.read_csv(path, sep="\t")
+            elif suffix == ".csv":
+                frame = pd.read_csv(path)
+            else:
+                frame = pd.read_csv(path, sep=None, engine="python")
+        except pd.errors.EmptyDataError:
+            frame = pd.DataFrame({path.name: []})
+        except pd.errors.ParserError:
+            try:
+                frame = pd.read_csv(path, header=None, engine="python")
+            except Exception:
+                frame = pd.DataFrame()
+        except Exception:
+            frame = pd.DataFrame()
+        if frame is None or frame.empty:
+            try:
+                lines = path.read_text(errors="ignore").splitlines()
+            except Exception:
+                lines = []
+            frame = pd.DataFrame({"value": lines})
         return frame
 
     def _build_workbook_shell(self, path: Path) -> WorkbookData:
@@ -1731,7 +1766,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
 
 
 __all__ = [
-    "BasePlotWindow",
+    "PyPlotWindow",
     "GraphLineState",
     "GraphSelectionDialog",
     "PlotTabState",

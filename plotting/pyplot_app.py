@@ -3,6 +3,7 @@
 import sys
 import uuid
 from dataclasses import asdict
+import json
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
@@ -14,8 +15,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 
 import pandas as pd
 
-from plotting.base_plotter import (
-    BasePlotWindow,
+from plotting.pyplot import (
+    PyPlotWindow,
     WorksheetColumnMeta,
     WorksheetData,
     WorkbookData,
@@ -24,12 +25,13 @@ from plotting.utils import ensure_app_theme
 from plotting.vsm_hysteresis_loops import VSMPlotter
 
 
-class BasePlotterPlugin:
-    """Interface for script-specific behaviour inside the base plotter."""
+class PyPlotPlugin:
+    """Base plugin contract for PyPlot script integrations."""
 
-    def __init__(self, host: "BasePlotterWorkbench", name: str) -> None:
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         self.host = host
         self.name = name
+        self._settings_widget: QtWidgets.QWidget | None = None
 
     # Lifecycle ---------------------------------------------------------
     def activate(self) -> None:
@@ -40,20 +42,37 @@ class BasePlotterPlugin:
 
     # UI helpers --------------------------------------------------------
     def panel_widget(self) -> QtWidgets.QWidget | None:
-        """Return the widget shown in the script panel."""
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        label = QtWidgets.QLabel("Script-specific controls will appear here once implemented.")
+        label.setWordWrap(True)
+        layout.addWidget(label)
+        layout.addStretch(1)
+        return container
 
-        return None
+    def settings_widget(self) -> QtWidgets.QWidget:
+        if self._settings_widget is None:
+            container = QtWidgets.QWidget(self.host)
+            layout = QtWidgets.QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(8)
+            label = QtWidgets.QLabel("No additional settings are exposed for this script yet.")
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            layout.addStretch(1)
+            self._settings_widget = container
+        return self._settings_widget
 
-    def settings_widget(self) -> QtWidgets.QWidget | None:
-        self._ensure_initialized()
-        """Return the widget inserted into the Graph Settings dock."""
+    # Host actions ------------------------------------------------------
+    def load_data(self) -> None:
+        QtWidgets.QMessageBox.information(
+            self.host,
+            self.name,
+            "This script does not provide a load handler yet.",
+        )
 
-        return None
-
-    def update_ui(self) -> None:
-        """Refresh button states / summary labels."""
-
-    # Host action handlers ----------------------------------------------
     def generate(self) -> None:
         QtWidgets.QMessageBox.information(
             self.host,
@@ -96,211 +115,29 @@ class BasePlotterPlugin:
             "Origin export is not available for this plotting script yet.",
         )
 
-
-class ExternalPlotterPlugin(BasePlotterPlugin):
-    """Placeholder plugin that opens the legacy plotting window."""
-
-    def __init__(
-        self,
-        host: "BasePlotterWorkbench",
-        name: str,
-        launcher: Callable[[], QtWidgets.QWidget | None],
-    ) -> None:
-        super().__init__(host, name)
-        self._launcher = launcher
-        self._panel: QtWidgets.QWidget | None = None
-        self._settings_stub: QtWidgets.QWidget | None = None
-
-    def panel_widget(self) -> QtWidgets.QWidget:
-        if self._panel is None:
-            container = QtWidgets.QWidget(self.host)
-            layout = QtWidgets.QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            title = QtWidgets.QLabel(f"{self.name} (standalone)")
-            title.setStyleSheet("font-weight: 600;")
-            layout.addWidget(title)
-            message = QtWidgets.QLabel(
-                "This plotting script has not been migrated to the shared workspace yet. "
-                "Use the buttons below to open the original window."
-            )
-            message.setWordWrap(True)
-            layout.addWidget(message)
-
-            launch_button = QtWidgets.QPushButton(f"Open {self.name} window")
-            launch_button.clicked.connect(self.generate)
-            layout.addWidget(launch_button)
-            layout.addStretch(1)
-            self._panel = container
-        return self._panel
-
-    def settings_widget(self) -> QtWidgets.QWidget | None:
-        if self._settings_stub is None:
-            label = QtWidgets.QLabel(
-                "Script-specific settings will appear here once the workflow is migrated."
-            )
-            label.setWordWrap(True)
-            container = QtWidgets.QWidget(self.host)
-            layout = QtWidgets.QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(0)
-            layout.addWidget(label)
-            layout.addStretch(1)
-            self._settings_stub = container
-        return self._settings_stub
-
-    def update_ui(self) -> None:
-        self.host.plot_button.setText(f"Open {self.name}")
-        self.host.plot_button.setEnabled(True)
-        self.host.popout_button.setEnabled(False)
-        self.host.save_graph_button.setEnabled(False)
-        self.host.normalize_button.setEnabled(False)
-        self.host.export_button.setEnabled(False)
-        self.host.open_origin_button.setEnabled(False)
-
-    def generate(self) -> None:
-        try:
-            result = self._launcher()
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self.host,
-                self.name,
-                f"Failed to open {self.name}:\n{exc}",
-            )
-            return
-        if isinstance(result, QtWidgets.QWidget):
-            result.show()
-
-
-class VSMHysteresisPlugin(BasePlotterPlugin):
-    """Full-featured plugin that reuses the VSM hysteresis loops logic."""
-
-    _METHOD_EXCLUDES = {
-        "__init__",
-        "_create_dock_widget",
-        "_after_base_ui_created",
-        "_import_paths",
-        "_choose_files",
-        "_choose_folder",
-        "_handle_manual_path_entry",
-        "_open_files_from_menu",
-        "_open_folder_from_menu",
-        "_selected_paths",
-    }
-
-    def __init__(self, host: "BasePlotterWorkbench", name: str = "VSM Hysteresis Loops") -> None:
-        super().__init__(host, name)
-        self._panel: QtWidgets.QWidget | None = None
-        self._settings_widget: QtWidgets.QWidget | None = None
-        self._summary_label: QtWidgets.QLabel | None = None
-        self._initialized = False
-        self._menus_ready = False
-
-    # Lifecycle ---------------------------------------------------------
-    def activate(self) -> None:
-        self._ensure_initialized()
-        self.host.help_topic = VSMPlotter.help_topic
-        self.host._update_project_title()
-        self.host._update_project_actions()
-        self.update_ui()
-
-    def deactivate(self) -> None:
-        # keep state so reselecting preserves data
-        pass
-
-    # Widgets -----------------------------------------------------------
-    def panel_widget(self) -> QtWidgets.QWidget:
-        if self._panel is None:
-            container = QtWidgets.QWidget(self.host)
-            layout = QtWidgets.QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-
-            title = QtWidgets.QLabel("VSM Hysteresis Loops configuration")
-            title.setStyleSheet("font-weight: 600;")
-            layout.addWidget(title)
-
-            description = QtWidgets.QLabel(
-                "Script-specific controls for VSM data. Imported data remain in the workspace "
-                "while you adjust plotting behaviour."
-            )
-            description.setWordWrap(True)
-            layout.addWidget(description)
-
-            self._summary_label = QtWidgets.QLabel()
-            layout.addWidget(self._summary_label)
-
-            layout.addStretch(1)
-            self._panel = container
-        return self._panel
-
-    def settings_widget(self) -> QtWidgets.QWidget:
-        if self._settings_widget is None:
-            self._ensure_initialized()
-            container = QtWidgets.QWidget(self.host)
-            layout = QtWidgets.QVBoxLayout(container)
-            layout.setContentsMargins(0, 0, 0, 0)
-            layout.setSpacing(8)
-            VSMPlotter._populate_graph_settings(self.host, layout)
-            layout.addStretch(1)
-            self._settings_widget = container
-        return self._settings_widget
-
-    # Host actions ------------------------------------------------------
-    def generate(self) -> None:
-        if not self.host.path_edit.text().strip():
-            if not self.host._selected_paths:
-                QtWidgets.QMessageBox.information(
-                    self.host,
-                    self.name,
-                    "Import VSM measurements from the Data menu before generating plots.",
-                )
-                return
-            self.host.path_edit.setText(self.host._format_paths(self.host._selected_paths))
-        VSMPlotter._generate_plots(self.host)
-        self.host._save_settings()
-        self.update_ui()
-
-    def open_matplotlib(self) -> None:
-        VSMPlotter._open_matplotlib_window(self.host)
-
-    def save_graph(self) -> None:
-        VSMPlotter._save_current_graph(self.host)
-
-    def normalize(self) -> None:
-        VSMPlotter._normalize_current_graph(self.host)
-
-    def export_txt(self) -> None:
-        VSMPlotter._export_txt(self.host)
-
-    def open_origin(self) -> None:
-        VSMPlotter._open_origin_prompt(self.host)
-
-    # UI state ----------------------------------------------------------
-    def update_ui(self) -> None:
-        self._ensure_initialized()
-        host = self.host
-        if self._summary_label is not None:
-            count = len(host._selected_paths)
-            if count == 0:
-                self._summary_label.setText("No data sources selected.")
-            elif count == 1:
-                self._summary_label.setText(f"1 data source selected: {host._selected_paths[0]}")
-            else:
-                self._summary_label.setText(f"{count} data sources selected.")
-
-        has_paths = bool(host._selected_paths)
+# UI state ----------------------------------------------------------
+def update_ui(self) -> None:
+    self._ensure_initialized()
+    host = self.host
+    has_paths = bool(host._selected_paths)
+    if hasattr(host, "load_data_button"):
+        host.load_data_button.setEnabled(has_paths)
+    if self._summary_label is not None:
+        self._summary_label.clear()
+    if hasattr(host, "plot_button"):
         host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))
         host.plot_button.setText("Generate VSM Hysteresis Loops")
-
+    if hasattr(host, "_update_save_graph_enabled"):
         host._update_save_graph_enabled()
+    if hasattr(host, "_update_normalize_enabled"):
         host._update_normalize_enabled()
+    if hasattr(host, "_update_project_actions"):
         host._update_project_actions()
-
     # Internal helpers --------------------------------------------------
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
+        self._settings_loaded = False
         host = self.host
         host.logger = logging.getLogger("vsm_hysteresis_loops")
         host.logger.setLevel(logging.INFO)
@@ -314,7 +151,7 @@ class VSMHysteresisPlugin(BasePlotterPlugin):
         )
         host.last_export_path = None
 
-        host.measurements: List[VSMPlotter.VSMMeasurement] = []  # type: ignore[attr-defined]
+        host.measurements = []
         host._last_rescale_info = {}
         host._last_axes = None
         host._last_rescale_enabled = False
@@ -342,7 +179,6 @@ class VSMHysteresisPlugin(BasePlotterPlugin):
             VSMPlotter._extend_menus(host, host.menuBar())
             self._menus_ready = True
 
-        host._load_settings()
         self._initialized = True
 
     def _bind_methods(self) -> None:
@@ -355,8 +191,8 @@ class VSMHysteresisPlugin(BasePlotterPlugin):
             setattr(host, name, types.MethodType(func, host))
         host._vsm_methods_bound = True
 
-class BasePlotterWorkbench(BasePlotWindow):
-    """Lightweight harness for exercising shared BasePlotWindow features."""
+class PyPlotWorkbench(PyPlotWindow):
+    """Lightweight harness for exercising shared PyPlotWindow features."""
 
     help_topic = "pyplot"
     PROJECT_EXTENSION = ".pypj"
@@ -366,17 +202,25 @@ class BasePlotterWorkbench(BasePlotWindow):
     def __init__(
         self,
         *,
-        plotters: Dict[str, Callable[["BasePlotterWorkbench"], BasePlotterPlugin]] | None = None,
+        plotters: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] | None = None,
         initial_plotter: str | None = None,
     ) -> None:
-        self.settings = QtCore.QSettings("MicrowireLab", "BasePlotterWorkbench")
+        self.settings = QtCore.QSettings("MicrowireLab", "PyPlotWorkbench")
+        raw_dirs = self.settings.value("plugin_last_dirs", "{}")
+        try:
+            parsed_dirs = json.loads(raw_dirs) if isinstance(raw_dirs, str) else {}
+        except json.JSONDecodeError:
+            parsed_dirs = {}
+        self._plugin_last_directories: Dict[str, Path] = {
+            key: Path(value) for key, value in parsed_dirs.items() if isinstance(value, str)
+        }
         self._last_directory: Path | None = None
         self._selected_paths: List[Path] = []
         self._plugin_factories: Dict[
-            str, Callable[["BasePlotterWorkbench"], BasePlotterPlugin]
+            str, Callable[["PyPlotWorkbench"], PyPlotPlugin]
         ] = dict(sorted((plotters or {}).items()))
-        self._plugin_instances: Dict[str, BasePlotterPlugin] = {}
-        self._current_plugin: BasePlotterPlugin | None = None
+        self._plugin_instances: Dict[str, PyPlotPlugin] = {}
+        self._current_plugin: PyPlotPlugin | None = None
         self._current_plotter_name: str | None = None
         self._plotter_combo: QtWidgets.QComboBox | None = None
         self._plugin_settings_container: QtWidgets.QWidget | None = None
@@ -384,6 +228,7 @@ class BasePlotterWorkbench(BasePlotWindow):
         self._active_plugin_updater: Callable[[], None] | None = None
         self._initial_plotter = initial_plotter
         super().__init__(title="PyPlot")
+        self.setObjectName("PyPlotWorkbench")
         try:
             self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
         except Exception:
@@ -405,28 +250,62 @@ class BasePlotterWorkbench(BasePlotWindow):
         self._update_action_states()
         self._set_data_sources_visible(False)
         self._select_initial_plotter()
+        self._update_window_title()
+
+
+    def _update_window_title(self) -> None:
+        parts = ["PyPlot"]
+        if self._current_plotter_name:
+            parts.append(self._current_plotter_name)
+        project_path = getattr(self, "_project_path", None)
+        if isinstance(project_path, Path) and project_path.name:
+            parts.append(project_path.name)
+        else:
+            parts.append("UNTITLED")
+        self.setWindowTitle(" - ".join(parts))
 
     def _select_initial_plotter(self) -> None:
         if not self._plugin_factories:
             self._apply_selected_plotter()
             return
-        target = self._initial_plotter
-        if not target or target not in self._plugin_factories:
-            target = next(iter(self._plugin_factories), None)
+        target = self._initial_plotter if self._initial_plotter in self._plugin_factories else None
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
-        if combo is not None and target is not None:
-            index = combo.findText(target)
+        if combo is not None:
             combo.blockSignals(True)
-            if index >= 0:
-                combo.setCurrentIndex(index)
-            else:
+            if target is None:
                 combo.setCurrentIndex(0)
+            else:
+                index = combo.findData(target)
+                if index < 0:
+                    index = 0
+                combo.setCurrentIndex(index)
             combo.blockSignals(False)
-        self._apply_selected_plotter()
+        if target is not None:
+            self._apply_selected_plotter()
+        else:
+            self._current_plugin = None
+            self._current_plotter_name = None
+            self._set_script_panel(None)
+            self._set_plugin_settings_widget(None)
+            self._active_plugin_updater = None
+            self._update_action_states()
         return
-        return
+    def _dialog_start_directory(self) -> Path:
+        if self._current_plotter_name:
+            stored = self._plugin_last_directories.get(self._current_plotter_name)
+            if stored is not None and stored.exists():
+                return stored
+        return super()._dialog_start_directory()
+
     # ------------------------------------------------------------------ Qt hooks
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._current_plugin is not None:
+            try:
+                self._current_plugin.deactivate()
+            except Exception:
+                pass
+        payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
+        self.settings.setValue("plugin_last_dirs", json.dumps(payload))
         self.settings.setValue("sources", self.path_edit.text())
         if self._last_directory is not None:
             self.settings.setValue("last_directory", str(self._last_directory))
@@ -434,26 +313,50 @@ class BasePlotterWorkbench(BasePlotWindow):
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ project and data integration
+    def _load_data(self) -> None:
+        if self._current_plugin is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "PyPlot",
+                "Select a plotting script before loading data.",
+            )
+            return
+        self._current_plugin.load_data()
+        self._update_action_states()
+
+    def _update_action_states(self) -> None:
+        if self._current_plugin is not None:
+            try:
+                self._current_plugin.update_ui()
+            except Exception:
+                pass
+            return
+        if hasattr(self, "load_data_button"):
+            self.load_data_button.setEnabled(False)
+        if hasattr(self, "plot_button"):
+            self.plot_button.setEnabled(False)
+            self.plot_button.setText("Generate")
+        if hasattr(self, "popout_button"):
+            self.popout_button.setEnabled(False)
+        if hasattr(self, "save_graph_button"):
+            self.save_graph_button.setEnabled(False)
+        if hasattr(self, "normalize_button"):
+            self.normalize_button.setEnabled(False)
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(False)
+        if hasattr(self, "open_origin_button"):
+            self.open_origin_button.setEnabled(False)
+
     def _import_paths(self, paths: Iterable[Path]) -> None:
         super()._import_paths(paths)
-        seen: list[Path] = []
-        for workbook in self._workbooks.values():
-            source = workbook.source
-            if isinstance(source, Path):
-                try:
-                    resolved = source.resolve()
-                except Exception:
-                    resolved = source
-                if resolved not in seen:
-                    seen.append(resolved)
-        self._selected_paths = seen
-        if self._selected_paths:
-            self.path_edit.setText(self._format_paths(self._selected_paths))
-        else:
-            self.path_edit.clear()
+        if self._current_plotter_name and self._last_directory is not None:
+            self._plugin_last_directories[self._current_plotter_name] = self._last_directory
+            payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
+            self.settings.setValue("plugin_last_dirs", json.dumps(payload))
         self._update_action_states()
         self._update_project_actions()
-
+        self.settings.setValue("sources", self.path_edit.text())
+        self.settings.sync()
     def _has_project_data_to_save(self) -> bool:
         return bool(self._worksheets)
 
@@ -731,12 +634,12 @@ class BasePlotterWorkbench(BasePlotWindow):
         group_layout.setContentsMargins(8, 8, 8, 8)
         group_layout.setSpacing(6)
         self._plotter_combo = QtWidgets.QComboBox(group)
+        self._plotter_combo.addItem("Select a script…", None)
         if self._plugin_factories:
             for name in self._plugin_factories:
-                self._plotter_combo.addItem(name)
+                self._plotter_combo.addItem(name, name)
             self._plotter_combo.currentIndexChanged.connect(lambda _: self._apply_selected_plotter())
         else:
-            self._plotter_combo.addItem("No scripts available")
             self._plotter_combo.setEnabled(False)
         group_layout.addWidget(self._plotter_combo)
         layout.addWidget(group)
@@ -767,12 +670,9 @@ class BasePlotterWorkbench(BasePlotWindow):
             self._plugin_settings_container.setVisible(True)
 
     def _apply_selected_plotter(self) -> None:
-        name = (
-            self._plotter_combo.currentText()
-            if isinstance(self._plotter_combo, QtWidgets.QComboBox)
-            else None
-        )
-        if not name or name not in self._plugin_factories:
+        combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
+        name = combo.currentData() if combo is not None else None
+        if not name:
             if self._current_plugin is not None:
                 self._current_plugin.deactivate()
             self._current_plugin = None
@@ -780,6 +680,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             self._set_script_panel(None)
             self._set_plugin_settings_widget(None)
             self._active_plugin_updater = None
+            self._update_window_title()
             self._update_action_states()
             return
 
@@ -800,6 +701,9 @@ class BasePlotterWorkbench(BasePlotWindow):
             self._set_script_panel(plugin.panel_widget())
             self._set_plugin_settings_widget(plugin.settings_widget())
             plugin.activate()
+            last_dir = self._plugin_last_directories.get(name)
+            if last_dir is not None:
+                self._last_directory = last_dir if last_dir.exists() else self._last_directory
 
         self._active_plugin_updater = plugin.update_ui
         if self._active_plugin_updater is not None:
@@ -807,8 +711,8 @@ class BasePlotterWorkbench(BasePlotWindow):
                 self._active_plugin_updater()
             except Exception:
                 pass
+        self._update_window_title()
         self._update_action_states()
-
     def _apply_path_text(self, text: str) -> None:
         paths = [Path(entry) for entry in self._iter_path_entries(text)]
         self._selected_paths = paths
@@ -834,27 +738,22 @@ class BasePlotterWorkbench(BasePlotWindow):
         if last is not None:
             self._last_directory = last
 
-    def _dialog_start_directory(self) -> Path:
-        if self._last_directory is not None and self._last_directory.exists():
-            return self._last_directory
-        return Path.home()
 
-    def _update_action_states(self) -> None:
+
+    def _update_project_title(self) -> None:
+        self._update_window_title()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._current_plugin is not None:
             try:
-                self._current_plugin.update_ui()
+                self._current_plugin.deactivate()
             except Exception:
                 pass
-        else:
-            has_selection = bool(self._selected_paths)
-            self.plot_button.setEnabled(has_selection)
-            self.plot_button.setText("Generate plots")
-            self.popout_button.setEnabled(False)
-            self.save_graph_button.setEnabled(bool(self.tab_widget.currentWidget()))
-            self.normalize_button.setEnabled(False)
-            self.export_button.setEnabled(bool(self.tab_widget.currentWidget()))
-            self.open_origin_button.setEnabled(False)
-
+        payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
+        self.settings.setValue("plugin_last_dirs", json.dumps(payload))
+        self.settings.setValue("sources", self.path_edit.text())
+        self.settings.sync()
+        super().closeEvent(event)
 
 def main(
     available_plotters: Dict[str, Callable[[], QtWidgets.QWidget | None]] | None = None,
@@ -862,7 +761,7 @@ def main(
 ) -> QtWidgets.QWidget | None:
     """Entry-point used by the launcher."""
 
-    plugin_factories: Dict[str, Callable[["BasePlotterWorkbench"], BasePlotterPlugin]] = {}
+    plugin_factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {}
     for name, launcher in sorted((available_plotters or {}).items()):
         if name == "VSM Hysteresis Loops":
             plugin_factories[name] = lambda host, n=name: VSMHysteresisPlugin(host, n)
@@ -875,7 +774,7 @@ def main(
         app = QtWidgets.QApplication(sys.argv)
         created_app = True
     ensure_app_theme(app)
-    window = BasePlotterWorkbench(plotters=plugin_factories, initial_plotter=initial_plotter)
+    window = PyPlotWorkbench(plotters=plugin_factories, initial_plotter=initial_plotter)
     window.show()
     if created_app:
         app.exec()

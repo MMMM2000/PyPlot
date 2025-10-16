@@ -11,7 +11,7 @@ from data_logging import data_logger
 from data_logging.current_annealing_logger import current_annealing_logger
 from emulators import virtual_serial_emulator_gui
 from plotting import common
-from plotting.base_plotter_app import main as base_plotter_main
+from plotting.pyplot_app import main as pyplot_main
 from plotting.hsw_distribution import distribution_gui
 from plotting.hsw_load_compare import load_compare_gui
 from plotting.hysteresis_loops import loops_gui
@@ -47,17 +47,17 @@ LEGACY_PLOTTERS: Dict[str, LauncherFactory] = {
 }
 
 
-def launch_base_plotter(initial: str | None = None) -> QtWidgets.QWidget | None:
+def launch_pyplot(initial: str | None = None) -> QtWidgets.QWidget | None:
     """Open the base plotter workbench, optionally selecting a script."""
 
-    return base_plotter_main(available_plotters=LEGACY_PLOTTERS, initial_plotter=initial)
+    return pyplot_main(available_plotters=LEGACY_PLOTTERS, initial_plotter=initial)
 
 
 PLOTTERS: Dict[str, LauncherFactory] = {
-    "PyPlot": lambda: launch_base_plotter(),
+        "PyPlot": lambda: launch_pyplot(),
 }
 for _name in LEGACY_PLOTTERS:
-    PLOTTERS[_name] = (lambda n=_name: launch_base_plotter(initial=n))
+    PLOTTERS[_name] = (lambda n=_name: launch_pyplot(initial=n))
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": data_logger.main,

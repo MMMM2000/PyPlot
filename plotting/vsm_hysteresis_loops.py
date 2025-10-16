@@ -20,8 +20,8 @@ from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 
-from plotting.base_plotter import (
-    BasePlotWindow,
+from plotting.pyplot import (
+    PyPlotWindow,
     GraphLineState,
     GraphSelectionDialog,
     PlotTabState,
@@ -1615,7 +1615,7 @@ class ExportOptionsDialog(QtWidgets.QDialog):
         return str(data or "all")
 
 
-class VSMPlotter(BasePlotWindow):
+class VSMPlotter(PyPlotWindow):
     """Render hysteresis loops for VSM-HYS-DATA files."""
 
     help_topic = "vsm_hysteresis_loops"
