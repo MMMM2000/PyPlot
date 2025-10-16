@@ -54,7 +54,7 @@ def launch_base_plotter(initial: str | None = None) -> QtWidgets.QWidget | None:
 
 
 PLOTTERS: Dict[str, LauncherFactory] = {
-    "Base Plotter": lambda: launch_base_plotter(),
+    "PyPlot": lambda: launch_base_plotter(),
 }
 for _name in LEGACY_PLOTTERS:
     PLOTTERS[_name] = (lambda n=_name: launch_base_plotter(initial=n))
@@ -107,7 +107,6 @@ class MasterLauncher(QtWidgets.QWidget):
             except Exception:
                 pass
 
-        self.search_bar = QtWidgets.QLineEdit(self)
         self.search_bar = QtWidgets.QLineEdit(self)
         self.search_bar.setPlaceholderText("Search tools...")
         try:

@@ -236,6 +236,7 @@ class VSMHysteresisPlugin(BasePlotterPlugin):
 
     def settings_widget(self) -> QtWidgets.QWidget:
         if self._settings_widget is None:
+            self._ensure_initialized()
             container = QtWidgets.QWidget(self.host)
             layout = QtWidgets.QVBoxLayout(container)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -357,10 +358,10 @@ class VSMHysteresisPlugin(BasePlotterPlugin):
 class BasePlotterWorkbench(BasePlotWindow):
     """Lightweight harness for exercising shared BasePlotWindow features."""
 
-    help_topic = "base_plotter"
+    help_topic = "pyplot"
     PROJECT_EXTENSION = ".pypj"
-    PROJECT_CODE = "base_plotter"
-    PROJECT_SETTINGS_PREFIX = "base_plotter"
+    PROJECT_CODE = "pyplot"
+    PROJECT_SETTINGS_PREFIX = "pyplot"
 
     def __init__(
         self,
@@ -382,7 +383,7 @@ class BasePlotterWorkbench(BasePlotWindow):
         self._plugin_settings_layout: QtWidgets.QVBoxLayout | None = None
         self._active_plugin_updater: Callable[[], None] | None = None
         self._initial_plotter = initial_plotter
-        super().__init__(title="Base Plotter")
+        super().__init__(title="PyPlot")
         try:
             self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
         except Exception:
@@ -412,16 +413,17 @@ class BasePlotterWorkbench(BasePlotWindow):
         target = self._initial_plotter
         if not target or target not in self._plugin_factories:
             target = next(iter(self._plugin_factories), None)
-        if isinstance(self._plotter_combo, QtWidgets.QComboBox) and target is not None:
-            index = self._plotter_combo.findText(target)
+        combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
+        if combo is not None and target is not None:
+            index = combo.findText(target)
+            combo.blockSignals(True)
             if index >= 0:
-                self._plotter_combo.setCurrentIndex(index)
+                combo.setCurrentIndex(index)
             else:
-                self._plotter_combo.setCurrentIndex(0)
+                combo.setCurrentIndex(0)
+            combo.blockSignals(False)
         self._apply_selected_plotter()
-        self._apply_selected_plotter()
-        self._apply_selected_plotter()
-        self._select_initial_plotter()
+        return
         return
     # ------------------------------------------------------------------ Qt hooks
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
@@ -671,7 +673,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             return
         QtWidgets.QMessageBox.information(
             self,
-            "Base Plotter",
+            "PyPlot",
             "Select a plotting script before generating plots.",
         )
     def _open_matplotlib_window(self) -> None:
@@ -680,7 +682,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             return
         QtWidgets.QMessageBox.information(
             self,
-            "Base Plotter",
+            "PyPlot",
             "Select a plotting script that supports Matplotlib export.",
         )
     def _save_current_graph(self) -> None:
@@ -689,7 +691,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             return
         QtWidgets.QMessageBox.information(
             self,
-            "Base Plotter",
+            "PyPlot",
             "Plot a graph before saving.",
         )
     def _normalize_current_graph(self) -> None:
@@ -698,7 +700,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             return
         QtWidgets.QMessageBox.information(
             self,
-            "Base Plotter",
+            "PyPlot",
             "Plot a graph before normalizing.",
         )
     def _export_txt(self) -> None:
@@ -707,7 +709,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             return
         QtWidgets.QMessageBox.information(
             self,
-            "Base Plotter",
+            "PyPlot",
             "Generate data before exporting.",
         )
     def _open_origin_prompt(self) -> None:
@@ -716,7 +718,7 @@ class BasePlotterWorkbench(BasePlotWindow):
             return
         QtWidgets.QMessageBox.information(
             self,
-            "Base Plotter",
+            "PyPlot",
             "Origin export is not available for the selected script.",
         )
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:

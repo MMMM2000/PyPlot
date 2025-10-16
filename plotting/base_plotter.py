@@ -889,7 +889,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ project commands
     def _open_project_dialog(self) -> None:
         start_dir = self._project_dialog_start_directory()
-        filters = f"Python Plot Projects (*{self.PROJECT_EXTENSION});;All files (*)"
+        filters = f"Python Plot Project (*{self.PROJECT_EXTENSION});;All files (*)"
         path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Open Project",
@@ -923,7 +923,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
             return
         start_dir = self._project_dialog_start_directory()
         suggested = start_dir / self._default_project_filename()
-        filters = f"Python Plot Projects (*{self.PROJECT_EXTENSION});;All files (*)"
+        filters = f"Python Plot Project (*{self.PROJECT_EXTENSION});;All files (*)"
         path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Project As",
