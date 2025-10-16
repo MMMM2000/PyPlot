@@ -1480,16 +1480,26 @@ def install_standard_menu(
 
     def _invoke_focus(methods: tuple[str, ...]) -> None:
         widget = _focused_widget()
-        if widget is None:
-            return
-        for name in methods:
-            target_method = getattr(widget, name, None)
-            if callable(target_method):
-                try:
-                    target_method()
-                except Exception:
-                    pass
-                break
+        invoked = False
+        if widget is not None:
+            for name in methods:
+                target_method = getattr(widget, name, None)
+                if callable(target_method):
+                    try:
+                        target_method()
+                    except Exception:
+                        pass
+                    invoked = True
+                    break
+        if not invoked:
+            for name in methods:
+                fallback = getattr(target, name, None)
+                if callable(fallback):
+                    try:
+                        fallback()
+                    except Exception:
+                        pass
+                    break
 
     def _add_edit_action(
         label: str,

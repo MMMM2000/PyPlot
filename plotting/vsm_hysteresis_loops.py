@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -1618,6 +1619,8 @@ class VSMPlotter(BasePlotWindow):
     """Render hysteresis loops for VSM-HYS-DATA files."""
 
     help_topic = "vsm_hysteresis_loops"
+    PROJECT_VERSION = 1
+    PROJECT_EXTENSION = ".vsmproj"
 
     def __init__(self) -> None:
         self.logger = logging.getLogger("vsm_hysteresis_loops")
@@ -1650,9 +1653,20 @@ class VSMPlotter(BasePlotWindow):
         self._field_direction_enabled = False
         self._direction_legends: Dict[Any, Legend] = {}
 
-        super().__init__(title="VSM Hysteresis Loops")
+        self._base_title = "VSM Hysteresis Loops"
+        self._project_path: Path | None = None
+        self._recent_projects: List[str] = []
+        self._recent_projects_menu: QtWidgets.QMenu | None = None
+        self._open_project_action: QtGui.QAction | None = None
+        self._save_project_action: QtGui.QAction | None = None
+        self._save_project_as_action: QtGui.QAction | None = None
+        self._load_recent_projects_setting()
+
+        super().__init__(title=self._base_title)
         self.resize(1480, 940)
+        self._update_project_title()
         self._load_settings()
+        self._update_project_actions()
 
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         return AutoHideDockWidget(title, self, object_name=object_name)
@@ -1671,7 +1685,133 @@ class VSMPlotter(BasePlotWindow):
         self.log_view.installEventFilter(self)
         log_dock.visibilityChanged.connect(self._handle_log_visibility)
 
+    # ------------------------------------------------------------------ project helpers
+    def _update_project_title(self) -> None:
+        title = self._base_title
+        if self._project_path is not None:
+            title = f"{self._base_title} — {self._project_path.name}"
+        self.setWindowTitle(title)
+
+    def _update_project_actions(self) -> None:
+        has_measurements = bool(self.measurements)
+        if self._save_project_action is not None:
+            self._save_project_action.setEnabled(has_measurements)
+        if self._save_project_as_action is not None:
+            self._save_project_as_action.setEnabled(has_measurements)
+
+    def _load_recent_projects_setting(self) -> None:
+        stored = self.settings.value("recent_projects", "[]")
+        entries: List[str]
+        if isinstance(stored, str):
+            try:
+                parsed = json.loads(stored)
+            except json.JSONDecodeError:
+                parsed = []
+            entries = [entry for entry in parsed if isinstance(entry, str)]
+        elif isinstance(stored, (list, tuple)):
+            entries = [entry for entry in stored if isinstance(entry, str)]
+        else:
+            entries = []
+        self._recent_projects = entries[:10]
+
+    def _save_recent_projects_setting(self) -> None:
+        payload = json.dumps(self._recent_projects[:10], ensure_ascii=False)
+        self.settings.setValue("recent_projects", payload)
+        if self._project_path is not None:
+            self.settings.setValue("last_project_path", str(self._project_path))
+        else:
+            try:
+                self.settings.remove("last_project_path")
+            except Exception:
+                pass
+
+    def _remember_recent_project(self, path: Path) -> None:
+        try:
+            resolved = str(path.resolve())
+        except Exception:
+            resolved = str(path)
+        entries = [entry for entry in self._recent_projects if entry != resolved]
+        entries.insert(0, resolved)
+        self._recent_projects = entries[:10]
+        self._update_recent_projects_menu()
+        self._save_recent_projects_setting()
+
+    def _update_recent_projects_menu(self) -> None:
+        menu = self._recent_projects_menu
+        if menu is None:
+            return
+        menu.clear()
+        if not self._recent_projects:
+            action = menu.addAction("No recent projects")
+            if action is not None:
+                action.setEnabled(False)
+            return
+        for entry in self._recent_projects:
+            path = Path(entry)
+            label = path.name or entry
+            action = menu.addAction(label)
+            if action is None:
+                continue
+            action.triggered.connect(
+                lambda checked=False, e=entry: self._load_project_from_recent(e)
+            )
+
+    def _load_project_from_recent(self, entry: str) -> None:
+        self._load_project_from_path(Path(entry))
+
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        file_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_file")
+        if file_menu is not None:
+            actions = file_menu.actions()
+            insert_before: QtGui.QAction | None = None
+            for action in actions:
+                if action.isSeparator():
+                    insert_before = action
+                    break
+
+            def _insert(action: QtGui.QAction) -> None:
+                if insert_before is not None:
+                    file_menu.insertAction(insert_before, action)
+                else:
+                    file_menu.addAction(action)
+
+            open_sequence = "Ctrl+Alt+O"
+            if sys.platform == "darwin":
+                open_sequence = "Meta+Alt+O"
+            self._open_project_action = QtGui.QAction("Open Project…", self)
+            self._open_project_action.triggered.connect(self._open_project_dialog)
+            try:
+                self._open_project_action.setShortcut(QtGui.QKeySequence(open_sequence))
+            except Exception:
+                pass
+            _insert(self._open_project_action)
+
+            self._save_project_action = QtGui.QAction("Save Project", self)
+            self._save_project_action.triggered.connect(self._save_project)
+            try:
+                self._save_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save))
+            except Exception:
+                pass
+            _insert(self._save_project_action)
+
+            self._save_project_as_action = QtGui.QAction("Save Project As…", self)
+            self._save_project_as_action.triggered.connect(self._save_project_as)
+            try:
+                self._save_project_as_action.setShortcut(
+                    QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.SaveAs)
+                )
+            except Exception:
+                pass
+            _insert(self._save_project_as_action)
+
+            self._recent_projects_menu = QtWidgets.QMenu("Recent Projects", file_menu)
+            if insert_before is not None:
+                file_menu.insertMenu(insert_before, self._recent_projects_menu)
+            else:
+                file_menu.addMenu(self._recent_projects_menu)
+            file_menu.insertSeparator(insert_before) if insert_before is not None else file_menu.addSeparator()
+            self._update_recent_projects_menu()
+
         export_menu = menu_bar.addMenu("Export")
         export_data_action = export_menu.addAction("TXT data…")
         export_data_action.triggered.connect(self._export_txt)
@@ -1698,6 +1838,325 @@ class VSMPlotter(BasePlotWindow):
                 remanence_action.triggered.connect(
                     partial(self._show_metric_debug, "remanence")
                 )
+
+        self._update_project_actions()
+
+    # ------------------------------------------------------------------ project persistence
+    def _open_project_dialog(self) -> None:
+        if not self._recent_projects:
+            start_dir = self.settings.value('last_project_path', '')
+        else:
+            start_dir = self._recent_projects[0]
+        if isinstance(start_dir, str) and start_dir:
+            candidate = Path(start_dir)
+            if candidate.is_file():
+                start_dir_path = candidate.parent
+            else:
+                start_dir_path = candidate
+        elif self._project_path is not None:
+            start_dir_path = self._project_path.parent
+        else:
+            start_dir_path = Path.home()
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            'Open Project',
+            str(start_dir_path),
+            'VSM Projects (*.vsmproj);;All files (*)',
+        )
+        if not path_str:
+            return
+        self._load_project_from_path(Path(path_str))
+
+    def _save_project(self) -> None:
+        if not self.measurements:
+            QtWidgets.QMessageBox.information(
+                self, 'VSM Hysteresis Loops', 'Load VSM measurements before saving a project.'
+            )
+            return
+        if self._project_path is None:
+            self._save_project_as()
+            return
+        self._write_project_file(self._project_path)
+
+    def _save_project_as(self) -> None:
+        if not self.measurements:
+            QtWidgets.QMessageBox.information(
+                self, 'VSM Hysteresis Loops', 'Load VSM measurements before saving a project.'
+            )
+            return
+        if self._project_path is not None:
+            start_dir = self._project_path.parent
+        else:
+            start_dir = Path(self.settings.value('last_project_path', '') or Path.home())
+            if not start_dir.exists():
+                start_dir = Path.home()
+        path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            'Save Project As',
+            str(start_dir),
+            'VSM Projects (*.vsmproj);;All files (*)',
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        if target.suffix.lower() != self.PROJECT_EXTENSION:
+            target = target.with_suffix(self.PROJECT_EXTENSION)
+        self._write_project_file(target)
+
+    def _write_project_file(self, target: Path) -> None:
+        payload = self._build_project_payload(base_path=target.parent)
+        try:
+            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                'VSM Hysteresis Loops',
+                f"Failed to save project:\n{exc}",
+            )
+            return
+        self._project_path = target
+        self._update_project_title()
+        self._remember_recent_project(target)
+        self._append_log(f'Saved project to {target}')
+        self._update_project_actions()
+
+    def _build_project_payload(self, *, base_path: Path | None = None) -> Dict[str, Any]:
+        sources = [str(path) for path in self._selected_paths()]
+        temp_value = self.temperature_combo.currentData() if hasattr(self, 'temperature_combo') else None
+        if isinstance(temp_value, (int, float)):
+            temperature_filter = float(temp_value)
+        else:
+            temperature_filter = None
+        axes_payload = {
+            'x': self.x_axis_combo.currentText() if hasattr(self, 'x_axis_combo') else None,
+            'y': self.y_axis_combo.currentText() if hasattr(self, 'y_axis_combo') else None,
+        }
+        visibility_payload: Dict[str, Dict[str, bool]] = {}
+        for temperature, angles in self._line_visibility.items():
+            angle_map = {str(angle): bool(flag) for angle, flag in angles.items()}
+            visibility_payload[str(temperature)] = angle_map
+        measurements_payload: List[Dict[str, Any]] = []
+        base_dir = base_path.resolve() if base_path is not None else None
+        for measurement in self.measurements:
+            table = measurement.data.astype(object).where(
+                pd.notnull(measurement.data), None
+            )
+            records: List[Dict[str, Any]] = []
+            for _, row in table.iterrows():
+                record: Dict[str, Any] = {}
+                for column in table.columns:
+                    record[str(column)] = self._json_friendly(row[column])
+                records.append(record)
+            index_payload = [self._json_friendly(value) for value in table.index.tolist()]
+            entry: Dict[str, Any] = {
+                'path': str(measurement.path),
+                'temperature': self._json_friendly(measurement.temperature),
+                'angle': self._json_friendly(measurement.angle),
+                'data': {
+                    'columns': [str(column) for column in table.columns],
+                    'records': records,
+                    'index': index_payload,
+                },
+            }
+            if base_dir is not None:
+                try:
+                    relative = measurement.path.resolve().relative_to(base_dir)
+                except Exception:
+                    relative = None
+                if relative is not None:
+                    entry['relative_path'] = str(relative)
+            measurements_payload.append(entry)
+        payload: Dict[str, Any] = {
+            'version': self.PROJECT_VERSION,
+            'sources': sources,
+            'axes': axes_payload,
+            'temperature_filter': temperature_filter,
+            'field_direction': bool(self._field_direction_enabled),
+            'style': self.style_combo.currentData() if hasattr(self, 'style_combo') else None,
+            'dark_mode': bool(self.dark_mode_checkbox.isChecked()) if hasattr(self, 'dark_mode_checkbox') else False,
+            'line_visibility': visibility_payload,
+            'measurements': measurements_payload,
+        }
+        return payload
+
+    def _load_project_from_path(self, path: Path) -> None:
+        try:
+            payload = json.loads(path.read_text())
+        except FileNotFoundError:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', f'Project file not found: {path}'
+            )
+            return
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                'VSM Hysteresis Loops',
+                f"Failed to open project:\n{exc}",
+            )
+            return
+        version = payload.get('version') if isinstance(payload, dict) else None
+        if version != self.PROJECT_VERSION:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', 'This project was created with an incompatible version.'
+            )
+            return
+        if self._apply_project_payload(payload, path):
+            self._remember_recent_project(path)
+            self._append_log(f'Opened project {path}')
+
+    def _apply_project_payload(self, payload: Dict[str, Any], project_path: Path) -> bool:
+        measurements_data = payload.get('measurements')
+        if not isinstance(measurements_data, list) or not measurements_data:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', 'The project does not contain any measurements.'
+            )
+            return False
+        self._project_path = None
+        self._update_project_title()
+        self._reset_session_state()
+        sources = payload.get('sources')
+        if isinstance(sources, list):
+            source_strings = [str(item) for item in sources if isinstance(item, str)]
+            self.path_edit.setText(';'.join(source_strings))
+        else:
+            self.path_edit.clear()
+        style_value = payload.get('style')
+        if hasattr(self, 'style_combo') and isinstance(style_value, str):
+            index = self.style_combo.findData(style_value)
+            if index >= 0:
+                self.style_combo.setCurrentIndex(index)
+        dark_value = payload.get('dark_mode')
+        if hasattr(self, 'dark_mode_checkbox'):
+            self.dark_mode_checkbox.setChecked(bool(dark_value))
+        axes_data = payload.get('axes', {}) if isinstance(payload, dict) else {}
+        x_axis = axes_data.get('x') if isinstance(axes_data, dict) else None
+        y_axis = axes_data.get('y') if isinstance(axes_data, dict) else None
+        x_axis = x_axis if isinstance(x_axis, str) and x_axis else None
+        y_axis = y_axis if isinstance(y_axis, str) and y_axis else None
+        self._stored_axes = (x_axis, y_axis)
+        self._line_visibility = self._deserialize_line_visibility(payload.get('line_visibility', {}))
+        field_direction = bool(payload.get('field_direction'))
+        measurements: List[VSMMeasurement] = []
+        base_dir = project_path.parent
+        for entry in measurements_data:
+            if not isinstance(entry, dict):
+                continue
+            raw_path = entry.get('relative_path')
+            measurement_path: Path | None = None
+            if isinstance(raw_path, str) and raw_path:
+                measurement_path = (base_dir / raw_path).resolve()
+            else:
+                fallback = entry.get('path')
+                if isinstance(fallback, str) and fallback:
+                    candidate = Path(fallback)
+                    if not candidate.is_absolute():
+                        measurement_path = (base_dir / candidate).resolve()
+                    else:
+                        measurement_path = candidate
+            if measurement_path is None:
+                continue
+            temperature_value = entry.get('temperature')
+            angle_value = entry.get('angle')
+            temperature = float(temperature_value) if isinstance(temperature_value, (int, float)) else None
+            angle = float(angle_value) if isinstance(angle_value, (int, float)) else None
+            data_payload = entry.get('data')
+            if not isinstance(data_payload, dict):
+                continue
+            columns = data_payload.get('columns')
+            records = data_payload.get('records', [])
+            if not isinstance(columns, list):
+                continue
+            df = pd.DataFrame.from_records(records, columns=[str(col) for col in columns])
+            index_values = data_payload.get('index')
+            if isinstance(index_values, list) and len(index_values) == len(df):
+                df.index = pd.Index(index_values)
+            measurements.append(
+                VSMMeasurement(path=measurement_path, temperature=temperature, angle=angle, data=df)
+            )
+        if not measurements:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', 'No valid measurements were found in the project file.'
+            )
+            return False
+        self._project_path = project_path
+        self._update_project_title()
+        self.measurements = measurements
+        self.measurements.sort(
+            key=lambda m: (
+                float('inf') if m.temperature is None else m.temperature,
+                float('inf') if m.angle is None else m.angle,
+            )
+        )
+        self._populate_project_tree()
+        self._populate_worksheets()
+        unique_temperatures = sorted({m.temperature for m in self.measurements if m.temperature is not None})
+        for temp in unique_temperatures:
+            self.temperature_combo.addItem(f'{temp:g} °C', temp)
+        plottable = sum(1 for m in self.measurements if m.temperature is not None and m.angle is not None)
+        candidate_columns: List[str]
+        common_columns: Dict[str, int] | None = None
+        for measurement in self.measurements:
+            column_set = {col for col in measurement.data.columns if pd.api.types.is_numeric_dtype(measurement.data[col])}
+            if common_columns is None:
+                common_columns = {col: idx for idx, col in enumerate(measurement.data.columns) if col in column_set}
+            else:
+                common_columns = {col: idx for col, idx in common_columns.items() if col in column_set}
+        if common_columns:
+            candidate_columns = list(common_columns.keys())
+        elif self.measurements:
+            candidate_columns = list(self.measurements[0].data.columns)
+        else:
+            candidate_columns = []
+        if candidate_columns:
+            self._populate_axis_combos(candidate_columns)
+            if x_axis and self.x_axis_combo.findText(x_axis) >= 0:
+                self.x_axis_combo.setCurrentText(x_axis)
+            if y_axis and self.y_axis_combo.findText(y_axis) >= 0:
+                self.y_axis_combo.setCurrentText(y_axis)
+            self._store_axis_selection()
+        temp_filter = payload.get('temperature_filter')
+        if isinstance(temp_filter, (int, float)):
+            index = self.temperature_combo.findData(float(temp_filter))
+            if index >= 0:
+                self.temperature_combo.setCurrentIndex(index)
+        self.plot_button.setEnabled(plottable > 0)
+        self.export_button.setEnabled(True)
+        self._update_project_actions()
+        self._generate_plots()
+        self._set_field_direction_enabled(field_direction)
+        self._save_settings()
+        return True
+
+    def _deserialize_line_visibility(self, payload: Any) -> Dict[float, Dict[float, bool]]:
+        result: Dict[float, Dict[float, bool]] = {}
+        if not isinstance(payload, dict):
+            return result
+        for temp_key, angles in payload.items():
+            try:
+                temperature = float(temp_key)
+            except (TypeError, ValueError):
+                continue
+            visibility: Dict[float, bool] = {}
+            if isinstance(angles, dict):
+                for angle_key, flag in angles.items():
+                    try:
+                        angle = float(angle_key)
+                    except (TypeError, ValueError):
+                        continue
+                    visibility[angle] = bool(flag)
+            result[temperature] = visibility
+        return result
+
+    @staticmethod
+    def _json_friendly(value: Any) -> Any:
+        if isinstance(value, (int, str, bool)) or value is None:
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, np.generic):
+            python_value = value.item()
+            return VSMPlotter._json_friendly(python_value)
+        return str(value)
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         axes_group = QtWidgets.QGroupBox("Axes and filters")
@@ -1935,7 +2394,18 @@ class VSMPlotter(BasePlotWindow):
             Line2D([], [], color=color, linestyle="-", label="Increasing H"),
             Line2D([], [], color=color, linestyle="--", label="Decreasing H"),
         ]
-        legend = Legend(axes, handles, [handle.get_label() for handle in handles], loc="lower left")
+        legend = Legend(
+            axes,
+            handles,
+            [handle.get_label() for handle in handles],
+            loc="lower left",
+            bbox_to_anchor=(0.0, 1.02),
+            borderaxespad=0.0,
+        )
+        try:
+            legend.set_in_layout(False)
+        except Exception:
+            pass
         axes.add_artist(legend)
         self._style_legend(legend)
         self._direction_legends[axes] = legend
@@ -2004,6 +2474,7 @@ class VSMPlotter(BasePlotWindow):
             self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("window_state", self.saveState())
+        self._save_recent_projects_setting()
         self.settings.sync()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
@@ -2569,8 +3040,15 @@ class VSMPlotter(BasePlotWindow):
         self._focus_tree_on_tab(tab)
         self._update_tab_buttons()
     # ------------------------------------------------------------------ data loading
-    def _load_measurements(self, *, show_warning: bool = True) -> None:
-        self.measurements.clear()
+    def _reset_session_state(self, *, clear_measurements: bool = True) -> None:
+        if clear_measurements:
+            self.measurements.clear()
+        for legend in list(self._direction_legends.values()):
+            try:
+                legend.remove()
+            except Exception:
+                pass
+        self._direction_legends.clear()
         self.project_tree.clear()
         self._clear_tab_list(self._temperature_tab_widgets)
         self._clear_tab_list(self._metrics_angle_tabs)
@@ -2615,6 +3093,12 @@ class VSMPlotter(BasePlotWindow):
         self._update_metric_controls()
         self._update_normalize_enabled()
         self._update_tab_buttons()
+        self._update_project_actions()
+
+    def _load_measurements(self, *, show_warning: bool = True) -> None:
+        self._reset_session_state()
+        self._project_path = None
+        self._update_project_title()
 
         paths = self._selected_paths()
         if not paths:
@@ -2720,6 +3204,7 @@ class VSMPlotter(BasePlotWindow):
 
         self.plot_button.setEnabled(plottable > 0)
         self.export_button.setEnabled(True)
+        self._update_project_actions()
         self._save_settings()
 
     def _populate_axis_combos(self, labels: List[str]) -> None:
@@ -3310,8 +3795,9 @@ class VSMPlotter(BasePlotWindow):
             state for state in descriptor.lines.values() if state.line.get_visible()
         ]
         if visible_states:
+            handles = [self._legend_handle_for_state(state) for state in visible_states]
             legend = descriptor.axes.legend(
-                [state.line for state in visible_states],
+                handles,
                 [state.label for state in visible_states],
                 loc="best",
             )
@@ -3332,6 +3818,44 @@ class VSMPlotter(BasePlotWindow):
         except Exception:  # pragma: no cover - backend specific
             pass
         self._update_direction_legend(descriptor, self._field_direction_enabled)
+
+    def _legend_handle_for_state(self, state: GraphLineState) -> Line2D:
+        handle = Line2D([], [])
+        try:
+            color = state.line.get_color()
+        except Exception:
+            color = None
+        if color:
+            handle.set_color(color)
+        try:
+            linewidth = state.line.get_linewidth()
+        except Exception:
+            linewidth = None
+        if linewidth is not None:
+            handle.set_linewidth(linewidth)
+        marker = None
+        try:
+            marker = state.line.get_marker()
+        except Exception:
+            marker = None
+        if marker:
+            handle.set_marker(marker)
+            if marker != "None":
+                try:
+                    markersize = state.line.get_markersize()
+                except Exception:
+                    markersize = None
+                if markersize is not None:
+                    handle.set_markersize(markersize)
+        if self._field_direction_enabled:
+            style = self._line_style_kwargs().get("linestyle", "-")
+            handle.set_linestyle(style)
+        else:
+            try:
+                handle.set_linestyle(state.line.get_linestyle())
+            except Exception:
+                handle.set_linestyle("-")
+        return handle
 
     def _rescale_y_limits(
         self,
