@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple, cast
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
@@ -476,8 +476,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         item: QtWidgets.QTreeWidgetItem,
         column: int,
     ) -> None:
-        _ = column
-        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        data = self._project_item_payload(item, column)
         if not data:
             return
         role = data[0]
@@ -491,6 +490,41 @@ class BasePlotWindow(QtWidgets.QMainWindow):
                 self._open_worksheet_tab(path)
         elif role == "worksheet_group":
             item.setExpanded(not item.isExpanded())
+
+    def _assign_project_payload(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        payload: Tuple[str, Any],
+    ) -> None:
+        columns = max(1, item.columnCount())
+        for index in range(columns):
+            item.setData(index, QtCore.Qt.ItemDataRole.UserRole, payload)
+
+    def _project_item_payload(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        column: int,
+    ) -> Tuple[str, Any] | None:
+        candidates: List[int] = []
+        if column >= 0:
+            candidates.append(column)
+        candidates.append(0)
+        seen: set[int] = set()
+        for idx in candidates:
+            if idx in seen or idx < 0:
+                continue
+            seen.add(idx)
+            payload = item.data(idx, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(payload, tuple) and len(payload) >= 2:
+                return cast(Tuple[str, Any], payload)
+        column_count = item.columnCount()
+        for idx in range(column_count):
+            if idx in seen:
+                continue
+            payload = item.data(idx, QtCore.Qt.ItemDataRole.UserRole)
+            if isinstance(payload, tuple) and len(payload) >= 2:
+                return cast(Tuple[str, Any], payload)
+        return None
 
     # Placeholder methods that subclasses may override or extend -----------------
     def _handle_object_item_changed(self, *_: Any) -> None:

@@ -1620,7 +1620,7 @@ class VSMPlotter(BasePlotWindow):
 
     help_topic = "vsm_hysteresis_loops"
     PROJECT_VERSION = 1
-    PROJECT_EXTENSION = ".vsmproj"
+    PROJECT_EXTENSION = ".pypj"
 
     def __init__(self) -> None:
         self.logger = logging.getLogger("vsm_hysteresis_loops")
@@ -1861,7 +1861,7 @@ class VSMPlotter(BasePlotWindow):
             self,
             'Open Project',
             str(start_dir_path),
-            'VSM Projects (*.vsmproj);;All files (*)',
+            'Python Plot Projects (*.pypj);;All files (*)',
         )
         if not path_str:
             return
@@ -1894,7 +1894,7 @@ class VSMPlotter(BasePlotWindow):
             self,
             'Save Project As',
             str(start_dir),
-            'VSM Projects (*.vsmproj);;All files (*)',
+            'Python Plot Projects (*.pypj);;All files (*)',
         )
         if not path_str:
             return
@@ -2539,7 +2539,7 @@ class VSMPlotter(BasePlotWindow):
 
         graphs_root = QtWidgets.QTreeWidgetItem(["Graphs", ""])
         graphs_root.setFlags(graphs_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
-        graphs_root.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("group", "graphs"))
+        self._assign_project_payload(graphs_root, ("group", "graphs"))
         graphs_root.setExpanded(True)
         self.project_tree.addTopLevelItem(graphs_root)
         self._graph_tree_root = graphs_root
@@ -2548,8 +2548,8 @@ class VSMPlotter(BasePlotWindow):
         worksheets_root.setFlags(
             worksheets_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
         )
-        worksheets_root.setData(
-            0, QtCore.Qt.ItemDataRole.UserRole, ("group", "worksheets")
+        self._assign_project_payload(
+            worksheets_root, ("group", "worksheets")
         )
         worksheets_root.setExpanded(True)
         self.project_tree.addTopLevelItem(worksheets_root)
@@ -2575,9 +2575,8 @@ class VSMPlotter(BasePlotWindow):
                 parent = QtWidgets.QTreeWidgetItem([label, ""])
                 parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
                 parent.setExpanded(True)
-                parent.setData(
-                    0,
-                    QtCore.Qt.ItemDataRole.UserRole,
+                self._assign_project_payload(
+                    parent,
                     ("worksheet_group", measurement.temperature),
                 )
                 groups[temp_key] = parent
@@ -2590,9 +2589,8 @@ class VSMPlotter(BasePlotWindow):
             )
             details = measurement.path.name
             child = QtWidgets.QTreeWidgetItem([angle_label, details])
-            child.setData(
-                0,
-                QtCore.Qt.ItemDataRole.UserRole,
+            self._assign_project_payload(
+                child,
                 ("worksheet", measurement.path),
             )
             parent.addChild(child)
@@ -2614,27 +2612,6 @@ class VSMPlotter(BasePlotWindow):
                     view.setModel(model)
         for path in list(self._worksheet_tree_items.keys()):
             self._update_worksheet_item_state(path)
-
-    def _handle_project_item_double_click(
-        self,
-        item: QtWidgets.QTreeWidgetItem,
-        column: int,
-    ) -> None:
-        _ = column
-        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not data:
-            return
-        role = data[0]
-        if role == "graph":
-            tab = data[1]
-            if isinstance(tab, QtWidgets.QWidget):
-                self._show_tab(tab)
-        elif role == "worksheet":
-            path = data[1]
-            if isinstance(path, Path):
-                self._open_worksheet_tab(path)
-        elif role == "worksheet_group":
-            item.setExpanded(not item.isExpanded())
 
     def _update_worksheet_item_state(self, path: Path) -> None:
         item = self._worksheet_tree_items.get(path)
@@ -2724,9 +2701,8 @@ class VSMPlotter(BasePlotWindow):
         detail = descriptor.title
         if item is None:
             item = QtWidgets.QTreeWidgetItem([label, detail])
-            item.setData(
-                0,
-                QtCore.Qt.ItemDataRole.UserRole,
+            self._assign_project_payload(
+                item,
                 ("graph", tab),
             )
             self._graph_tree_root.addChild(item)
@@ -2734,6 +2710,10 @@ class VSMPlotter(BasePlotWindow):
         else:
             item.setText(0, label)
             item.setText(1, detail)
+            self._assign_project_payload(
+                item,
+                ("graph", tab),
+            )
         self._style_graph_item(item, self._is_tab_visible(tab))
 
     def _update_graph_tree_for_tab(self, tab: QtWidgets.QWidget) -> None:
