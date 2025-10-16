@@ -163,7 +163,9 @@ buttons use, adds `Close Window`/`Quit` actions, and keeps the last-used paths i
 sync so keyboard-driven workflows stay quick.  A new **Edit** menu sits beside
 it with working `Undo`, `Redo`, `Cut`, `Copy`, `Paste`, and `Select All`
 shortcuts that operate on whichever widget currently has focus, so you can
-drive text boxes and tables without touching the mouse.  The **View** menu
+drive text boxes and tables without touching the mouse.  Undo now tracks graph tabs as
+well, so a stray close click (or ⌘/Ctrl + W) can be reversed instantly on macOS and
+Windows alike.  The **View** menu
 exposes theme controls (System/Light/Dark), toggles the file browser or console
 panes, and resets splitter sizes if the layout becomes cramped, while **Help**
 opens a Markdown guide tailored to the current tool.  A dedicated **Window**
@@ -627,9 +629,15 @@ The workspace now mirrors the Origin-style experiment so the frequently used pan
 
 The Object Manager tree supersedes the floating “Show angles…” dialog and now mirrors whichever plot tab is active—temperature loops, angle overlays, or derived metrics—so hiding a node only affects the curves you are currently inspecting while keeping exports in sync. Angles and temperatures are sorted numerically, matching the way you read the legend. The angle picker in the Graph Settings dock replaces the old overlays window: multi-select rotations and choose **Plot selected angles across temperatures** to spawn overlay tabs inside the viewer instead of launching a separate Matplotlib window. Styling, rescale decisions, and the dark theme propagate automatically, and the always-available **Save graph…** action captures the active tab—temperature plots, overlays, or derived metrics—as PNG, PDF, or SVG for quick reporting. New tabs immediately apply the same layout pass used after visibility changes, so axis labels and titles are positioned correctly from the first render. The companion **Normalize Y** button (available on hysteresis loops and overlay tabs) divides each visible curve by its own peak, then rescales the axis around the resulting span (symmetrically if the data crosses zero) so the figure neither zooms out nor wastes empty space, and it still remembers the previous limits so a second click restores the original scale without nudging the canvas. Derived-metric tabs stay in their native units so comparisons such as saturation versus angle remain meaningful. **Open in Matplotlib** re-plots the selected tab into a floating window using Matplotlib’s constrained layout so titles and axis labels remain visible when you detach a comparison for closer inspection.
 
+Every interaction now feeds a global undo/redo stack, so a stray hide/show in the Object Manager, an accidental minimise, or an unwanted overlay tab can be reverted immediately from the **Edit → Undo** menu (or the usual keyboard shortcuts) and re-applied with **Redo**. The history even tracks newly generated tabs, letting you step backwards through a batch of plots without manually closing each one. Undo now even resurrects closed graph tabs, so an accidental click on a tab's close button is just a single shortcut away.
+
+The Graph Settings dock also gains a **Highlight field direction** toggle. When enabled, each hysteresis curve is split into solid segments while the applied field ramps up and dashed segments as it returns, with a second legend explaining the styles. The direction detection follows the worksheet ordering, works alongside normalisation and exports, and respects visibility filters so the extra styling never pollutes saved data. The original legend keeps the familiar solid styling while the new direction guide sits above the axes, so the two never fight for the same corner of the plot.
+
+Sessions can now be saved and restored just like an Origin project. Use **File → Save Project** to capture the loaded measurements, axis choices, visibility filters, and field-direction styling into a `.pypj` (Python Plot Project) bundle, then reopen it with **File → Open Project**. The File menu keeps track of the last few projects in a **Recent Projects** submenu, so hopping between experiments is as quick as a single click.
+
 The Message Log dock now highlights itself in red whenever an error is recorded—for example when a measurement fails to parse or a loop lacks the crossings required to compute coercivity. Hover over the tab or pin it open to acknowledge the message and the highlight clears automatically, so it is obvious when something in the workflow needs attention even while the panel is collapsed.
 
-Editable worksheets stay in sync with the plots. Right-click inside a worksheet tab to delete the selected rows, then hit **Generate plots** to recalc the curves and derived metrics with the cleaned data. The Project Explorer’s double-click handler jumps straight to the matching temperature tab so navigating dense batches stays effortless.
+Editable worksheets stay in sync with the plots. Right-click inside a worksheet tab to delete the selected rows, then hit **Generate plots** to recalc the curves and derived metrics with the cleaned data. The Project Explorer opens items on double-click or the **Return/Enter** key, so navigating dense batches on macOS trackpads is just as reliable as on Windows.
 
 All TXT exports now include an Origin-friendly header block: the first four
 rows provide short names, long names, units, and comments (complete with the

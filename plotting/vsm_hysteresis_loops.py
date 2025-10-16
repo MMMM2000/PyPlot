@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
@@ -16,6 +17,8 @@ import numpy as np
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.legend import Legend
+from matplotlib.lines import Line2D
 
 from plotting.base_plotter import (
     BasePlotWindow,
@@ -1616,6 +1619,8 @@ class VSMPlotter(BasePlotWindow):
     """Render hysteresis loops for VSM-HYS-DATA files."""
 
     help_topic = "vsm_hysteresis_loops"
+    PROJECT_VERSION = 1
+    PROJECT_EXTENSION = ".pypj"
 
     def __init__(self) -> None:
         self.logger = logging.getLogger("vsm_hysteresis_loops")
@@ -1645,10 +1650,23 @@ class VSMPlotter(BasePlotWindow):
         self._metric_debug_columns: Dict[str, Dict[str, str]] = {}
         self._metric_debug_windows: Dict[str, MetricDebugWindow] = {}
         self._last_graph_dir: Path | None = None
+        self._field_direction_enabled = False
+        self._direction_legends: Dict[Any, Legend] = {}
 
-        super().__init__(title="VSM Hysteresis Loops")
+        self._base_title = "VSM Hysteresis Loops"
+        self._project_path: Path | None = None
+        self._recent_projects: List[str] = []
+        self._recent_projects_menu: QtWidgets.QMenu | None = None
+        self._open_project_action: QtGui.QAction | None = None
+        self._save_project_action: QtGui.QAction | None = None
+        self._save_project_as_action: QtGui.QAction | None = None
+        self._load_recent_projects_setting()
+
+        super().__init__(title=self._base_title)
         self.resize(1480, 940)
+        self._update_project_title()
         self._load_settings()
+        self._update_project_actions()
 
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         return AutoHideDockWidget(title, self, object_name=object_name)
@@ -1667,7 +1685,133 @@ class VSMPlotter(BasePlotWindow):
         self.log_view.installEventFilter(self)
         log_dock.visibilityChanged.connect(self._handle_log_visibility)
 
+    # ------------------------------------------------------------------ project helpers
+    def _update_project_title(self) -> None:
+        title = self._base_title
+        if self._project_path is not None:
+            title = f"{self._base_title} — {self._project_path.name}"
+        self.setWindowTitle(title)
+
+    def _update_project_actions(self) -> None:
+        has_measurements = bool(self.measurements)
+        if self._save_project_action is not None:
+            self._save_project_action.setEnabled(has_measurements)
+        if self._save_project_as_action is not None:
+            self._save_project_as_action.setEnabled(has_measurements)
+
+    def _load_recent_projects_setting(self) -> None:
+        stored = self.settings.value("recent_projects", "[]")
+        entries: List[str]
+        if isinstance(stored, str):
+            try:
+                parsed = json.loads(stored)
+            except json.JSONDecodeError:
+                parsed = []
+            entries = [entry for entry in parsed if isinstance(entry, str)]
+        elif isinstance(stored, (list, tuple)):
+            entries = [entry for entry in stored if isinstance(entry, str)]
+        else:
+            entries = []
+        self._recent_projects = entries[:10]
+
+    def _save_recent_projects_setting(self) -> None:
+        payload = json.dumps(self._recent_projects[:10], ensure_ascii=False)
+        self.settings.setValue("recent_projects", payload)
+        if self._project_path is not None:
+            self.settings.setValue("last_project_path", str(self._project_path))
+        else:
+            try:
+                self.settings.remove("last_project_path")
+            except Exception:
+                pass
+
+    def _remember_recent_project(self, path: Path) -> None:
+        try:
+            resolved = str(path.resolve())
+        except Exception:
+            resolved = str(path)
+        entries = [entry for entry in self._recent_projects if entry != resolved]
+        entries.insert(0, resolved)
+        self._recent_projects = entries[:10]
+        self._update_recent_projects_menu()
+        self._save_recent_projects_setting()
+
+    def _update_recent_projects_menu(self) -> None:
+        menu = self._recent_projects_menu
+        if menu is None:
+            return
+        menu.clear()
+        if not self._recent_projects:
+            action = menu.addAction("No recent projects")
+            if action is not None:
+                action.setEnabled(False)
+            return
+        for entry in self._recent_projects:
+            path = Path(entry)
+            label = path.name or entry
+            action = menu.addAction(label)
+            if action is None:
+                continue
+            action.triggered.connect(
+                lambda checked=False, e=entry: self._load_project_from_recent(e)
+            )
+
+    def _load_project_from_recent(self, entry: str) -> None:
+        self._load_project_from_path(Path(entry))
+
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        file_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_file")
+        if file_menu is not None:
+            actions = file_menu.actions()
+            insert_before: QtGui.QAction | None = None
+            for action in actions:
+                if action.isSeparator():
+                    insert_before = action
+                    break
+
+            def _insert(action: QtGui.QAction) -> None:
+                if insert_before is not None:
+                    file_menu.insertAction(insert_before, action)
+                else:
+                    file_menu.addAction(action)
+
+            open_sequence = "Ctrl+Alt+O"
+            if sys.platform == "darwin":
+                open_sequence = "Meta+Alt+O"
+            self._open_project_action = QtGui.QAction("Open Project…", self)
+            self._open_project_action.triggered.connect(self._open_project_dialog)
+            try:
+                self._open_project_action.setShortcut(QtGui.QKeySequence(open_sequence))
+            except Exception:
+                pass
+            _insert(self._open_project_action)
+
+            self._save_project_action = QtGui.QAction("Save Project", self)
+            self._save_project_action.triggered.connect(self._save_project)
+            try:
+                self._save_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save))
+            except Exception:
+                pass
+            _insert(self._save_project_action)
+
+            self._save_project_as_action = QtGui.QAction("Save Project As…", self)
+            self._save_project_as_action.triggered.connect(self._save_project_as)
+            try:
+                self._save_project_as_action.setShortcut(
+                    QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.SaveAs)
+                )
+            except Exception:
+                pass
+            _insert(self._save_project_as_action)
+
+            self._recent_projects_menu = QtWidgets.QMenu("Recent Projects", file_menu)
+            if insert_before is not None:
+                file_menu.insertMenu(insert_before, self._recent_projects_menu)
+            else:
+                file_menu.addMenu(self._recent_projects_menu)
+            file_menu.insertSeparator(insert_before) if insert_before is not None else file_menu.addSeparator()
+            self._update_recent_projects_menu()
+
         export_menu = menu_bar.addMenu("Export")
         export_data_action = export_menu.addAction("TXT data…")
         export_data_action.triggered.connect(self._export_txt)
@@ -1694,6 +1838,325 @@ class VSMPlotter(BasePlotWindow):
                 remanence_action.triggered.connect(
                     partial(self._show_metric_debug, "remanence")
                 )
+
+        self._update_project_actions()
+
+    # ------------------------------------------------------------------ project persistence
+    def _open_project_dialog(self) -> None:
+        if not self._recent_projects:
+            start_dir = self.settings.value('last_project_path', '')
+        else:
+            start_dir = self._recent_projects[0]
+        if isinstance(start_dir, str) and start_dir:
+            candidate = Path(start_dir)
+            if candidate.is_file():
+                start_dir_path = candidate.parent
+            else:
+                start_dir_path = candidate
+        elif self._project_path is not None:
+            start_dir_path = self._project_path.parent
+        else:
+            start_dir_path = Path.home()
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            'Open Project',
+            str(start_dir_path),
+            'Python Plot Projects (*.pypj);;All files (*)',
+        )
+        if not path_str:
+            return
+        self._load_project_from_path(Path(path_str))
+
+    def _save_project(self) -> None:
+        if not self.measurements:
+            QtWidgets.QMessageBox.information(
+                self, 'VSM Hysteresis Loops', 'Load VSM measurements before saving a project.'
+            )
+            return
+        if self._project_path is None:
+            self._save_project_as()
+            return
+        self._write_project_file(self._project_path)
+
+    def _save_project_as(self) -> None:
+        if not self.measurements:
+            QtWidgets.QMessageBox.information(
+                self, 'VSM Hysteresis Loops', 'Load VSM measurements before saving a project.'
+            )
+            return
+        if self._project_path is not None:
+            start_dir = self._project_path.parent
+        else:
+            start_dir = Path(self.settings.value('last_project_path', '') or Path.home())
+            if not start_dir.exists():
+                start_dir = Path.home()
+        path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            'Save Project As',
+            str(start_dir),
+            'Python Plot Projects (*.pypj);;All files (*)',
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        if target.suffix.lower() != self.PROJECT_EXTENSION:
+            target = target.with_suffix(self.PROJECT_EXTENSION)
+        self._write_project_file(target)
+
+    def _write_project_file(self, target: Path) -> None:
+        payload = self._build_project_payload(base_path=target.parent)
+        try:
+            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                'VSM Hysteresis Loops',
+                f"Failed to save project:\n{exc}",
+            )
+            return
+        self._project_path = target
+        self._update_project_title()
+        self._remember_recent_project(target)
+        self._append_log(f'Saved project to {target}')
+        self._update_project_actions()
+
+    def _build_project_payload(self, *, base_path: Path | None = None) -> Dict[str, Any]:
+        sources = [str(path) for path in self._selected_paths()]
+        temp_value = self.temperature_combo.currentData() if hasattr(self, 'temperature_combo') else None
+        if isinstance(temp_value, (int, float)):
+            temperature_filter = float(temp_value)
+        else:
+            temperature_filter = None
+        axes_payload = {
+            'x': self.x_axis_combo.currentText() if hasattr(self, 'x_axis_combo') else None,
+            'y': self.y_axis_combo.currentText() if hasattr(self, 'y_axis_combo') else None,
+        }
+        visibility_payload: Dict[str, Dict[str, bool]] = {}
+        for temperature, angles in self._line_visibility.items():
+            angle_map = {str(angle): bool(flag) for angle, flag in angles.items()}
+            visibility_payload[str(temperature)] = angle_map
+        measurements_payload: List[Dict[str, Any]] = []
+        base_dir = base_path.resolve() if base_path is not None else None
+        for measurement in self.measurements:
+            table = measurement.data.astype(object).where(
+                pd.notnull(measurement.data), None
+            )
+            records: List[Dict[str, Any]] = []
+            for _, row in table.iterrows():
+                record: Dict[str, Any] = {}
+                for column in table.columns:
+                    record[str(column)] = self._json_friendly(row[column])
+                records.append(record)
+            index_payload = [self._json_friendly(value) for value in table.index.tolist()]
+            entry: Dict[str, Any] = {
+                'path': str(measurement.path),
+                'temperature': self._json_friendly(measurement.temperature),
+                'angle': self._json_friendly(measurement.angle),
+                'data': {
+                    'columns': [str(column) for column in table.columns],
+                    'records': records,
+                    'index': index_payload,
+                },
+            }
+            if base_dir is not None:
+                try:
+                    relative = measurement.path.resolve().relative_to(base_dir)
+                except Exception:
+                    relative = None
+                if relative is not None:
+                    entry['relative_path'] = str(relative)
+            measurements_payload.append(entry)
+        payload: Dict[str, Any] = {
+            'version': self.PROJECT_VERSION,
+            'sources': sources,
+            'axes': axes_payload,
+            'temperature_filter': temperature_filter,
+            'field_direction': bool(self._field_direction_enabled),
+            'style': self.style_combo.currentData() if hasattr(self, 'style_combo') else None,
+            'dark_mode': bool(self.dark_mode_checkbox.isChecked()) if hasattr(self, 'dark_mode_checkbox') else False,
+            'line_visibility': visibility_payload,
+            'measurements': measurements_payload,
+        }
+        return payload
+
+    def _load_project_from_path(self, path: Path) -> None:
+        try:
+            payload = json.loads(path.read_text())
+        except FileNotFoundError:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', f'Project file not found: {path}'
+            )
+            return
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                'VSM Hysteresis Loops',
+                f"Failed to open project:\n{exc}",
+            )
+            return
+        version = payload.get('version') if isinstance(payload, dict) else None
+        if version != self.PROJECT_VERSION:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', 'This project was created with an incompatible version.'
+            )
+            return
+        if self._apply_project_payload(payload, path):
+            self._remember_recent_project(path)
+            self._append_log(f'Opened project {path}')
+
+    def _apply_project_payload(self, payload: Dict[str, Any], project_path: Path) -> bool:
+        measurements_data = payload.get('measurements')
+        if not isinstance(measurements_data, list) or not measurements_data:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', 'The project does not contain any measurements.'
+            )
+            return False
+        self._project_path = None
+        self._update_project_title()
+        self._reset_session_state()
+        sources = payload.get('sources')
+        if isinstance(sources, list):
+            source_strings = [str(item) for item in sources if isinstance(item, str)]
+            self.path_edit.setText(';'.join(source_strings))
+        else:
+            self.path_edit.clear()
+        style_value = payload.get('style')
+        if hasattr(self, 'style_combo') and isinstance(style_value, str):
+            index = self.style_combo.findData(style_value)
+            if index >= 0:
+                self.style_combo.setCurrentIndex(index)
+        dark_value = payload.get('dark_mode')
+        if hasattr(self, 'dark_mode_checkbox'):
+            self.dark_mode_checkbox.setChecked(bool(dark_value))
+        axes_data = payload.get('axes', {}) if isinstance(payload, dict) else {}
+        x_axis = axes_data.get('x') if isinstance(axes_data, dict) else None
+        y_axis = axes_data.get('y') if isinstance(axes_data, dict) else None
+        x_axis = x_axis if isinstance(x_axis, str) and x_axis else None
+        y_axis = y_axis if isinstance(y_axis, str) and y_axis else None
+        self._stored_axes = (x_axis, y_axis)
+        self._line_visibility = self._deserialize_line_visibility(payload.get('line_visibility', {}))
+        field_direction = bool(payload.get('field_direction'))
+        measurements: List[VSMMeasurement] = []
+        base_dir = project_path.parent
+        for entry in measurements_data:
+            if not isinstance(entry, dict):
+                continue
+            raw_path = entry.get('relative_path')
+            measurement_path: Path | None = None
+            if isinstance(raw_path, str) and raw_path:
+                measurement_path = (base_dir / raw_path).resolve()
+            else:
+                fallback = entry.get('path')
+                if isinstance(fallback, str) and fallback:
+                    candidate = Path(fallback)
+                    if not candidate.is_absolute():
+                        measurement_path = (base_dir / candidate).resolve()
+                    else:
+                        measurement_path = candidate
+            if measurement_path is None:
+                continue
+            temperature_value = entry.get('temperature')
+            angle_value = entry.get('angle')
+            temperature = float(temperature_value) if isinstance(temperature_value, (int, float)) else None
+            angle = float(angle_value) if isinstance(angle_value, (int, float)) else None
+            data_payload = entry.get('data')
+            if not isinstance(data_payload, dict):
+                continue
+            columns = data_payload.get('columns')
+            records = data_payload.get('records', [])
+            if not isinstance(columns, list):
+                continue
+            df = pd.DataFrame.from_records(records, columns=[str(col) for col in columns])
+            index_values = data_payload.get('index')
+            if isinstance(index_values, list) and len(index_values) == len(df):
+                df.index = pd.Index(index_values)
+            measurements.append(
+                VSMMeasurement(path=measurement_path, temperature=temperature, angle=angle, data=df)
+            )
+        if not measurements:
+            QtWidgets.QMessageBox.warning(
+                self, 'VSM Hysteresis Loops', 'No valid measurements were found in the project file.'
+            )
+            return False
+        self._project_path = project_path
+        self._update_project_title()
+        self.measurements = measurements
+        self.measurements.sort(
+            key=lambda m: (
+                float('inf') if m.temperature is None else m.temperature,
+                float('inf') if m.angle is None else m.angle,
+            )
+        )
+        self._populate_project_tree()
+        self._populate_worksheets()
+        unique_temperatures = sorted({m.temperature for m in self.measurements if m.temperature is not None})
+        for temp in unique_temperatures:
+            self.temperature_combo.addItem(f'{temp:g} °C', temp)
+        plottable = sum(1 for m in self.measurements if m.temperature is not None and m.angle is not None)
+        candidate_columns: List[str]
+        common_columns: Dict[str, int] | None = None
+        for measurement in self.measurements:
+            column_set = {col for col in measurement.data.columns if pd.api.types.is_numeric_dtype(measurement.data[col])}
+            if common_columns is None:
+                common_columns = {col: idx for idx, col in enumerate(measurement.data.columns) if col in column_set}
+            else:
+                common_columns = {col: idx for col, idx in common_columns.items() if col in column_set}
+        if common_columns:
+            candidate_columns = list(common_columns.keys())
+        elif self.measurements:
+            candidate_columns = list(self.measurements[0].data.columns)
+        else:
+            candidate_columns = []
+        if candidate_columns:
+            self._populate_axis_combos(candidate_columns)
+            if x_axis and self.x_axis_combo.findText(x_axis) >= 0:
+                self.x_axis_combo.setCurrentText(x_axis)
+            if y_axis and self.y_axis_combo.findText(y_axis) >= 0:
+                self.y_axis_combo.setCurrentText(y_axis)
+            self._store_axis_selection()
+        temp_filter = payload.get('temperature_filter')
+        if isinstance(temp_filter, (int, float)):
+            index = self.temperature_combo.findData(float(temp_filter))
+            if index >= 0:
+                self.temperature_combo.setCurrentIndex(index)
+        self.plot_button.setEnabled(plottable > 0)
+        self.export_button.setEnabled(True)
+        self._update_project_actions()
+        self._generate_plots()
+        self._set_field_direction_enabled(field_direction)
+        self._save_settings()
+        return True
+
+    def _deserialize_line_visibility(self, payload: Any) -> Dict[float, Dict[float, bool]]:
+        result: Dict[float, Dict[float, bool]] = {}
+        if not isinstance(payload, dict):
+            return result
+        for temp_key, angles in payload.items():
+            try:
+                temperature = float(temp_key)
+            except (TypeError, ValueError):
+                continue
+            visibility: Dict[float, bool] = {}
+            if isinstance(angles, dict):
+                for angle_key, flag in angles.items():
+                    try:
+                        angle = float(angle_key)
+                    except (TypeError, ValueError):
+                        continue
+                    visibility[angle] = bool(flag)
+            result[temperature] = visibility
+        return result
+
+    @staticmethod
+    def _json_friendly(value: Any) -> Any:
+        if isinstance(value, (int, str, bool)) or value is None:
+            return value
+        if isinstance(value, float):
+            return value if math.isfinite(value) else None
+        if isinstance(value, np.generic):
+            python_value = value.item()
+            return VSMPlotter._json_friendly(python_value)
+        return str(value)
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         axes_group = QtWidgets.QGroupBox("Axes and filters")
@@ -1726,6 +2189,15 @@ class VSMPlotter(BasePlotWindow):
         self.dark_mode_checkbox.setToolTip("Render Matplotlib plots using a dark background theme.")
         self.dark_mode_checkbox.toggled.connect(self._restyle_plots)
         appearance_layout.addWidget(self.dark_mode_checkbox)
+        self.field_direction_button = QtWidgets.QPushButton(
+            "Highlight field direction"
+        )
+        self.field_direction_button.setCheckable(True)
+        self.field_direction_button.setToolTip(
+            "Use solid lines for increasing magnetic field and dashed lines for decreasing segments."
+        )
+        self.field_direction_button.toggled.connect(self._handle_field_direction_toggle)
+        appearance_layout.addWidget(self.field_direction_button)
         layout.addWidget(appearance_group)
 
         overlay_group = QtWidgets.QGroupBox("Angle overlays")
@@ -1765,6 +2237,188 @@ class VSMPlotter(BasePlotWindow):
         self.angle_overlay_list.itemSelectionChanged.connect(
             self._update_overlay_button_state
         )
+
+
+    def _handle_field_direction_toggle(self, checked: bool) -> None:
+        previous = self._field_direction_enabled
+        if previous == checked:
+            return
+        self._set_field_direction_enabled(checked, update_button=False)
+        description = (
+            "Enable field-direction highlighting"
+            if checked
+            else "Disable field-direction highlighting"
+        )
+        self._record_history_action(
+            description,
+            undo=lambda prev=previous: self._set_field_direction_enabled(prev),
+            redo=lambda current=checked: self._set_field_direction_enabled(current),
+        )
+
+    def _set_field_direction_enabled(
+        self,
+        enabled: bool,
+        *,
+        update_button: bool = True,
+    ) -> None:
+        self._field_direction_enabled = bool(enabled)
+        if update_button and hasattr(self, "field_direction_button"):
+            self.field_direction_button.blockSignals(True)
+            self.field_direction_button.setChecked(self._field_direction_enabled)
+            self.field_direction_button.blockSignals(False)
+        for descriptor in list(self._tab_descriptors.values()):
+            self._apply_direction_split_to_descriptor(descriptor)
+            self._refresh_descriptor_legend(descriptor, force_layout=True)
+
+    def _apply_direction_split_to_descriptor(self, descriptor: TabDescriptor) -> None:
+        if not descriptor.lines:
+            self._update_direction_legend(descriptor, False)
+            return
+        for state in descriptor.lines.values():
+            self._apply_direction_split_to_state(descriptor, state)
+
+    def _apply_direction_split_to_state(
+        self,
+        descriptor: TabDescriptor,
+        state: GraphLineState,
+    ) -> None:
+        self._clear_state_extra_lines(state)
+        x_data = np.asarray(state.x_data(), dtype=float)
+        y_data = np.asarray(state.y_data(), dtype=float)
+        if (
+            x_data.size == 0
+            or y_data.size == 0
+            or x_data.shape != y_data.shape
+            or not np.isfinite(x_data).any()
+        ):
+            if x_data.size and y_data.size:
+                state.line.set_data(x_data, y_data)
+            self._apply_default_line_style(state.line)
+            return
+
+        if not self._field_direction_enabled:
+            state.line.set_data(x_data, y_data)
+            self._apply_default_line_style(state.line)
+            return
+
+        half = x_data.size // 2
+        if half == 0 or half >= x_data.size:
+            state.line.set_data(x_data, y_data)
+            self._apply_default_line_style(state.line)
+            return
+
+        x_first = x_data[:half]
+        y_first = y_data[:half]
+        x_second = x_data[half:]
+        y_second = y_data[half:]
+
+        direction_first = self._segment_direction(x_first)
+        direction_second = self._segment_direction(x_second)
+
+        get_attr = getattr
+        color = get_attr(state.line, "get_color", lambda: None)()
+        linewidth = get_attr(state.line, "get_linewidth", lambda: None)()
+        marker = get_attr(state.line, "get_marker", lambda: "None")()
+        markersize = get_attr(state.line, "get_markersize", lambda: None)()
+
+        state.line.set_data(x_first, y_first)
+        state.line.set_linestyle("-" if direction_first >= 0 else "--")
+        if color is not None:
+            state.line.set_color(color)
+        if linewidth is not None:
+            state.line.set_linewidth(linewidth)
+        if marker is not None:
+            state.line.set_marker(marker)
+            if markersize is not None and marker != "None":
+                state.line.set_markersize(markersize)
+
+        extra_line = Line2D(x_second, y_second)
+        if color is not None:
+            extra_line.set_color(color)
+        extra_line.set_linestyle("-" if direction_second >= 0 else "--")
+        if linewidth is not None:
+            extra_line.set_linewidth(linewidth)
+        if marker is not None:
+            extra_line.set_marker(marker)
+            if markersize is not None and marker != "None":
+                extra_line.set_markersize(markersize)
+        extra_line.set_label("_direction_segment")
+        extra_line.set_visible(state.line.get_visible())
+        descriptor.axes.add_line(extra_line)
+        state.extra_lines = [extra_line]
+
+    @staticmethod
+    def _segment_direction(values: np.ndarray) -> int:
+        diffs = np.diff(values)
+        finite = diffs[np.isfinite(diffs)]
+        if finite.size == 0:
+            return 0
+        total = float(np.sum(finite))
+        if total > 0:
+            return 1
+        if total < 0:
+            return -1
+        return 0
+
+    def _clear_state_extra_lines(self, state: GraphLineState) -> None:
+        for line in state.extra_lines:
+            try:
+                line.remove()
+            except Exception:
+                pass
+        state.extra_lines.clear()
+
+    def _apply_default_line_style(self, line: Any) -> None:
+        style = self._line_style_kwargs()
+        line.set_linestyle(style.get("linestyle", "-"))
+        marker = style.get("marker")
+        if marker:
+            line.set_marker(marker)
+            line.set_markersize(style.get("markersize", line.get_markersize()))
+        else:
+            line.set_marker("None")
+
+    def _update_direction_legend(self, descriptor: TabDescriptor, enabled: bool) -> None:
+        axes = descriptor.axes
+        legend = self._direction_legends.pop(axes, None)
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:
+                pass
+        if not enabled or not descriptor.lines:
+            return
+
+        color = self._direction_reference_color(descriptor)
+        handles = [
+            Line2D([], [], color=color, linestyle="-", label="Increasing H"),
+            Line2D([], [], color=color, linestyle="--", label="Decreasing H"),
+        ]
+        legend = Legend(
+            axes,
+            handles,
+            [handle.get_label() for handle in handles],
+            loc="lower left",
+            bbox_to_anchor=(0.0, 1.02),
+            borderaxespad=0.0,
+        )
+        try:
+            legend.set_in_layout(False)
+        except Exception:
+            pass
+        axes.add_artist(legend)
+        self._style_legend(legend)
+        self._direction_legends[axes] = legend
+
+    def _direction_reference_color(self, descriptor: TabDescriptor) -> str:
+        for state in descriptor.lines.values():
+            try:
+                color = state.line.get_color()
+            except Exception:
+                color = None
+            if color:
+                return str(color)
+        return "#404040"
 
 
     def _load_settings(self) -> None:
@@ -1820,6 +2474,7 @@ class VSMPlotter(BasePlotWindow):
             self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("window_state", self.saveState())
+        self._save_recent_projects_setting()
         self.settings.sync()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
@@ -1884,7 +2539,7 @@ class VSMPlotter(BasePlotWindow):
 
         graphs_root = QtWidgets.QTreeWidgetItem(["Graphs", ""])
         graphs_root.setFlags(graphs_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
-        graphs_root.setData(0, QtCore.Qt.ItemDataRole.UserRole, ("group", "graphs"))
+        self._assign_project_payload(graphs_root, ("group", "graphs"))
         graphs_root.setExpanded(True)
         self.project_tree.addTopLevelItem(graphs_root)
         self._graph_tree_root = graphs_root
@@ -1893,8 +2548,8 @@ class VSMPlotter(BasePlotWindow):
         worksheets_root.setFlags(
             worksheets_root.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable
         )
-        worksheets_root.setData(
-            0, QtCore.Qt.ItemDataRole.UserRole, ("group", "worksheets")
+        self._assign_project_payload(
+            worksheets_root, ("group", "worksheets")
         )
         worksheets_root.setExpanded(True)
         self.project_tree.addTopLevelItem(worksheets_root)
@@ -1920,9 +2575,8 @@ class VSMPlotter(BasePlotWindow):
                 parent = QtWidgets.QTreeWidgetItem([label, ""])
                 parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
                 parent.setExpanded(True)
-                parent.setData(
-                    0,
-                    QtCore.Qt.ItemDataRole.UserRole,
+                self._assign_project_payload(
+                    parent,
                     ("worksheet_group", measurement.temperature),
                 )
                 groups[temp_key] = parent
@@ -1935,9 +2589,8 @@ class VSMPlotter(BasePlotWindow):
             )
             details = measurement.path.name
             child = QtWidgets.QTreeWidgetItem([angle_label, details])
-            child.setData(
-                0,
-                QtCore.Qt.ItemDataRole.UserRole,
+            self._assign_project_payload(
+                child,
                 ("worksheet", measurement.path),
             )
             parent.addChild(child)
@@ -1959,28 +2612,6 @@ class VSMPlotter(BasePlotWindow):
                     view.setModel(model)
         for path in list(self._worksheet_tree_items.keys()):
             self._update_worksheet_item_state(path)
-
-    def _handle_project_item_double_click(
-        self,
-        item: QtWidgets.QTreeWidgetItem,
-        column: int,
-    ) -> None:
-        if column != 0:
-            return
-        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not data:
-            return
-        role = data[0]
-        if role == "graph":
-            tab = data[1]
-            if isinstance(tab, QtWidgets.QWidget):
-                self._show_tab(tab)
-        elif role == "worksheet":
-            path = data[1]
-            if isinstance(path, Path):
-                self._open_worksheet_tab(path)
-        elif role == "worksheet_group":
-            item.setExpanded(not item.isExpanded())
 
     def _update_worksheet_item_state(self, path: Path) -> None:
         item = self._worksheet_tree_items.get(path)
@@ -2070,9 +2701,8 @@ class VSMPlotter(BasePlotWindow):
         detail = descriptor.title
         if item is None:
             item = QtWidgets.QTreeWidgetItem([label, detail])
-            item.setData(
-                0,
-                QtCore.Qt.ItemDataRole.UserRole,
+            self._assign_project_payload(
+                item,
                 ("graph", tab),
             )
             self._graph_tree_root.addChild(item)
@@ -2080,6 +2710,10 @@ class VSMPlotter(BasePlotWindow):
         else:
             item.setText(0, label)
             item.setText(1, detail)
+            self._assign_project_payload(
+                item,
+                ("graph", tab),
+            )
         self._style_graph_item(item, self._is_tab_visible(tab))
 
     def _update_graph_tree_for_tab(self, tab: QtWidgets.QWidget) -> None:
@@ -2155,48 +2789,6 @@ class VSMPlotter(BasePlotWindow):
         path = self._tab_to_worksheet_path.get(tab)
         if path is not None:
             self._update_worksheet_item_state(path)
-
-    def _close_tab(self, tab: QtWidgets.QWidget) -> None:
-        descriptor = self._tab_descriptors.pop(tab, None)
-        index = self.tab_widget.indexOf(tab)
-        if index >= 0:
-            self.tab_widget.removeTab(index)
-        self._canvas_by_tab.pop(tab, None)
-        self._axes_by_tab.pop(tab, None)
-        self._hidden_tabs.discard(tab)
-
-        if tab in self._graph_tree_items:
-            item = self._graph_tree_items.pop(tab)
-            parent = item.parent()
-            if parent is not None:
-                parent.removeChild(item)
-            else:
-                index = self.project_tree.indexOfTopLevelItem(item)
-                if index >= 0:
-                    self.project_tree.takeTopLevelItem(index)
-        for collection in (
-            self._temperature_tab_widgets,
-            self._metrics_angle_tabs,
-            self._metrics_temperature_tabs,
-            self._overlay_tab_widgets,
-        ):
-            if tab in collection:
-                collection.remove(tab)
-
-        if descriptor is not None and descriptor.kind == "temperature":
-            temperature = descriptor.metadata.get("temperature")
-            if isinstance(temperature, (int, float)):
-                self._plot_tabs.pop(float(temperature), None)
-                self._line_visibility.pop(float(temperature), None)
-
-        self._update_save_graph_enabled()
-        self._update_normalize_enabled()
-        self._update_tab_buttons()
-        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
-
-        if not self._tab_descriptors:
-            self.export_button.setEnabled(False)
-            self.open_origin_button.setEnabled(False)
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
@@ -2298,8 +2890,27 @@ class VSMPlotter(BasePlotWindow):
             descriptor.metadata.setdefault(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.metadata.setdefault(_BASE_TITLE_KEY, descriptor.title)
             self._tab_descriptors[tab] = descriptor
+            if self._field_direction_enabled:
+                self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
             self._ensure_graph_tree_item(tab, descriptor)
+            if not self._history.is_replaying:
+                info_holder: Dict[str, Any] = {"info": None}
+
+                def _undo_creation() -> None:
+                    info_holder["info"] = self._remove_tab_internal(tab)
+
+                def _redo_creation() -> None:
+                    info = info_holder.get("info")
+                    if info is not None:
+                        self._restore_tab_from_info(info)
+
+                title = descriptor.root_label or descriptor.title or "Plot"
+                self._record_history_action(
+                    f"Add tab {title}",
+                    undo=_undo_creation,
+                    redo=_redo_creation,
+                )
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         if self.tab_widget.currentWidget() is tab:
@@ -2366,8 +2977,15 @@ class VSMPlotter(BasePlotWindow):
         self._focus_tree_on_tab(tab)
         self._update_tab_buttons()
     # ------------------------------------------------------------------ data loading
-    def _load_measurements(self, *, show_warning: bool = True) -> None:
-        self.measurements.clear()
+    def _reset_session_state(self, *, clear_measurements: bool = True) -> None:
+        if clear_measurements:
+            self.measurements.clear()
+        for legend in list(self._direction_legends.values()):
+            try:
+                legend.remove()
+            except Exception:
+                pass
+        self._direction_legends.clear()
         self.project_tree.clear()
         self._clear_tab_list(self._temperature_tab_widgets)
         self._clear_tab_list(self._metrics_angle_tabs)
@@ -2412,6 +3030,12 @@ class VSMPlotter(BasePlotWindow):
         self._update_metric_controls()
         self._update_normalize_enabled()
         self._update_tab_buttons()
+        self._update_project_actions()
+
+    def _load_measurements(self, *, show_warning: bool = True) -> None:
+        self._reset_session_state()
+        self._project_path = None
+        self._update_project_title()
 
         paths = self._selected_paths()
         if not paths:
@@ -2517,6 +3141,7 @@ class VSMPlotter(BasePlotWindow):
 
         self.plot_button.setEnabled(plottable > 0)
         self.export_button.setEnabled(True)
+        self._update_project_actions()
         self._save_settings()
 
     def _populate_axis_combos(self, labels: List[str]) -> None:
@@ -3065,6 +3690,9 @@ class VSMPlotter(BasePlotWindow):
             except Exception:  # pragma: no cover - backend differences
                 pass
 
+        for legend in list(self._direction_legends.values()):
+            self._style_legend(legend)
+
     def _refresh_tab_legend(self, tab_state: PlotTabState, *, draw: bool = True) -> None:
         legend = getattr(tab_state.axes, "legend_", None)
         if legend is not None:
@@ -3104,8 +3732,9 @@ class VSMPlotter(BasePlotWindow):
             state for state in descriptor.lines.values() if state.line.get_visible()
         ]
         if visible_states:
+            handles = [self._legend_handle_for_state(state) for state in visible_states]
             legend = descriptor.axes.legend(
-                [state.line for state in visible_states],
+                handles,
                 [state.label for state in visible_states],
                 loc="best",
             )
@@ -3125,6 +3754,45 @@ class VSMPlotter(BasePlotWindow):
             descriptor.canvas.draw_idle()
         except Exception:  # pragma: no cover - backend specific
             pass
+        self._update_direction_legend(descriptor, self._field_direction_enabled)
+
+    def _legend_handle_for_state(self, state: GraphLineState) -> Line2D:
+        handle = Line2D([], [])
+        try:
+            color = state.line.get_color()
+        except Exception:
+            color = None
+        if color:
+            handle.set_color(color)
+        try:
+            linewidth = state.line.get_linewidth()
+        except Exception:
+            linewidth = None
+        if linewidth is not None:
+            handle.set_linewidth(linewidth)
+        marker = None
+        try:
+            marker = state.line.get_marker()
+        except Exception:
+            marker = None
+        if marker:
+            handle.set_marker(marker)
+            if marker != "None":
+                try:
+                    markersize = state.line.get_markersize()
+                except Exception:
+                    markersize = None
+                if markersize is not None:
+                    handle.set_markersize(markersize)
+        if self._field_direction_enabled:
+            style = self._line_style_kwargs().get("linestyle", "-")
+            handle.set_linestyle(style)
+        else:
+            try:
+                handle.set_linestyle(state.line.get_linestyle())
+            except Exception:
+                handle.set_linestyle("-")
+        return handle
 
     def _rescale_y_limits(
         self,
@@ -3137,7 +3805,7 @@ class VSMPlotter(BasePlotWindow):
         for state in descriptor.lines.values():
             if not state.line.get_visible():
                 continue
-            data = np.asarray(state.line.get_ydata(), dtype=float)
+            data = np.asarray(state.y_data(), dtype=float)
             if data.size == 0:
                 continue
             finite = data[np.isfinite(data)]
@@ -3325,19 +3993,42 @@ class VSMPlotter(BasePlotWindow):
         line_state = descriptor.lines.get(tuple(key))
         if line_state is None:
             return
-        visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
-        line_state.line.set_visible(visible)
-        if descriptor.kind == "temperature":
-            temperature = descriptor.metadata.get("temperature")
-            if isinstance(temperature, (int, float)):
-                visibility = self._line_visibility.setdefault(float(temperature), {})
+        new_visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
+        old_visible = line_state.line.get_visible()
+        if new_visible == old_visible:
+            return
+
+        def _apply(flag: bool) -> None:
+            for segment in line_state.iter_lines():
                 try:
-                    _, angle_value = key
-                except (TypeError, ValueError):
-                    angle_value = None
-                if isinstance(angle_value, (int, float)):
-                    visibility[float(angle_value)] = visible
-        self._refresh_descriptor_legend(descriptor)
+                    segment.set_visible(flag)
+                except Exception:
+                    pass
+            if descriptor.kind == "temperature":
+                temperature = descriptor.metadata.get("temperature")
+                if isinstance(temperature, (int, float)):
+                    visibility = self._line_visibility.setdefault(float(temperature), {})
+                    try:
+                        _, angle_value = key
+                    except (TypeError, ValueError):
+                        angle_value = None
+                    if isinstance(angle_value, (int, float)):
+                        visibility[float(angle_value)] = flag
+            item.blockSignals(True)
+            item.setCheckState(
+                0,
+                QtCore.Qt.CheckState.Checked if flag else QtCore.Qt.CheckState.Unchecked,
+            )
+            item.blockSignals(False)
+            self._refresh_descriptor_legend(descriptor)
+
+        _apply(new_visible)
+        action = "Show" if new_visible else "Hide"
+        self._record_history_action(
+            f"{action} {line_state.label}",
+            undo=lambda: _apply(old_visible),
+            redo=lambda: _apply(new_visible),
+        )
 
     def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
         tab_state = self._plot_tabs.get(float(temperature))
@@ -3346,7 +4037,10 @@ class VSMPlotter(BasePlotWindow):
         line = tab_state.lines.get(float(angle))
         if line is None:
             return
-        line.set_visible(visible)
+        try:
+            line.set_visible(visible)
+        except Exception:
+            pass
         self._refresh_tab_legend(tab_state)
 
         self._line_visibility.setdefault(float(temperature), {})[float(angle)] = visible
@@ -3362,9 +4056,111 @@ class VSMPlotter(BasePlotWindow):
             state = descriptor.lines.get(("angle", float(angle)))
             if state is None:
                 continue
-            state.line.set_visible(visible)
+            for segment in state.iter_lines():
+                try:
+                    segment.set_visible(visible)
+                except Exception:
+                    pass
             self._refresh_descriptor_legend(descriptor)
             break
+
+    def _after_tab_removed(self, info: Any) -> None:  # type: ignore[override]
+        super()._after_tab_removed(info)
+
+        tab = getattr(info, "tab", None)
+        descriptor = getattr(info, "descriptor", None)
+        extra = getattr(info, "extra", {})
+        if not isinstance(extra, dict):
+            extra = {}
+            setattr(info, "extra", extra)
+
+        extra.setdefault("collections", {})
+        collections: Dict[str, int] = extra["collections"]
+
+        for key, collection in (
+            ("temperature", self._temperature_tab_widgets),
+            ("metrics_angle", self._metrics_angle_tabs),
+            ("metrics_temperature", self._metrics_temperature_tabs),
+            ("overlay", self._overlay_tab_widgets),
+        ):
+            if tab in collection:
+                index = collection.index(tab)
+                collection.pop(index)
+                collections[key] = index
+
+        if isinstance(descriptor, TabDescriptor):
+            if descriptor.kind == "temperature":
+                temperature = descriptor.metadata.get("temperature")
+                if isinstance(temperature, (int, float)):
+                    key = float(temperature)
+                    tab_state = self._plot_tabs.pop(key, None)
+                    if tab_state is not None:
+                        extra["plot_tab_state"] = tab_state
+                    visibility = self._line_visibility.pop(key, None)
+                    if visibility is not None:
+                        extra["line_visibility"] = visibility
+
+        extra["export_enabled_before"] = self.export_button.isEnabled()
+        extra["origin_enabled_before"] = self.open_origin_button.isEnabled()
+
+        if not self._tab_descriptors:
+            self.open_origin_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+
+        axes = getattr(info, "axes", None)
+        legend = None
+        if axes is not None:
+            legend = self._direction_legends.pop(axes, None)
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:
+                pass
+
+    def _after_tab_restored(self, info: Any) -> None:  # type: ignore[override]
+        super()._after_tab_restored(info)
+        descriptor = getattr(info, "descriptor", None)
+        tab = getattr(info, "tab", None)
+        extra = getattr(info, "extra", {})
+
+        collections: Dict[str, int] = {}
+        if isinstance(extra, dict):
+            collections = dict(extra.get("collections", {}))
+
+        for key, collection in (
+            ("temperature", self._temperature_tab_widgets),
+            ("metrics_angle", self._metrics_angle_tabs),
+            ("metrics_temperature", self._metrics_temperature_tabs),
+            ("overlay", self._overlay_tab_widgets),
+        ):
+            if tab is None:
+                continue
+            if key in collections:
+                index = collections[key]
+                if 0 <= index <= len(collection):
+                    collection.insert(index, tab)
+                elif tab not in collection:
+                    collection.append(tab)
+
+        if isinstance(descriptor, TabDescriptor):
+            if descriptor.kind == "temperature":
+                temperature = descriptor.metadata.get("temperature")
+                if isinstance(temperature, (int, float)):
+                    key = float(temperature)
+                    tab_state = extra.get("plot_tab_state") if isinstance(extra, dict) else None
+                    if isinstance(tab_state, PlotTabState):
+                        self._plot_tabs[key] = tab_state
+                    visibility = extra.get("line_visibility") if isinstance(extra, dict) else None
+                    if isinstance(visibility, dict):
+                        self._line_visibility[key] = visibility
+            self._apply_direction_split_to_descriptor(descriptor)
+            self._refresh_descriptor_legend(descriptor, force_layout=True)
+
+        if isinstance(extra, dict):
+            if "export_enabled_before" in extra:
+                self.export_button.setEnabled(bool(extra["export_enabled_before"]))
+            if "origin_enabled_before" in extra:
+                self.open_origin_button.setEnabled(bool(extra["origin_enabled_before"]))
 
     def _plot_angle_overlays(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:
@@ -3428,6 +4224,8 @@ class VSMPlotter(BasePlotWindow):
                         line=line,
                         base_x=numeric_x,
                         base_y=numeric_y,
+                        full_x=numeric_x,
+                        full_y=numeric_y,
                     )
                     plotted = True
             if plotted:
@@ -3506,8 +4304,8 @@ class VSMPlotter(BasePlotWindow):
             for state in descriptor.lines.values():
                 if not include_hidden and not state.line.get_visible():
                     continue
-                x_data = np.asarray(state.line.get_xdata(), dtype=float)
-                y_data = np.asarray(state.line.get_ydata(), dtype=float)
+                x_data = np.asarray(state.x_data(), dtype=float)
+                y_data = np.asarray(state.y_data(), dtype=float)
                 if x_data.size == 0 or y_data.size == 0 or x_data.shape != y_data.shape:
                     continue
 
@@ -3621,6 +4419,8 @@ class VSMPlotter(BasePlotWindow):
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
+                    full_x=numeric_x,
+                    full_y=numeric_y,
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
@@ -3742,6 +4542,8 @@ class VSMPlotter(BasePlotWindow):
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
+                    full_x=numeric_x,
+                    full_y=numeric_y,
                 )
                 plotted = True
             long_name, unit = _split_column_label(column)
@@ -3968,7 +4770,7 @@ class VSMPlotter(BasePlotWindow):
                 kwargs["marker"] = marker
             if markersize is not None:
                 kwargs["markersize"] = markersize
-            ax.plot(state.line.get_xdata(), state.line.get_ydata(), **kwargs)
+            ax.plot(state.x_data(), state.y_data(), **kwargs)
             plotted = True
 
         ax.set_xlabel(descriptor.x_label)
@@ -4129,6 +4931,10 @@ class VSMPlotter(BasePlotWindow):
             for state in descriptor.lines.values():
                 state.line.set_ydata(state.base_y)
                 state.normalized = False
+                try:
+                    state.full_y = np.asarray(state.base_y, dtype=float)
+                except Exception:
+                    state.full_y = state.base_y
 
             original_label = descriptor.metadata.get(_BASE_Y_LABEL_KEY, descriptor.y_label)
             descriptor.y_label = str(original_label or descriptor.y_label)
@@ -4151,6 +4957,7 @@ class VSMPlotter(BasePlotWindow):
             else:
                 self._rescale_y_limits(descriptor)
 
+            self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
             self._append_log("Restored the original scaling for the current graph.")
             return
@@ -4191,6 +4998,10 @@ class VSMPlotter(BasePlotWindow):
             )
             state.line.set_ydata(normalized)
             state.normalized = True
+            try:
+                state.full_y = np.asarray(normalized, dtype=float)
+            except Exception:
+                state.full_y = normalized
             updated = True
 
             finite_normalized = normalized[np.isfinite(normalized)]
@@ -4226,6 +5037,7 @@ class VSMPlotter(BasePlotWindow):
         descriptor.title = self._descriptor_title_for_labels(descriptor, descriptor.y_label)
         descriptor.axes.set_title(descriptor.title)
         self._update_graph_tree_for_tab(tab)
+        self._apply_direction_split_to_descriptor(descriptor)
         self._refresh_descriptor_legend(descriptor, force_layout=True)
         self._append_log(
             "Normalized the current graph and rescaled the Y axis to fit the data."
@@ -4457,6 +5269,8 @@ class VSMPlotter(BasePlotWindow):
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
+                    full_x=numeric_x,
+                    full_y=numeric_y,
                 )
                 valid_angles.add(angle)
 

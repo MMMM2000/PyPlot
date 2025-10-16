@@ -1480,16 +1480,26 @@ def install_standard_menu(
 
     def _invoke_focus(methods: tuple[str, ...]) -> None:
         widget = _focused_widget()
-        if widget is None:
-            return
-        for name in methods:
-            target_method = getattr(widget, name, None)
-            if callable(target_method):
-                try:
-                    target_method()
-                except Exception:
-                    pass
-                break
+        invoked = False
+        if widget is not None:
+            for name in methods:
+                target_method = getattr(widget, name, None)
+                if callable(target_method):
+                    try:
+                        target_method()
+                    except Exception:
+                        pass
+                    invoked = True
+                    break
+        if not invoked:
+            for name in methods:
+                fallback = getattr(target, name, None)
+                if callable(fallback):
+                    try:
+                        fallback()
+                    except Exception:
+                        pass
+                    break
 
     def _add_edit_action(
         label: str,
@@ -1624,6 +1634,10 @@ def install_standard_menu(
     window_menu = QtWidgets.QMenu(window_title, menu_bar)
     menu_bar.addMenu(window_menu)
     window_menu.setObjectName("mw_shared_window")
+    if not window_menu.actions():
+        placeholder = window_menu.addAction("No windows available")
+        if placeholder is not None:
+            placeholder.setEnabled(False)
     try:
         window_role = QtGui.QAction.MenuRole.WindowRole  # type: ignore[attr-defined]
     except AttributeError:
