@@ -88,4 +88,3 @@ zeroconf==0.147.2
 # because tools like pip manage them automatically and pinning them can break
 # environment bootstrapping:
 # setuptools
-pytest==8.4.2

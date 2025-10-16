@@ -2620,8 +2620,7 @@ class VSMPlotter(BasePlotWindow):
         item: QtWidgets.QTreeWidgetItem,
         column: int,
     ) -> None:
-        if column != 0:
-            return
+        _ = column
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if not data:
             return
