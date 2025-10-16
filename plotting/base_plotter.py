@@ -1,11 +1,28 @@
 from __future__ import annotations
 
+import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Hashable,
+    Iterable,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+    cast,
+)
+
+import json
+import uuid
+from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+import pandas as pd
 
 from plotting.utils import install_standard_menu
 
@@ -55,6 +72,137 @@ class _HistoryEntry:
     description: str
     undo: Callable[[], None]
     redo: Callable[[], None]
+
+
+@dataclass
+class WorksheetColumnMeta:
+    """Describe Origin-style metadata for a worksheet column."""
+
+    long_name: str = ""
+    units: str = ""
+    comments: str = ""
+    formula: str = ""
+
+
+@dataclass
+class WorksheetData:
+    """Represent a worksheet created or imported into the workspace."""
+
+    key: Hashable
+    name: str
+    dataframe: pd.DataFrame
+    columns: Dict[str, WorksheetColumnMeta]
+    source: Path | None = None
+    workbook_key: Hashable | None = None
+
+
+@dataclass
+class WorkbookData:
+    """Group one or more worksheets originating from the same file."""
+
+    key: Hashable
+    name: str
+    worksheets: List[Hashable] = field(default_factory=list)
+    source: Path | None = None
+    folder: Path | None = None
+
+
+class DataFrameTableModel(QtCore.QAbstractTableModel):
+    """Editable Qt model exposing a pandas dataframe."""
+
+    def __init__(self, frame: pd.DataFrame, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._frame = frame
+        self._columns = [str(column) for column in frame.columns]
+
+    @property
+    def dataframe(self) -> pd.DataFrame:
+        return self._frame
+
+    def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # type: ignore[override]
+        if parent.isValid():
+            return 0
+        return len(self._frame.index)
+
+    def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # type: ignore[override]
+        if parent.isValid():
+            return 0
+        return len(self._columns)
+
+    def data(
+        self,
+        index: QtCore.QModelIndex,
+        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
+    ) -> Any:  # type: ignore[override]
+        if not index.isValid():
+            return None
+        column = self._columns[index.column()]
+        value = self._frame.iloc[index.row(), self._frame.columns.get_loc(column)]
+        if role in {QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.EditRole}:
+            if pd.isna(value):
+                return ""
+            return str(value)
+        return None
+
+    def headerData(
+        self,
+        section: int,
+        orientation: QtCore.Qt.Orientation,
+        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
+    ) -> str | None:  # type: ignore[override]
+        if role != QtCore.Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == QtCore.Qt.Orientation.Horizontal:
+            if 0 <= section < len(self._columns):
+                return self._columns[section]
+        else:
+            return str(section + 1)
+        return None
+
+    def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlag:  # type: ignore[override]
+        base = super().flags(index)
+        if index.isValid():
+            base |= QtCore.Qt.ItemFlag.ItemIsEditable
+        return base
+
+    def setData(
+        self,
+        index: QtCore.QModelIndex,
+        value: object,
+        role: int = QtCore.Qt.ItemDataRole.EditRole,
+    ) -> bool:  # type: ignore[override]
+        if role != QtCore.Qt.ItemDataRole.EditRole or not index.isValid():
+            return False
+        column = self._columns[index.column()]
+        df = self._frame
+        column_index = df.columns.get_loc(column)
+        series = df.iloc[:, column_index]
+        text = str(value)
+        if pd.api.types.is_numeric_dtype(series):
+            try:
+                parsed = float(text)
+            except ValueError:
+                return False
+            df.iat[index.row(), column_index] = parsed
+        else:
+            df.iat[index.row(), column_index] = text
+        self.dataChanged.emit(index, index, [role])
+        return True
+
+    def removeRows(
+        self,
+        row: int,
+        count: int,
+        parent: QtCore.QModelIndex = QtCore.QModelIndex(),
+    ) -> bool:  # type: ignore[override]
+        if row < 0 or count <= 0 or row + count > len(self._frame.index):
+            return False
+        self.beginRemoveRows(parent, row, row + count - 1)
+        drop_index = self._frame.index[row : row + count]
+        self._frame.drop(index=drop_index, inplace=True)
+        self._frame.reset_index(drop=True, inplace=True)
+        self.endRemoveRows()
+        return True
 
 
 class _HistoryManager:
@@ -122,7 +270,7 @@ class _RemovedTabInfo:
     descriptor: TabDescriptor | None
     canvas: FigureCanvas | None
     axes: Any | None
-    worksheet_path: Path | None
+    worksheet_key: Hashable | None
     was_hidden: bool
     was_current: bool
     extra: Dict[str, Any] = field(default_factory=dict)
@@ -263,10 +411,35 @@ class BasePlotWindow(QtWidgets.QMainWindow):
     """Shared UI frame used by plotting tools."""
 
     help_topic: str = "plotter"
+    PROJECT_EXTENSION: str = ".pypj"
+    PROJECT_VERSION: int = 1
+    PROJECT_CODE: str | None = None
+    PROJECT_SETTINGS_PREFIX: str = "project"
+    SUPPORTED_IMPORT_EXTENSIONS: tuple[str, ...] = (
+        ".csv",
+        ".tsv",
+        ".txt",
+        ".xlsx",
+        ".xls",
+        ".xlsm",
+        ".json",
+    )
 
     def __init__(self, *, title: str) -> None:
         super().__init__()
-        self.setWindowTitle(title)
+        self._base_title = getattr(self, "_base_title", title)
+        self._project_path: Path | None = None
+        self._recent_projects: List[str] = []
+        self._recent_projects_menu: QtWidgets.QMenu | None = None
+        self._open_project_action: QtGui.QAction | None = None
+        self._save_project_action: QtGui.QAction | None = None
+        self._save_project_as_action: QtGui.QAction | None = None
+        self._project_menu_separator: QtGui.QAction | None = None
+
+        if not hasattr(self, "settings"):
+            self.settings = QtCore.QSettings("MicrowireLab", self.__class__.__name__)
+
+        self._load_recent_projects_setting()
 
         # Tab/graph bookkeeping shared by subclasses.
         self._tab_descriptors: Dict[QtWidgets.QWidget, TabDescriptor] = {}
@@ -284,15 +457,29 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         self._graph_tree_root: QtWidgets.QTreeWidgetItem | None = None
         self._worksheet_tree_root: QtWidgets.QTreeWidgetItem | None = None
         self._graph_tree_items: Dict[QtWidgets.QWidget, QtWidgets.QTreeWidgetItem] = {}
-        self._worksheet_tree_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
-        self._worksheet_tabs_open: Dict[Path, QtWidgets.QWidget] = {}
-        self._tab_to_worksheet_path: Dict[QtWidgets.QWidget, Path] = {}
+        self._worksheet_tree_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
+        self._worksheet_tabs_open: Dict[Hashable, QtWidgets.QWidget] = {}
+        self._tab_to_worksheet_key: Dict[QtWidgets.QWidget, Hashable] = {}
         self._hidden_tabs: set[QtWidgets.QWidget] = set()
+        self._script_panel_container: QtWidgets.QWidget | None = None
+        self._script_panel_layout: QtWidgets.QVBoxLayout | None = None
+        self._data_sources_widget: QtWidgets.QWidget | None = None
+        self._data_tree_root: QtWidgets.QTreeWidgetItem | None = None
+        self._data_folder_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
+        self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
+        self._workbooks: Dict[Hashable, WorkbookData] = {}
+        self._worksheets: Dict[Hashable, WorksheetData] = {}
+        self._data_menu: QtWidgets.QMenu | None = None
+        self._import_files_action: QtGui.QAction | None = None
+        self._import_folder_action: QtGui.QAction | None = None
+        self._refresh_import_action: QtGui.QAction | None = None
 
         self._log_has_unread_errors = False
         self._history = _HistoryManager()
 
         self._build_base_ui()
+        self._update_project_title()
+        self._update_project_actions()
 
     # ------------------------------------------------------------------ abstract hooks
     def _handle_manual_path_entry(self) -> None:
@@ -325,6 +512,36 @@ class BasePlotWindow(QtWidgets.QMainWindow):
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         raise NotImplementedError
 
+    def _update_worksheet_item_state(self, key: Hashable) -> None:
+        """Refresh the visual state of a worksheet entry."""
+
+        _ = key
+
+    def _set_script_panel(self, widget: QtWidgets.QWidget | None) -> None:
+        """Display ``widget`` inside the shared script panel placeholder."""
+
+        if self._script_panel_layout is None or self._script_panel_container is None:
+            return
+        layout = self._script_panel_layout
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            child = item.widget()
+            if child is not None:
+                child.setParent(None)
+            del item
+        if widget is None:
+            self._script_panel_container.setVisible(False)
+            return
+        layout.addWidget(widget)
+        self._script_panel_container.setVisible(True)
+
+    def _set_data_sources_visible(self, visible: bool) -> None:
+        if self._data_sources_widget is None:
+            return
+        self._data_sources_widget.setVisible(visible)
+
     # ------------------------------------------------------------------ base UI
     def _build_base_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -354,7 +571,16 @@ class BasePlotWindow(QtWidgets.QMainWindow):
 
         controls_layout.setColumnStretch(1, 1)
         controls_layout.setColumnStretch(2, 1)
+        self._data_sources_widget = controls
         central_layout.addWidget(controls)
+
+        self._script_panel_container = QtWidgets.QFrame()
+        self._script_panel_container.setObjectName("mw_script_panel_container")
+        self._script_panel_container.setVisible(False)
+        self._script_panel_layout = QtWidgets.QVBoxLayout(self._script_panel_container)
+        self._script_panel_layout.setContentsMargins(0, 0, 0, 0)
+        self._script_panel_layout.setSpacing(8)
+        central_layout.addWidget(self._script_panel_container)
 
         action_row = QtWidgets.QHBoxLayout()
         self.plot_button = QtWidgets.QPushButton("Generate plots")
@@ -441,8 +667,685 @@ class BasePlotWindow(QtWidgets.QMainWindow):
             open_folder=self._open_folder_from_menu,
             close_window=self.close,
         )
+        self._setup_project_menu(menu_bar)
+        self._setup_data_menu(menu_bar)
         self._extend_menus(menu_bar)
         self._after_base_ui_created(project_dock=project_dock, log_dock=log_dock, graph_dock=graph_dock)
+
+    def _setup_project_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        """Attach shared project actions (open/save) to the File menu."""
+
+        file_menu: QtWidgets.QMenu | None = None
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if menu is not None and menu.objectName() == "mw_shared_file":
+                file_menu = menu
+                break
+        if file_menu is None:
+            return
+
+        insert_before: QtGui.QAction | None = None
+        for action in file_menu.actions():
+            if action.isSeparator():
+                insert_before = action
+                break
+
+        project_separator = None
+        if insert_before is not None:
+            project_separator = file_menu.insertSeparator(insert_before)
+
+        open_project_action = QtGui.QAction("Open Project…", self)
+        try:
+            open_project_action.setShortcut(QtGui.QKeySequence("Ctrl+Alt+O"))
+        except Exception:
+            pass
+        open_project_action.triggered.connect(self._open_project_dialog)
+        self._open_project_action = open_project_action
+        if insert_before is not None:
+            file_menu.insertAction(project_separator or insert_before, open_project_action)
+        else:
+            file_menu.addAction(open_project_action)
+
+        save_project_action = QtGui.QAction("Save Project", self)
+        try:
+            save_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save))
+        except Exception:
+            pass
+        save_project_action.triggered.connect(self._save_project)
+        save_project_action.setEnabled(False)
+        self._save_project_action = save_project_action
+        if insert_before is not None:
+            file_menu.insertAction(insert_before, save_project_action)
+        else:
+            file_menu.addAction(save_project_action)
+
+        save_as_action = QtGui.QAction("Save Project As…", self)
+        try:
+            save_as_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.SaveAs))
+        except Exception:
+            pass
+        save_as_action.triggered.connect(self._save_project_as)
+        save_as_action.setEnabled(False)
+        self._save_project_as_action = save_as_action
+        if insert_before is not None:
+            file_menu.insertAction(insert_before, save_as_action)
+        else:
+            file_menu.addAction(save_as_action)
+
+        recent_menu = QtWidgets.QMenu("Recent Projects", file_menu)
+        self._recent_projects_menu = recent_menu
+        if insert_before is not None:
+            file_menu.insertMenu(insert_before, recent_menu)
+        else:
+            file_menu.addMenu(recent_menu)
+        self._update_recent_projects_menu()
+
+        if project_separator is None and insert_before is not None:
+            self._project_menu_separator = file_menu.insertSeparator(insert_before)
+        else:
+            self._project_menu_separator = project_separator
+
+    def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        """Create the shared Data menu with import helpers."""
+
+        data_menu = QtWidgets.QMenu("&Data", menu_bar)
+        data_menu.setObjectName("mw_shared_data")
+        menu_bar.addMenu(data_menu)
+        self._data_menu = data_menu
+
+        import_files_action = data_menu.addAction("Import Files…")
+        import_files_action.triggered.connect(self._import_data_from_files)
+        self._import_files_action = import_files_action
+
+        import_folder_action = data_menu.addAction("Import Folder…")
+        import_folder_action.triggered.connect(self._import_data_from_folder)
+        self._import_folder_action = import_folder_action
+
+        data_menu.addSeparator()
+        recent_action = data_menu.addAction("Refresh Imported Data")
+        recent_action.triggered.connect(self._refresh_imported_data_summary)
+        recent_action.setEnabled(False)
+        self._refresh_import_action = recent_action
+
+    # ------------------------------------------------------------------ shared menu helpers
+    def _project_settings_key(self, suffix: str) -> str:
+        prefix = getattr(self, "PROJECT_SETTINGS_PREFIX", "project") or ""
+        prefix = prefix.strip("/")
+        if not prefix:
+            return suffix
+        return f"{prefix}/{suffix}"
+
+    def _load_recent_projects_setting(self) -> None:
+        settings_key = self._project_settings_key("recent_projects")
+        stored = self.settings.value(settings_key, "[]")
+        entries: List[str]
+        if isinstance(stored, str):
+            try:
+                parsed = json.loads(stored)
+            except json.JSONDecodeError:
+                parsed = []
+            entries = [entry for entry in parsed if isinstance(entry, str)]
+        elif isinstance(stored, (list, tuple)):
+            entries = [str(entry) for entry in stored if isinstance(entry, (str, Path))]
+        else:
+            entries = []
+        self._recent_projects = entries[:10]
+
+    def _save_recent_projects_setting(self) -> None:
+        settings_key = self._project_settings_key("recent_projects")
+        payload = json.dumps(self._recent_projects[:10], ensure_ascii=False)
+        self.settings.setValue(settings_key, payload)
+        if self._project_path is not None:
+            last_key = self._project_settings_key("last_path")
+            self.settings.setValue(last_key, str(self._project_path.parent))
+        self.settings.sync()
+
+    def _remember_recent_project(self, path: Path) -> None:
+        try:
+            resolved = str(path.resolve())
+        except Exception:
+            resolved = str(path)
+        self._recent_projects = [entry for entry in self._recent_projects if entry != resolved]
+        self._recent_projects.insert(0, resolved)
+        self._recent_projects = self._recent_projects[:10]
+        self._update_recent_projects_menu()
+        self._save_recent_projects_setting()
+
+    def _update_recent_projects_menu(self) -> None:
+        menu = self._recent_projects_menu
+        if menu is None:
+            return
+        menu.clear()
+        if not self._recent_projects:
+            action = menu.addAction("No recent projects")
+            if action is not None:
+                action.setEnabled(False)
+            return
+        for entry in self._recent_projects:
+            path = Path(entry)
+            label = path.name or entry
+            action = menu.addAction(label)
+            if action is not None:
+                action.triggered.connect(partial(self._load_project_from_recent, path))
+
+    def _load_project_from_recent(self, path: Path) -> None:
+        self._load_project_from_path(path)
+
+    def _project_dialog_start_directory(self) -> Path:
+        if self._project_path is not None:
+            return self._project_path.parent
+        last_key = self._project_settings_key("last_path")
+        stored = self.settings.value(last_key, "")
+        if isinstance(stored, str) and stored:
+            candidate = Path(stored)
+            if candidate.exists():
+                return candidate
+        return Path.home()
+
+    def _update_project_title(self) -> None:
+        title = self._base_title
+        if self._project_path is not None:
+            title = f"{self._base_title} — {self._project_path.name}"
+        self.setWindowTitle(title)
+
+    def _update_project_actions(self) -> None:
+        has_data = self._has_project_data_to_save()
+        if self._save_project_action is not None:
+            self._save_project_action.setEnabled(has_data)
+        if self._save_project_as_action is not None:
+            self._save_project_as_action.setEnabled(has_data)
+
+    # ------------------------------------------------------------------ project workflow hooks
+    def _has_project_data_to_save(self) -> bool:
+        """Return True when the current session can be persisted."""
+
+        return False
+
+    def _build_project_payload(self, *, base_path: Path | None) -> Dict[str, Any]:
+        """Return a serialisable payload describing the current session."""
+
+        _ = base_path
+        raise NotImplementedError
+
+    def _apply_project_payload(self, payload: Dict[str, Any], *, project_dir: Path) -> bool:
+        """Populate the session using ``payload`` from a project file."""
+
+        _ = (payload, project_dir)
+        raise NotImplementedError
+
+    def _reset_project_state(self) -> None:
+        """Clear session data prior to loading a project."""
+
+    def _after_project_loaded(self, path: Path, payload: Dict[str, Any]) -> None:
+        """Hook for subclasses after a project has been applied."""
+
+        _ = (path, payload)
+
+    def _after_project_saved(self, path: Path, payload: Dict[str, Any]) -> None:
+        """Hook for subclasses after a project has been written."""
+
+        _ = (path, payload)
+
+    # ------------------------------------------------------------------ project commands
+    def _open_project_dialog(self) -> None:
+        start_dir = self._project_dialog_start_directory()
+        filters = f"Python Plot Projects (*{self.PROJECT_EXTENSION});;All files (*)"
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            str(start_dir),
+            filters,
+        )
+        if not path_str:
+            return
+        self._load_project_from_path(Path(path_str))
+
+    def _save_project(self) -> None:
+        if not self._has_project_data_to_save():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project",
+                "There is no data to save yet.",
+            )
+            return
+        if self._project_path is None:
+            self._save_project_as()
+            return
+        self._write_project_file(self._project_path)
+
+    def _save_project_as(self) -> None:
+        if not self._has_project_data_to_save():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project As",
+                "Load or import data before saving a project.",
+            )
+            return
+        start_dir = self._project_dialog_start_directory()
+        suggested = start_dir / self._default_project_filename()
+        filters = f"Python Plot Projects (*{self.PROJECT_EXTENSION});;All files (*)"
+        path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Project As",
+            str(suggested),
+            filters,
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        if target.suffix.lower() != self.PROJECT_EXTENSION.lower():
+            target = target.with_suffix(self.PROJECT_EXTENSION)
+        self._write_project_file(target)
+
+    def _write_project_file(self, target: Path) -> None:
+        payload = self._build_project_payload(base_path=target.parent)
+        if not isinstance(payload, dict):
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Save Project",
+                "The project payload is invalid.",
+            )
+            return
+        payload.setdefault("version", self.PROJECT_VERSION)
+        if "kind" not in payload:
+            payload["kind"] = self.PROJECT_CODE or self.__class__.__name__
+        try:
+            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Save Project",
+                f"Failed to write project file:\n{exc}",
+            )
+            return
+        self._project_path = target
+        self._update_project_title()
+        self._remember_recent_project(target)
+        self._after_project_saved(target, payload)
+        self._update_project_actions()
+
+    def _load_project_from_path(self, path: Path) -> None:
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open Project",
+                f"Project file not found:\n{path}",
+            )
+            return
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                f"Failed to read project file:\n{exc}",
+            )
+            return
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                f"Project file is not valid JSON:\n{exc}",
+            )
+            return
+        if not isinstance(payload, dict):
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                "Project file did not contain a JSON object.",
+            )
+            return
+        version = payload.get("version")
+        if version != self.PROJECT_VERSION:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open Project",
+                "This project was saved with an incompatible version.",
+            )
+            return
+        self._reset_project_state()
+        project_dir = path.parent
+        try:
+            success = self._apply_project_payload(payload, project_dir=project_dir)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                f"Failed to apply project payload:\n{exc}",
+            )
+            return
+        if not success:
+            return
+        self._project_path = path
+        self._update_project_title()
+        self._remember_recent_project(path)
+        self._after_project_loaded(path, payload)
+        self._update_project_actions()
+
+    # ------------------------------------------------------------------ data import helpers
+    def _import_data_from_files(self) -> None:
+        start_dir = self._project_dialog_start_directory()
+        filters = [
+            "Data files (" + " ".join(f"*{ext}" for ext in self.SUPPORTED_IMPORT_EXTENSIONS) + ")",
+            "All files (*)",
+        ]
+        dialog_filter = ";;".join(filters)
+        paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
+            self,
+            "Import Data Files",
+            str(start_dir),
+            dialog_filter,
+        )
+        if not paths:
+            return
+        self._import_paths(Path(path) for path in paths)
+
+    def _import_data_from_folder(self) -> None:
+        start_dir = self._project_dialog_start_directory()
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Import Data Folder",
+            str(start_dir),
+        )
+        if not directory:
+            return
+        self._import_paths([Path(directory)])
+
+    def _import_paths(self, paths: Iterable[Path]) -> None:
+        files: List[Path] = []
+        for path in paths:
+            if not isinstance(path, Path):
+                continue
+            if path.is_dir():
+                files.extend(self._iter_supported_files(path))
+            elif path.is_file() and self._is_supported_data_file(path):
+                files.append(path)
+        if not files:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Import Data",
+                "No supported data files were found.",
+            )
+            return
+        errors: List[str] = []
+        imported = 0
+        for file_path in files:
+            result = self._load_workbook_from_file(file_path)
+            if result is None:
+                continue
+            workbook, worksheets = result
+            try:
+                self._register_imported_workbook(workbook, worksheets)
+            except Exception as exc:  # pragma: no cover - defensive, UI fallback
+                errors.append(f"{file_path}: {exc}")
+                continue
+            imported += len(worksheets)
+        if errors:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Import Data",
+                "Some files could not be imported:\n" + "\n".join(errors[:10]),
+            )
+        if imported:
+            self._refresh_imported_data_summary()
+            self._update_project_actions()
+        if self._refresh_import_action is not None:
+            self._refresh_import_action.setEnabled(bool(self._worksheets))
+
+    def _iter_supported_files(self, root: Path) -> List[Path]:
+        try:
+            resolved = root.resolve()
+        except Exception:
+            resolved = root
+        results: List[Path] = []
+        for candidate in resolved.rglob("*"):
+            if candidate.is_file() and self._is_supported_data_file(candidate):
+                results.append(candidate)
+        return results
+
+    def _is_supported_data_file(self, path: Path) -> bool:
+        return path.suffix.lower() in self.SUPPORTED_IMPORT_EXTENSIONS
+
+    def _load_workbook_from_file(
+        self,
+        path: Path,
+    ) -> tuple[WorkbookData, List[WorksheetData]] | None:
+        suffix = path.suffix.lower()
+        try:
+            if suffix in {".csv", ".tsv", ".txt"}:
+                frame = self._read_delimited_file(path, suffix)
+                if frame is None:
+                    return None
+                workbook = self._build_workbook_shell(path)
+                worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
+                workbook.worksheets = [worksheet.key]
+                return workbook, [worksheet]
+            if suffix in {".xlsx", ".xls", ".xlsm"}:
+                frames = pd.read_excel(path, sheet_name=None)
+                workbook = self._build_workbook_shell(path)
+                worksheets: List[WorksheetData] = []
+                for sheet_name, frame in frames.items():
+                    worksheet = self._create_worksheet_from_frame(workbook, str(sheet_name), frame)
+                    worksheets.append(worksheet)
+                workbook.worksheets = [worksheet.key for worksheet in worksheets]
+                return workbook, worksheets
+            if suffix == ".json":
+                frame = pd.read_json(path)
+                workbook = self._build_workbook_shell(path)
+                worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
+                workbook.worksheets = [worksheet.key]
+                return workbook, [worksheet]
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Import Data",
+                f"Failed to import {path.name}:\n{exc}",
+            )
+            return None
+        QtWidgets.QMessageBox.information(
+            self,
+            "Import Data",
+            f"Skipping unsupported file type: {path.name}",
+        )
+        return None
+
+    def _read_delimited_file(self, path: Path, suffix: str) -> pd.DataFrame | None:
+        if suffix == ".tsv":
+            frame = pd.read_csv(path, sep="\t")
+        elif suffix == ".csv":
+            frame = pd.read_csv(path)
+        else:
+            frame = pd.read_csv(path, sep=None, engine="python")
+        return frame
+
+    def _build_workbook_shell(self, path: Path) -> WorkbookData:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        folder = resolved.parent if resolved.parent != resolved else resolved
+        key = self._workbook_key(resolved)
+        return WorkbookData(
+            key=key,
+            name=resolved.stem,
+            source=resolved,
+            folder=folder,
+        )
+
+    def _workbook_key(self, path: Path) -> str:
+        return str(path)
+
+    def _worksheet_key(self, workbook_key: Hashable, sheet_name: str) -> str:
+        clean = sheet_name.strip() or "Sheet"
+        return f"{workbook_key}::{clean}"
+
+    def _create_worksheet_from_frame(
+        self,
+        workbook: WorkbookData,
+        sheet_name: str,
+        frame: pd.DataFrame,
+    ) -> WorksheetData:
+        data = frame.copy()
+        data.columns = [str(column) for column in data.columns]
+        key = self._worksheet_key(workbook.key, sheet_name)
+        columns_meta = {
+            column: WorksheetColumnMeta(long_name=column) for column in data.columns
+        }
+        worksheet = WorksheetData(
+            key=key,
+            name=sheet_name.strip() or "Sheet",
+            dataframe=data,
+            columns=columns_meta,
+            source=workbook.source,
+            workbook_key=workbook.key,
+        )
+        return worksheet
+
+    def _register_imported_workbook(
+        self,
+        workbook: WorkbookData,
+        worksheets: List[WorksheetData],
+    ) -> None:
+        self._ensure_data_root()
+        # Remove any previous representation of this workbook.
+        previous = self._workbooks.get(workbook.key)
+        if previous is not None:
+            for key in list(previous.worksheets):
+                self._remove_worksheet(key)
+        old_item = self._data_workbook_items.pop(workbook.key, None)
+        if old_item is not None:
+            parent = old_item.parent()
+            if parent is not None:
+                index = parent.indexOfChild(old_item)
+                if index >= 0:
+                    parent.takeChild(index)
+        self._workbooks[workbook.key] = workbook
+
+        folder_item = self._ensure_folder_item(workbook.folder)
+        workbook_item = QtWidgets.QTreeWidgetItem([workbook.name, str(workbook.source or "")])
+        self._assign_project_payload(workbook_item, ("worksheet_group", workbook.key))
+        folder_item.addChild(workbook_item)
+        workbook_item.setExpanded(True)
+        self._data_workbook_items[workbook.key] = workbook_item
+
+        for worksheet in worksheets:
+            worksheet.workbook_key = workbook.key
+            self._worksheets[worksheet.key] = worksheet
+            sheet_item = QtWidgets.QTreeWidgetItem([worksheet.name, ""])
+            self._assign_project_payload(sheet_item, ("worksheet", worksheet.key))
+            workbook_item.addChild(sheet_item)
+            self._worksheet_tree_items[worksheet.key] = sheet_item
+
+    def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:
+        if self._data_tree_root is None:
+            root = QtWidgets.QTreeWidgetItem(["Imported Data", ""])
+            root.setExpanded(True)
+            self.project_tree.addTopLevelItem(root)
+            self._data_tree_root = root
+        return self._data_tree_root
+
+    def _ensure_folder_item(self, folder: Path | None) -> QtWidgets.QTreeWidgetItem:
+        root = self._ensure_data_root()
+        if folder is None:
+            return root
+        try:
+            resolved = folder.resolve()
+        except Exception:
+            resolved = folder
+        item = self._data_folder_items.get(resolved)
+        if item is None:
+            label = resolved.name or str(resolved)
+            item = QtWidgets.QTreeWidgetItem([label, str(resolved)])
+            self._assign_project_payload(item, ("worksheet_group", resolved))
+            root.addChild(item)
+            item.setExpanded(True)
+            self._data_folder_items[resolved] = item
+        return item
+
+    def _remove_worksheet(self, key: Hashable) -> None:
+        tab = self._worksheet_tabs_open.pop(key, None)
+        if tab is not None:
+            self._tab_to_worksheet_key.pop(tab, None)
+            index = self.tab_widget.indexOf(tab)
+            if index >= 0:
+                self.tab_widget.removeTab(index)
+        item = self._worksheet_tree_items.pop(key, None)
+        if item is not None:
+            parent = item.parent()
+            if parent is not None:
+                index = parent.indexOfChild(item)
+                if index >= 0:
+                    parent.takeChild(index)
+        self._worksheets.pop(key, None)
+
+    def _refresh_imported_data_summary(self) -> None:
+        for key, item in self._worksheet_tree_items.items():
+            worksheet = self._worksheets.get(key)
+            if worksheet is None:
+                continue
+            rows, columns = worksheet.dataframe.shape
+            item.setText(1, f"{rows} × {columns}")
+        for key, item in self._data_workbook_items.items():
+            workbook = self._workbooks.get(key)
+            if workbook is None:
+                continue
+            count = len(workbook.worksheets)
+            if workbook.source is not None:
+                item.setText(1, f"{workbook.source} ({count} sheet{'s' if count != 1 else ''})")
+            else:
+                item.setText(1, f"{count} sheet{'s' if count != 1 else ''}")
+
+    def _create_worksheet_tab(self, worksheet: WorksheetData) -> QtWidgets.QWidget | None:
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        columns = list(worksheet.dataframe.columns)
+        metadata_table = QtWidgets.QTableWidget(4, len(columns))
+        metadata_table.setVerticalHeaderLabels(["Long Name", "Units", "Comments", "F(x)"])
+        metadata_table.setHorizontalHeaderLabels(columns)
+        metadata_table.horizontalHeader().setStretchLastSection(True)
+        metadata_table.verticalHeader().setVisible(True)
+
+        metadata_table.blockSignals(True)
+        for col_index, column_name in enumerate(columns):
+            meta = worksheet.columns.setdefault(column_name, WorksheetColumnMeta(long_name=column_name))
+            values = [meta.long_name, meta.units, meta.comments, meta.formula]
+            for row_index, value in enumerate(values):
+                item = QtWidgets.QTableWidgetItem(str(value) if value else "")
+                metadata_table.setItem(row_index, col_index, item)
+        metadata_table.blockSignals(False)
+
+        def _handle_meta_change(item: QtWidgets.QTableWidgetItem) -> None:
+            header_item = metadata_table.horizontalHeaderItem(item.column())
+            if header_item is None:
+                return
+            column_name = header_item.text()
+            meta = worksheet.columns.setdefault(column_name, WorksheetColumnMeta())
+            text = item.text()
+            row = item.row()
+            if row == 0:
+                meta.long_name = text
+            elif row == 1:
+                meta.units = text
+            elif row == 2:
+                meta.comments = text
+            elif row == 3:
+                meta.formula = text
+
+        metadata_table.itemChanged.connect(_handle_meta_change)
+        layout.addWidget(metadata_table)
+
+        view = QtWidgets.QTableView()
+        model = DataFrameTableModel(worksheet.dataframe, self)
+        view.setModel(model)
+        view.setAlternatingRowColors(True)
+        view.horizontalHeader().setStretchLastSection(True)
+        layout.addWidget(view, 1)
+        return container
 
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
         """Allow subclasses to customise the main menu."""
@@ -457,6 +1360,29 @@ class BasePlotWindow(QtWidgets.QMainWindow):
     ) -> None:
         """Hook invoked once base dock widgets have been created."""
         _ = (project_dock, log_dock, graph_dock)
+
+    # ------------------------------------------------------------------ project helpers
+    def _default_project_filename(self) -> str:
+        """Return a suggested project filename based on the plotter and current date."""
+
+        code = getattr(self, "PROJECT_CODE", None)
+        if isinstance(code, str) and code.strip():
+            prefix = code.strip()
+        else:
+            base_title = getattr(self, "_base_title", "")
+            if isinstance(base_title, str) and base_title.strip():
+                candidate = base_title.strip()
+            else:
+                candidate = self.windowTitle().strip()
+            sanitized = candidate.replace("—", " ").replace("�?", " ").replace("-", " ")
+            parts = [segment for segment in sanitized.replace("/", " ").split() if segment]
+            prefix = "_".join(parts) if parts else self.__class__.__name__
+        extension = getattr(self, "PROJECT_EXTENSION", "")
+        ext = extension if isinstance(extension, str) else ""
+        if ext and not ext.startswith("."):
+            ext = f".{ext}"
+        date_stamp = datetime.date.today().strftime("%Y-%m-%d")
+        return f"{prefix} {date_stamp}{ext}"
 
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
@@ -533,11 +1459,26 @@ class BasePlotWindow(QtWidgets.QMainWindow):
     def _rebuild_object_manager_for_tab(self, *_: Any) -> None:
         """Rebuild the object manager tree for ``tab``."""
 
-    def _open_worksheet_tab(self, path: Path) -> None:
-        """Open or focus the worksheet that originated from ``path``."""
-        widget = self._worksheet_tabs_open.get(path)
+    def _open_worksheet_tab(self, key: Hashable) -> None:
+        """Open or focus the worksheet that originated from ``key``."""
+
+        widget = self._worksheet_tabs_open.get(key)
         if widget is not None:
             self._show_tab(widget)
+            return
+        worksheet = self._worksheets.get(key)
+        if worksheet is None:
+            return
+        widget = self._create_worksheet_tab(worksheet)
+        if widget is None:
+            return
+        index = self.tab_widget.addTab(widget, worksheet.name)
+        self.tab_widget.setCurrentIndex(index)
+        self._worksheet_tabs_open[key] = widget
+        self._tab_to_worksheet_key[widget] = key
+        self._update_tab_buttons()
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
 
     def _show_tab(self, tab: QtWidgets.QWidget) -> None:
         index = self.tab_widget.indexOf(tab)
@@ -706,10 +1647,10 @@ class BasePlotWindow(QtWidgets.QMainWindow):
                 top_index = self.project_tree.indexOfTopLevelItem(item)
                 if top_index >= 0:
                     self.project_tree.takeTopLevelItem(top_index)
-        worksheet_path = self._tab_to_worksheet_path.pop(tab, None)
-        if worksheet_path is not None:
-            self._worksheet_tabs_open.pop(worksheet_path, None)
-            self._update_worksheet_item_state(worksheet_path)
+        worksheet_key = self._tab_to_worksheet_key.pop(tab, None)
+        if worksheet_key is not None:
+            self._worksheet_tabs_open.pop(worksheet_key, None)
+            self._update_worksheet_item_state(worksheet_key)
         was_hidden = tab in self._hidden_tabs
         self._hidden_tabs.discard(tab)
         was_current = self.tab_widget.currentWidget() is tab
@@ -722,7 +1663,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
             descriptor=descriptor,
             canvas=canvas,
             axes=axes,
-            worksheet_path=worksheet_path,
+            worksheet_key=worksheet_key,
             was_hidden=was_hidden,
             was_current=was_current,
         )
@@ -744,10 +1685,10 @@ class BasePlotWindow(QtWidgets.QMainWindow):
                 self._canvas_by_tab[info.tab] = info.canvas
             if info.axes is not None:
                 self._axes_by_tab[info.tab] = info.axes
-        if info.worksheet_path is not None:
-            self._worksheet_tabs_open[info.worksheet_path] = info.tab
-            self._tab_to_worksheet_path[info.tab] = info.worksheet_path
-            self._update_worksheet_item_state(info.worksheet_path)
+        if info.worksheet_key is not None:
+            self._worksheet_tabs_open[info.worksheet_key] = info.tab
+            self._tab_to_worksheet_key[info.tab] = info.worksheet_key
+            self._update_worksheet_item_state(info.worksheet_key)
         self._set_tab_visibility(info.tab, not info.was_hidden)
         if info.was_current or not info.was_hidden:
             restored_index = self.tab_widget.indexOf(info.tab)
@@ -780,9 +1721,9 @@ class BasePlotWindow(QtWidgets.QMainWindow):
             if tab in self._tab_descriptors:
                 target_item = self._graph_tree_items.get(tab)
             else:
-                path = self._tab_to_worksheet_path.get(tab)
-                if path is not None:
-                    target_item = self._worksheet_tree_items.get(path)
+                key = self._tab_to_worksheet_key.get(tab)
+                if key is not None:
+                    target_item = self._worksheet_tree_items.get(key)
         if target_item is not None:
             self.project_tree.setCurrentItem(target_item)
             self.project_tree.scrollToItem(target_item)

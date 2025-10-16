@@ -1621,6 +1621,8 @@ class VSMPlotter(BasePlotWindow):
     help_topic = "vsm_hysteresis_loops"
     PROJECT_VERSION = 1
     PROJECT_EXTENSION = ".pypj"
+    PROJECT_CODE = "VSM_Hysteresis_Loops"
+    PROJECT_SETTINGS_PREFIX = "vsm_project"
 
     def __init__(self) -> None:
         self.logger = logging.getLogger("vsm_hysteresis_loops")
@@ -1654,14 +1656,6 @@ class VSMPlotter(BasePlotWindow):
         self._direction_legends: Dict[Any, Legend] = {}
 
         self._base_title = "VSM Hysteresis Loops"
-        self._project_path: Path | None = None
-        self._recent_projects: List[str] = []
-        self._recent_projects_menu: QtWidgets.QMenu | None = None
-        self._open_project_action: QtGui.QAction | None = None
-        self._save_project_action: QtGui.QAction | None = None
-        self._save_project_as_action: QtGui.QAction | None = None
-        self._load_recent_projects_setting()
-
         super().__init__(title=self._base_title)
         self.resize(1480, 940)
         self._update_project_title()
@@ -1686,132 +1680,24 @@ class VSMPlotter(BasePlotWindow):
         log_dock.visibilityChanged.connect(self._handle_log_visibility)
 
     # ------------------------------------------------------------------ project helpers
-    def _update_project_title(self) -> None:
-        title = self._base_title
-        if self._project_path is not None:
-            title = f"{self._base_title} — {self._project_path.name}"
-        self.setWindowTitle(title)
+    def _has_project_data_to_save(self) -> bool:
+        return bool(self.measurements)
 
-    def _update_project_actions(self) -> None:
-        has_measurements = bool(self.measurements)
-        if self._save_project_action is not None:
-            self._save_project_action.setEnabled(has_measurements)
-        if self._save_project_as_action is not None:
-            self._save_project_as_action.setEnabled(has_measurements)
+    def _reset_project_state(self) -> None:
+        self._project_path = None
+        self._update_project_title()
+        self._reset_session_state()
+        self._update_project_actions()
 
-    def _load_recent_projects_setting(self) -> None:
-        stored = self.settings.value("recent_projects", "[]")
-        entries: List[str]
-        if isinstance(stored, str):
-            try:
-                parsed = json.loads(stored)
-            except json.JSONDecodeError:
-                parsed = []
-            entries = [entry for entry in parsed if isinstance(entry, str)]
-        elif isinstance(stored, (list, tuple)):
-            entries = [entry for entry in stored if isinstance(entry, str)]
-        else:
-            entries = []
-        self._recent_projects = entries[:10]
+    def _after_project_saved(self, path: Path, payload: Dict[str, Any]) -> None:
+        _ = payload
+        self._append_log(f"Saved project to {path}")
 
-    def _save_recent_projects_setting(self) -> None:
-        payload = json.dumps(self._recent_projects[:10], ensure_ascii=False)
-        self.settings.setValue("recent_projects", payload)
-        if self._project_path is not None:
-            self.settings.setValue("last_project_path", str(self._project_path))
-        else:
-            try:
-                self.settings.remove("last_project_path")
-            except Exception:
-                pass
-
-    def _remember_recent_project(self, path: Path) -> None:
-        try:
-            resolved = str(path.resolve())
-        except Exception:
-            resolved = str(path)
-        entries = [entry for entry in self._recent_projects if entry != resolved]
-        entries.insert(0, resolved)
-        self._recent_projects = entries[:10]
-        self._update_recent_projects_menu()
-        self._save_recent_projects_setting()
-
-    def _update_recent_projects_menu(self) -> None:
-        menu = self._recent_projects_menu
-        if menu is None:
-            return
-        menu.clear()
-        if not self._recent_projects:
-            action = menu.addAction("No recent projects")
-            if action is not None:
-                action.setEnabled(False)
-            return
-        for entry in self._recent_projects:
-            path = Path(entry)
-            label = path.name or entry
-            action = menu.addAction(label)
-            if action is None:
-                continue
-            action.triggered.connect(
-                lambda checked=False, e=entry: self._load_project_from_recent(e)
-            )
-
-    def _load_project_from_recent(self, entry: str) -> None:
-        self._load_project_from_path(Path(entry))
+    def _after_project_loaded(self, path: Path, payload: Dict[str, Any]) -> None:
+        _ = payload
+        self._append_log(f"Opened project {path}")
 
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
-        file_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_file")
-        if file_menu is not None:
-            actions = file_menu.actions()
-            insert_before: QtGui.QAction | None = None
-            for action in actions:
-                if action.isSeparator():
-                    insert_before = action
-                    break
-
-            def _insert(action: QtGui.QAction) -> None:
-                if insert_before is not None:
-                    file_menu.insertAction(insert_before, action)
-                else:
-                    file_menu.addAction(action)
-
-            open_sequence = "Ctrl+Alt+O"
-            if sys.platform == "darwin":
-                open_sequence = "Meta+Alt+O"
-            self._open_project_action = QtGui.QAction("Open Project…", self)
-            self._open_project_action.triggered.connect(self._open_project_dialog)
-            try:
-                self._open_project_action.setShortcut(QtGui.QKeySequence(open_sequence))
-            except Exception:
-                pass
-            _insert(self._open_project_action)
-
-            self._save_project_action = QtGui.QAction("Save Project", self)
-            self._save_project_action.triggered.connect(self._save_project)
-            try:
-                self._save_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save))
-            except Exception:
-                pass
-            _insert(self._save_project_action)
-
-            self._save_project_as_action = QtGui.QAction("Save Project As…", self)
-            self._save_project_as_action.triggered.connect(self._save_project_as)
-            try:
-                self._save_project_as_action.setShortcut(
-                    QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.SaveAs)
-                )
-            except Exception:
-                pass
-            _insert(self._save_project_as_action)
-
-            self._recent_projects_menu = QtWidgets.QMenu("Recent Projects", file_menu)
-            if insert_before is not None:
-                file_menu.insertMenu(insert_before, self._recent_projects_menu)
-            else:
-                file_menu.addMenu(self._recent_projects_menu)
-            file_menu.insertSeparator(insert_before) if insert_before is not None else file_menu.addSeparator()
-            self._update_recent_projects_menu()
-
         export_menu = menu_bar.addMenu("Export")
         export_data_action = export_menu.addAction("TXT data…")
         export_data_action.triggered.connect(self._export_txt)
@@ -1839,85 +1725,6 @@ class VSMPlotter(BasePlotWindow):
                     partial(self._show_metric_debug, "remanence")
                 )
 
-        self._update_project_actions()
-
-    # ------------------------------------------------------------------ project persistence
-    def _open_project_dialog(self) -> None:
-        if not self._recent_projects:
-            start_dir = self.settings.value('last_project_path', '')
-        else:
-            start_dir = self._recent_projects[0]
-        if isinstance(start_dir, str) and start_dir:
-            candidate = Path(start_dir)
-            if candidate.is_file():
-                start_dir_path = candidate.parent
-            else:
-                start_dir_path = candidate
-        elif self._project_path is not None:
-            start_dir_path = self._project_path.parent
-        else:
-            start_dir_path = Path.home()
-        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
-            self,
-            'Open Project',
-            str(start_dir_path),
-            'Python Plot Projects (*.pypj);;All files (*)',
-        )
-        if not path_str:
-            return
-        self._load_project_from_path(Path(path_str))
-
-    def _save_project(self) -> None:
-        if not self.measurements:
-            QtWidgets.QMessageBox.information(
-                self, 'VSM Hysteresis Loops', 'Load VSM measurements before saving a project.'
-            )
-            return
-        if self._project_path is None:
-            self._save_project_as()
-            return
-        self._write_project_file(self._project_path)
-
-    def _save_project_as(self) -> None:
-        if not self.measurements:
-            QtWidgets.QMessageBox.information(
-                self, 'VSM Hysteresis Loops', 'Load VSM measurements before saving a project.'
-            )
-            return
-        if self._project_path is not None:
-            start_dir = self._project_path.parent
-        else:
-            start_dir = Path(self.settings.value('last_project_path', '') or Path.home())
-            if not start_dir.exists():
-                start_dir = Path.home()
-        path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
-            self,
-            'Save Project As',
-            str(start_dir),
-            'Python Plot Projects (*.pypj);;All files (*)',
-        )
-        if not path_str:
-            return
-        target = Path(path_str)
-        if target.suffix.lower() != self.PROJECT_EXTENSION:
-            target = target.with_suffix(self.PROJECT_EXTENSION)
-        self._write_project_file(target)
-
-    def _write_project_file(self, target: Path) -> None:
-        payload = self._build_project_payload(base_path=target.parent)
-        try:
-            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                'VSM Hysteresis Loops',
-                f"Failed to save project:\n{exc}",
-            )
-            return
-        self._project_path = target
-        self._update_project_title()
-        self._remember_recent_project(target)
-        self._append_log(f'Saved project to {target}')
         self._update_project_actions()
 
     def _build_project_payload(self, *, base_path: Path | None = None) -> Dict[str, Any]:
@@ -1979,41 +1786,13 @@ class VSMPlotter(BasePlotWindow):
         }
         return payload
 
-    def _load_project_from_path(self, path: Path) -> None:
-        try:
-            payload = json.loads(path.read_text())
-        except FileNotFoundError:
-            QtWidgets.QMessageBox.warning(
-                self, 'VSM Hysteresis Loops', f'Project file not found: {path}'
-            )
-            return
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self,
-                'VSM Hysteresis Loops',
-                f"Failed to open project:\n{exc}",
-            )
-            return
-        version = payload.get('version') if isinstance(payload, dict) else None
-        if version != self.PROJECT_VERSION:
-            QtWidgets.QMessageBox.warning(
-                self, 'VSM Hysteresis Loops', 'This project was created with an incompatible version.'
-            )
-            return
-        if self._apply_project_payload(payload, path):
-            self._remember_recent_project(path)
-            self._append_log(f'Opened project {path}')
-
-    def _apply_project_payload(self, payload: Dict[str, Any], project_path: Path) -> bool:
+    def _apply_project_payload(self, payload: Dict[str, Any], *, project_dir: Path) -> bool:
         measurements_data = payload.get('measurements')
         if not isinstance(measurements_data, list) or not measurements_data:
             QtWidgets.QMessageBox.warning(
                 self, 'VSM Hysteresis Loops', 'The project does not contain any measurements.'
             )
             return False
-        self._project_path = None
-        self._update_project_title()
-        self._reset_session_state()
         sources = payload.get('sources')
         if isinstance(sources, list):
             source_strings = [str(item) for item in sources if isinstance(item, str)]
@@ -2037,7 +1816,7 @@ class VSMPlotter(BasePlotWindow):
         self._line_visibility = self._deserialize_line_visibility(payload.get('line_visibility', {}))
         field_direction = bool(payload.get('field_direction'))
         measurements: List[VSMMeasurement] = []
-        base_dir = project_path.parent
+        base_dir = project_dir
         for entry in measurements_data:
             if not isinstance(entry, dict):
                 continue
@@ -2078,8 +1857,6 @@ class VSMPlotter(BasePlotWindow):
                 self, 'VSM Hysteresis Loops', 'No valid measurements were found in the project file.'
             )
             return False
-        self._project_path = project_path
-        self._update_project_title()
         self.measurements = measurements
         self.measurements.sort(
             key=lambda m: (
@@ -2121,7 +1898,6 @@ class VSMPlotter(BasePlotWindow):
                 self.temperature_combo.setCurrentIndex(index)
         self.plot_button.setEnabled(plottable > 0)
         self.export_button.setEnabled(True)
-        self._update_project_actions()
         self._generate_plots()
         self._set_field_direction_enabled(field_direction)
         self._save_settings()
@@ -2474,7 +2250,6 @@ class VSMPlotter(BasePlotWindow):
             self.settings.setValue("last_export_path", str(self.last_export_path))
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("window_state", self.saveState())
-        self._save_recent_projects_setting()
         self.settings.sync()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
@@ -2667,7 +2442,7 @@ class VSMPlotter(BasePlotWindow):
         index = self.tab_widget.addTab(container, tab_label)
         self.tab_widget.setCurrentIndex(index)
         self._worksheet_tabs_open[path] = container
-        self._tab_to_worksheet_path[container] = path
+        self._tab_to_worksheet_key[container] = path
         self._set_tab_visibility(container, True)
         return container
 
@@ -2756,7 +2531,7 @@ class VSMPlotter(BasePlotWindow):
         if tab in self._tab_descriptors:
             self._update_graph_tree_for_tab(tab)
         else:
-            path = self._tab_to_worksheet_path.get(tab)
+            path = self._tab_to_worksheet_key.get(tab)
             if path is not None:
                 self._update_worksheet_item_state(path)
 
@@ -2786,7 +2561,7 @@ class VSMPlotter(BasePlotWindow):
             self.export_button.setEnabled(False)
             self.open_origin_button.setEnabled(False)
         self.export_button.setEnabled(False)
-        path = self._tab_to_worksheet_path.get(tab)
+        path = self._tab_to_worksheet_key.get(tab)
         if path is not None:
             self._update_worksheet_item_state(path)
 
@@ -2799,7 +2574,7 @@ class VSMPlotter(BasePlotWindow):
             if descriptor is not None:
                 target_item = self._graph_tree_items.get(tab)
             else:
-                path = self._tab_to_worksheet_path.get(tab)
+                path = self._tab_to_worksheet_key.get(tab)
                 if path is not None:
                     target_item = self._worksheet_tree_items.get(path)
         if target_item is not None:
@@ -2937,7 +2712,7 @@ class VSMPlotter(BasePlotWindow):
                             self.project_tree.takeTopLevelItem(index)
             for key in [key for key in self._object_items.keys() if key[0] is tab]:
                 self._object_items.pop(key, None)
-            path = self._tab_to_worksheet_path.pop(tab, None)
+            path = self._tab_to_worksheet_key.pop(tab, None)
             if path is not None:
                 self._worksheet_tabs_open.pop(path, None)
                 self._update_worksheet_item_state(path)
@@ -3011,7 +2786,7 @@ class VSMPlotter(BasePlotWindow):
         self._graph_tree_items.clear()
         self._worksheet_tree_items.clear()
         self._worksheet_tabs_open.clear()
-        self._tab_to_worksheet_path.clear()
+        self._tab_to_worksheet_key.clear()
         self._hidden_tabs.clear()
         self._plotted_series_exports = {}
         self._metrics_by_temperature = {}
