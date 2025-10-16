@@ -2811,48 +2811,6 @@ class VSMPlotter(BasePlotWindow):
         if path is not None:
             self._update_worksheet_item_state(path)
 
-    def _close_tab(self, tab: QtWidgets.QWidget) -> None:
-        descriptor = self._tab_descriptors.pop(tab, None)
-        index = self.tab_widget.indexOf(tab)
-        if index >= 0:
-            self.tab_widget.removeTab(index)
-        self._canvas_by_tab.pop(tab, None)
-        self._axes_by_tab.pop(tab, None)
-        self._hidden_tabs.discard(tab)
-
-        if tab in self._graph_tree_items:
-            item = self._graph_tree_items.pop(tab)
-            parent = item.parent()
-            if parent is not None:
-                parent.removeChild(item)
-            else:
-                index = self.project_tree.indexOfTopLevelItem(item)
-                if index >= 0:
-                    self.project_tree.takeTopLevelItem(index)
-        for collection in (
-            self._temperature_tab_widgets,
-            self._metrics_angle_tabs,
-            self._metrics_temperature_tabs,
-            self._overlay_tab_widgets,
-        ):
-            if tab in collection:
-                collection.remove(tab)
-
-        if descriptor is not None and descriptor.kind == "temperature":
-            temperature = descriptor.metadata.get("temperature")
-            if isinstance(temperature, (int, float)):
-                self._plot_tabs.pop(float(temperature), None)
-                self._line_visibility.pop(float(temperature), None)
-
-        self._update_save_graph_enabled()
-        self._update_normalize_enabled()
-        self._update_tab_buttons()
-        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
-
-        if not self._tab_descriptors:
-            self.export_button.setEnabled(False)
-            self.open_origin_button.setEnabled(False)
-
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
         self.project_tree.clearSelection()
@@ -4129,6 +4087,47 @@ class VSMPlotter(BasePlotWindow):
 
     def _after_tab_removed(self, info: Any) -> None:  # type: ignore[override]
         super()._after_tab_removed(info)
+
+        tab = getattr(info, "tab", None)
+        descriptor = getattr(info, "descriptor", None)
+        extra = getattr(info, "extra", {})
+        if not isinstance(extra, dict):
+            extra = {}
+            setattr(info, "extra", extra)
+
+        extra.setdefault("collections", {})
+        collections: Dict[str, int] = extra["collections"]
+
+        for key, collection in (
+            ("temperature", self._temperature_tab_widgets),
+            ("metrics_angle", self._metrics_angle_tabs),
+            ("metrics_temperature", self._metrics_temperature_tabs),
+            ("overlay", self._overlay_tab_widgets),
+        ):
+            if tab in collection:
+                index = collection.index(tab)
+                collection.pop(index)
+                collections[key] = index
+
+        if isinstance(descriptor, TabDescriptor):
+            if descriptor.kind == "temperature":
+                temperature = descriptor.metadata.get("temperature")
+                if isinstance(temperature, (int, float)):
+                    key = float(temperature)
+                    tab_state = self._plot_tabs.pop(key, None)
+                    if tab_state is not None:
+                        extra["plot_tab_state"] = tab_state
+                    visibility = self._line_visibility.pop(key, None)
+                    if visibility is not None:
+                        extra["line_visibility"] = visibility
+
+        extra["export_enabled_before"] = self.export_button.isEnabled()
+        extra["origin_enabled_before"] = self.open_origin_button.isEnabled()
+
+        if not self._tab_descriptors:
+            self.open_origin_button.setEnabled(False)
+        self.export_button.setEnabled(False)
+
         axes = getattr(info, "axes", None)
         legend = None
         if axes is not None:
@@ -4142,9 +4141,47 @@ class VSMPlotter(BasePlotWindow):
     def _after_tab_restored(self, info: Any) -> None:  # type: ignore[override]
         super()._after_tab_restored(info)
         descriptor = getattr(info, "descriptor", None)
+        tab = getattr(info, "tab", None)
+        extra = getattr(info, "extra", {})
+
+        collections: Dict[str, int] = {}
+        if isinstance(extra, dict):
+            collections = dict(extra.get("collections", {}))
+
+        for key, collection in (
+            ("temperature", self._temperature_tab_widgets),
+            ("metrics_angle", self._metrics_angle_tabs),
+            ("metrics_temperature", self._metrics_temperature_tabs),
+            ("overlay", self._overlay_tab_widgets),
+        ):
+            if tab is None:
+                continue
+            if key in collections:
+                index = collections[key]
+                if 0 <= index <= len(collection):
+                    collection.insert(index, tab)
+                elif tab not in collection:
+                    collection.append(tab)
+
         if isinstance(descriptor, TabDescriptor):
+            if descriptor.kind == "temperature":
+                temperature = descriptor.metadata.get("temperature")
+                if isinstance(temperature, (int, float)):
+                    key = float(temperature)
+                    tab_state = extra.get("plot_tab_state") if isinstance(extra, dict) else None
+                    if isinstance(tab_state, PlotTabState):
+                        self._plot_tabs[key] = tab_state
+                    visibility = extra.get("line_visibility") if isinstance(extra, dict) else None
+                    if isinstance(visibility, dict):
+                        self._line_visibility[key] = visibility
             self._apply_direction_split_to_descriptor(descriptor)
             self._refresh_descriptor_legend(descriptor, force_layout=True)
+
+        if isinstance(extra, dict):
+            if "export_enabled_before" in extra:
+                self.export_button.setEnabled(bool(extra["export_enabled_before"]))
+            if "origin_enabled_before" in extra:
+                self.open_origin_button.setEnabled(bool(extra["origin_enabled_before"]))
 
     def _plot_angle_overlays(self) -> None:
         if not self._last_prepared_groups or not self._last_axes:

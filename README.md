@@ -163,7 +163,9 @@ buttons use, adds `Close Window`/`Quit` actions, and keeps the last-used paths i
 sync so keyboard-driven workflows stay quick.  A new **Edit** menu sits beside
 it with working `Undo`, `Redo`, `Cut`, `Copy`, `Paste`, and `Select All`
 shortcuts that operate on whichever widget currently has focus, so you can
-drive text boxes and tables without touching the mouse.  The **View** menu
+drive text boxes and tables without touching the mouse.  Undo now tracks graph tabs as
+well, so a stray close click (or ⌘/Ctrl + W) can be reversed instantly on macOS and
+Windows alike.  The **View** menu
 exposes theme controls (System/Light/Dark), toggles the file browser or console
 panes, and resets splitter sizes if the layout becomes cramped, while **Help**
 opens a Markdown guide tailored to the current tool.  A dedicated **Window**
@@ -635,7 +637,7 @@ Sessions can now be saved and restored just like an Origin project. Use **File �
 
 The Message Log dock now highlights itself in red whenever an error is recorded—for example when a measurement fails to parse or a loop lacks the crossings required to compute coercivity. Hover over the tab or pin it open to acknowledge the message and the highlight clears automatically, so it is obvious when something in the workflow needs attention even while the panel is collapsed.
 
-Editable worksheets stay in sync with the plots. Right-click inside a worksheet tab to delete the selected rows, then hit **Generate plots** to recalc the curves and derived metrics with the cleaned data. The Project Explorer’s double-click handler jumps straight to the matching temperature tab so navigating dense batches stays effortless.
+Editable worksheets stay in sync with the plots. Right-click inside a worksheet tab to delete the selected rows, then hit **Generate plots** to recalc the curves and derived metrics with the cleaned data. The Project Explorer opens items on double-click or the **Return/Enter** key, so navigating dense batches on macOS trackpads is just as reliable as on Windows.
 
 All TXT exports now include an Origin-friendly header block: the first four
 rows provide short names, long names, units, and comments (complete with the

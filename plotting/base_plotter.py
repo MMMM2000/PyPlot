@@ -125,6 +125,7 @@ class _RemovedTabInfo:
     worksheet_path: Path | None
     was_hidden: bool
     was_current: bool
+    extra: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -399,6 +400,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
         self.project_tree.header().setStretchLastSection(True)
         self.project_tree.itemDoubleClicked.connect(self._handle_project_item_double_click)
+        self.project_tree.itemActivated.connect(self._handle_project_item_double_click)
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
@@ -474,8 +476,7 @@ class BasePlotWindow(QtWidgets.QMainWindow):
         item: QtWidgets.QTreeWidgetItem,
         column: int,
     ) -> None:
-        if column != 0:
-            return
+        _ = column
         data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
         if not data:
             return

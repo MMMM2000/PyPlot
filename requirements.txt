@@ -37,6 +37,8 @@ pandas==2.3.2
     # via python-plot (pyproject.toml)
 openpyxl==3.1.5
     # via python-plot (pyproject.toml)
+originpro==1.1.14
+    # via python-plot (pyproject.toml)
 pillow==11.3.0
     # via matplotlib
 plotly==6.3.0
@@ -82,6 +84,8 @@ tzdata==2025.2
 zeroconf==0.147.2
     # via python-plot (pyproject.toml)
 
-# The following packages are considered to be unsafe in a requirements file:
+# The following packages are considered to be unsafe in a requirements file by pip-tools
+# because tools like pip manage them automatically and pinning them can break
+# environment bootstrapping:
 # setuptools
 pytest==8.4.2
