@@ -29,6 +29,9 @@ from plotting.utils import install_standard_menu
 from origin_clone.app import PythonConsoleWidget
 
 
+OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+
+
 class _DockSwitcherWidget(QtWidgets.QWidget):
     """Vertical tab bar that mirrors dock visibility with hover-to-open behaviour."""
 
@@ -1938,14 +1941,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             ):
                 try:
                     self.splitDockWidget(
-                        right_switcher,
                         object_dock,
+                        right_switcher,
                         QtCore.Qt.Orientation.Horizontal,
                     )
                 except Exception:
                     pass
                 try:
-                    object_dock.raise_()
+                    right_switcher.raise_()
                 except Exception:
                     pass
         finally:

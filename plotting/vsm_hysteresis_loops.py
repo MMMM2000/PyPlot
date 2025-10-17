@@ -10,7 +10,7 @@ import sys
 from dataclasses import dataclass, field
 from functools import lru_cache, partial
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Literal, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Literal, Sequence, Tuple, Hashable
 
 import pandas as pd
 import numpy as np
@@ -26,6 +26,10 @@ from plotting.pyplot import (
     GraphSelectionDialog,
     PlotTabState,
     TabDescriptor,
+    WorksheetTableModel,
+    WorksheetColumnMeta,
+    WorksheetData,
+    OBJECT_TREE_STATE_ROLE,
 )
 from plotting.utils import ensure_app_theme, origin_session, schedule_origin_release
 
@@ -197,104 +201,6 @@ class AutoHideDockWidget(QtWidgets.QDockWidget):
             self._title_label.setStyleSheet("color: #b3261e; font-weight: 600;")
         else:
             self._title_label.setStyleSheet("")
-
-
-class WorksheetModel(QtCore.QAbstractTableModel):
-    """Editable model exposing a measurement dataframe."""
-
-    def __init__(self, measurement: VSMMeasurement, parent: QtCore.QObject | None = None) -> None:
-        super().__init__(parent)
-        self._measurement = measurement
-        self._columns = list(measurement.data.columns)
-
-    @property
-    def dataframe(self) -> pd.DataFrame:
-        return self._measurement.data
-
-    def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # type: ignore[override]
-        if parent.isValid():
-            return 0
-        return len(self.dataframe)
-
-    def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # type: ignore[override]
-        if parent.isValid():
-            return 0
-        return len(self._columns)
-
-    def data(
-        self,
-        index: QtCore.QModelIndex,
-        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
-    ) -> Any:  # type: ignore[override]
-        if not index.isValid():
-            return None
-        column = self._columns[index.column()]
-        value = self.dataframe.iloc[index.row(), self.dataframe.columns.get_loc(column)]
-        if role in {QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.EditRole}:
-            if pd.isna(value):
-                return ""
-            return str(value)
-        return None
-
-    def headerData(
-        self,
-        section: int,
-        orientation: QtCore.Qt.Orientation,
-        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
-    ) -> str | None:  # type: ignore[override]
-        if role != QtCore.Qt.ItemDataRole.DisplayRole:
-            return None
-        if orientation == QtCore.Qt.Orientation.Horizontal:
-            if 0 <= section < len(self._columns):
-                return str(self._columns[section])
-        else:
-            return str(section + 1)
-        return None
-
-    def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlag:  # type: ignore[override]
-        base = super().flags(index)
-        if index.isValid():
-            base |= QtCore.Qt.ItemFlag.ItemIsEditable
-        return base
-
-    def setData(
-        self,
-        index: QtCore.QModelIndex,
-        value: object,
-        role: int = QtCore.Qt.ItemDataRole.EditRole,
-    ) -> bool:  # type: ignore[override]
-        if role != QtCore.Qt.ItemDataRole.EditRole or not index.isValid():
-            return False
-        column = self._columns[index.column()]
-        df = self.dataframe
-        column_index = df.columns.get_loc(column)
-        series = df.iloc[:, column_index]
-        text = str(value)
-        if pd.api.types.is_numeric_dtype(series):
-            try:
-                parsed = float(text)
-            except ValueError:
-                return False
-            df.iat[index.row(), column_index] = parsed
-        else:
-            df.iat[index.row(), column_index] = text
-        self.dataChanged.emit(index, index, [role])
-        return True
-
-    def removeRows(
-        self,
-        row: int,
-        count: int,
-        parent: QtCore.QModelIndex = QtCore.QModelIndex(),
-    ) -> bool:  # type: ignore[override]
-        if row < 0 or count <= 0 or row + count > len(self.dataframe):
-            return False
-        self.beginRemoveRows(parent, row, row + count - 1)
-        drop_index = self.dataframe.index[row : row + count]
-        self.dataframe.drop(index=drop_index, inplace=True)
-        self.dataframe.reset_index(drop=True, inplace=True)
-        self.endRemoveRows()
-        return True
 
 
 class _MetricDebugTab(QtWidgets.QWidget):
@@ -1642,7 +1548,7 @@ class VSMPlotter(PyPlotWindow):
         self._last_axes: tuple[str, str] | None = None
         self._last_rescale_enabled = False
         self._line_visibility: Dict[float, Dict[float, bool]] = {}
-        self._worksheet_models: Dict[Path, WorksheetModel] = {}
+        self._worksheet_models: Dict[Path, WorksheetTableModel] = {}
         self._plotted_series_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
         self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
@@ -1654,6 +1560,7 @@ class VSMPlotter(PyPlotWindow):
         self._last_graph_dir: Path | None = None
         self._field_direction_enabled = False
         self._direction_legends: Dict[Any, Legend] = {}
+        self._last_source_dir: Path | None = None
 
         self._base_title = "VSM Hysteresis Loops"
         super().__init__(title=self._base_title)
@@ -1952,6 +1859,7 @@ class VSMPlotter(PyPlotWindow):
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         axes_group = QtWidgets.QGroupBox("Axes and filters")
+        axes_group.setFlat(True)
         axes_form = QtWidgets.QFormLayout(axes_group)
         axes_form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
@@ -1969,6 +1877,7 @@ class VSMPlotter(PyPlotWindow):
         layout.addWidget(axes_group)
 
         appearance_group = QtWidgets.QGroupBox("Appearance")
+        appearance_group.setFlat(True)
         appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
         appearance_layout.setContentsMargins(8, 8, 8, 8)
         self.style_combo = QtWidgets.QComboBox()
@@ -1993,12 +1902,14 @@ class VSMPlotter(PyPlotWindow):
         layout.addWidget(appearance_group)
 
         overlay_group = QtWidgets.QGroupBox("Angle overlays")
+        overlay_group.setFlat(True)
         overlay_layout = QtWidgets.QVBoxLayout(overlay_group)
         overlay_layout.setContentsMargins(8, 8, 8, 8)
         self.angle_overlay_list = QtWidgets.QListWidget()
         self.angle_overlay_list.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.angle_overlay_list.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
         overlay_layout.addWidget(self.angle_overlay_list, 1)
         overlay_hint = QtWidgets.QLabel(
             "Select rotations to compare across temperatures or when exporting overlays."
@@ -2014,6 +1925,7 @@ class VSMPlotter(PyPlotWindow):
         layout.addWidget(overlay_group, 1)
 
         metrics_group = QtWidgets.QGroupBox("Derived metrics")
+        metrics_group.setFlat(True)
         metrics_layout = QtWidgets.QVBoxLayout(metrics_group)
         metrics_layout.setContentsMargins(8, 8, 8, 8)
         self.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle")
@@ -2232,6 +2144,13 @@ class VSMPlotter(PyPlotWindow):
             except (TypeError, ValueError):
                 self._last_graph_dir = None
 
+        source_dir = self.settings.value("last_source_dir", "")
+        if isinstance(source_dir, str) and source_dir:
+            try:
+                self._last_source_dir = Path(source_dir)
+            except (TypeError, ValueError):
+                self._last_source_dir = None
+
         style_value = self.settings.value("plot_style", "line")
         if isinstance(style_value, str):
             index = self.style_combo.findData(style_value)
@@ -2282,6 +2201,8 @@ class VSMPlotter(PyPlotWindow):
         self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
+        if self._last_source_dir:
+            self.settings.setValue("last_source_dir", str(self._last_source_dir))
         if not bool(getattr(self, "_suppress_window_persistence", False)):
             self.settings.setValue("geometry", self.saveGeometry())
             self.settings.setValue("window_state", self.saveState())
@@ -2330,7 +2251,7 @@ class VSMPlotter(PyPlotWindow):
             PyPlotWindow.closeEvent(self, event)
 
     def _choose_files(self) -> None:
-        start_dir = self.path_edit.text() or str(Path.home())
+        start_dir = str(self._default_source_directory())
         files, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self,
             "Select VSM files",
@@ -2340,11 +2261,13 @@ class VSMPlotter(PyPlotWindow):
         if not files:
             return
         self.path_edit.setText(";".join(files))
+        first = Path(files[0])
+        self._remember_source_directory(first.parent if first.is_file() else first)
         self._load_measurements(show_warning=False)
         self._save_settings()
 
     def _choose_folder(self) -> None:
-        start_dir = self.path_edit.text() or str(Path.home())
+        start_dir = str(self._default_source_directory())
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self,
             "Select folder with VSM files",
@@ -2357,6 +2280,7 @@ class VSMPlotter(PyPlotWindow):
             self.path_edit.setText(";".join(str(path) for path in paths))
         else:
             self.path_edit.setText(directory)
+        self._remember_source_directory(Path(directory))
         self._load_measurements(show_warning=False)
         self._save_settings()
 
@@ -2364,6 +2288,9 @@ class VSMPlotter(PyPlotWindow):
         text = self.path_edit.text().strip()
         if not text:
             return
+        first = Path(text.split(";")[0])
+        if first.exists():
+            self._remember_source_directory(first)
         self._load_measurements(show_warning=False)
         self._save_settings()
 
@@ -2450,14 +2377,19 @@ class VSMPlotter(PyPlotWindow):
 
     def _populate_worksheets(self) -> None:
         self._worksheet_models.clear()
+        self._worksheets.clear()
         for measurement in self.measurements:
-            model = WorksheetModel(measurement)
+            worksheet = self._build_measurement_worksheet(measurement)
+            self._worksheets[worksheet.key] = worksheet
+            model = WorksheetTableModel(worksheet, self)
+            setattr(model, "_measurement", measurement)
             self._worksheet_models[measurement.path] = model
             widget = self._worksheet_tabs_open.get(measurement.path)
             if widget is not None:
                 view = getattr(widget, "_worksheet_view", None)
                 if isinstance(view, QtWidgets.QTableView):
                     view.setModel(model)
+                    self._configure_worksheet_view(view)
         for path in list(self._worksheet_tree_items.keys()):
             self._update_worksheet_item_state(path)
 
@@ -2485,7 +2417,7 @@ class VSMPlotter(PyPlotWindow):
         item.setForeground(0, brush)
         item.setForeground(1, brush)
 
-    def _create_worksheet_tab(self, path: Path, model: WorksheetModel) -> QtWidgets.QWidget:
+    def _create_worksheet_tab(self, path: Path, model: WorksheetTableModel) -> QtWidgets.QWidget:
         view = QtWidgets.QTableView()
         view.setModel(model)
         view.setSelectionBehavior(
@@ -2499,17 +2431,22 @@ class VSMPlotter(PyPlotWindow):
             lambda pos, table=view: self._open_table_menu(table, pos)
         )
         view.horizontalHeader().setStretchLastSection(True)
-        view.verticalHeader().setVisible(False)
+        self._configure_worksheet_view(view)
 
         container = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(view)
         setattr(container, "_worksheet_view", view)
+        setattr(view, "_worksheet_key", path)
 
         tab_label = path.stem or "Worksheet"
-        measurement = model._measurement
-        if measurement.temperature is not None and measurement.angle is not None:
+        measurement = getattr(model, "_measurement", None)
+        if (
+            isinstance(measurement, VSMMeasurement)
+            and measurement.temperature is not None
+            and measurement.angle is not None
+        ):
             tab_label = f"{measurement.temperature:g}°C @ {measurement.angle:g}°"
 
         index = self.tab_widget.addTab(container, tab_label)
@@ -2519,10 +2456,107 @@ class VSMPlotter(PyPlotWindow):
         self._set_tab_visibility(container, True)
         return container
 
+    def _configure_worksheet_view(self, view: QtWidgets.QTableView) -> None:
+        header = view.verticalHeader()
+        header.setVisible(True)
+        for row_index in range(len(WorksheetTableModel.METADATA_FIELDS)):
+            header.setSectionResizeMode(
+                row_index, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
+        header.setDefaultSectionSize(max(22, header.defaultSectionSize()))
+
+    def _build_measurement_worksheet(self, measurement: VSMMeasurement) -> WorksheetData:
+        frame = measurement.data.copy()
+        frame.columns = [str(column) for column in frame.columns]
+        comment = self._measurement_comment(measurement)
+        formula = self._measurement_formula(measurement)
+        columns: Dict[str, WorksheetColumnMeta] = {}
+        for column in frame.columns:
+            long_name, unit = _split_column_label(column)
+            columns[column] = WorksheetColumnMeta(
+                long_name=long_name or column,
+                units=unit,
+                comments=comment,
+                formula=formula,
+            )
+        workbook_key: Hashable = (
+            measurement.path.parent
+            if measurement.path.parent != measurement.path
+            else measurement.path
+        )
+        return WorksheetData(
+            key=measurement.path,
+            name=measurement.path.stem or "Worksheet",
+            dataframe=frame,
+            columns=columns,
+            source=measurement.path,
+            workbook_key=workbook_key,
+        )
+
+    def _measurement_comment(self, measurement: VSMMeasurement) -> str:
+        parts: List[str] = []
+        if measurement.temperature is not None and not math.isnan(measurement.temperature):
+            parts.append(f"{measurement.temperature:g} °C")
+        if measurement.angle is not None and not math.isnan(measurement.angle):
+            if parts:
+                parts.append("@")
+            parts.append(f"{measurement.angle:g}°")
+        if not parts:
+            parts.append(measurement.path.name)
+        return " ".join(parts)
+
+    def _measurement_formula(self, measurement: VSMMeasurement) -> str:
+        return f"Imported from {measurement.path.name}"
+
+    def _series_label(
+        self,
+        measurement: VSMMeasurement,
+        column: str,
+        fallback: str,
+    ) -> str:
+        worksheet = self._worksheets.get(measurement.path)
+        if worksheet is not None:
+            meta = worksheet.columns.get(column)
+            if meta and meta.comments:
+                return meta.comments
+        return fallback
+
+    def _default_source_directory(self) -> Path:
+        if self._last_source_dir is not None and self._last_source_dir.exists():
+            return self._last_source_dir
+        text = self.path_edit.text().strip()
+        if text:
+            first = text.split(";")[0]
+            candidate = Path(first)
+            if candidate.is_dir():
+                return candidate
+            if candidate.is_file():
+                return candidate.parent
+        return Path.home()
+
+    def _remember_source_directory(self, path: Path) -> None:
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        if resolved.is_file():
+            resolved = resolved.parent
+        if not resolved.exists():
+            return
+        self._last_source_dir = resolved
+        self.settings.setValue("last_source_dir", str(resolved))
+
     def _open_worksheet_tab(self, path: Path) -> None:
         model = self._worksheet_models.get(path)
         if model is None:
-            return
+            worksheet = self._worksheets.get(path)
+            if worksheet is None:
+                return
+            model = WorksheetTableModel(worksheet, self)
+            measurement = next((m for m in self.measurements if m.path == path), None)
+            if measurement is not None:
+                setattr(model, "_measurement", measurement)
+            self._worksheet_models[path] = model
         widget = self._worksheet_tabs_open.get(path)
         if widget is None:
             widget = self._create_worksheet_tab(path, model)
@@ -2709,19 +2743,34 @@ class VSMPlotter(PyPlotWindow):
 
     def _delete_selected_rows(self, table: QtWidgets.QTableView) -> None:
         model = table.model()
-        if not isinstance(model, WorksheetModel):
+        if not isinstance(model, WorksheetTableModel):
             return
         selection = table.selectionModel()
         if selection is None:
             return
-        rows = sorted({index.row() for index in selection.selectedRows()}, reverse=True)
+        rows = sorted(
+            {
+                index.row()
+                for index in selection.selectedRows()
+                if index.row() >= len(WorksheetTableModel.METADATA_FIELDS)
+            },
+            reverse=True,
+        )
         if not rows:
             return
         for row in rows:
             model.removeRows(row, 1)
-        self._append_log(
-            f"Deleted {len(rows)} row(s) from {model._measurement.path.name}."
-        )
+        label = None
+        worksheet_key = getattr(table, "_worksheet_key", None)
+        if isinstance(worksheet_key, Path):
+            label = worksheet_key.name
+        if label is None:
+            measurement = getattr(model, "_measurement", None)
+            if isinstance(measurement, VSMMeasurement):
+                label = measurement.path.name
+        if label is None:
+            label = "worksheet"
+        self._append_log(f"Deleted {len(rows)} row(s) from {label}.")
         self._generate_plots()
 
     def _register_plot_tab(
@@ -2852,6 +2901,11 @@ class VSMPlotter(PyPlotWindow):
         self._plot_tabs = {}
         self._object_items = {}
         self._worksheet_models.clear()
+        self._worksheets.clear()
+        self._workbooks.clear()
+        self._data_workbook_items.clear()
+        self._data_folder_items.clear()
+        self._data_tree_root = None
         self._reset_object_manager()
         self._graph_tree_root = None
         self._worksheet_tree_root = None
@@ -3755,6 +3809,7 @@ class VSMPlotter(PyPlotWindow):
                 QtCore.Qt.ItemDataRole.UserRole,
                 (tab, key),
             )
+            child.setData(0, OBJECT_TREE_STATE_ROLE, line_state)
             root.addChild(child)
             self._object_items[(tab, key)] = child
 
@@ -3836,7 +3891,9 @@ class VSMPlotter(PyPlotWindow):
         descriptor = self._tab_descriptors.get(tab)
         if descriptor is None:
             return
-        line_state = descriptor.lines.get(tuple(key))
+        line_state = item.data(0, OBJECT_TREE_STATE_ROLE)
+        if not isinstance(line_state, GraphLineState):
+            line_state = descriptor.lines.get(tuple(key))
         if line_state is None:
             return
         new_visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
@@ -4058,15 +4115,20 @@ class VSMPlotter(PyPlotWindow):
                     numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
                     if numeric_x.size == 0 or numeric_y.size == 0:
                         continue
+                    label = self._series_label(
+                        measurement,
+                        y_axis,
+                        f"{temperature:g} °C",
+                    )
                     line, = ax.plot(
                         numeric_x,
                         numeric_y,
-                        label=f"{temperature:g} °C",
+                        label=label,
                         **line_kwargs,
                     )
                     lines[("temperature", float(temperature))] = GraphLineState(
                         key=("temperature", float(temperature)),
-                        label=f"{temperature:g} °C",
+                        label=label,
                         line=line,
                         base_x=numeric_x,
                         base_y=numeric_y,
@@ -5100,10 +5162,15 @@ class VSMPlotter(PyPlotWindow):
                             series_y = series_y * result.scale + result.offset
                 numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
                 numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
+                label = self._series_label(
+                    measurement,
+                    y_axis,
+                    f"{measurement.angle:g}°",
+                )
                 line, = ax.plot(
                     numeric_x,
                     numeric_y,
-                    label=f"{measurement.angle:g}°",
+                    label=label,
                     **line_kwargs,
                 )
                 visible = visibility.get(angle, True)
@@ -5111,7 +5178,7 @@ class VSMPlotter(PyPlotWindow):
                 lines[angle] = line
                 descriptor_lines[("angle", angle)] = GraphLineState(
                     key=("angle", angle),
-                    label=f"{measurement.angle:g}°",
+                    label=label,
                     line=line,
                     base_x=numeric_x,
                     base_y=numeric_y,
