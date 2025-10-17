@@ -115,29 +115,97 @@ class PyPlotPlugin:
             "Origin export is not available for this plotting script yet.",
         )
 
-# UI state ----------------------------------------------------------
-def update_ui(self) -> None:
-    self._ensure_initialized()
-    host = self.host
-    has_paths = bool(host._selected_paths)
-    if hasattr(host, "load_data_button"):
-        host.load_data_button.setEnabled(has_paths)
-    if self._summary_label is not None:
-        self._summary_label.clear()
-    if hasattr(host, "plot_button"):
-        host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))
-        host.plot_button.setText("Generate VSM Hysteresis Loops")
-    if hasattr(host, "_update_save_graph_enabled"):
-        host._update_save_graph_enabled()
-    if hasattr(host, "_update_normalize_enabled"):
-        host._update_normalize_enabled()
-    if hasattr(host, "_update_project_actions"):
-        host._update_project_actions()
-    # Internal helpers --------------------------------------------------
+
+class VSMHysteresisPlugin(PyPlotPlugin):
+    """PyPlot plugin wrapper around :class:`VSMPlotter`."""
+
+    _METHOD_EXCLUDES = {"__init__"}
+
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name)
+        self._initialized = False
+        self._menus_ready = False
+        self._summary_label: QtWidgets.QLabel | None = None
+        self._settings_loaded = False
+
+    # Lifecycle -----------------------------------------------------
+    def activate(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._set_data_sources_visible(True)
+        self.update_ui()
+
+    def deactivate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+
+    # UI helpers ----------------------------------------------------
+    def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        summary = QtWidgets.QLabel(
+            "Select one or more VSM hysteresis files and click Load data."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        layout.addStretch(1)
+        self._summary_label = summary
+        return container
+
+    # Host actions --------------------------------------------------
+    def load_data(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._load_measurements()
+
+    def generate(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._generate_plots()
+
+    def open_matplotlib(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._open_matplotlib_window()
+
+    def save_graph(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._save_current_graph()
+
+    def normalize(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._normalize_current_graph()
+
+    def export_txt(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._export_txt()
+
+    def open_origin(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        self.host._open_origin_prompt()
+
+    # UI state ------------------------------------------------------
+    def update_ui(self) -> None:  # type: ignore[override]
+        self._ensure_initialized()
+        host = self.host
+        has_paths = bool(host._selected_paths)
+        if hasattr(host, "load_data_button"):
+            host.load_data_button.setEnabled(has_paths)
+        if self._summary_label is not None and not has_paths:
+            self._summary_label.setText(
+                "Select one or more VSM hysteresis files and click Load data."
+            )
+        if hasattr(host, "plot_button"):
+            host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))
+            host.plot_button.setText("Generate VSM Hysteresis Loops")
+        if hasattr(host, "_update_save_graph_enabled"):
+            host._update_save_graph_enabled()
+        if hasattr(host, "_update_normalize_enabled"):
+            host._update_normalize_enabled()
+        if hasattr(host, "_update_project_actions"):
+            host._update_project_actions()
+
+    # Internal helpers ---------------------------------------------
     def _ensure_initialized(self) -> None:
         if self._initialized:
             return
-        self._settings_loaded = False
         host = self.host
         host.logger = logging.getLogger("vsm_hysteresis_loops")
         host.logger.setLevel(logging.INFO)
@@ -178,6 +246,14 @@ def update_ui(self) -> None:
         if not self._menus_ready:
             VSMPlotter._extend_menus(host, host.menuBar())
             self._menus_ready = True
+
+        if not self._settings_loaded:
+            try:
+                host._load_settings()
+            except Exception:
+                host.logger.exception("Failed to load saved VSM settings")
+            else:
+                self._settings_loaded = True
 
         self._initialized = True
 
