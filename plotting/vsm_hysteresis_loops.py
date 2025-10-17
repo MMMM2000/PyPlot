@@ -1674,25 +1674,6 @@ class VSMPlotter(PyPlotWindow):
         log_dock: QtWidgets.QDockWidget,
         graph_dock: QtWidgets.QDockWidget,
     ) -> None:
-        left_switcher = next(
-            (
-                panel
-                for panel in getattr(self, "_dock_switcher_panels", [])
-                if isinstance(panel, QtWidgets.QDockWidget)
-                and panel.objectName() == "mw_left_dock_switcher"
-            ),
-            None,
-        )
-
-        def _retabify_left() -> None:
-            if left_switcher is not None:
-                self.splitDockWidget(left_switcher, project_dock, QtCore.Qt.Orientation.Horizontal)
-            self.tabifyDockWidget(project_dock, log_dock)
-            self.tabifyDockWidget(project_dock, graph_dock)
-            project_dock.raise_()
-
-        _retabify_left()
-
         graph_dock_features = graph_dock.features()
         graph_dock.setFeatures(
             graph_dock_features | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
@@ -1706,12 +1687,13 @@ class VSMPlotter(PyPlotWindow):
         def _handle_location_change(area: QtCore.Qt.DockWidgetArea) -> None:
             if area == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea:
                 graph_dock.setFloating(False)
-                _retabify_left()
+                self._retabify_primary_docks()
 
         graph_dock.dockLocationChanged.connect(_handle_location_change)
         self.message_log_dock = log_dock
         self.log_view.installEventFilter(self)
         log_dock.visibilityChanged.connect(self._handle_log_visibility)
+        self._retabify_primary_docks()
 
     # ------------------------------------------------------------------ project helpers
     def _has_project_data_to_save(self) -> bool:
@@ -5184,6 +5166,10 @@ class VSMPlotter(PyPlotWindow):
                 self._refresh_tab_legend(tab_state)
 
         self._append_log("Finished generating Matplotlib hysteresis plots.")
+        try:
+            self._ensure_window_visibility()
+        except Exception:
+            pass
 
     def _export_origin(
         self,

@@ -1033,6 +1033,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
+        self.project_dock = project_dock
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -1041,6 +1042,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         log_dock.setWidget(self.log_view)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, log_dock)
         log_dock.hide()
+        self.log_dock = log_dock
 
         self.object_tree = QtWidgets.QTreeWidget()
         self.object_tree.setHeaderLabels(["Object Manager"])
@@ -1049,6 +1051,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
+        self.object_dock = object_dock
 
         graph_settings_widget = QtWidgets.QWidget()
         graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
@@ -1061,6 +1064,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         graph_dock.setWidget(graph_settings_widget)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
         graph_dock.hide()
+        self.graph_dock = graph_dock
 
         self.console_widget = PythonConsoleWidget(self)
         self.console_widget.set_environment({"window": self, "pd": pd})
@@ -1079,6 +1083,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._create_dock_switcher((object_dock,), side="right")
         )
 
+        for tracked in (project_dock, log_dock, graph_dock, object_dock):
+            if tracked is None:
+                continue
+            try:
+                tracked.dockLocationChanged.connect(
+                    lambda area, dock=tracked: self._handle_primary_dock_location_change(dock, area)
+                )
+            except Exception:
+                pass
+
         menu_bar = install_standard_menu(
             self,
             help_topic=self.help_topic,
@@ -1091,6 +1105,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._setup_data_menu(menu_bar)
         self._extend_menus(menu_bar)
         self._after_base_ui_created(project_dock=project_dock, log_dock=log_dock, graph_dock=graph_dock)
+        self._retabify_primary_docks()
         view_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_view")
         if view_menu is not None and hasattr(self, "console_dock"):
             view_menu.addSeparator()
@@ -1845,11 +1860,96 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         self.addDockWidget(area, panel)
         reference = docks[0]
-        if side == "left":
+        try:
             self.splitDockWidget(panel, reference, QtCore.Qt.Orientation.Horizontal)
-        else:
-            self.splitDockWidget(reference, panel, QtCore.Qt.Orientation.Horizontal)
+        except Exception:
+            pass
         return panel
+
+    def _handle_primary_dock_location_change(
+        self,
+        dock: QtWidgets.QDockWidget,
+        area: QtCore.Qt.DockWidgetArea,
+    ) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        if area in (
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
+            QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+        ):
+            self._retabify_primary_docks()
+
+    def _retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        self._retabbing_docks = True
+        try:
+            project_dock = getattr(self, "project_dock", None)
+            log_dock = getattr(self, "log_dock", None)
+            graph_dock = getattr(self, "graph_dock", None)
+            object_dock = getattr(self, "object_dock", None)
+
+            left_switcher = next(
+                (
+                    panel
+                    for panel in getattr(self, "_dock_switcher_panels", [])
+                    if isinstance(panel, QtWidgets.QDockWidget)
+                    and panel.objectName() == "mw_left_dock_switcher"
+                ),
+                None,
+            )
+            right_switcher = next(
+                (
+                    panel
+                    for panel in getattr(self, "_dock_switcher_panels", [])
+                    if isinstance(panel, QtWidgets.QDockWidget)
+                    and panel.objectName() == "mw_right_dock_switcher"
+                ),
+                None,
+            )
+
+            if isinstance(project_dock, QtWidgets.QDockWidget):
+                if isinstance(left_switcher, QtWidgets.QDockWidget):
+                    try:
+                        self.splitDockWidget(
+                            left_switcher,
+                            project_dock,
+                            QtCore.Qt.Orientation.Horizontal,
+                        )
+                    except Exception:
+                        pass
+                for companion in (log_dock, graph_dock):
+                    if not isinstance(companion, QtWidgets.QDockWidget):
+                        continue
+                    if companion is project_dock:
+                        continue
+                    try:
+                        self.tabifyDockWidget(project_dock, companion)
+                    except Exception:
+                        pass
+                try:
+                    project_dock.raise_()
+                except Exception:
+                    pass
+
+            if (
+                isinstance(right_switcher, QtWidgets.QDockWidget)
+                and isinstance(object_dock, QtWidgets.QDockWidget)
+            ):
+                try:
+                    self.splitDockWidget(
+                        right_switcher,
+                        object_dock,
+                        QtCore.Qt.Orientation.Horizontal,
+                    )
+                except Exception:
+                    pass
+                try:
+                    object_dock.raise_()
+                except Exception:
+                    pass
+        finally:
+            self._retabbing_docks = False
 
     def _handle_console_execution(self, code: str, result: object) -> None:
         if not hasattr(self, "log_view") or self.log_view is None:
