@@ -49,6 +49,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._pinned_index: int | None = None
         self._floating_indices: set[int] = set()
         self._dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._panel_dock = parent if isinstance(parent, QtWidgets.QDockWidget) else None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -165,12 +166,12 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._syncing = True
         self._collapse_all(exclude=index)
         dock = self._docks[index]
-        if dock in self._dock_widths and not dock.isFloating():
-            width = self._dock_widths[dock]
-            if width > 0:
-                dock.resize(width, dock.height() or dock.sizeHint().height())
         dock.show()
         if not dock.isFloating():
+            self._ensure_tabbed(dock)
+            width = self._dock_widths.get(dock, 0)
+            if width > 0:
+                self._apply_dock_width(dock, width)
             dock.raise_()
         self._expanded_index = index
         self._collapse_timer.stop()
@@ -181,7 +182,8 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             return
         if visible:
             if not self._docks[index].isFloating():
-                self._dock_widths[self._docks[index]] = max(self._docks[index].width(), self._dock_widths.get(self._docks[index], 220))
+                current = self._docks[index]
+                self._dock_widths[current] = max(current.width(), self._dock_widths.get(current, 220))
             self._expanded_index = index
             self._collapse_timer.stop()
             if self._tab_bar.currentIndex() != index:
@@ -254,6 +256,61 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             self._floating_indices.discard(index)
             if self._pinned_index == index:
                 self._pinned_index = None
+            self._ensure_tabbed(dock)
+            width = self._dock_widths.get(dock, 0)
+            if width > 0:
+                self._apply_dock_width(dock, width)
+
+    def _main_window(self) -> QtWidgets.QMainWindow | None:
+        if self._panel_dock is not None:
+            window = self._panel_dock.parentWidget()
+        else:
+            window = self.parentWidget()
+        while window is not None and not isinstance(window, QtWidgets.QMainWindow):
+            window = window.parentWidget()
+        return window if isinstance(window, QtWidgets.QMainWindow) else None
+
+    def _ensure_tabbed(self, dock: QtWidgets.QDockWidget) -> None:
+        if dock.isFloating():
+            return
+        main_window = self._main_window()
+        if main_window is None:
+            return
+        reference: QtWidgets.QDockWidget | None = None
+        for candidate in self._docks:
+            if candidate is dock or candidate.isFloating():
+                continue
+            reference = candidate
+            break
+        if reference is not None:
+            try:
+                main_window.tabifyDockWidget(reference, dock)
+            except Exception:
+                pass
+            return
+        if self._panel_dock is not None:
+            try:
+                main_window.splitDockWidget(self._panel_dock, dock, QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+
+    def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
+        if dock.isFloating() or width <= 0:
+            return
+
+        def _resize() -> None:
+            if dock.isFloating():
+                return
+            dock.resize(width, dock.height() or dock.sizeHint().height())
+            main_window = self._main_window()
+            if main_window is None:
+                return
+            try:
+                main_window.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+
+        QtCore.QTimer.singleShot(0, _resize)
 
 
 @dataclass

@@ -1657,8 +1657,8 @@ class VSMPlotter(PyPlotWindow):
 
         self._base_title = "VSM Hysteresis Loops"
         super().__init__(title=self._base_title)
-        self.setMinimumSize(1024, 720)
-        self.resize(1480, 940)
+        self.setMinimumSize(960, 640)
+        self.resize(1360, 900)
         self._update_project_title()
         self._load_settings()
         self._ensure_window_visibility()
@@ -2309,18 +2309,29 @@ class VSMPlotter(PyPlotWindow):
         if bool(getattr(self, "_suppress_window_persistence", False)):
             return
         frame = self.frameGeometry()
-        min_size = QtCore.QSize(1024, 720)
-        target_size = frame.size().expandedTo(min_size)
-        if target_size != frame.size():
-            self.resize(target_size)
-            frame = self.frameGeometry()
-
         screen = QtGui.QGuiApplication.screenAt(frame.center())
         if screen is None:
             screen = QtGui.QGuiApplication.primaryScreen()
         if screen is None:
             return
         available = screen.availableGeometry()
+
+        min_size = QtCore.QSize(960, 640)
+        clamped_width = max(min_size.width(), min(frame.width(), available.width()))
+        clamped_height = max(min_size.height(), min(frame.height(), available.height()))
+        if clamped_width != frame.width() or clamped_height != frame.height():
+            self.resize(clamped_width, clamped_height)
+            frame = self.frameGeometry()
+
+        left_limit = available.left()
+        top_limit = available.top()
+        right_limit = available.left() + available.width() - frame.width()
+        bottom_limit = available.top() + available.height() - frame.height()
+        new_left = min(max(frame.left(), left_limit), right_limit)
+        new_top = min(max(frame.top(), top_limit), bottom_limit)
+        if new_left != frame.left() or new_top != frame.top():
+            self.move(new_left, new_top)
+            frame = self.frameGeometry()
 
         if not available.contains(frame):
             frame.moveCenter(available.center())
