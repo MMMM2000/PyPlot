@@ -22,7 +22,7 @@ from plotting.pyplot import (
     WorkbookData,
 )
 from plotting.utils import ensure_app_theme
-from plotting.vsm_hysteresis_loops import VSMPlotter
+from plotting.vsm_hysteresis_loops import VSMPlotter, _looks_like_vsm_name
 
 
 class PyPlotPlugin:
@@ -119,7 +119,7 @@ class PyPlotPlugin:
 class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
-    _METHOD_EXCLUDES = {"__init__", "_selected_paths"}
+    _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -278,14 +278,24 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     # Host actions --------------------------------------------------
     def load_data(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        if not self.host._selected_paths():
-            try:
-                self.host._choose_files()
-            except Exception:
-                self.host.logger.exception("Failed to open file dialog for VSM data selection")
-        if not self.host._selected_paths():
+        host = self.host
+        paths = host._selected_paths()
+        if not paths:
+            imported = self._collect_imported_vsm_sources()
+            if imported:
+                formatted = host._format_paths(imported)
+                host.path_edit.setText(formatted)
+                host._apply_path_text(formatted)
+                host._update_action_states()
+                paths = host._selected_paths()
+        if not paths:
+            if not self._open_data_menu():
+                try:
+                    host._choose_files()
+                except Exception:
+                    host.logger.exception("Failed to open file dialog for VSM data selection")
             return
-        self.host._load_measurements()
+        host._load_measurements()
 
     def generate(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
@@ -381,13 +391,63 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
         if not self._settings_loaded:
             try:
+                previous = bool(getattr(host, "_suppress_window_persistence", False))
+                host._suppress_window_persistence = True
                 host._load_settings()
             except Exception:
                 host.logger.exception("Failed to load saved VSM settings")
             else:
                 self._settings_loaded = True
+            finally:
+                if not previous:
+                    try:
+                        delattr(host, "_suppress_window_persistence")
+                    except AttributeError:
+                        pass
 
         self._initialized = True
+
+    def _collect_imported_vsm_sources(self) -> List[Path]:
+        host = self.host
+        worksheets = getattr(host, "_worksheets", {})
+        if not isinstance(worksheets, dict) or not worksheets:
+            return []
+        ordered: List[Path] = []
+        seen: set[Path] = set()
+        for worksheet in worksheets.values():
+            source = getattr(worksheet, "source", None)
+            if not isinstance(source, Path):
+                continue
+            if not _looks_like_vsm_name(source.name):
+                continue
+            if source in seen:
+                continue
+            seen.add(source)
+            ordered.append(source)
+        return ordered
+
+    def _open_data_menu(self) -> bool:
+        data_menu = getattr(self.host, "_data_menu", None)
+        if not isinstance(data_menu, QtWidgets.QMenu):
+            return False
+        menu_bar = self.host.menuBar() if hasattr(self.host, "menuBar") else None
+        global_pos: QtCore.QPoint
+        action = data_menu.menuAction()
+        if isinstance(menu_bar, QtWidgets.QMenuBar):
+            rect = menu_bar.actionGeometry(action)
+            anchor = rect.bottomLeft() if rect.isValid() else QtCore.QPoint(
+                0, menu_bar.height()
+            )
+            global_pos = menu_bar.mapToGlobal(anchor)
+            menu_bar.setActiveAction(action)
+        else:
+            button = getattr(self.host, "load_data_button", None)
+            if isinstance(button, QtWidgets.QPushButton):
+                global_pos = button.mapToGlobal(button.rect().bottomLeft())
+            else:
+                global_pos = self.host.mapToGlobal(QtCore.QPoint(0, 0))
+        data_menu.popup(global_pos)
+        return True
 
     def _bind_methods(self) -> None:
         host = self.host
@@ -437,11 +497,6 @@ class PyPlotWorkbench(PyPlotWindow):
         self._initial_plotter = initial_plotter
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
-        try:
-            self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
-        except Exception:
-            pass
-
         self.tab_widget.currentChanged.connect(lambda _: self._update_action_states())
 
         stored_sources = self.settings.value("sources", "")

@@ -1657,13 +1657,15 @@ class VSMPlotter(PyPlotWindow):
 
         self._base_title = "VSM Hysteresis Loops"
         super().__init__(title=self._base_title)
+        self.setMinimumSize(1024, 720)
         self.resize(1480, 940)
         self._update_project_title()
         self._load_settings()
+        self._ensure_window_visibility()
         self._update_project_actions()
 
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
-        return AutoHideDockWidget(title, self, object_name=object_name)
+        return super()._create_dock_widget(title, object_name)
 
     def _after_base_ui_created(
         self,
@@ -1672,9 +1674,41 @@ class VSMPlotter(PyPlotWindow):
         log_dock: QtWidgets.QDockWidget,
         graph_dock: QtWidgets.QDockWidget,
     ) -> None:
-        project_dock.raise_()
-        self.tabifyDockWidget(project_dock, log_dock)
-        self.tabifyDockWidget(project_dock, graph_dock)
+        left_switcher = next(
+            (
+                panel
+                for panel in getattr(self, "_dock_switcher_panels", [])
+                if isinstance(panel, QtWidgets.QDockWidget)
+                and panel.objectName() == "mw_left_dock_switcher"
+            ),
+            None,
+        )
+
+        def _retabify_left() -> None:
+            if left_switcher is not None:
+                self.splitDockWidget(left_switcher, project_dock, QtCore.Qt.Orientation.Horizontal)
+            self.tabifyDockWidget(project_dock, log_dock)
+            self.tabifyDockWidget(project_dock, graph_dock)
+            project_dock.raise_()
+
+        _retabify_left()
+
+        graph_dock_features = graph_dock.features()
+        graph_dock.setFeatures(
+            graph_dock_features | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+        )
+        graph_dock.setAllowedAreas(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+            | QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        graph_dock.setMinimumWidth(260)
+
+        def _handle_location_change(area: QtCore.Qt.DockWidgetArea) -> None:
+            if area == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea:
+                graph_dock.setFloating(False)
+                _retabify_left()
+
+        graph_dock.dockLocationChanged.connect(_handle_location_change)
         self.message_log_dock = log_dock
         self.log_view.installEventFilter(self)
         log_dock.visibilityChanged.connect(self._handle_log_visibility)
@@ -2228,19 +2262,37 @@ class VSMPlotter(PyPlotWindow):
         elif dark_value is not None:
             self.dark_mode_checkbox.setChecked(bool(dark_value))
 
-        geometry = self.settings.value("geometry")
-        if isinstance(geometry, QtCore.QByteArray):
-            try:
-                self.restoreGeometry(geometry)
-            except Exception:  # pragma: no cover - Qt versions differ
-                pass
+        suppress_window = bool(getattr(self, "_suppress_window_persistence", False))
 
-        window_state = self.settings.value("window_state")
-        if isinstance(window_state, QtCore.QByteArray):
-            try:
-                self.restoreState(window_state)
-            except Exception:  # pragma: no cover - Qt versions differ
-                pass
+        if not suppress_window:
+            geometry_restored = False
+            geometry = self.settings.value("geometry")
+            if isinstance(geometry, QtCore.QByteArray):
+                try:
+                    geometry_restored = bool(self.restoreGeometry(geometry))
+                except Exception:  # pragma: no cover - Qt versions differ
+                    geometry_restored = False
+
+            if not geometry_restored:
+                self.resize(1480, 940)
+            else:
+                rect = self.geometry()
+                if rect.width() < 400 or rect.height() < 300:
+                    screen = QtGui.QGuiApplication.primaryScreen()
+                    if screen is not None:
+                        fallback = QtCore.QSize(1024, 768)
+                        self.resize(fallback)
+                        available = screen.availableGeometry()
+                        frame = self.frameGeometry()
+                        frame.moveCenter(available.center())
+                        self.move(frame.topLeft())
+
+            window_state = self.settings.value("window_state")
+            if isinstance(window_state, QtCore.QByteArray):
+                try:
+                    self.restoreState(window_state)
+                except Exception:  # pragma: no cover - Qt versions differ
+                    pass
 
     def _save_settings(self) -> None:
         self.settings.setValue("sources", self.path_edit.text())
@@ -2248,13 +2300,41 @@ class VSMPlotter(PyPlotWindow):
         self.settings.setValue("plot_dark_mode", self.dark_mode_checkbox.isChecked())
         if self.last_export_path:
             self.settings.setValue("last_export_path", str(self.last_export_path))
-        self.settings.setValue("geometry", self.saveGeometry())
-        self.settings.setValue("window_state", self.saveState())
+        if not bool(getattr(self, "_suppress_window_persistence", False)):
+            self.settings.setValue("geometry", self.saveGeometry())
+            self.settings.setValue("window_state", self.saveState())
         self.settings.sync()
+
+    def _ensure_window_visibility(self) -> None:
+        if bool(getattr(self, "_suppress_window_persistence", False)):
+            return
+        frame = self.frameGeometry()
+        min_size = QtCore.QSize(1024, 720)
+        target_size = frame.size().expandedTo(min_size)
+        if target_size != frame.size():
+            self.resize(target_size)
+            frame = self.frameGeometry()
+
+        screen = QtGui.QGuiApplication.screenAt(frame.center())
+        if screen is None:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+
+        if not available.contains(frame):
+            frame.moveCenter(available.center())
+            self.move(frame.topLeft())
+
+        self.activateWindow()
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         self._save_settings()
-        super().closeEvent(event)
+        try:
+            super().closeEvent(event)
+        except TypeError:
+            # Method may be rebound onto PyPlotWorkbench (not a VSMPlotter subclass).
+            PyPlotWindow.closeEvent(self, event)
 
     def _choose_files(self) -> None:
         start_dir = self.path_edit.text() or str(Path.home())
@@ -2500,8 +2580,7 @@ class VSMPlotter(PyPlotWindow):
         item.setText(1, descriptor.title)
         self._style_graph_item(item, self._is_tab_visible(tab))
 
-    @staticmethod
-    def _style_graph_item(item: QtWidgets.QTreeWidgetItem, visible: bool) -> None:
+    def _style_graph_item(self, item: QtWidgets.QTreeWidgetItem, visible: bool) -> None:
         font = item.font(0)
         font.setItalic(not visible)
         item.setFont(0, font)
@@ -3689,8 +3768,7 @@ class VSMPlotter(PyPlotWindow):
         self.object_tree.expandAll()
         self.object_tree.blockSignals(False)
 
-    @staticmethod
-    def _object_manager_sort_key(item: tuple[tuple[str, float | str], GraphLineState]) -> tuple[int, float | str, str]:
+    def _object_manager_sort_key(self, item: tuple[tuple[str, float | str], GraphLineState]) -> tuple[int, float | str, str]:
         """Sort object manager entries numerically when possible."""
 
         key, state = item

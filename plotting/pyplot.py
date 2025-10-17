@@ -82,6 +82,11 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
 
+        # Timer must exist before dock visibility changes emit signals during setup.
+        self._collapse_timer = QtCore.QTimer(self)
+        self._collapse_timer.setSingleShot(True)
+        self._collapse_timer.timeout.connect(self._collapse_if_outside)
+
         for idx, dock in enumerate(self._docks):
             tab_index = self._tab_bar.addTab(dock.windowTitle())
             dock.windowTitleChanged.connect(
@@ -97,14 +102,11 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             self._dock_widths[dock] = max(dock.sizeHint().width(), 220)
             dock.hide()
 
-        self._collapse_timer = QtCore.QTimer(self)
-        self._collapse_timer.setSingleShot(True)
-        self._collapse_timer.timeout.connect(self._collapse_if_outside)
-
         self._tab_bar.currentChanged.connect(self._activate_index)
         if self._docks:
             self._tab_bar.setCurrentIndex(0)
         self._collapse_all()
+
 
     # Event handling -------------------------------------------------
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
@@ -960,7 +962,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         action_row.addStretch(1)
         central_layout.addLayout(action_row)
 
-        self.tab_widget = QtWidgets.QTabWidget()
+        self.tab_widget = _MdiTabProxy()
         self.tab_widget.currentChanged.connect(self._handle_current_tab_changed)
         central_layout.addWidget(self.tab_widget, 1)
 
@@ -1948,8 +1950,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._update_tab_buttons()
 
     def _update_tab_buttons(self) -> None:
-        tab_bar = self.tab_widget.tabBar()
-        if tab_bar is None:
+        tab_bar = getattr(self.tab_widget, "tabBar", lambda: None)()
+        if not isinstance(tab_bar, QtWidgets.QTabBar):
             return
         for index in range(self.tab_widget.count()):
             button = tab_bar.tabButton(index, QtWidgets.QTabBar.ButtonPosition.RightSide)
@@ -2146,6 +2148,225 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self.project_tree.setCurrentItem(target_item)
             self.project_tree.scrollToItem(target_item)
         self.project_tree.blockSignals(False)
+
+
+class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
+    """QMdiSubWindow that avoids deleting its widget on close."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
+
+
+class _MdiTabProxy(QtWidgets.QWidget):
+    """Proxy that mimics a subset of QTabWidget behaviour using a QMdiArea backend."""
+
+    currentChanged = QtCore.pyqtSignal(int)
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        self._mdi = QtWidgets.QMdiArea(self)
+        self._mdi.setViewMode(QtWidgets.QMdiArea.ViewMode.SubWindowView)
+        self._mdi.setOption(QtWidgets.QMdiArea.AreaOption.DontMaximizeSubWindowOnActivation, True)
+        layout.addWidget(self._mdi)
+
+        self._widgets: list[QtWidgets.QWidget] = []
+        self._subwindows: dict[QtWidgets.QWidget, _ManagedSubWindow] = {}
+        self._titles: dict[QtWidgets.QWidget, str] = {}
+        self._icons: dict[QtWidgets.QWidget, QtGui.QIcon] = {}
+        self._visible: dict[QtWidgets.QWidget, bool] = {}
+        self._blocking = False
+        self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
+
+    # ------------------------------------------------------------------ helpers
+    def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
+        if self._blocking:
+            return
+        widget = sub.widget() if sub is not None else None
+        index = self.indexOf(widget) if widget is not None else -1
+        self.currentChanged.emit(index)
+
+    def _subwindow_for(self, widget: QtWidgets.QWidget | None) -> _ManagedSubWindow | None:
+        if widget is None:
+            return None
+        return self._subwindows.get(widget)
+
+    def _activate_index(self, index: int) -> None:
+        if not 0 <= index < len(self._widgets):
+            self._mdi.setActiveSubWindow(None)
+            self.currentChanged.emit(-1)
+            return
+        widget = self._widgets[index]
+        sub = self._subwindow_for(widget)
+        if sub is None:
+            return
+        self._blocking = True
+        self._mdi.setActiveSubWindow(sub)
+        sub.showNormal()
+        sub.raise_()
+        self._blocking = False
+        self.currentChanged.emit(index)
+
+    def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
+        if widget is None:
+            return
+        try:
+            index = self._widgets.index(widget)
+        except ValueError:
+            return
+        self._widgets.pop(index)
+        self._titles.pop(widget, None)
+        self._icons.pop(widget, None)
+        self._visible.pop(widget, None)
+        sub = self._subwindows.pop(widget, None)
+        if sub is not None:
+            self._mdi.removeSubWindow(sub)
+            sub.setWidget(None)
+            sub.deleteLater()
+        widget.setParent(None)
+        if self._widgets:
+            new_index = min(index, len(self._widgets) - 1)
+            self._activate_index(new_index)
+        else:
+            self._mdi.setActiveSubWindow(None)
+            self.currentChanged.emit(-1)
+
+    # ------------------------------------------------------------------ tab-like API
+    def addTab(self, widget: QtWidgets.QWidget, title: str) -> int:
+        return self.insertTab(self.count(), widget, title)
+
+    def insertTab(self, index: int, widget: QtWidgets.QWidget, title: str) -> int:
+        index = max(0, min(index, len(self._widgets)))
+        widget.setParent(None)
+        sub = _ManagedSubWindow(self._mdi)
+        sub.setWidget(widget)
+        sub.setWindowTitle(title)
+        icon = self._icons.get(widget, QtGui.QIcon())
+        if not icon.isNull():
+            sub.setWindowIcon(icon)
+        self._mdi.addSubWindow(sub)
+        sub.show()
+
+        if widget in self._widgets:
+            self._remove_widget(widget)
+        self._widgets.insert(index, widget)
+        self._subwindows[widget] = sub
+        self._titles[widget] = title
+        self._icons[widget] = icon
+        self._visible[widget] = True
+
+        self._activate_index(index)
+        return index
+
+    def removeTab(self, index: int) -> None:
+        widget = self.widget(index)
+        self._remove_widget(widget)
+
+    def indexOf(self, widget: QtWidgets.QWidget | None) -> int:
+        if widget is None:
+            return -1
+        try:
+            return self._widgets.index(widget)
+        except ValueError:
+            return -1
+
+    def widget(self, index: int) -> QtWidgets.QWidget | None:
+        if 0 <= index < len(self._widgets):
+            return self._widgets[index]
+        return None
+
+    def setCurrentIndex(self, index: int) -> None:
+        self._activate_index(index)
+
+    def currentIndex(self) -> int:
+        active = self._mdi.activeSubWindow()
+        if active is None:
+            return -1
+        return self.indexOf(active.widget())
+
+    def currentWidget(self) -> QtWidgets.QWidget | None:
+        index = self.currentIndex()
+        return self.widget(index) if index >= 0 else None
+
+    def count(self) -> int:
+        return len(self._widgets)
+
+    def setTabVisible(self, index: int, visible: bool) -> None:
+        widget = self.widget(index)
+        if widget is None:
+            return
+        sub = self._subwindow_for(widget)
+        if sub is None:
+            return
+        self._visible[widget] = bool(visible)
+        if visible:
+            if sub not in self._mdi.subWindowList():
+                self._mdi.addSubWindow(sub)
+            sub.show()
+            self._activate_index(index)
+        else:
+            was_active = self._mdi.activeSubWindow() is sub
+            sub.hide()
+            if was_active:
+                for idx, candidate in enumerate(self._widgets):
+                    if self._visible.get(candidate, False):
+                        self._activate_index(idx)
+                        break
+
+    def isTabVisible(self, index: int) -> bool:
+        widget = self.widget(index)
+        if widget is None:
+            return False
+        return bool(self._visible.get(widget, False))
+
+    def setTabIcon(self, index: int, icon: QtGui.QIcon) -> None:
+        widget = self.widget(index)
+        if widget is None:
+            return
+        if not isinstance(icon, QtGui.QIcon):
+            icon = QtGui.QIcon()
+        self._icons[widget] = icon
+        sub = self._subwindow_for(widget)
+        if sub is not None:
+            sub.setWindowIcon(icon)
+
+    def tabIcon(self, index: int) -> QtGui.QIcon:
+        widget = self.widget(index)
+        if widget is None:
+            return QtGui.QIcon()
+        return self._icons.get(widget, QtGui.QIcon())
+
+    def setTabText(self, index: int, title: str) -> None:
+        widget = self.widget(index)
+        if widget is None:
+            return
+        self._titles[widget] = title
+        sub = self._subwindow_for(widget)
+        if sub is not None:
+            sub.setWindowTitle(title)
+
+    def tabText(self, index: int) -> str:
+        widget = self.widget(index)
+        if widget is None:
+            return ""
+        return self._titles.get(widget, "")
+
+    def tabBar(self) -> None:
+        return None
+
+    def setTabToolTip(self, index: int, tooltip: str) -> None:
+        _ = index, tooltip
+
+    def tabToolTip(self, index: int) -> str:
+        _ = index
+        return ""
+
+    def clear(self) -> None:
+        for widget in list(self._widgets):
+            self._remove_widget(widget)
 
 
 __all__ = [
