@@ -119,7 +119,7 @@ class PyPlotPlugin:
 class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
-    _METHOD_EXCLUDES = {"__init__"}
+    _METHOD_EXCLUDES = {"__init__", "_selected_paths"}
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -127,11 +127,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         self._menus_ready = False
         self._summary_label: QtWidgets.QLabel | None = None
         self._settings_loaded = False
+        self._controls_connected = False
 
     # Lifecycle -----------------------------------------------------
     def activate(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        self.host._set_data_sources_visible(True)
         self.update_ui()
 
     def deactivate(self) -> None:  # type: ignore[override]
@@ -152,9 +152,139 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         self._summary_label = summary
         return container
 
+    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
+        if self._settings_widget is not None:
+            return self._settings_widget
+
+        host = self.host
+        container = QtWidgets.QWidget(host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        axes_group = QtWidgets.QGroupBox("Axes and filters", container)
+        axes_form = QtWidgets.QFormLayout(axes_group)
+        axes_form.setContentsMargins(8, 8, 8, 8)
+        axes_form.setSpacing(6)
+        host.temperature_combo = QtWidgets.QComboBox(axes_group)
+        host.temperature_combo.addItem("All temperatures", None)
+        axes_form.addRow("Temperature", host.temperature_combo)
+
+        host.x_axis_combo = QtWidgets.QComboBox(axes_group)
+        host.y_axis_combo = QtWidgets.QComboBox(axes_group)
+        axes_form.addRow("X axis", host.x_axis_combo)
+        axes_form.addRow("Y axis", host.y_axis_combo)
+        layout.addWidget(axes_group)
+
+        appearance_group = QtWidgets.QGroupBox("Appearance", container)
+        appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
+        appearance_layout.setContentsMargins(8, 8, 8, 8)
+        appearance_layout.setSpacing(6)
+        host.style_combo = QtWidgets.QComboBox(appearance_group)
+        host.style_combo.addItem("Line", "line")
+        host.style_combo.addItem("Line + symbols", "line_markers")
+        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style", appearance_group))
+        appearance_layout.addWidget(host.style_combo)
+
+        host.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme", appearance_group)
+        host.dark_mode_checkbox.setToolTip(
+            "Render Matplotlib plots using a dark background theme."
+        )
+        appearance_layout.addWidget(host.dark_mode_checkbox)
+
+        host.field_direction_button = QtWidgets.QPushButton("Highlight field direction", appearance_group)
+        host.field_direction_button.setCheckable(True)
+        host.field_direction_button.setToolTip(
+            "Use solid lines for increasing magnetic field and dashed lines for decreasing segments."
+        )
+        appearance_layout.addWidget(host.field_direction_button)
+        layout.addWidget(appearance_group)
+
+        overlay_group = QtWidgets.QGroupBox("Angle overlays", container)
+        overlay_layout = QtWidgets.QVBoxLayout(overlay_group)
+        overlay_layout.setContentsMargins(8, 8, 8, 8)
+        overlay_layout.setSpacing(6)
+        host.angle_overlay_list = QtWidgets.QListWidget(overlay_group)
+        host.angle_overlay_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        overlay_layout.addWidget(host.angle_overlay_list, 1)
+        overlay_hint = QtWidgets.QLabel(
+            "Select rotations to compare across temperatures or when exporting overlays.",
+            overlay_group,
+        )
+        overlay_hint.setWordWrap(True)
+        overlay_layout.addWidget(overlay_hint)
+        host.angle_overlay_button = QtWidgets.QPushButton(
+            "Plot selected angles across temperatures", overlay_group
+        )
+        host.angle_overlay_button.setEnabled(False)
+        overlay_layout.addWidget(host.angle_overlay_button)
+        layout.addWidget(overlay_group, 1)
+
+        metrics_group = QtWidgets.QGroupBox("Derived metrics", container)
+        metrics_layout = QtWidgets.QVBoxLayout(metrics_group)
+        metrics_layout.setContentsMargins(8, 8, 8, 8)
+        metrics_layout.setSpacing(6)
+        host.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle", metrics_group)
+        host.metrics_angle_button.setEnabled(False)
+        metrics_layout.addWidget(host.metrics_angle_button)
+        host.metrics_temperature_button = QtWidgets.QPushButton(
+            "Plot metrics vs temperature", metrics_group
+        )
+        host.metrics_temperature_button.setEnabled(False)
+        metrics_layout.addWidget(host.metrics_temperature_button)
+        layout.addWidget(metrics_group)
+
+        layout.addStretch(1)
+        self._settings_widget = container
+        self._controls_connected = False
+        return container
+
+    def _connect_control_signals(self) -> None:
+        if self._controls_connected:
+            return
+        host = self.host
+        if hasattr(host, "x_axis_combo") and callable(getattr(host, "_store_axis_selection", None)):
+            host.x_axis_combo.currentTextChanged.connect(lambda _: host._store_axis_selection())
+        if hasattr(host, "y_axis_combo") and callable(getattr(host, "_store_axis_selection", None)):
+            host.y_axis_combo.currentTextChanged.connect(lambda _: host._store_axis_selection())
+        if hasattr(host, "style_combo") and callable(getattr(host, "_restyle_plots", None)):
+            host.style_combo.currentIndexChanged.connect(lambda _: host._restyle_plots())
+        if hasattr(host, "dark_mode_checkbox") and callable(getattr(host, "_restyle_plots", None)):
+            host.dark_mode_checkbox.toggled.connect(lambda _: host._restyle_plots())
+        if hasattr(host, "field_direction_button") and callable(
+            getattr(host, "_handle_field_direction_toggle", None)
+        ):
+            host.field_direction_button.toggled.connect(host._handle_field_direction_toggle)
+        if hasattr(host, "angle_overlay_list") and callable(
+            getattr(host, "_update_overlay_button_state", None)
+        ):
+            host.angle_overlay_list.itemSelectionChanged.connect(host._update_overlay_button_state)
+        if hasattr(host, "angle_overlay_button") and callable(
+            getattr(host, "_plot_angle_overlays", None)
+        ):
+            host.angle_overlay_button.clicked.connect(host._plot_angle_overlays)
+        if hasattr(host, "metrics_angle_button") and callable(
+            getattr(host, "_plot_metrics_vs_angle", None)
+        ):
+            host.metrics_angle_button.clicked.connect(host._plot_metrics_vs_angle)
+        if hasattr(host, "metrics_temperature_button") and callable(
+            getattr(host, "_plot_metrics_vs_temperature", None)
+        ):
+            host.metrics_temperature_button.clicked.connect(host._plot_metrics_vs_temperature)
+        self._controls_connected = True
+
     # Host actions --------------------------------------------------
     def load_data(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
+        if not self.host._selected_paths():
+            try:
+                self.host._choose_files()
+            except Exception:
+                self.host.logger.exception("Failed to open file dialog for VSM data selection")
+        if not self.host._selected_paths():
+            return
         self.host._load_measurements()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -185,9 +315,9 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     def update_ui(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
         host = self.host
-        has_paths = bool(host._selected_paths)
+        has_paths = bool(host._selected_paths())
         if hasattr(host, "load_data_button"):
-            host.load_data_button.setEnabled(has_paths)
+            host.load_data_button.setEnabled(True)
         if self._summary_label is not None and not has_paths:
             self._summary_label.setText(
                 "Select one or more VSM hysteresis files and click Load data."
@@ -207,6 +337,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         if self._initialized:
             return
         host = self.host
+        self.settings_widget()
         host.logger = logging.getLogger("vsm_hysteresis_loops")
         host.logger.setLevel(logging.INFO)
         host.settings = QtCore.QSettings("MicrowireLab", "VSMHysteresisLoops")
@@ -243,6 +374,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host.PROJECT_SETTINGS_PREFIX = VSMPlotter.PROJECT_SETTINGS_PREFIX
 
         self._bind_methods()
+        self._connect_control_signals()
         if not self._menus_ready:
             VSMPlotter._extend_menus(host, host.menuBar())
             self._menus_ready = True
@@ -291,7 +423,7 @@ class PyPlotWorkbench(PyPlotWindow):
             key: Path(value) for key, value in parsed_dirs.items() if isinstance(value, str)
         }
         self._last_directory: Path | None = None
-        self._selected_paths: List[Path] = []
+        self._selected_path_entries: List[Path] = []
         self._plugin_factories: Dict[
             str, Callable[["PyPlotWorkbench"], PyPlotPlugin]
         ] = dict(sorted((plotters or {}).items()))
@@ -434,19 +566,22 @@ class PyPlotWorkbench(PyPlotWindow):
         self.settings.setValue("sources", self.path_edit.text())
         self.settings.sync()
     def _has_project_data_to_save(self) -> bool:
+        measurements = getattr(self, "measurements", None)
+        if isinstance(measurements, list) and measurements:
+            return True
         return bool(self._worksheets)
 
     def _reset_project_state(self) -> None:
         super()._reset_project_state()
         self._clear_imported_data()
-        self._selected_paths = []
+        self._selected_path_entries = []
         self.path_edit.clear()
         self._update_action_states()
         self._update_project_actions()
 
     def _build_project_payload(self, *, base_path: Path | None) -> Dict[str, Any]:
         selected_payload = [
-            self._portable_path(path, base_path) for path in self._selected_paths
+            self._portable_path(path, base_path) for path in self._selected_path_entries
         ]
         workbooks_payload: List[Dict[str, Any]] = []
         for workbook in self._workbooks.values():
@@ -495,16 +630,16 @@ class PyPlotWorkbench(PyPlotWindow):
     def _apply_project_payload(self, payload: Dict[str, Any], *, project_dir: Path) -> bool:
         self._clear_imported_data()
         selected_payload = payload.get("selected_paths")
-        self._selected_paths = []
+        self._selected_path_entries = []
         if isinstance(selected_payload, list):
             for entry in selected_payload:
                 if isinstance(entry, str) and entry:
                     resolved = self._resolve_portable_path(entry, project_dir)
                     if resolved is not None:
-                        self._selected_paths.append(resolved)
-        if self._selected_paths:
-            self.path_edit.setText(self._format_paths(self._selected_paths))
-            self._remember_directory_from_paths(self._selected_paths)
+                        self._selected_path_entries.append(resolved)
+        if self._selected_path_entries:
+            self.path_edit.setText(self._format_paths(self._selected_path_entries))
+            self._remember_directory_from_paths(self._selected_path_entries)
         else:
             self.path_edit.clear()
 
@@ -626,9 +761,9 @@ class PyPlotWorkbench(PyPlotWindow):
         )
         if not paths:
             return
-        self._selected_paths = [Path(entry) for entry in paths]
-        self._remember_directory_from_paths(self._selected_paths)
-        self.path_edit.setText(self._format_paths(self._selected_paths))
+        self._selected_path_entries = [Path(entry) for entry in paths]
+        self._remember_directory_from_paths(self._selected_path_entries)
+        self.path_edit.setText(self._format_paths(self._selected_path_entries))
         self._update_action_states()
 
     def _choose_folder(self) -> None:
@@ -641,9 +776,9 @@ class PyPlotWorkbench(PyPlotWindow):
         if not directory:
             return
         folder = Path(directory)
-        self._selected_paths = [folder]
+        self._selected_path_entries = [folder]
         self._last_directory = folder
-        self.path_edit.setText(self._format_paths(self._selected_paths))
+        self.path_edit.setText(self._format_paths(self._selected_path_entries))
         self._update_action_states()
 
     def _generate_plots(self) -> None:
@@ -791,7 +926,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._update_action_states()
     def _apply_path_text(self, text: str) -> None:
         paths = [Path(entry) for entry in self._iter_path_entries(text)]
-        self._selected_paths = paths
+        self._selected_path_entries = paths
         self._remember_directory_from_paths(paths)
 
     def _iter_path_entries(self, text: str) -> Iterable[str]:
@@ -803,6 +938,9 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _format_paths(self, paths: Iterable[Path]) -> str:
         return "; ".join(str(path) for path in paths)
+
+    def _selected_paths(self) -> List[Path]:
+        return list(self._selected_path_entries)
 
     def _remember_directory_from_paths(self, paths: Iterable[Path]) -> None:
         last = None
@@ -859,5 +997,3 @@ def main(
 
 if __name__ == "__main__":
     main()
-
-

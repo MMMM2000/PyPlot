@@ -30,9 +30,7 @@ from origin_clone.app import PythonConsoleWidget
 
 
 class _DockSwitcherWidget(QtWidgets.QWidget):
-    """Vertical tab bar that mirrors dock visibility with hover-to-open behaviour."""
-
-    _HOVER_CLOSE_DELAY_MS = 200
+    """Vertical tab bar that mirrors dock visibility."""
 
     def __init__(
         self,
@@ -45,10 +43,6 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._docks = list(docks)
         self._side = side
         self._syncing = False
-        self._expanded_index: int | None = None
-        self._pinned_index: int | None = None
-        self._floating_indices: set[int] = set()
-        self._dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -67,12 +61,13 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._tab_bar.setElideMode(QtCore.Qt.TextElideMode.ElideRight)
         self._tab_bar.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
         self._tab_bar.setDrawBase(False)
-        self._tab_bar.setMouseTracking(True)
-        self._tab_bar.installEventFilter(self)
-        self._tab_bar.setAttribute(QtCore.Qt.WidgetAttribute.WA_Hover, True)
 
-        layout.addWidget(self._tab_bar, 1)
-        layout.addStretch(1)
+        if side == "left":
+            layout.addWidget(self._tab_bar, 1)
+            layout.addStretch(1)
+        else:
+            layout.addStretch(1)
+            layout.addWidget(self._tab_bar, 1)
 
         metrics = self.fontMetrics()
         estimated_width = metrics.height() + 18
@@ -90,168 +85,39 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             dock.visibilityChanged.connect(
                 lambda visible, ti=tab_index: self._handle_visibility_change(ti, visible)
             )
-            dock.topLevelChanged.connect(
-                lambda floating, ti=tab_index, d=dock: self._handle_top_level_change(ti, floating, d)
-            )
-            dock.installEventFilter(self)
-            self._dock_widths[dock] = max(dock.sizeHint().width(), 220)
-            dock.hide()
-
-        self._collapse_timer = QtCore.QTimer(self)
-        self._collapse_timer.setSingleShot(True)
-        self._collapse_timer.timeout.connect(self._collapse_if_outside)
 
         self._tab_bar.currentChanged.connect(self._activate_index)
         if self._docks:
             self._tab_bar.setCurrentIndex(0)
-        self._collapse_all()
+        self._activate_index(self._tab_bar.currentIndex())
 
-    # Event handling -------------------------------------------------
-    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
-        if obj is self._tab_bar:
-            if event.type() == QtCore.QEvent.Type.MouseButtonPress:
-                button = getattr(event, "button", lambda: None)()
-                if button == QtCore.Qt.MouseButton.LeftButton:
-                    index = self._tab_index_from_event(event)
-                    if index >= 0:
-                        if self._pinned_index == index:
-                            self._pinned_index = None
-                            self._collapse_all(exclude=None)
-                        else:
-                            self._pinned_index = index
-                            self._activate_index(index)
-                            self._tab_bar.setCurrentIndex(index)
-                        return True
-            if event.type() in (
-                QtCore.QEvent.Type.MouseMove,
-                QtCore.QEvent.Type.HoverMove,
-                QtCore.QEvent.Type.HoverEnter,
-            ):
-                index = self._tab_index_from_event(event)
-                if index >= 0:
-                    self._activate_index(index)
-            elif event.type() in (QtCore.QEvent.Type.HoverLeave, QtCore.QEvent.Type.Leave):
-                self._schedule_collapse()
-        elif obj in self._docks:
-            if event.type() == QtCore.QEvent.Type.Enter:
-                self._collapse_timer.stop()
-            elif event.type() == QtCore.QEvent.Type.Leave:
-                index = self._docks.index(obj)
-                if not self._is_persistent(index):
-                    self._schedule_collapse()
-        return super().eventFilter(obj, event)
-
-    def _tab_index_from_event(self, event: QtCore.QEvent) -> int:
-        pos_value: QtCore.QPointF | None = None
-        if hasattr(event, "position"):
-            pos_value = event.position()
-        elif hasattr(event, "pos"):
-            pos = event.pos()
-            if isinstance(pos, QtCore.QPoint):
-                pos_value = QtCore.QPointF(pos)
-        if pos_value is None:
-            return -1
-        point = QtCore.QPoint(int(pos_value.x()), int(pos_value.y()))
-        return self._tab_bar.tabAt(point)
-
-    # Behaviour ------------------------------------------------------
     def _activate_index(self, index: int) -> None:
         if not self._docks or index < 0 or index >= len(self._docks):
             return
-        if self._expanded_index == index and self._docks[index].isVisible():
-            return
         self._syncing = True
-        self._collapse_all(exclude=index)
-        dock = self._docks[index]
-        if dock in self._dock_widths and not dock.isFloating():
-            width = self._dock_widths[dock]
-            if width > 0:
-                dock.resize(width, dock.height() or dock.sizeHint().height())
-        dock.show()
-        if not dock.isFloating():
-            dock.raise_()
-        self._expanded_index = index
-        self._collapse_timer.stop()
+        for offset, dock in enumerate(self._docks):
+            dock.setVisible(offset == index)
+            if offset == index and not dock.isFloating():
+                dock.raise_()
         self._syncing = False
 
     def _handle_visibility_change(self, index: int, visible: bool) -> None:
         if self._syncing or not self._docks:
             return
         if visible:
-            if not self._docks[index].isFloating():
-                self._dock_widths[self._docks[index]] = max(self._docks[index].width(), self._dock_widths.get(self._docks[index], 220))
-            self._expanded_index = index
-            self._collapse_timer.stop()
             if self._tab_bar.currentIndex() != index:
                 self._syncing = True
                 self._tab_bar.setCurrentIndex(index)
                 self._syncing = False
         else:
-            if self._expanded_index == index:
-                self._expanded_index = None
-            if self._pinned_index == index:
-                self._pinned_index = None
-            self._floating_indices.discard(index)
-            self._schedule_collapse()
-
-    def _collapse_all(self, *, exclude: int | None = None) -> None:
-        previous = self._syncing
-        self._syncing = True
-        for offset, dock in enumerate(self._docks):
-            if (exclude is not None and offset == exclude) or self._is_persistent(offset):
-                continue
-            dock.hide()
-        self._syncing = previous
-        if exclude is None and self._pinned_index is None and not self._floating_indices:
-            self._expanded_index = None
-
-    def _schedule_collapse(self) -> None:
-        if self._collapse_timer.isActive() or self._pinned_index is not None or self._floating_indices:
-            return
-        self._collapse_timer.start(self._HOVER_CLOSE_DELAY_MS)
-
-    def _collapse_if_outside(self) -> None:
-        if self._pinned_index is not None or self._floating_indices:
-            return
-        if self._pointer_over_tab_bar() or self._pointer_over_any_dock():
-            return
-        self._collapse_all()
-
-    def _pointer_over_tab_bar(self) -> bool:
-        cursor = QtGui.QCursor.pos()
-        local = self._tab_bar.mapFromGlobal(cursor)
-        return self._tab_bar.rect().contains(local)
-
-    def _pointer_over_any_dock(self) -> bool:
-        cursor = QtGui.QCursor.pos()
-        for dock in self._docks:
-            local = dock.mapFromGlobal(cursor)
-            if dock.isVisible() and dock.rect().contains(local):
-                return True
-        return False
-
-    def _is_persistent(self, index: int) -> bool:
-        return index == self._pinned_index or index in self._floating_indices
-
-    def _handle_top_level_change(
-        self,
-        index: int,
-        floating: bool,
-        dock: QtWidgets.QDockWidget,
-    ) -> None:
-        if floating:
-            dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
-            dock.show()
-            self._floating_indices.add(index)
-            self._pinned_index = index
-            self._expanded_index = index
-            self._collapse_timer.stop()
-        else:
-            dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
-            dock.show()
-            self._floating_indices.discard(index)
-            if self._pinned_index == index:
-                self._pinned_index = None
+            if self._tab_bar.currentIndex() == index:
+                for offset, dock in enumerate(self._docks):
+                    if dock.isVisible():
+                        self._syncing = True
+                        self._tab_bar.setCurrentIndex(offset)
+                        self._syncing = False
+                        return
+                # No dock is visible; keep tabs but allow user to reactivate manually.
 
 
 @dataclass
