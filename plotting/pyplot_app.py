@@ -377,6 +377,8 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host._last_graph_dir = None
         host._field_direction_enabled = False
         host._direction_legends = {}
+        host._last_source_dir = None
+        host.last_export_path = None
         host._base_title = "VSM Hysteresis Loops"
         host.PROJECT_EXTENSION = VSMPlotter.PROJECT_EXTENSION
         host.PROJECT_VERSION = VSMPlotter.PROJECT_VERSION

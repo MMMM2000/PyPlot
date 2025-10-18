@@ -453,16 +453,21 @@ class WorksheetTableModel(QtCore.QAbstractTableModel):
         orientation: QtCore.Qt.Orientation,
         role: int = QtCore.Qt.ItemDataRole.DisplayRole,
     ) -> str | None:  # type: ignore[override]
+        if orientation == QtCore.Qt.Orientation.Horizontal:
+            if role == QtCore.Qt.ItemDataRole.DisplayRole:
+                if 0 <= section < len(self._columns):
+                    return self._column_letter(section)
+                return None
+            if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+                if 0 <= section < len(self._columns):
+                    return self._columns[section]
+                return None
+            return None
         if role != QtCore.Qt.ItemDataRole.DisplayRole:
             return None
-        if orientation == QtCore.Qt.Orientation.Horizontal:
-            if 0 <= section < len(self._columns):
-                return self._columns[section]
-        else:
-            if section < len(self.METADATA_FIELDS):
-                return self.METADATA_FIELDS[section][0]
-            return str(section - len(self.METADATA_FIELDS) + 1)
-        return None
+        if section < len(self.METADATA_FIELDS):
+            return self.METADATA_FIELDS[section][0]
+        return str(section - len(self.METADATA_FIELDS) + 1)
 
     def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlag:  # type: ignore[override]
         base = super().flags(index)
@@ -600,6 +605,112 @@ class WorksheetTableModel(QtCore.QAbstractTableModel):
             base_index += 1
             candidate = f"Col{base_index:02d}"
         return candidate
+
+    @staticmethod
+    def _column_letter(index: int) -> str:
+        """Return an Origin-style column letter for ``index``."""
+
+        index += 1
+        label = ""
+        while index > 0:
+            index, remainder = divmod(index - 1, 26)
+            label = chr(ord("A") + remainder) + label
+        return label or "A"
+
+
+class WorksheetTableView(QtWidgets.QTableView):
+    """Table view that mirrors Origin's header interaction and copy behaviour."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        h_header = self.horizontalHeader()
+        h_header.setSectionsClickable(True)
+        h_header.sectionPressed.connect(self._select_column)
+        v_header = self.verticalHeader()
+        v_header.setSectionsClickable(True)
+        v_header.sectionPressed.connect(self._select_row)
+
+    # ------------------------------------------------------------------ copy helpers
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # type: ignore[override]
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def copy_selection(self) -> None:
+        model = self.model()
+        selection = self.selectionModel()
+        if model is None or selection is None:
+            return
+        indexes = selection.selectedIndexes()
+        if not indexes:
+            return
+        ordered = sorted(indexes, key=lambda idx: (idx.row(), idx.column()))
+        rows = sorted({index.row() for index in ordered})
+        columns = sorted({index.column() for index in ordered})
+        if not rows or not columns:
+            return
+        row_map = {row: offset for offset, row in enumerate(rows)}
+        column_map = {column: offset for offset, column in enumerate(columns)}
+        grid: List[List[str]] = [["" for _ in columns] for _ in rows]
+        for index in ordered:
+            value = model.data(index, QtCore.Qt.ItemDataRole.DisplayRole)
+            display = "" if value is None else str(value)
+            grid[row_map[index.row()]][column_map[index.column()]] = display
+        text = "\n".join("\t".join(row) for row in grid)
+        QtWidgets.QApplication.clipboard().setText(text)
+
+    # ------------------------------------------------------------------ selection helpers
+    def _select_column(self, logical_index: int) -> None:
+        model = self.model()
+        selection = self.selectionModel()
+        if (
+            model is None
+            or selection is None
+            or logical_index < 0
+            or logical_index >= model.columnCount()
+            or model.rowCount() == 0
+        ):
+            return
+        top_left = model.index(0, logical_index)
+        bottom_right = model.index(model.rowCount() - 1, logical_index)
+        if not top_left.isValid() or not bottom_right.isValid():
+            return
+        selection.select(
+            QtCore.QItemSelection(top_left, bottom_right),
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Columns,
+        )
+        self.setFocus()
+
+    def _select_row(self, logical_index: int) -> None:
+        model = self.model()
+        selection = self.selectionModel()
+        if (
+            model is None
+            or selection is None
+            or logical_index < 0
+            or logical_index >= model.rowCount()
+            or model.columnCount() == 0
+        ):
+            return
+        top_left = model.index(logical_index, 0)
+        bottom_right = model.index(logical_index, model.columnCount() - 1)
+        if not top_left.isValid() or not bottom_right.isValid():
+            return
+        selection.select(
+            QtCore.QItemSelection(top_left, bottom_right),
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self.setFocus()
 
 
 class _HistoryManager:
@@ -1092,6 +1203,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             try:
                 tracked.dockLocationChanged.connect(
                     lambda area, dock=tracked: self._handle_primary_dock_location_change(dock, area)
+                )
+            except Exception:
+                pass
+            try:
+                tracked.visibilityChanged.connect(
+                    lambda _visible, dock=tracked: self._handle_primary_dock_visibility_changed(dock)
                 )
             except Exception:
                 pass
@@ -1778,7 +1895,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        view = QtWidgets.QTableView()
+        view = WorksheetTableView()
         model = WorksheetTableModel(worksheet, self)
         view.setModel(model)
         view.setAlternatingRowColors(True)
@@ -1881,6 +1998,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
         ):
             self._retabify_primary_docks()
+
+    def _handle_primary_dock_visibility_changed(
+        self, dock: QtWidgets.QDockWidget
+    ) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        _ = dock
+        self._retabify_primary_docks()
 
     def _retabify_primary_docks(self) -> None:
         if getattr(self, "_retabbing_docks", False):
