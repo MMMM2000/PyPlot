@@ -29,6 +29,9 @@ from plotting.utils import install_standard_menu
 from origin_clone.app import PythonConsoleWidget
 
 
+OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+
+
 class _DockSwitcherWidget(QtWidgets.QWidget):
     """Vertical tab bar that mirrors dock visibility with hover-to-open behaviour."""
 
@@ -49,6 +52,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._pinned_index: int | None = None
         self._floating_indices: set[int] = set()
         self._dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._panel_dock = parent if isinstance(parent, QtWidgets.QDockWidget) else None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -165,12 +169,12 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._syncing = True
         self._collapse_all(exclude=index)
         dock = self._docks[index]
-        if dock in self._dock_widths and not dock.isFloating():
-            width = self._dock_widths[dock]
-            if width > 0:
-                dock.resize(width, dock.height() or dock.sizeHint().height())
         dock.show()
         if not dock.isFloating():
+            self._ensure_tabbed(dock)
+            width = self._dock_widths.get(dock, 0)
+            if width > 0:
+                self._apply_dock_width(dock, width)
             dock.raise_()
         self._expanded_index = index
         self._collapse_timer.stop()
@@ -181,7 +185,8 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             return
         if visible:
             if not self._docks[index].isFloating():
-                self._dock_widths[self._docks[index]] = max(self._docks[index].width(), self._dock_widths.get(self._docks[index], 220))
+                current = self._docks[index]
+                self._dock_widths[current] = max(current.width(), self._dock_widths.get(current, 220))
             self._expanded_index = index
             self._collapse_timer.stop()
             if self._tab_bar.currentIndex() != index:
@@ -254,6 +259,61 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             self._floating_indices.discard(index)
             if self._pinned_index == index:
                 self._pinned_index = None
+            self._ensure_tabbed(dock)
+            width = self._dock_widths.get(dock, 0)
+            if width > 0:
+                self._apply_dock_width(dock, width)
+
+    def _main_window(self) -> QtWidgets.QMainWindow | None:
+        if self._panel_dock is not None:
+            window = self._panel_dock.parentWidget()
+        else:
+            window = self.parentWidget()
+        while window is not None and not isinstance(window, QtWidgets.QMainWindow):
+            window = window.parentWidget()
+        return window if isinstance(window, QtWidgets.QMainWindow) else None
+
+    def _ensure_tabbed(self, dock: QtWidgets.QDockWidget) -> None:
+        if dock.isFloating():
+            return
+        main_window = self._main_window()
+        if main_window is None:
+            return
+        reference: QtWidgets.QDockWidget | None = None
+        for candidate in self._docks:
+            if candidate is dock or candidate.isFloating():
+                continue
+            reference = candidate
+            break
+        if reference is not None:
+            try:
+                main_window.tabifyDockWidget(reference, dock)
+            except Exception:
+                pass
+            return
+        if self._panel_dock is not None:
+            try:
+                main_window.splitDockWidget(self._panel_dock, dock, QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+
+    def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
+        if dock.isFloating() or width <= 0:
+            return
+
+        def _resize() -> None:
+            if dock.isFloating():
+                return
+            dock.resize(width, dock.height() or dock.sizeHint().height())
+            main_window = self._main_window()
+            if main_window is None:
+                return
+            try:
+                main_window.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+
+        QtCore.QTimer.singleShot(0, _resize)
 
 
 @dataclass
@@ -393,16 +453,21 @@ class WorksheetTableModel(QtCore.QAbstractTableModel):
         orientation: QtCore.Qt.Orientation,
         role: int = QtCore.Qt.ItemDataRole.DisplayRole,
     ) -> str | None:  # type: ignore[override]
+        if orientation == QtCore.Qt.Orientation.Horizontal:
+            if role == QtCore.Qt.ItemDataRole.DisplayRole:
+                if 0 <= section < len(self._columns):
+                    return self._column_letter(section)
+                return None
+            if role == QtCore.Qt.ItemDataRole.ToolTipRole:
+                if 0 <= section < len(self._columns):
+                    return self._columns[section]
+                return None
+            return None
         if role != QtCore.Qt.ItemDataRole.DisplayRole:
             return None
-        if orientation == QtCore.Qt.Orientation.Horizontal:
-            if 0 <= section < len(self._columns):
-                return self._columns[section]
-        else:
-            if section < len(self.METADATA_FIELDS):
-                return self.METADATA_FIELDS[section][0]
-            return str(section - len(self.METADATA_FIELDS) + 1)
-        return None
+        if section < len(self.METADATA_FIELDS):
+            return self.METADATA_FIELDS[section][0]
+        return str(section - len(self.METADATA_FIELDS) + 1)
 
     def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlag:  # type: ignore[override]
         base = super().flags(index)
@@ -540,6 +605,112 @@ class WorksheetTableModel(QtCore.QAbstractTableModel):
             base_index += 1
             candidate = f"Col{base_index:02d}"
         return candidate
+
+    @staticmethod
+    def _column_letter(index: int) -> str:
+        """Return an Origin-style column letter for ``index``."""
+
+        index += 1
+        label = ""
+        while index > 0:
+            index, remainder = divmod(index - 1, 26)
+            label = chr(ord("A") + remainder) + label
+        return label or "A"
+
+
+class WorksheetTableView(QtWidgets.QTableView):
+    """Table view that mirrors Origin's header interaction and copy behaviour."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
+        )
+        self.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        h_header = self.horizontalHeader()
+        h_header.setSectionsClickable(True)
+        h_header.sectionPressed.connect(self._select_column)
+        v_header = self.verticalHeader()
+        v_header.setSectionsClickable(True)
+        v_header.sectionPressed.connect(self._select_row)
+
+    # ------------------------------------------------------------------ copy helpers
+    def keyPressEvent(self, event: QtGui.QKeyEvent) -> None:  # type: ignore[override]
+        if event.matches(QtGui.QKeySequence.StandardKey.Copy):
+            self.copy_selection()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def copy_selection(self) -> None:
+        model = self.model()
+        selection = self.selectionModel()
+        if model is None or selection is None:
+            return
+        indexes = selection.selectedIndexes()
+        if not indexes:
+            return
+        ordered = sorted(indexes, key=lambda idx: (idx.row(), idx.column()))
+        rows = sorted({index.row() for index in ordered})
+        columns = sorted({index.column() for index in ordered})
+        if not rows or not columns:
+            return
+        row_map = {row: offset for offset, row in enumerate(rows)}
+        column_map = {column: offset for offset, column in enumerate(columns)}
+        grid: List[List[str]] = [["" for _ in columns] for _ in rows]
+        for index in ordered:
+            value = model.data(index, QtCore.Qt.ItemDataRole.DisplayRole)
+            display = "" if value is None else str(value)
+            grid[row_map[index.row()]][column_map[index.column()]] = display
+        text = "\n".join("\t".join(row) for row in grid)
+        QtWidgets.QApplication.clipboard().setText(text)
+
+    # ------------------------------------------------------------------ selection helpers
+    def _select_column(self, logical_index: int) -> None:
+        model = self.model()
+        selection = self.selectionModel()
+        if (
+            model is None
+            or selection is None
+            or logical_index < 0
+            or logical_index >= model.columnCount()
+            or model.rowCount() == 0
+        ):
+            return
+        top_left = model.index(0, logical_index)
+        bottom_right = model.index(model.rowCount() - 1, logical_index)
+        if not top_left.isValid() or not bottom_right.isValid():
+            return
+        selection.select(
+            QtCore.QItemSelection(top_left, bottom_right),
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Columns,
+        )
+        self.setFocus()
+
+    def _select_row(self, logical_index: int) -> None:
+        model = self.model()
+        selection = self.selectionModel()
+        if (
+            model is None
+            or selection is None
+            or logical_index < 0
+            or logical_index >= model.rowCount()
+            or model.columnCount() == 0
+        ):
+            return
+        top_left = model.index(logical_index, 0)
+        bottom_right = model.index(logical_index, model.columnCount() - 1)
+        if not top_left.isValid() or not bottom_right.isValid():
+            return
+        selection.select(
+            QtCore.QItemSelection(top_left, bottom_right),
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self.setFocus()
 
 
 class _HistoryManager:
@@ -976,6 +1147,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
+        self.project_dock = project_dock
 
         self.log_view = QtWidgets.QPlainTextEdit()
         self.log_view.setReadOnly(True)
@@ -984,6 +1156,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         log_dock.setWidget(self.log_view)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, log_dock)
         log_dock.hide()
+        self.log_dock = log_dock
 
         self.object_tree = QtWidgets.QTreeWidget()
         self.object_tree.setHeaderLabels(["Object Manager"])
@@ -992,6 +1165,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
+        self.object_dock = object_dock
 
         graph_settings_widget = QtWidgets.QWidget()
         graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
@@ -1004,6 +1178,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         graph_dock.setWidget(graph_settings_widget)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
         graph_dock.hide()
+        self.graph_dock = graph_dock
 
         self.console_widget = PythonConsoleWidget(self)
         self.console_widget.set_environment({"window": self, "pd": pd})
@@ -1022,6 +1197,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._create_dock_switcher((object_dock,), side="right")
         )
 
+        for tracked in (project_dock, log_dock, graph_dock, object_dock):
+            if tracked is None:
+                continue
+            try:
+                tracked.dockLocationChanged.connect(
+                    lambda area, dock=tracked: self._handle_primary_dock_location_change(dock, area)
+                )
+            except Exception:
+                pass
+            try:
+                tracked.visibilityChanged.connect(
+                    lambda _visible, dock=tracked: self._handle_primary_dock_visibility_changed(dock)
+                )
+            except Exception:
+                pass
+
         menu_bar = install_standard_menu(
             self,
             help_topic=self.help_topic,
@@ -1034,6 +1225,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._setup_data_menu(menu_bar)
         self._extend_menus(menu_bar)
         self._after_base_ui_created(project_dock=project_dock, log_dock=log_dock, graph_dock=graph_dock)
+        self._retabify_primary_docks()
         view_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_view")
         if view_menu is not None and hasattr(self, "console_dock"):
             view_menu.addSeparator()
@@ -1703,7 +1895,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
-        view = QtWidgets.QTableView()
+        view = WorksheetTableView()
         model = WorksheetTableModel(worksheet, self)
         view.setModel(model)
         view.setAlternatingRowColors(True)
@@ -1788,11 +1980,104 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         self.addDockWidget(area, panel)
         reference = docks[0]
-        if side == "left":
+        try:
             self.splitDockWidget(panel, reference, QtCore.Qt.Orientation.Horizontal)
-        else:
-            self.splitDockWidget(reference, panel, QtCore.Qt.Orientation.Horizontal)
+        except Exception:
+            pass
         return panel
+
+    def _handle_primary_dock_location_change(
+        self,
+        dock: QtWidgets.QDockWidget,
+        area: QtCore.Qt.DockWidgetArea,
+    ) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        if area in (
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
+            QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
+        ):
+            self._retabify_primary_docks()
+
+    def _handle_primary_dock_visibility_changed(
+        self, dock: QtWidgets.QDockWidget
+    ) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        _ = dock
+        self._retabify_primary_docks()
+
+    def _retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        self._retabbing_docks = True
+        try:
+            project_dock = getattr(self, "project_dock", None)
+            log_dock = getattr(self, "log_dock", None)
+            graph_dock = getattr(self, "graph_dock", None)
+            object_dock = getattr(self, "object_dock", None)
+
+            left_switcher = next(
+                (
+                    panel
+                    for panel in getattr(self, "_dock_switcher_panels", [])
+                    if isinstance(panel, QtWidgets.QDockWidget)
+                    and panel.objectName() == "mw_left_dock_switcher"
+                ),
+                None,
+            )
+            right_switcher = next(
+                (
+                    panel
+                    for panel in getattr(self, "_dock_switcher_panels", [])
+                    if isinstance(panel, QtWidgets.QDockWidget)
+                    and panel.objectName() == "mw_right_dock_switcher"
+                ),
+                None,
+            )
+
+            if isinstance(project_dock, QtWidgets.QDockWidget):
+                if isinstance(left_switcher, QtWidgets.QDockWidget):
+                    try:
+                        self.splitDockWidget(
+                            left_switcher,
+                            project_dock,
+                            QtCore.Qt.Orientation.Horizontal,
+                        )
+                    except Exception:
+                        pass
+                for companion in (log_dock, graph_dock):
+                    if not isinstance(companion, QtWidgets.QDockWidget):
+                        continue
+                    if companion is project_dock:
+                        continue
+                    try:
+                        self.tabifyDockWidget(project_dock, companion)
+                    except Exception:
+                        pass
+                try:
+                    project_dock.raise_()
+                except Exception:
+                    pass
+
+            if (
+                isinstance(right_switcher, QtWidgets.QDockWidget)
+                and isinstance(object_dock, QtWidgets.QDockWidget)
+            ):
+                try:
+                    self.splitDockWidget(
+                        object_dock,
+                        right_switcher,
+                        QtCore.Qt.Orientation.Horizontal,
+                    )
+                except Exception:
+                    pass
+                try:
+                    right_switcher.raise_()
+                except Exception:
+                    pass
+        finally:
+            self._retabbing_docks = False
 
     def _handle_console_execution(self, code: str, result: object) -> None:
         if not hasattr(self, "log_view") or self.log_view is None:

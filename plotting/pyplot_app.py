@@ -377,6 +377,8 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host._last_graph_dir = None
         host._field_direction_enabled = False
         host._direction_legends = {}
+        host._last_source_dir = None
+        host.last_export_path = None
         host._base_title = "VSM Hysteresis Loops"
         host.PROJECT_EXTENSION = VSMPlotter.PROJECT_EXTENSION
         host.PROJECT_VERSION = VSMPlotter.PROJECT_VERSION
@@ -384,6 +386,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host.PROJECT_SETTINGS_PREFIX = VSMPlotter.PROJECT_SETTINGS_PREFIX
 
         self._bind_methods()
+        if hasattr(host, "_retabify_primary_docks"):
+            try:
+                host._retabify_primary_docks()
+            except Exception:
+                host.logger.exception("Failed to retabify primary docks")
         self._connect_control_signals()
         if not self._menus_ready:
             VSMPlotter._extend_menus(host, host.menuBar())
@@ -404,6 +411,12 @@ class VSMHysteresisPlugin(PyPlotPlugin):
                         delattr(host, "_suppress_window_persistence")
                     except AttributeError:
                         pass
+
+        if hasattr(host, "_ensure_window_visibility"):
+            try:
+                host._ensure_window_visibility()
+            except Exception:
+                host.logger.exception("Failed to clamp PyPlot window to the active screen")
 
         self._initialized = True
 
@@ -483,6 +496,7 @@ class PyPlotWorkbench(PyPlotWindow):
             key: Path(value) for key, value in parsed_dirs.items() if isinstance(value, str)
         }
         self._last_directory: Path | None = None
+        self._last_source_dir: Path | None = None
         self._selected_path_entries: List[Path] = []
         self._plugin_factories: Dict[
             str, Callable[["PyPlotWorkbench"], PyPlotPlugin]
@@ -497,6 +511,12 @@ class PyPlotWorkbench(PyPlotWindow):
         self._initial_plotter = initial_plotter
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
+        try:
+            self.setWindowState(
+                self.windowState() | QtCore.Qt.WindowState.WindowMaximized
+            )
+        except Exception:
+            pass
         self.tab_widget.currentChanged.connect(lambda _: self._update_action_states())
 
         stored_sources = self.settings.value("sources", "")
