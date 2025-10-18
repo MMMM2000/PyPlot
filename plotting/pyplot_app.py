@@ -496,6 +496,7 @@ class PyPlotWorkbench(PyPlotWindow):
             key: Path(value) for key, value in parsed_dirs.items() if isinstance(value, str)
         }
         self._last_directory: Path | None = None
+        self._last_source_dir: Path | None = None
         self._selected_path_entries: List[Path] = []
         self._plugin_factories: Dict[
             str, Callable[["PyPlotWorkbench"], PyPlotPlugin]
