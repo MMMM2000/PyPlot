@@ -163,6 +163,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.setSpacing(8)
 
         axes_group = QtWidgets.QGroupBox("Axes and filters", container)
+        axes_group.setFlat(True)
         axes_form = QtWidgets.QFormLayout(axes_group)
         axes_form.setContentsMargins(8, 8, 8, 8)
         axes_form.setSpacing(6)
@@ -177,6 +178,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.addWidget(axes_group)
 
         appearance_group = QtWidgets.QGroupBox("Appearance", container)
+        appearance_group.setFlat(True)
         appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
         appearance_layout.setContentsMargins(8, 8, 8, 8)
         appearance_layout.setSpacing(6)
@@ -201,6 +203,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.addWidget(appearance_group)
 
         overlay_group = QtWidgets.QGroupBox("Angle overlays", container)
+        overlay_group.setFlat(True)
         overlay_layout = QtWidgets.QVBoxLayout(overlay_group)
         overlay_layout.setContentsMargins(8, 8, 8, 8)
         overlay_layout.setSpacing(6)
@@ -223,6 +226,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.addWidget(overlay_group, 1)
 
         metrics_group = QtWidgets.QGroupBox("Derived metrics", container)
+        metrics_group.setFlat(True)
         metrics_layout = QtWidgets.QVBoxLayout(metrics_group)
         metrics_layout.setContentsMargins(8, 8, 8, 8)
         metrics_layout.setSpacing(6)

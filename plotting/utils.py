@@ -12,7 +12,7 @@ from matplotlib.collections import PathCollection
 from matplotlib.axes import Axes
 from matplotlib import colors as mcolors
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, cast
+from typing import Any, Callable, Iterator, Sequence, cast, Literal
 import matplotlib.pyplot as plt
 import datetime
 
@@ -375,6 +375,78 @@ def _bring_all_to_front() -> None:
 
     for widget in _visible_windows():
         _activate_window(widget)
+
+
+def _cascade_windows(windows: Sequence[QtWidgets.QWidget]) -> None:
+    targets = [widget for widget in windows if isinstance(widget, QtWidgets.QWidget)]
+    if not targets:
+        return
+    reference = None
+    for widget in targets:
+        reference = _available_geometry(widget)
+        if reference is not None:
+            break
+    if reference is None:
+        reference = QtCore.QRect(100, 100, 900, 600)
+    width = max(320, int(reference.width() * 0.6))
+    height = max(240, int(reference.height() * 0.6))
+    offset = 32
+    for index, widget in enumerate(targets):
+        try:
+            widget.showNormal()
+            widget.setGeometry(
+                reference.x() + offset * index,
+                reference.y() + offset * index,
+                width,
+                height,
+            )
+            _activate_window(widget)
+        except Exception:
+            continue
+
+
+def _tile_windows(windows: Sequence[QtWidgets.QWidget], *, orientation: Literal["vertical", "horizontal"]) -> None:
+    targets = [widget for widget in windows if isinstance(widget, QtWidgets.QWidget)]
+    if not targets:
+        return
+    reference = None
+    for widget in targets:
+        reference = _available_geometry(widget)
+        if reference is not None:
+            break
+    if reference is None:
+        reference = QtCore.QRect(100, 100, 900, 600)
+    count = len(targets)
+    if orientation == "vertical":
+        column_width = max(240, reference.width() // max(1, count))
+        for index, widget in enumerate(targets):
+            x = reference.x() + index * column_width
+            width = column_width
+            if index == count - 1:
+                width = reference.right() - x
+                if width <= 0:
+                    width = column_width
+            try:
+                widget.showNormal()
+                widget.setGeometry(x, reference.y(), width, reference.height())
+                _activate_window(widget)
+            except Exception:
+                continue
+    else:
+        row_height = max(200, reference.height() // max(1, count))
+        for index, widget in enumerate(targets):
+            y = reference.y() + index * row_height
+            height = row_height
+            if index == count - 1:
+                height = reference.bottom() - y
+                if height <= 0:
+                    height = row_height
+            try:
+                widget.showNormal()
+                widget.setGeometry(reference.x(), y, reference.width(), height)
+                _activate_window(widget)
+            except Exception:
+                continue
 
 
 def _show_move_resize_dialog(widget: QtWidgets.QWidget) -> None:
@@ -1288,6 +1360,32 @@ class _WindowMenuManager(QtCore.QObject):
         _apply_standard_icon(bring_action, QtWidgets.QStyle.StandardPixmap.SP_BrowserReload, style)
         if bring_action is not None:
             bring_action.triggered.connect(_bring_all_to_front)
+
+        def _managed_windows() -> list[QtWidgets.QWidget]:
+            return [w for w in _visible_windows() if w is not target]
+
+        managed = _managed_windows()
+        cascade_action = menu.addAction("Cascade")
+        _apply_standard_icon(cascade_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView, style)
+        if cascade_action is not None:
+            cascade_action.setEnabled(bool(managed))
+            cascade_action.triggered.connect(lambda: _cascade_windows(_managed_windows()))
+
+        tile_vert_action = menu.addAction("Tile Vertically")
+        _apply_standard_icon(tile_vert_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton, style)
+        if tile_vert_action is not None:
+            tile_vert_action.setEnabled(bool(managed))
+            tile_vert_action.triggered.connect(
+                lambda: _tile_windows(_managed_windows(), orientation="vertical")
+            )
+
+        tile_horiz_action = menu.addAction("Tile Horizontally")
+        _apply_standard_icon(tile_horiz_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarUnshadeButton, style)
+        if tile_horiz_action is not None:
+            tile_horiz_action.setEnabled(bool(managed))
+            tile_horiz_action.triggered.connect(
+                lambda: _tile_windows(_managed_windows(), orientation="horizontal")
+            )
 
         # Window list ------------------------------------------------------
         windows = _visible_windows()

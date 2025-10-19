@@ -32,7 +32,7 @@ from plotting.pyplot import (
     WorksheetData,
     OBJECT_TREE_STATE_ROLE,
 )
-from plotting.utils import ensure_app_theme, origin_session, schedule_origin_release
+from plotting.utils import ensure_app_theme, origin_session, schedule_origin_release, format_annealing_title
 
 HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
@@ -43,6 +43,7 @@ FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)°)", re.IG
 ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
 SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
 FOLDER_SANITIZE_RE = re.compile(r"[^0-9A-Za-z._-]+")
+SAMPLE_FRACTION_RE = re.compile(r"(?<=\b)(\d+)-(\d+)(?=\b)")
 
 TEMPERATURE_COLUMN_CANDIDATES = [
     "Sample Temperature [degC]",
@@ -2626,6 +2627,18 @@ class VSMPlotter(PyPlotWindow):
                 return meta.comments
         return fallback
 
+    def _format_sample_label(self, name: str | None) -> str | None:
+        if not name:
+            return None
+        formatted = format_annealing_title(str(name).strip())
+        tokens = formatted.split()
+        for index, token in enumerate(tokens):
+            if "-" not in token:
+                continue
+            replacement = SAMPLE_FRACTION_RE.sub(r"\1/\2", token)
+            tokens[index] = replacement
+        return " ".join(tokens)
+
     def _default_source_directory(self) -> Path:
         if self._last_source_dir is not None and self._last_source_dir.exists():
             return self._last_source_dir
@@ -3517,8 +3530,6 @@ class VSMPlotter(PyPlotWindow):
                     inplace=True,
                 )
                 desired_columns = [
-                    x_column_label,
-                    y_column_label,
                     angle_label,
                     raw_first_label,
                     raw_second_label,
@@ -3526,6 +3537,8 @@ class VSMPlotter(PyPlotWindow):
                     sym_pos_label,
                     original_label,
                     corrected_label,
+                    x_column_label,
+                    y_column_label,
                 ]
                 df = df[[column for column in desired_columns if column in df.columns]]
                 tables[temperature] = df
@@ -4033,17 +4046,29 @@ class VSMPlotter(PyPlotWindow):
     def _handle_object_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
         if column != 0:
             return
-        payload = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
-        if not payload:
-            return
-        tab, key = payload
-        descriptor = self._tab_descriptors.get(tab)
+        raw_payload = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        descriptor: TabDescriptor | None = None
+        normalized_key: Any | None = None
+        if isinstance(raw_payload, (tuple, list)) and len(raw_payload) == 2:
+            candidate, key_raw = raw_payload
+            if isinstance(candidate, QtWidgets.QWidget):
+                descriptor = self._tab_descriptors.get(candidate)
+            elif isinstance(candidate, TabDescriptor):
+                descriptor = candidate
+            if isinstance(key_raw, (list, tuple)):
+                normalized_key = tuple(key_raw)
+            else:
+                normalized_key = key_raw
         if descriptor is None:
+            return
+        if normalized_key is None:
             return
         line_state = item.data(0, OBJECT_TREE_STATE_ROLE)
         if not isinstance(line_state, GraphLineState):
-            line_state = descriptor.lines.get(tuple(key))
-        if line_state is None:
+            line_state = descriptor.lines.get(normalized_key)
+            if isinstance(line_state, GraphLineState):
+                item.setData(0, OBJECT_TREE_STATE_ROLE, line_state)
+        if not isinstance(line_state, GraphLineState):
             return
         new_visible = item.checkState(0) == QtCore.Qt.CheckState.Checked
         old_visible = line_state.line.get_visible()
@@ -4060,10 +4085,9 @@ class VSMPlotter(PyPlotWindow):
                 temperature = descriptor.metadata.get("temperature")
                 if isinstance(temperature, (int, float)):
                     visibility = self._line_visibility.setdefault(float(temperature), {})
-                    try:
-                        _, angle_value = key
-                    except (TypeError, ValueError):
-                        angle_value = None
+                    angle_value = None
+                    if isinstance(normalized_key, tuple) and len(normalized_key) == 2:
+                        angle_value = normalized_key[1]
                     if isinstance(angle_value, (int, float)):
                         visibility[float(angle_value)] = flag
             item.blockSignals(True)
@@ -4245,7 +4269,7 @@ class VSMPlotter(PyPlotWindow):
             ax = fig.add_subplot(111)
             lines: Dict[tuple[str, float | str], GraphLineState] = {}
             plotted = False
-            sample_names: set[str] = set()
+            raw_sample_names: set[str] = set()
             for temperature, entries in sorted(self._last_prepared_groups.items()):
                 for measurement, subset in entries:
                     if measurement.angle is None:
@@ -4253,7 +4277,7 @@ class VSMPlotter(PyPlotWindow):
                     if not math.isclose(float(measurement.angle), angle, abs_tol=0.05):
                         continue
                     if measurement.sample_name:
-                        sample_names.add(str(measurement.sample_name))
+                        raw_sample_names.add(str(measurement.sample_name))
                     series_y = subset[y_axis]
                     if rescale_enabled:
                         result = rescale_info.get(temperature, {}).get(measurement.path)
@@ -4288,10 +4312,18 @@ class VSMPlotter(PyPlotWindow):
                         full_y=numeric_y,
                     )
                     plotted = True
+            formatted_samples = {
+                sample
+                for sample in (
+                    self._format_sample_label(name) for name in raw_sample_names
+                )
+                if sample
+            }
+
             if plotted:
                 overlay_title = f"{angle:g}° across temperatures"
-                if len(sample_names) == 1:
-                    overlay_title = f"{next(iter(sample_names))} — {overlay_title}"
+                if len(formatted_samples) == 1:
+                    overlay_title = f"{next(iter(formatted_samples))} — {overlay_title}"
                 ax.set_title(overlay_title)
                 ax.set_xlabel(x_axis)
                 ax.set_ylabel(y_axis)
@@ -4332,8 +4364,8 @@ class VSMPlotter(PyPlotWindow):
                 lines=lines,
                 metadata={"angle": float(angle)},
             )
-            if len(sample_names) == 1:
-                descriptor.metadata["sample_name"] = next(iter(sample_names))
+            if len(formatted_samples) == 1:
+                descriptor.metadata["sample_name"] = next(iter(formatted_samples))
             self.tab_widget.addTab(tab, title)
             self._overlay_tab_widgets.append(tab)
             self._register_plot_tab(tab, canvas, ax, descriptor)
@@ -5306,12 +5338,19 @@ class VSMPlotter(PyPlotWindow):
             lines: Dict[float, Any] = {}
             descriptor_lines: Dict[tuple[str, float | str], GraphLineState] = {}
             valid_angles: set[float] = set()
-            sample_names = {
-                measurement.sample_name
+            raw_sample_names = {
+                str(measurement.sample_name)
                 for measurement, _ in entries
                 if measurement.sample_name
             }
-            sample_label = next(iter(sample_names)) if len(sample_names) == 1 else None
+            formatted_samples = {
+                sample
+                for sample in (
+                    self._format_sample_label(name) for name in raw_sample_names
+                )
+                if sample
+            }
+            sample_label = next(iter(formatted_samples)) if len(formatted_samples) == 1 else None
             for measurement, subset in entries:
                 if measurement.angle is None:
                     continue
@@ -5358,9 +5397,8 @@ class VSMPlotter(PyPlotWindow):
 
             ax.set_xlabel(x_axis)
             ax.set_ylabel(y_axis)
-            title = f"{y_axis} vs {x_axis} at {temperature:g} °C"
-            if sample_label:
-                title = f"{sample_label} — {title}"
+            temperature_label = f"{temperature:g} °C"
+            title = f"{sample_label} — {temperature_label}" if sample_label else temperature_label
             ax.set_title(title)
             self._apply_plot_theme(ax)
 
@@ -5580,7 +5618,9 @@ class VSMPlotter(PyPlotWindow):
             return
         if getattr(self, "_log_has_unread_errors", False):
             self._log_has_unread_errors = False
-        self.message_log_dock.set_alert(False)
+        dock = getattr(self, "message_log_dock", None)
+        if hasattr(dock, "set_alert"):
+            dock.set_alert(False)
 
     def _append_log(self, message: str, *, level: Literal["info", "error"] = "info") -> None:
         derived_level = level
@@ -5598,7 +5638,7 @@ class VSMPlotter(PyPlotWindow):
                 self._clear_log_alert()
             else:
                 self._log_has_unread_errors = True
-                if dock is not None:
+                if hasattr(dock, "set_alert"):
                     dock.set_alert(True)
         else:
             self.logger.info(message)
@@ -5619,4 +5659,3 @@ def main() -> QtWidgets.QWidget | None:  # pragma: no cover - launcher helper
 
 if __name__ == "__main__":  # pragma: no cover - manual execution
     main()
-

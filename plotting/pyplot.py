@@ -25,7 +25,7 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import pandas as pd
 
-from plotting.utils import install_standard_menu
+from plotting.utils import install_standard_menu, developer_options
 from origin_clone.app import PythonConsoleWidget
 
 
@@ -90,6 +90,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._collapse_timer = QtCore.QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.timeout.connect(self._collapse_if_outside)
+        self._overlay_indices: set[int] = set()
 
         for idx, dock in enumerate(self._docks):
             tab_index = self._tab_bar.addTab(dock.windowTitle())
@@ -169,13 +170,40 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._syncing = True
         self._collapse_all(exclude=index)
         dock = self._docks[index]
-        dock.show()
-        if not dock.isFloating():
-            self._ensure_tabbed(dock)
-            width = self._dock_widths.get(dock, 0)
-            if width > 0:
-                self._apply_dock_width(dock, width)
+        overlay = self._pinned_index is not None and index != self._pinned_index
+        if overlay:
+            pinned = self._docks[self._pinned_index]
+            top_left = pinned.mapToGlobal(QtCore.QPoint(0, 0))
+            size = pinned.size()
+            self._overlay_indices.add(index)
+            try:
+                dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
+            except Exception:
+                pass
+            dock.setFloating(True)
+            dock.show()
+            if size.isValid():
+                dock.resize(size)
+            dock.move(top_left)
             dock.raise_()
+        else:
+            if index in self._overlay_indices:
+                self._overlay_indices.discard(index)
+                try:
+                    dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
+                except Exception:
+                    pass
+                dock.setFloating(False)
+            dock.show()
+            try:
+                dock.raise_()
+            except Exception:
+                pass
+            if not dock.isFloating():
+                self._ensure_tabbed(dock)
+                width = self._dock_widths.get(dock, 0)
+                if width > 0:
+                    self._apply_dock_width(dock, width)
         self._expanded_index = index
         self._collapse_timer.stop()
         self._syncing = False
@@ -183,10 +211,23 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
     def _handle_visibility_change(self, index: int, visible: bool) -> None:
         if self._syncing or not self._docks:
             return
+        if index in self._overlay_indices:
+            if not visible:
+                self._overlay_indices.discard(index)
+            return
         if visible:
             if not self._docks[index].isFloating():
                 current = self._docks[index]
                 self._dock_widths[current] = max(current.width(), self._dock_widths.get(current, 220))
+                main = self._main_window()
+                if hasattr(main, "_primary_dock_widths"):
+                    try:
+                        main._primary_dock_widths[current] = max(  # type: ignore[attr-defined]
+                            current.width(),
+                            main._primary_dock_widths.get(current, 0),  # type: ignore[attr-defined]
+                        )
+                    except Exception:
+                        pass
             self._expanded_index = index
             self._collapse_timer.stop()
             if self._tab_bar.currentIndex() != index:
@@ -194,6 +235,17 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 self._tab_bar.setCurrentIndex(index)
                 self._syncing = False
         else:
+            if self._pinned_index == index and not self._docks[index].isFloating():
+                dock = self._docks[index]
+                self._syncing = True
+                dock.show()
+                try:
+                    dock.raise_()
+                except Exception:
+                    pass
+                self._syncing = False
+                self._collapse_timer.stop()
+                return
             if self._expanded_index == index:
                 self._expanded_index = None
             if self._pinned_index == index:
@@ -279,18 +331,6 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         main_window = self._main_window()
         if main_window is None:
             return
-        reference: QtWidgets.QDockWidget | None = None
-        for candidate in self._docks:
-            if candidate is dock or candidate.isFloating():
-                continue
-            reference = candidate
-            break
-        if reference is not None:
-            try:
-                main_window.tabifyDockWidget(reference, dock)
-            except Exception:
-                pass
-            return
         if self._panel_dock is not None:
             try:
                 main_window.splitDockWidget(self._panel_dock, dock, QtCore.Qt.Orientation.Horizontal)
@@ -301,15 +341,41 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if dock.isFloating() or width <= 0:
             return
 
+        available = None
+        try:
+            screen = QtGui.QGuiApplication.screenAt(dock.mapToGlobal(dock.rect().center()))
+            if screen is None:
+                screen = QtGui.QGuiApplication.primaryScreen()
+            available = screen.availableGeometry() if screen is not None else None
+        except Exception:
+            available = None
+        if available is not None:
+            width = max(120, min(width, available.width()))
+
         def _resize() -> None:
             if dock.isFloating():
                 return
-            dock.resize(width, dock.height() or dock.sizeHint().height())
+            try:
+                dock.resize(width, dock.height() or dock.sizeHint().height())
+            except Exception:
+                pass
             main_window = self._main_window()
-            if main_window is None:
+            if not isinstance(main_window, QtWidgets.QMainWindow):
                 return
             try:
                 main_window.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+            try:
+                frame = main_window.frameGeometry()
+                screen = QtGui.QGuiApplication.screenAt(frame.center())
+                if screen is None:
+                    screen = QtGui.QGuiApplication.primaryScreen()
+                if screen is not None:
+                    available_rect = screen.availableGeometry()
+                    new_left = max(available_rect.left(), min(frame.left(), available_rect.right() - frame.width()))
+                    new_top = max(available_rect.top(), min(frame.top(), available_rect.bottom() - frame.height()))
+                    main_window.move(new_left, new_top)
             except Exception:
                 pass
 
@@ -978,17 +1044,30 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
         self._worksheets: Dict[Hashable, WorksheetData] = {}
+        self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
+        self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._last_import_sources: List[str] = []
+        self._restoring_imports = False
         self._data_menu: QtWidgets.QMenu | None = None
         self._import_files_action: QtGui.QAction | None = None
         self._import_folder_action: QtGui.QAction | None = None
         self._refresh_import_action: QtGui.QAction | None = None
+        self._new_workbook_action: QtGui.QAction | None = None
+        self._add_column_before_action: QtGui.QAction | None = None
+        self._add_column_after_action: QtGui.QAction | None = None
+        self._delete_column_action: QtGui.QAction | None = None
+        self._reorder_columns_action: QtGui.QAction | None = None
 
         self._log_has_unread_errors = False
         self._history = _HistoryManager()
+        self._retabify_pending = False
+        self._import_storage_key = self._project_settings_key("import_sources")
 
         self._build_base_ui()
         self._update_project_title()
         self._update_project_actions()
+        developer_options().keep_files_changed.connect(self._handle_keep_files_changed)
+        QtCore.QTimer.singleShot(0, self._restore_persisted_imports)
 
     # ------------------------------------------------------------------ abstract hooks
     def _handle_manual_path_entry(self) -> None:
@@ -1333,6 +1412,29 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         recent_action.setEnabled(False)
         self._refresh_import_action = recent_action
 
+        data_menu.addSeparator()
+        new_workbook_action = data_menu.addAction("New Workbook")
+        new_workbook_action.triggered.connect(self._create_new_workbook)
+        self._new_workbook_action = new_workbook_action
+
+        add_before_action = data_menu.addAction("Add Column Before")
+        add_before_action.triggered.connect(lambda: self._insert_column(position="before"))
+        self._add_column_before_action = add_before_action
+
+        add_after_action = data_menu.addAction("Add Column After")
+        add_after_action.triggered.connect(lambda: self._insert_column(position="after"))
+        self._add_column_after_action = add_after_action
+
+        delete_column_action = data_menu.addAction("Delete Column")
+        delete_column_action.triggered.connect(self._delete_selected_columns)
+        self._delete_column_action = delete_column_action
+
+        reorder_action = data_menu.addAction("Reorder Columns…")
+        reorder_action.triggered.connect(self._reorder_columns)
+        self._reorder_columns_action = reorder_action
+
+        self._update_worksheet_actions()
+
     # ------------------------------------------------------------------ shared menu helpers
     def _project_settings_key(self, suffix: str) -> str:
         prefix = getattr(self, "PROJECT_SETTINGS_PREFIX", "project") or ""
@@ -1376,6 +1478,202 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._recent_projects = self._recent_projects[:10]
         self._update_recent_projects_menu()
         self._save_recent_projects_setting()
+
+    # ------------------------------------------------------------------ workbook helpers
+    def _worksheet_action_context(
+        self,
+    ) -> tuple[WorksheetTableModel, WorksheetTableView, Hashable] | None:
+        tab = self.tab_widget.currentWidget()
+        if tab is None:
+            return None
+        key = self._tab_to_worksheet_key.get(tab)
+        if key is None:
+            return None
+        model = self._worksheet_models.get(key)
+        if model is None:
+            worksheet = self._worksheets.get(key)
+            if worksheet is None:
+                return None
+            model = WorksheetTableModel(worksheet, self)
+            self._worksheet_models[key] = model
+        view = getattr(tab, "_worksheet_view", None)
+        if not isinstance(view, WorksheetTableView):
+            candidates = tab.findChildren(WorksheetTableView)
+            view = candidates[0] if candidates else None
+        if not isinstance(view, WorksheetTableView):
+            return None
+        return model, view, key
+
+    def _create_new_workbook(self) -> None:
+        identifier = uuid.uuid4().hex
+        workbook_key: Hashable = ("manual", identifier)
+        workbook_name = f"Workbook {len(self._workbooks) + 1:02d}"
+        sheet_name = "Sheet1"
+        initial_column = "Col01"
+        dataframe = pd.DataFrame(columns=[initial_column])
+        column_meta = {initial_column: WorksheetColumnMeta(long_name=initial_column)}
+        worksheet_key: Hashable = (workbook_key, sheet_name)
+        worksheet = WorksheetData(
+            key=worksheet_key,
+            name=sheet_name,
+            dataframe=dataframe,
+            columns=column_meta,
+            source=None,
+            workbook_key=workbook_key,
+        )
+        workbook = WorkbookData(
+            key=workbook_key,
+            name=workbook_name,
+            worksheets=[worksheet_key],
+            source=None,
+            folder=None,
+        )
+        self._register_imported_workbook(workbook, [worksheet])
+        self._open_worksheet_tab(worksheet_key)
+        self._update_project_actions()
+        self._update_worksheet_actions()
+
+    def _insert_column(self, *, position: Literal["before", "after"]) -> None:
+        context = self._worksheet_action_context()
+        if context is None:
+            return
+        model, view, key = context
+        selection_model = view.selectionModel()
+        selected_columns = sorted(
+            {index.column() for index in selection_model.selectedColumns()}
+        ) if selection_model is not None else []
+        if position == "before" and not selected_columns:
+            return
+        if selected_columns:
+            if position == "before":
+                insert_at = selected_columns[0]
+            else:
+                insert_at = selected_columns[-1] + 1
+        else:
+            insert_at = model.columnCount()
+        if not model.insertColumns(insert_at, 1):
+            return
+        self._worksheet_models[key] = model
+        header = view.horizontalHeader()
+        try:
+            header.setStretchLastSection(True)
+        except Exception:
+            pass
+        sel_model = view.selectionModel()
+        if sel_model is not None:
+            sel_model.clearSelection()
+            target_column = min(insert_at, model.columnCount() - 1)
+            target_index = model.index(0, target_column)
+            if target_index.isValid():
+                sel_model.select(
+                    target_index,
+                    QtCore.QItemSelectionModel.SelectionFlag.Select
+                    | QtCore.QItemSelectionModel.SelectionFlag.Columns,
+                )
+        self._update_project_actions()
+        self._update_worksheet_actions()
+
+    def _delete_selected_columns(self) -> None:
+        context = self._worksheet_action_context()
+        if context is None:
+            return
+        model, view, key = context
+        selection_model = view.selectionModel()
+        if selection_model is None:
+            return
+        selected_columns = sorted({index.column() for index in selection_model.selectedColumns()})
+        if not selected_columns:
+            return
+        removed = 0
+        for column in selected_columns:
+            model.removeColumns(column - removed, 1)
+            removed += 1
+        self._worksheet_models[key] = model
+        self._update_project_actions()
+        self._update_worksheet_actions()
+
+    def _reorder_columns(self) -> None:
+        context = self._worksheet_action_context()
+        if context is None:
+            return
+        model, view, key = context
+        columns = list(model.dataframe.columns)
+        if len(columns) < 2:
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Reorder Columns")
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        hint = QtWidgets.QLabel("Drag to reorder columns, then click Done.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        list_widget = QtWidgets.QListWidget(dialog)
+        list_widget.addItems(columns)
+        list_widget.setDragDropMode(QtWidgets.QAbstractItemView.DragDropMode.InternalMove)
+        list_widget.setDefaultDropAction(QtCore.Qt.DropAction.MoveAction)
+        list_widget.setAlternatingRowColors(True)
+        list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        layout.addWidget(list_widget, 1)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        layout.addWidget(button_box)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        new_order = [list_widget.item(idx).text() for idx in range(list_widget.count())]
+        if new_order == columns or not new_order:
+            return
+
+        model.beginResetModel()
+        reordered = model.dataframe.reindex(columns=new_order)
+        model._frame = reordered
+        model._worksheet.dataframe = reordered
+        model._columns = list(new_order)
+        column_meta = {
+            name: model._worksheet.columns.get(name, WorksheetColumnMeta(long_name=name))
+            for name in new_order
+        }
+        model._worksheet.columns = column_meta
+        model.endResetModel()
+
+        self._worksheet_models[key] = model
+        try:
+            view.horizontalHeader().setStretchLastSection(True)
+        except Exception:
+            pass
+        self._update_project_actions()
+        self._update_worksheet_actions()
+
+    def _update_worksheet_actions(self) -> None:
+        context = self._worksheet_action_context()
+        has_context = context is not None
+        column_count = 0
+        selected_columns = 0
+        if context is not None:
+            model, view, _ = context
+            column_count = model.columnCount()
+            selection_model = view.selectionModel()
+            if selection_model is not None:
+                selected_columns = len(selection_model.selectedColumns())
+        if self._add_column_after_action is not None:
+            self._add_column_after_action.setEnabled(has_context)
+        if self._add_column_before_action is not None:
+            self._add_column_before_action.setEnabled(has_context and selected_columns > 0)
+        if self._delete_column_action is not None:
+            self._delete_column_action.setEnabled(has_context and selected_columns > 0)
+        if self._reorder_columns_action is not None:
+            self._reorder_columns_action.setEnabled(has_context and column_count > 1)
 
     def _update_recent_projects_menu(self) -> None:
         menu = self._recent_projects_menu
@@ -1620,10 +1918,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._import_paths([Path(directory)])
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
+        provided_paths: List[Path] = []
+        for source in paths:
+            if isinstance(source, Path):
+                provided_paths.append(source)
         files: List[Path] = []
-        for path in paths:
-            if not isinstance(path, Path):
-                continue
+        for path in provided_paths:
             if path.is_dir():
                 files.extend(self._iter_supported_files(path))
             elif path.is_file() and self._is_supported_data_file(path):
@@ -1657,8 +1957,86 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if imported:
             self._refresh_imported_data_summary()
             self._update_project_actions()
+            if provided_paths:
+                self._remember_import_directory(provided_paths[0])
+                self._last_import_sources = [str(path) for path in provided_paths]
+                self._persist_import_sources(provided_paths)
         if self._refresh_import_action is not None:
             self._refresh_import_action.setEnabled(bool(self._worksheets))
+
+    def _remember_import_directory(self, source: Path) -> None:
+        try:
+            resolved = source.resolve()
+        except Exception:
+            resolved = source
+        target = resolved if resolved.is_dir() else resolved.parent
+        if target is None or not target.exists():
+            return
+        self.settings.setValue(self._project_settings_key("last_path"), str(target))
+
+    def _persist_import_sources(self, sources: Iterable[Path | str]) -> None:
+        if self._restoring_imports:
+            return
+        dev_opts = developer_options()
+        if not dev_opts.keep_files():
+            self._clear_persisted_imports()
+            return
+        unique: List[str] = []
+        for source in sources:
+            text = str(source)
+            if not text:
+                continue
+            if text not in unique:
+                unique.append(text)
+        if unique:
+            self.settings.setValue(self._import_storage_key, unique)
+            self._last_import_sources = unique
+        else:
+            self._clear_persisted_imports()
+
+    def _clear_persisted_imports(self) -> None:
+        self.settings.remove(self._import_storage_key)
+        self._last_import_sources = []
+
+    def _restore_persisted_imports(self) -> None:
+        dev_opts = developer_options()
+        if not dev_opts.keep_files():
+            self._clear_persisted_imports()
+            return
+        stored = self.settings.value(self._import_storage_key, [])
+        if isinstance(stored, str):
+            candidates = [seg for seg in stored.splitlines() if seg]
+            candidates = candidates or ([stored] if stored else [])
+        elif isinstance(stored, (list, tuple, set)):
+            candidates = [str(seg) for seg in stored if seg]
+        else:
+            candidates = []
+        if not candidates:
+            return
+        paths: List[Path] = []
+        for entry in candidates:
+            try:
+                path = Path(entry)
+            except Exception:
+                continue
+            paths.append(path)
+        if not paths:
+            return
+        self._restoring_imports = True
+        try:
+            self._import_paths(paths)
+        finally:
+            self._restoring_imports = False
+        self._last_import_sources = [str(path) for path in paths]
+
+    def _handle_keep_files_changed(self, enabled: bool) -> None:
+        if enabled:
+            if self._last_import_sources:
+                self._persist_import_sources(self._last_import_sources)
+            else:
+                self._restore_persisted_imports()
+        else:
+            self._clear_persisted_imports()
 
     def _iter_supported_files(self, root: Path) -> List[Path]:
         try:
@@ -1871,6 +2249,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if index >= 0:
                     parent.takeChild(index)
         self._worksheets.pop(key, None)
+        self._worksheet_models.pop(key, None)
 
     def _refresh_imported_data_summary(self) -> None:
         for key, item in self._worksheet_tree_items.items():
@@ -1889,14 +2268,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             else:
                 item.setText(1, f"{count} sheet{'s' if count != 1 else ''}")
 
-    def _create_worksheet_tab(self, worksheet: WorksheetData) -> QtWidgets.QWidget | None:
+    def _create_worksheet_tab(
+        self,
+        worksheet: WorksheetData,
+        model: WorksheetTableModel | None = None,
+    ) -> QtWidgets.QWidget | None:
+        if model is None:
+            model = self._worksheet_models.get(worksheet.key)
+            if model is None:
+                model = WorksheetTableModel(worksheet, self)
+                self._worksheet_models[worksheet.key] = model
         container = QtWidgets.QWidget()
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
 
         view = WorksheetTableView()
-        model = WorksheetTableModel(worksheet, self)
         view.setModel(model)
         view.setAlternatingRowColors(True)
         view.horizontalHeader().setStretchLastSection(True)
@@ -1906,6 +2293,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             header.setSectionResizeMode(row_index, QtWidgets.QHeaderView.ResizeToContents)
         header.setDefaultSectionSize(max(22, header.defaultSectionSize()))
         layout.addWidget(view, 1)
+        container._worksheet_view = view  # type: ignore[attr-defined]
+        container._worksheet_model = model  # type: ignore[attr-defined]
+        selection_model = view.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(lambda *_: self._update_worksheet_actions())
+        self._update_worksheet_actions()
         return container
 
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
@@ -1997,7 +2390,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea,
             QtCore.Qt.DockWidgetArea.RightDockWidgetArea,
         ):
-            self._retabify_primary_docks()
+            self._queue_retabify_primary_docks()
 
     def _handle_primary_dock_visibility_changed(
         self, dock: QtWidgets.QDockWidget
@@ -2005,17 +2398,40 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if getattr(self, "_retabbing_docks", False):
             return
         _ = dock
+        self._queue_retabify_primary_docks()
+
+    def _queue_retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabify_pending", False):
+            return
+        self._retabify_pending = True
+        QtCore.QTimer.singleShot(0, self._run_queued_retabify)
+
+    def _run_queued_retabify(self) -> None:
+        self._retabify_pending = False
         self._retabify_primary_docks()
 
     def _retabify_primary_docks(self) -> None:
         if getattr(self, "_retabbing_docks", False):
             return
+        self._retabify_pending = False
         self._retabbing_docks = True
         try:
             project_dock = getattr(self, "project_dock", None)
             log_dock = getattr(self, "log_dock", None)
             graph_dock = getattr(self, "graph_dock", None)
             object_dock = getattr(self, "object_dock", None)
+
+            tracked_widths: Dict[QtWidgets.QDockWidget, int] = {}
+            for candidate in (project_dock, log_dock, graph_dock, object_dock):
+                if isinstance(candidate, QtWidgets.QDockWidget):
+                    current_width = candidate.width()
+                    stored_width = self._primary_dock_widths.get(candidate, 0)
+                    width_reference = max(current_width, stored_width)
+                    if width_reference <= 0:
+                        continue
+                    if stored_width and abs(width_reference - stored_width) <= 2:
+                        continue
+                    tracked_widths[candidate] = width_reference
 
             left_switcher = next(
                 (
@@ -2036,7 +2452,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 None,
             )
 
-            if isinstance(project_dock, QtWidgets.QDockWidget):
+            if isinstance(project_dock, QtWidgets.QDockWidget) and not project_dock.isFloating():
                 if isinstance(left_switcher, QtWidgets.QDockWidget):
                     try:
                         self.splitDockWidget(
@@ -2044,15 +2460,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                             project_dock,
                             QtCore.Qt.Orientation.Horizontal,
                         )
-                    except Exception:
-                        pass
-                for companion in (log_dock, graph_dock):
-                    if not isinstance(companion, QtWidgets.QDockWidget):
-                        continue
-                    if companion is project_dock:
-                        continue
-                    try:
-                        self.tabifyDockWidget(project_dock, companion)
                     except Exception:
                         pass
                 try:
@@ -2063,6 +2470,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if (
                 isinstance(right_switcher, QtWidgets.QDockWidget)
                 and isinstance(object_dock, QtWidgets.QDockWidget)
+                and not object_dock.isFloating()
             ):
                 try:
                     self.splitDockWidget(
@@ -2076,8 +2484,95 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     right_switcher.raise_()
                 except Exception:
                     pass
+
+            for dock, width in tracked_widths.items():
+                self._primary_dock_widths[dock] = width
+                self._apply_dock_width(dock, width)
         finally:
             self._retabbing_docks = False
+
+    def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
+        if not isinstance(dock, QtWidgets.QDockWidget) or dock.isFloating() or width <= 0:
+            return
+        try:
+            screen = QtGui.QGuiApplication.screenAt(dock.mapToGlobal(dock.rect().center()))
+            if screen is None:
+                screen = QtGui.QGuiApplication.primaryScreen()
+            available = screen.availableGeometry() if screen is not None else None
+        except Exception:
+            available = None
+        if available is not None:
+            width = max(120, min(width, available.width()))
+
+        def _resize() -> None:
+            if dock.isFloating():
+                return
+            try:
+                dock.resize(width, dock.height() or dock.sizeHint().height())
+            except Exception:
+                pass
+            try:
+                self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                pass
+            try:
+                frame = self.frameGeometry()
+                screen = QtGui.QGuiApplication.screenAt(frame.center())
+                if screen is None:
+                    screen = QtGui.QGuiApplication.primaryScreen()
+                if screen is not None:
+                    available_rect = screen.availableGeometry()
+                    new_left = max(available_rect.left(), min(frame.left(), available_rect.right() - frame.width()))
+                    new_top = max(available_rect.top(), min(frame.top(), available_rect.bottom() - frame.height()))
+                    self.move(new_left, new_top)
+            except Exception:
+                pass
+
+        QtCore.QTimer.singleShot(0, _resize)
+
+    def _collapse_all(self, *, exclude: int | None = None) -> None:
+        previous = self._syncing
+        self._syncing = True
+        for offset, dock in enumerate(self._docks):
+            if exclude is not None and offset == exclude:
+                continue
+            if offset in self._overlay_indices:
+                try:
+                    dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
+                except Exception:
+                    pass
+                dock.hide()
+                dock.setFloating(False)
+                continue
+            if self._is_persistent(offset):
+                continue
+            dock.hide()
+        self._syncing = previous
+        if exclude is None and self._pinned_index is None and not self._floating_indices:
+            self._expanded_index = None
+        if exclude is None and self._overlay_indices:
+            for index in list(self._overlay_indices):
+                dock = self._docks[index]
+                try:
+                    dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
+                except Exception:
+                    pass
+                dock.hide()
+                dock.setFloating(False)
+                self._overlay_indices.discard(index)
+
+    def _schedule_collapse(self) -> None:
+        if self._collapse_timer.isActive() or self._pinned_index is not None or self._floating_indices:
+            return
+        self._collapse_timer.start(self._HOVER_CLOSE_DELAY_MS)
+
+    def _collapse_if_outside(self) -> None:
+        if self._pinned_index is not None or self._floating_indices:
+            return
+        if self._pointer_over_tab_bar() or self._pointer_over_any_dock():
+            return
+        self._collapse_all()
+
 
     def _handle_console_execution(self, code: str, result: object) -> None:
         if not hasattr(self, "log_view") or self.log_view is None:
@@ -2174,7 +2669,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         worksheet = self._worksheets.get(key)
         if worksheet is None:
             return
-        widget = self._create_worksheet_tab(worksheet)
+        model = self._worksheet_models.get(key)
+        if model is None:
+            model = WorksheetTableModel(worksheet, self)
+            self._worksheet_models[key] = model
+        widget = self._create_worksheet_tab(worksheet, model)
         if widget is None:
             return
         index = self.tab_widget.addTab(widget, worksheet.name)
@@ -2184,6 +2683,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._update_tab_buttons()
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
+        self._update_worksheet_actions()
 
     def _show_tab(self, tab: QtWidgets.QWidget) -> None:
         index = self.tab_widget.indexOf(tab)
@@ -2417,6 +2917,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._update_tab_buttons()
         self._focus_tree_on_tab(tab)
         self._rebuild_object_manager_for_tab(tab)
+        self._update_worksheet_actions()
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
