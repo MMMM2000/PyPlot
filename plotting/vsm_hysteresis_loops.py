@@ -1600,6 +1600,7 @@ class VSMPlotter(PyPlotWindow):
     PROJECT_EXTENSION = ".pypj"
     PROJECT_CODE = "VSM_Hysteresis_Loops"
     PROJECT_SETTINGS_PREFIX = "vsm_project"
+    _WINDOW_STATE_SIGNATURE_KEY = "window_state_signature"
 
     def __init__(self) -> None:
         self.logger = logging.getLogger("vsm_hysteresis_loops")
@@ -2268,6 +2269,13 @@ class VSMPlotter(PyPlotWindow):
                         self.move(frame.topLeft())
 
             window_state = self.settings.value("window_state")
+            signature = self.settings.value(self._WINDOW_STATE_SIGNATURE_KEY, "")
+            expected_signature = self._window_state_signature()
+            if not isinstance(signature, str) or signature != expected_signature:
+                window_state = None
+                self.settings.remove("window_state")
+                self.settings.remove(self._WINDOW_STATE_SIGNATURE_KEY)
+                self.settings.sync()
             if isinstance(window_state, QtCore.QByteArray):
                 try:
                     self.restoreState(window_state)
@@ -2285,7 +2293,11 @@ class VSMPlotter(PyPlotWindow):
         if not bool(getattr(self, "_suppress_window_persistence", False)):
             self.settings.setValue("geometry", self.saveGeometry())
             self.settings.setValue("window_state", self.saveState())
+            self.settings.setValue(self._WINDOW_STATE_SIGNATURE_KEY, self._window_state_signature())
         self.settings.sync()
+
+    def _window_state_signature(self) -> str:
+        return f"qt={QtCore.QT_VERSION_STR};pyqt={QtCore.PYQT_VERSION_STR}"
 
     def _ensure_window_visibility(self) -> None:
         if bool(getattr(self, "_suppress_window_persistence", False)):

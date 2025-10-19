@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -53,6 +54,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._floating_indices: set[int] = set()
         self._dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
         self._panel_dock = parent if isinstance(parent, QtWidgets.QDockWidget) else None
+        self._tabbed_docks: set[QtWidgets.QDockWidget] = set()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -305,6 +307,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             self._pinned_index = index
             self._expanded_index = index
             self._collapse_timer.stop()
+            self._tabbed_docks.discard(dock)
         else:
             dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
             dock.show()
@@ -327,6 +330,9 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
 
     def _ensure_tabbed(self, dock: QtWidgets.QDockWidget) -> None:
         if dock.isFloating():
+            self._tabbed_docks.discard(dock)
+            return
+        if dock in self._tabbed_docks:
             return
         main_window = self._main_window()
         if main_window is None:
@@ -336,6 +342,12 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 main_window.splitDockWidget(self._panel_dock, dock, QtCore.Qt.Orientation.Horizontal)
             except Exception:
                 pass
+            else:
+                self._tabbed_docks.add(dock)
+
+    def mark_tabbed(self, dock: QtWidgets.QDockWidget) -> None:
+        if isinstance(dock, QtWidgets.QDockWidget):
+            self._tabbed_docks.add(dock)
 
     def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
         if dock.isFloating() or width <= 0:
@@ -1269,12 +1281,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.console_dock = console_dock
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
-        self._dock_switcher_panels.append(
-            self._create_dock_switcher((project_dock, log_dock, graph_dock), side="left")
-        )
-        self._dock_switcher_panels.append(
-            self._create_dock_switcher((object_dock,), side="right")
-        )
+        if self._dock_switcher_supported():
+            self._dock_switcher_panels.append(
+                self._create_dock_switcher((project_dock, log_dock, graph_dock), side="left")
+            )
+            self._dock_switcher_panels.append(
+                self._create_dock_switcher((object_dock,), side="right")
+            )
+        else:
+            self._dock_switcher_panels.extend([None, None])
 
         for tracked in (project_dock, log_dock, graph_dock, object_dock):
             if tracked is None:
@@ -2343,6 +2358,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         dock.setObjectName(object_name)
         return dock
 
+    def _dock_switcher_supported(self) -> bool:
+        env_override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
+        if env_override.strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        return True
+
     def _create_dock_switcher(
         self,
         docks: Sequence[QtWidgets.QDockWidget],
@@ -2462,6 +2483,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         )
                     except Exception:
                         pass
+                    else:
+                        panel = left_switcher.widget()
+                        if isinstance(panel, _DockSwitcherWidget):
+                            panel.mark_tabbed(project_dock)
                 try:
                     project_dock.raise_()
                 except Exception:
@@ -2484,6 +2509,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     right_switcher.raise_()
                 except Exception:
                     pass
+                panel = right_switcher.widget()
+                if isinstance(panel, _DockSwitcherWidget):
+                    panel.mark_tabbed(object_dock)
 
             for dock, width in tracked_widths.items():
                 self._primary_dock_widths[dock] = width
