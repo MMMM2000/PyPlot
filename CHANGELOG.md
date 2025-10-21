@@ -16,6 +16,9 @@
   HSW distribution & load compare, Maxion continuous, PDF plotter, hysteresis
   loops, and Strain 3D) as first-class PyPlot plugins with integrated panels,
   including an overhauled HSW distribution dialog with inline file selection.
+- Rebuilt stress dependence as a native PyPlot plugin so it now loads data,
+  generates Matplotlib tabs, and exports to Origin through the shared
+  workbench controls instead of embedding the legacy window.
 
 ## 2025-10-19
 
