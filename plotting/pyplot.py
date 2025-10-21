@@ -24,6 +24,7 @@ from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 import pandas as pd
 
 from plotting.utils import install_standard_menu, developer_options
@@ -92,7 +93,6 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._collapse_timer = QtCore.QTimer(self)
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.timeout.connect(self._collapse_if_outside)
-        self._overlay_indices: set[int] = set()
 
         for idx, dock in enumerate(self._docks):
             tab_index = self._tab_bar.addTab(dock.windowTitle())
@@ -125,7 +125,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                     if index >= 0:
                         if self._pinned_index == index:
                             self._pinned_index = None
-                            self._collapse_all(exclude=None)
+                            self._collapse_all()
                         else:
                             self._pinned_index = index
                             self._activate_index(index)
@@ -169,53 +169,31 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             return
         if self._expanded_index == index and self._docks[index].isVisible():
             return
+        overlay = self._pinned_index is not None and index != self._pinned_index
         self._syncing = True
         self._collapse_all(exclude=index)
         dock = self._docks[index]
-        overlay = self._pinned_index is not None and index != self._pinned_index
-        if overlay:
-            pinned = self._docks[self._pinned_index]
-            top_left = pinned.mapToGlobal(QtCore.QPoint(0, 0))
-            size = pinned.size()
-            self._overlay_indices.add(index)
+        if not self._is_persistent(index) and dock.isFloating():
             try:
-                dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, True)
-            except Exception:
-                pass
-            dock.setFloating(True)
-            dock.show()
-            if size.isValid():
-                dock.resize(size)
-            dock.move(top_left)
-            dock.raise_()
-        else:
-            if index in self._overlay_indices:
-                self._overlay_indices.discard(index)
-                try:
-                    dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
-                except Exception:
-                    pass
                 dock.setFloating(False)
-            dock.show()
-            try:
-                dock.raise_()
             except Exception:
                 pass
-            if not dock.isFloating():
-                self._ensure_tabbed(dock)
-                width = self._dock_widths.get(dock, 0)
-                if width > 0:
-                    self._apply_dock_width(dock, width)
+        dock.show()
+        try:
+            dock.raise_()
+        except Exception:
+            pass
+        if not dock.isFloating():
+            self._ensure_tabbed(dock)
+            width = self._dock_widths.get(dock, 0)
+            if width > 0:
+                self._apply_dock_width(dock, width)
         self._expanded_index = index
         self._collapse_timer.stop()
         self._syncing = False
 
     def _handle_visibility_change(self, index: int, visible: bool) -> None:
         if self._syncing or not self._docks:
-            return
-        if index in self._overlay_indices:
-            if not visible:
-                self._overlay_indices.discard(index)
             return
         if visible:
             if not self._docks[index].isFloating():
@@ -255,24 +233,42 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             self._floating_indices.discard(index)
             self._schedule_collapse()
 
-    def _collapse_all(self, *, exclude: int | None = None) -> None:
+    def _collapse_all(self, *, exclude: int | None = None, keep: Iterable[int] | None = None) -> None:
         previous = self._syncing
         self._syncing = True
+        keep_indices = set(keep or [])
+        if exclude is not None:
+            keep_indices.add(exclude)
         for offset, dock in enumerate(self._docks):
-            if (exclude is not None and offset == exclude) or self._is_persistent(offset):
+            if exclude is None and self._is_persistent(offset):
+                keep_indices.add(offset)
+            if offset in keep_indices:
                 continue
             dock.hide()
         self._syncing = previous
-        if exclude is None and self._pinned_index is None and not self._floating_indices:
+        if exclude is None:
+            if self._pinned_index is not None:
+                if 0 <= self._pinned_index < len(self._docks):
+                    pinned = self._docks[self._pinned_index]
+                    if not pinned.isFloating():
+                        pinned.show()
+                        try:
+                            pinned.raise_()
+                        except Exception:
+                            pass
+                    self._expanded_index = self._pinned_index
+            elif not self._floating_indices:
+                self._expanded_index = None
+        elif not keep_indices and not self._floating_indices:
             self._expanded_index = None
 
     def _schedule_collapse(self) -> None:
-        if self._collapse_timer.isActive() or self._pinned_index is not None or self._floating_indices:
+        if self._collapse_timer.isActive() or self._floating_indices:
             return
         self._collapse_timer.start(self._HOVER_CLOSE_DELAY_MS)
 
     def _collapse_if_outside(self) -> None:
-        if self._pinned_index is not None or self._floating_indices:
+        if self._floating_indices:
             return
         if self._pointer_over_tab_bar() or self._pointer_over_any_dock():
             return
@@ -1252,7 +1248,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.object_tree = QtWidgets.QTreeWidget()
         self.object_tree.setHeaderLabels(["Object Manager"])
         self.object_tree.setColumnCount(1)
-        self.object_tree.itemChanged.connect(self._handle_object_item_changed)
+        self.object_tree.itemChanged.connect(self._dispatch_object_item_changed)
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
@@ -1344,6 +1340,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if file_menu is None:
             return
 
+        # Remove default "Open File/Folder" entries inherited from the shared menu
+        removed_placeholder = False
+        for action in list(file_menu.actions()):
+            text = action.text()
+            if not isinstance(text, str):
+                continue
+            simplified = text.replace("&", "").strip().lower()
+            if simplified.startswith("open file") or simplified.startswith("open folder"):
+                file_menu.removeAction(action)
+                removed_placeholder = True
+        if removed_placeholder:
+            for action in list(file_menu.actions()):
+                if action.isSeparator():
+                    file_menu.removeAction(action)
+                    break
+
         insert_before: QtGui.QAction | None = None
         for action in file_menu.actions():
             if action.isSeparator():
@@ -1354,9 +1366,28 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if insert_before is not None:
             project_separator = file_menu.insertSeparator(insert_before)
 
-        open_project_action = QtGui.QAction("Open Project…", self)
+        new_menu = QtWidgets.QMenu("New", file_menu)
+        new_window_action = new_menu.addAction("PyPlot Window")
+        if hasattr(self, "_create_new_pyplot_window"):
+            new_window_action.triggered.connect(self._create_new_pyplot_window)  # type: ignore[arg-type]
+        else:
+            new_window_action.setEnabled(False)
+        workbook_action = new_menu.addAction("Workbook")
+        workbook_action.triggered.connect(self._create_new_workbook)
+        graph_action = new_menu.addAction("Graph")
+        create_graph = getattr(self, "_create_blank_graph", None)
+        if callable(create_graph):
+            graph_action.triggered.connect(create_graph)  # type: ignore[arg-type]
+        else:
+            graph_action.setEnabled(False)
+        if insert_before is not None:
+            file_menu.insertMenu(insert_before, new_menu)
+        else:
+            file_menu.addMenu(new_menu)
+
+        open_project_action = QtGui.QAction("Open…", self)
         try:
-            open_project_action.setShortcut(QtGui.QKeySequence("Ctrl+Alt+O"))
+            open_project_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
         except Exception:
             pass
         open_project_action.triggered.connect(self._open_project_dialog)
@@ -1547,6 +1578,33 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._open_worksheet_tab(worksheet_key)
         self._update_project_actions()
         self._update_worksheet_actions()
+
+    def _create_blank_graph(self) -> None:
+        fig = Figure(figsize=(6, 4))
+        ax = fig.add_subplot(111)
+        ax.set_title("Untitled Graph")
+        ax.set_xlabel("X")
+        ax.set_ylabel("Y")
+        ax.grid(True)
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        descriptor = TabDescriptor(
+            kind="manual_graph",
+            title=ax.get_title(),
+            root_label="Graph",
+            x_label=ax.get_xlabel(),
+            y_label=ax.get_ylabel(),
+            canvas=canvas,
+            axes=ax,
+            lines={},
+            metadata={"blank": True},
+        )
+        self.tab_widget.addTab(tab, "Graph")
+        self.tab_widget.setCurrentWidget(tab)
+        self._register_plot_tab(tab, canvas, ax, descriptor)
 
     def _insert_column(self, *, position: Literal["before", "after"]) -> None:
         context = self._worksheet_action_context()
@@ -2558,50 +2616,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         QtCore.QTimer.singleShot(0, _resize)
 
-    def _collapse_all(self, *, exclude: int | None = None) -> None:
-        previous = self._syncing
-        self._syncing = True
-        for offset, dock in enumerate(self._docks):
-            if exclude is not None and offset == exclude:
-                continue
-            if offset in self._overlay_indices:
-                try:
-                    dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
-                except Exception:
-                    pass
-                dock.hide()
-                dock.setFloating(False)
-                continue
-            if self._is_persistent(offset):
-                continue
-            dock.hide()
-        self._syncing = previous
-        if exclude is None and self._pinned_index is None and not self._floating_indices:
-            self._expanded_index = None
-        if exclude is None and self._overlay_indices:
-            for index in list(self._overlay_indices):
-                dock = self._docks[index]
-                try:
-                    dock.setWindowFlag(QtCore.Qt.WindowType.WindowStaysOnTopHint, False)
-                except Exception:
-                    pass
-                dock.hide()
-                dock.setFloating(False)
-                self._overlay_indices.discard(index)
-
-    def _schedule_collapse(self) -> None:
-        if self._collapse_timer.isActive() or self._pinned_index is not None or self._floating_indices:
-            return
-        self._collapse_timer.start(self._HOVER_CLOSE_DELAY_MS)
-
-    def _collapse_if_outside(self) -> None:
-        if self._pinned_index is not None or self._floating_indices:
-            return
-        if self._pointer_over_tab_bar() or self._pointer_over_any_dock():
-            return
-        self._collapse_all()
-
-
     def _handle_console_execution(self, code: str, result: object) -> None:
         if not hasattr(self, "log_view") or self.log_view is None:
             return
@@ -2686,6 +2700,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _rebuild_object_manager_for_tab(self, *_: Any) -> None:
         """Rebuild the object manager tree for ``tab``."""
+
+    def _dispatch_object_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
+        handler = getattr(self, "_handle_object_item_changed", None)
+        if callable(handler):
+            try:
+                handler(item, column)
+            except TypeError:
+                try:
+                    handler(item)
+                except TypeError:
+                    handler()
 
     def _open_worksheet_tab(self, key: Hashable) -> None:
         """Open or focus the worksheet that originated from ``key``."""
@@ -2962,6 +2987,93 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self.project_tree.setCurrentItem(target_item)
             self.project_tree.scrollToItem(target_item)
         self.project_tree.blockSignals(False)
+
+    # ------------------------------------------------------------------ window menu hooks
+    def _mdi_area(self) -> QtWidgets.QMdiArea | None:
+        """Return the QMdiArea backing the tab proxy when available."""
+
+        mdi_area = getattr(self.tab_widget, "_mdi", None)
+        return mdi_area if isinstance(mdi_area, QtWidgets.QMdiArea) else None
+
+    def _window_menu_arrangement_targets(self) -> list[QtWidgets.QWidget]:
+        """Expose currently managed MDI subwindows for the shared Window menu."""
+
+        area = self._mdi_area()
+        if area is None:
+            return []
+        subwindows: list[QtWidgets.QWidget] = []
+        for sub in area.subWindowList():
+            if isinstance(sub, QtWidgets.QMdiSubWindow) and sub.widget() is not None and not sub.isHidden():
+                subwindows.append(sub)
+        return subwindows
+
+    def _window_menu_cascade(self, widgets: Sequence[QtWidgets.QWidget]) -> None:
+        """Cascade visible graph/workbook subwindows inside the workspace."""
+
+        _ = widgets
+        area = self._mdi_area()
+        if area is None:
+            return
+        area.cascadeSubWindows()
+
+    def _window_menu_tile(
+        self,
+        widgets: Sequence[QtWidgets.QWidget],
+        *,
+        orientation: Literal["vertical", "horizontal"],
+    ) -> None:
+        """Tile visible subwindows within the QMdiArea using the requested orientation."""
+
+        _ = widgets
+        area = self._mdi_area()
+        if area is None:
+            return
+        subwindows = [
+            sub
+            for sub in area.subWindowList()
+            if isinstance(sub, QtWidgets.QMdiSubWindow) and sub.widget() is not None and not sub.isHidden()
+        ]
+        if not subwindows:
+            return
+        viewport = area.viewport().rect()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            area.tileSubWindows()
+            return
+        for sub in subwindows:
+            try:
+                sub.showNormal()
+            except Exception:
+                pass
+        if orientation == "vertical":
+            base_width = max(1, viewport.width())
+            column_width = max(160, base_width // len(subwindows))
+            for index, sub in enumerate(subwindows):
+                x = viewport.left() + index * column_width
+                remaining = viewport.right() - x + 1
+                current_width = column_width if index < len(subwindows) - 1 else max(column_width, remaining)
+                sub.setGeometry(
+                    x,
+                    viewport.top(),
+                    current_width,
+                    viewport.height(),
+                )
+        elif orientation == "horizontal":
+            base_height = max(1, viewport.height())
+            row_height = max(140, base_height // len(subwindows))
+            for index, sub in enumerate(subwindows):
+                y = viewport.top() + index * row_height
+                remaining = viewport.bottom() - y + 1
+                current_height = row_height if index < len(subwindows) - 1 else max(row_height, remaining)
+                sub.setGeometry(
+                    viewport.left(),
+                    y,
+                    viewport.width(),
+                    current_height,
+                )
+        else:
+            area.tileSubWindows()
+            return
+        area.viewport().update()
 
 
 class _ManagedSubWindow(QtWidgets.QMdiSubWindow):

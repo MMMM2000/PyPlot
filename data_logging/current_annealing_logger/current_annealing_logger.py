@@ -128,6 +128,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._init_mode_menu(menu_bar)
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
+        self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
         if hasattr(self.ui, 'lineEdit_log_dir'):
             self.ui.lineEdit_log_dir.setText(
                 self.settings.value("log_dir", DEFAULT_LOG_DIR, type=str)
@@ -290,8 +291,29 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.checkBox_reverse.toggled.connect(self.update_planned_time_label)
         if hasattr(self.ui, 'spinBox_loops'):
             self.ui.spinBox_loops.valueChanged.connect(self.update_planned_time_label)
+            try:
+                stored_loops = int(self.settings.value("loops", self._last_loop_value) or self._last_loop_value)
+            except Exception:
+                stored_loops = self._last_loop_value
+            stored_loops = max(1, stored_loops)
+            self._last_loop_value = stored_loops
+            try:
+                self.ui.spinBox_loops.blockSignals(True)
+                self.ui.spinBox_loops.setValue(stored_loops)
+            finally:
+                self.ui.spinBox_loops.blockSignals(False)
+            self.ui.spinBox_loops.valueChanged.connect(self._handle_loop_value_changed)
         if hasattr(self.ui, 'checkBox_infinite_loops'):
             self.ui.checkBox_infinite_loops.toggled.connect(self.handle_checkBox_infinite_loops_toggled)
+            stored_infinite = bool(int(self.settings.value("loops_infinite", 0) or 0))
+            try:
+                self.ui.checkBox_infinite_loops.blockSignals(True)
+                self.ui.checkBox_infinite_loops.setChecked(stored_infinite)
+            finally:
+                self.ui.checkBox_infinite_loops.blockSignals(False)
+            self.ui.checkBox_infinite_loops.toggled.connect(self._store_loop_preferences)
+            if stored_infinite:
+                self.handle_checkBox_infinite_loops_toggled(True)
         if hasattr(self.ui, 'spinBox_step_mA'):
             self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
         self.ui.spinBox_max_current.valueChanged.connect(self.update_file_name_from_preset)
@@ -302,6 +324,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'spinBox_step_mA'):
             self.ui.spinBox_step_mA.valueChanged.connect(self.handle_step_changed)
 
+        self._store_loop_preferences()
         # Initialize planned estimate and file name once
         try:
             self.update_file_name_from_preset()
@@ -591,16 +614,59 @@ class MainWindow(QtWidgets.QMainWindow):
             if w is not None:
                 w.setEnabled(enabled)
 
+    def _handle_loop_value_changed(self, value: int) -> None:
+        try:
+            loops = max(1, int(value))
+        except Exception:
+            loops = 1
+        self._last_loop_value = loops
+        self._store_loop_preferences()
+        try:
+            self.update_file_name_from_preset()
+        except Exception:
+            pass
+
+    def _store_loop_preferences(self) -> None:
+        spin = getattr(self.ui, 'spinBox_loops', None)
+        chk = getattr(self.ui, 'checkBox_infinite_loops', None)
+        loops = self._last_loop_value
+        if isinstance(spin, QtWidgets.QSpinBox):
+            try:
+                loops = max(1, int(spin.value()))
+            except Exception:
+                loops = self._last_loop_value
+        infinite = bool(chk.isChecked()) if isinstance(chk, QtWidgets.QCheckBox) else False
+        if infinite:
+            loops = max(1, getattr(self, '_last_loop_value', loops))
+        else:
+            self._last_loop_value = loops
+        try:
+            self.settings.setValue('loops', max(1, loops))
+            self.settings.setValue('loops_infinite', int(infinite))
+        except Exception:
+            pass
+
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
-        if hasattr(self.ui, 'spinBox_loops'):
+        spin = getattr(self.ui, 'spinBox_loops', None)
+        if isinstance(spin, QtWidgets.QSpinBox):
             if checked:
-                self.ui.spinBox_loops.setValue(0)
-                self.ui.spinBox_loops.setEnabled(False)
+                try:
+                    self._last_loop_value = max(1, spin.value())
+                except Exception:
+                    self._last_loop_value = max(1, getattr(self, '_last_loop_value', 1))
+                spin.setValue(0)
+                spin.setEnabled(False)
             else:
-                if self.ui.spinBox_loops.value() == 0:
-                    self.ui.spinBox_loops.setValue(1)
-                self.ui.spinBox_loops.setEnabled(True)
+                restored = max(1, getattr(self, '_last_loop_value', 1))
+                if spin.value() == 0:
+                    spin.setValue(restored)
+                spin.setEnabled(True)
+        self._store_loop_preferences()
         self.update_planned_time_label()
+        try:
+            self.update_file_name_from_preset()
+        except Exception:
+            pass
 
     # Connect signals and slots
     def handle_connect_port_clicked(self):
@@ -792,7 +858,8 @@ class MainWindow(QtWidgets.QMainWindow):
                             except OSError:
                                 self.f_out = None
                         if self.f_out:
-                            line = f"{self.current_current_read}\t{self.current_voltage}\t{self.current_resistance}\n"
+                            current_mA = self.current_current_read * 1000.0
+                            line = f"{current_mA}\t{self.current_voltage}\t{self.current_resistance}\n"
                             self.f_out.write(line)
                             self.f_out.close()
                             self.f_out = None
@@ -908,7 +975,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"{prefix}: N/A"
         if self._time_to_voltage_limit == 0:
             if self._estimated_limit_current_mA is not None:
-                return f"{prefix}: reached (≈ {self._estimated_limit_current_mA:.0f} mA)"
+                return f"{prefix}: reached (â‰ˆ {self._estimated_limit_current_mA:.0f} mA)"
             return f"{prefix}: reached"
         if not self.direction_ascending or self.current_increment <= 0:
             return f"{prefix}: N/A"
@@ -917,7 +984,7 @@ class MainWindow(QtWidgets.QMainWindow):
         secs = max(0, int(self._time_to_voltage_limit + 0.999))
         text = self._format_secs(prefix, secs)
         if self._estimated_limit_current_mA is not None:
-            text += f" (≈ {self._estimated_limit_current_mA:.0f} mA)"
+            text += f" (â‰ˆ {self._estimated_limit_current_mA:.0f} mA)"
         return text
 
     def update_time_estimate(self):
@@ -931,7 +998,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.process_running:
             secs = self.compute_planned_seconds()
             if secs is None:
-                label.setText("Time remaining: ∞")
+                label.setText("Time remaining: âˆž")
             else:
                 label.setText(self._format_secs("Time remaining", secs))
             if limit_label is not None:
@@ -1056,6 +1123,17 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.label_custom_name.setVisible(True)
             if hasattr(self.ui, 'lineEdit_custom_name'):
                 self.ui.lineEdit_custom_name.setVisible(True)
+        loops = 1
+        infinite = False
+        if hasattr(self.ui, 'spinBox_loops'):
+            try:
+                loops = max(1, int(self.ui.spinBox_loops.value()))
+            except Exception:
+                loops = 1
+        if hasattr(self.ui, 'checkBox_infinite_loops'):
+            infinite = bool(self.ui.checkBox_infinite_loops.isChecked())
+        if loops > 1 and not infinite:
+            base = f"{base} {loops}loops"
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.setText(base)
         self.store_name_preset()
@@ -1249,7 +1327,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.init_graph_window()
                 self.send_init_commands()
                 # Immediately request the first sample instead of waiting
-                # for the one‑second timer interval to elapse.  This avoids
+                # for the oneâ€‘second timer interval to elapse.  This avoids
                 # an unnecessary pause after the user presses *Start*.
                 self.handle_send_new_command()
                 self.timer_command.start(1000)
@@ -1304,7 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.init_graph_window()
                 self.send_init_commands()
                 # Kick off the first acquisition immediately so the
-                # measurement starts without a one‑second delay.
+                # measurement starts without a oneâ€‘second delay.
                 self.handle_send_new_command()
                 self.timer_command.start(1000)
                 
@@ -1656,7 +1734,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_serial_command()
             # The original implementation paused for a full second between
             # initialisation commands, which caused a noticeable start-up
-            # delay.  A brief 200 ms gap gives the supply time to process
+            # delay.  A brief 200â€¯ms gap gives the supply time to process
             # each command while keeping the UI responsive.
             self.simple_delay(200)
             
@@ -1837,9 +1915,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()
             self.update_time_estimate()
-            self._show_status_message("30 V reached — reversing to zero.")
+            self._show_status_message("30 V reached â€” reversing to zero.")
         elif action == "stop":
-            self._show_status_message("30 V reached — stopping measurement.")
+            self._show_status_message("30 V reached â€” stopping measurement.")
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
@@ -1851,7 +1929,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
-            self._show_status_message("30 V reached — holding current.")
+            self._show_status_message("30 V reached â€” holding current.")
 
     def _show_max_voltage_prompt(self) -> None:
         msg = QtWidgets.QMessageBox(self)

@@ -5,25 +5,25 @@ description = "PyQt6 data logging and plotting utilities"
 authors = [{name = "Unknown"}]
 dependencies = [
     "PyQt6==6.9.1",
-    "matplotlib==3.10.3",
-    "numpy==2.3.2",
-    "pandas==2.3.1",
+    "matplotlib==3.10.7",
+    "numpy==2.2.6",
+    "pandas==2.3.3",
     "openpyxl==3.1.5",
     "originpro==1.1.14",
-    "PyPDF2==3.0.1",
+    "pypdf==6.1.2",
     "pyqtgraph==0.13.7",
-    "plotly==6.2.0",
-    "XlsxWriter==3.2.0",
+    "plotly==6.3.1",
+    "XlsxWriter==3.2.9",
     "tqdm==4.67.1",
-    "pyinstaller==6.15.0",
+    "pyinstaller==6.16.0",
     "pyserial==3.5",
-    "psutil==7.0.0",
-    "zeroconf==0.147.2",
+    "psutil==7.1.1",
+    "zeroconf==0.148.0",
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 
 [project.optional-dependencies]
-test = ["pytest==8.2.2"]
+test = ["pytest==8.4.2"]
 
 [project.scripts]
 launcher = "launcher:main"

@@ -2244,19 +2244,28 @@ class VSMPlotter(PyPlotWindow):
             self.dark_mode_checkbox.setChecked(bool(dark_value))
 
         suppress_window = bool(getattr(self, "_suppress_window_persistence", False))
+        maximized_preference = bool(self.settings.value("window_maximized", False))
 
         if not suppress_window:
             geometry_restored = False
-            geometry = self.settings.value("geometry")
-            if isinstance(geometry, QtCore.QByteArray):
-                try:
-                    geometry_restored = bool(self.restoreGeometry(geometry))
-                except Exception:  # pragma: no cover - Qt versions differ
-                    geometry_restored = False
-
-            if not geometry_restored:
-                self.resize(1480, 940)
+            if not maximized_preference:
+                geometry = self.settings.value("geometry")
+                if isinstance(geometry, QtCore.QByteArray):
+                    try:
+                        geometry_restored = bool(self.restoreGeometry(geometry))
+                    except Exception:  # pragma: no cover - Qt versions differ
+                        geometry_restored = False
             else:
+                geometry_restored = True
+
+            if not geometry_restored and not maximized_preference:
+                self.resize(1480, 940)
+            elif geometry_restored and maximized_preference:
+                try:
+                    self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
+                except Exception:
+                    pass
+            elif geometry_restored:
                 rect = self.geometry()
                 if rect.width() < 400 or rect.height() < 300:
                     screen = QtGui.QGuiApplication.primaryScreen()
@@ -2269,12 +2278,13 @@ class VSMPlotter(PyPlotWindow):
                         self.move(frame.topLeft())
 
             window_state = self.settings.value("window_state")
-            signature = self.settings.value(self._WINDOW_STATE_SIGNATURE_KEY, "")
+            signature_key = getattr(self, "_WINDOW_STATE_SIGNATURE_KEY", "window_state_signature")
+            signature = self.settings.value(signature_key, "")
             expected_signature = self._window_state_signature()
             if not isinstance(signature, str) or signature != expected_signature:
                 window_state = None
                 self.settings.remove("window_state")
-                self.settings.remove(self._WINDOW_STATE_SIGNATURE_KEY)
+                self.settings.remove(signature_key)
                 self.settings.sync()
             if isinstance(window_state, QtCore.QByteArray):
                 try:
@@ -2291,9 +2301,15 @@ class VSMPlotter(PyPlotWindow):
         if self._last_source_dir:
             self.settings.setValue("last_source_dir", str(self._last_source_dir))
         if not bool(getattr(self, "_suppress_window_persistence", False)):
-            self.settings.setValue("geometry", self.saveGeometry())
+            maximized_now = self.isMaximized() or bool(self.windowState() & QtCore.Qt.WindowState.WindowMaximized)
+            self.settings.setValue("window_maximized", maximized_now)
+            if maximized_now:
+                self.settings.remove("geometry")
+            else:
+                self.settings.setValue("geometry", self.saveGeometry())
             self.settings.setValue("window_state", self.saveState())
-            self.settings.setValue(self._WINDOW_STATE_SIGNATURE_KEY, self._window_state_signature())
+            signature_key = getattr(self, "_WINDOW_STATE_SIGNATURE_KEY", "window_state_signature")
+            self.settings.setValue(signature_key, self._window_state_signature())
         self.settings.sync()
 
     def _window_state_signature(self) -> str:
@@ -2302,6 +2318,10 @@ class VSMPlotter(PyPlotWindow):
     def _ensure_window_visibility(self) -> None:
         if bool(getattr(self, "_suppress_window_persistence", False)):
             return
+        if self.isMaximized() or bool(self.windowState() & QtCore.Qt.WindowState.WindowMaximized):
+            self.activateWindow()
+            return
+
         frame = self.frameGeometry()
         screen = QtGui.QGuiApplication.screenAt(frame.center())
         if screen is None:
@@ -2314,22 +2334,42 @@ class VSMPlotter(PyPlotWindow):
         clamped_width = max(min_size.width(), min(frame.width(), available.width()))
         clamped_height = max(min_size.height(), min(frame.height(), available.height()))
         if clamped_width != frame.width() or clamped_height != frame.height():
+            original_top_left = frame.topLeft()
             self.resize(clamped_width, clamped_height)
             frame = self.frameGeometry()
+            candidate = QtCore.QRect(original_top_left, frame.size())
+            if available.contains(candidate):
+                self.move(original_top_left)
+                frame = self.frameGeometry()
 
+        tolerance = 4
+        expanded = frame.adjusted(-tolerance, -tolerance, tolerance, tolerance)
+        if available.contains(expanded):
+            self.activateWindow()
+            return
+
+        width = frame.width()
+        height = frame.height()
         left_limit = available.left()
+        right_limit = available.right() - width
         top_limit = available.top()
-        right_limit = available.left() + available.width() - frame.width()
-        bottom_limit = available.top() + available.height() - frame.height()
-        new_left = min(max(frame.left(), left_limit), right_limit)
-        new_top = min(max(frame.top(), top_limit), bottom_limit)
+        bottom_limit = available.bottom() - height
+
+        new_left = frame.left()
+        new_top = frame.top()
+
+        if frame.left() < left_limit:
+            new_left = left_limit
+        elif frame.right() > available.right():
+            new_left = right_limit
+
+        if frame.top() < top_limit:
+            new_top = top_limit
+        elif frame.bottom() > available.bottom():
+            new_top = bottom_limit
+
         if new_left != frame.left() or new_top != frame.top():
             self.move(new_left, new_top)
-            frame = self.frameGeometry()
-
-        if not available.contains(frame):
-            frame.moveCenter(available.center())
-            self.move(frame.topLeft())
 
         self.activateWindow()
 
@@ -4102,21 +4142,53 @@ class VSMPlotter(PyPlotWindow):
                         angle_value = normalized_key[1]
                     if isinstance(angle_value, (int, float)):
                         visibility[float(angle_value)] = flag
-            item.blockSignals(True)
-            item.setCheckState(
-                0,
-                QtCore.Qt.CheckState.Checked if flag else QtCore.Qt.CheckState.Unchecked,
-            )
-            item.blockSignals(False)
             self._refresh_descriptor_legend(descriptor)
 
-        _apply(new_visible)
+        handled = False
+        result_visible = new_visible
         action = "Show" if new_visible else "Hide"
-        self._record_history_action(
-            f"{action} {line_state.label}",
-            undo=lambda: _apply(old_visible),
-            redo=lambda: _apply(new_visible),
-        )
+
+        if (
+            descriptor.kind == "temperature"
+            and isinstance(normalized_key, tuple)
+            and len(normalized_key) == 2
+            and normalized_key[0] == "angle"
+        ):
+            temperature = descriptor.metadata.get("temperature")
+            angle_value = normalized_key[1]
+            if isinstance(temperature, (int, float)) and isinstance(angle_value, (int, float)):
+                temp_f = float(temperature)
+                angle_f = float(angle_value)
+                self._toggle_line_visibility(temp_f, angle_f, new_visible)
+                result_visible = bool(line_state.line.get_visible())
+
+                self._record_history_action(
+                    f"{action} {line_state.label}",
+                    undo=lambda: self._toggle_line_visibility(temp_f, angle_f, old_visible),
+                    redo=lambda: self._toggle_line_visibility(temp_f, angle_f, new_visible),
+                )
+                handled = True
+
+        if not handled:
+            _apply(new_visible)
+            result_visible = bool(line_state.line.get_visible())
+            self._record_history_action(
+                f"{action} {line_state.label}",
+                undo=lambda: _apply(old_visible),
+                redo=lambda: _apply(new_visible),
+            )
+
+        tree = getattr(self, "object_tree", None)
+        try:
+            if isinstance(tree, QtWidgets.QTreeWidget):
+                tree.blockSignals(True)
+            item.setCheckState(
+                0,
+                QtCore.Qt.CheckState.Checked if result_visible else QtCore.Qt.CheckState.Unchecked,
+            )
+        finally:
+            if isinstance(tree, QtWidgets.QTreeWidget):
+                tree.blockSignals(False)
 
     def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
         tab_state = self._plot_tabs.get(float(temperature))

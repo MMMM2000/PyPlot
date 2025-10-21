@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
 try:  # optional dependency
-    from PyPDF2 import PdfReader
+    from pypdf import PdfReader
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
@@ -144,7 +144,7 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     are accepted and stray characters are stripped before parsing.
     """
     if PdfReader is None:
-        raise RuntimeError("PyPDF2 not installed. Install with: pip install PyPDF2")
+        raise RuntimeError("pypdf not installed. Install with: pip install pypdf")
     rows: List[NumberRow] = []
     reader = PdfReader(path)
     for page in reader.pages:

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2025-10-19
+
+- Bumped pinned dependencies (matplotlib 3.10.7, numpy 2.2.6 (to satisfy opencv-python) , pandas 2.3.3, plotly 6.3.1, psutil 7.1.1, zeroconf 0.148.0, etc.), raised the runtime floor to Python 3.10, and migrated from `PyPDF2` to the actively maintained `pypdf` 6.1.2 via `pip-compile --upgrade`.
+- Persisted the VSM window's maximized state and tightened geometry clamping so the workbench stays put and avoids Qt resize warnings when plots render.
+- Wired Object Manager checkbox changes through the shared dispatcher so curve visibility, legends, and undo history stay in sync.
+
 ## 2025-10-18
 
 - Fixed the Object Manager toggles so hiding a curve updates the plot and any

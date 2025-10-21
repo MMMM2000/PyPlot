@@ -105,7 +105,14 @@ def load_file(path: str) -> pd.DataFrame:
         df = df.iloc[1:].reset_index(drop=True)
     if df.empty:
         raise ValueError(f"{path}: no valid samples after parsing")
-    df["I_mA"] = df["I_A"] * 1e3
+    median_abs = float(df["I_A"].abs().median()) if not df["I_A"].empty else 0.0
+    if np.isnan(median_abs):
+        median_abs = 0.0
+    if median_abs > 20.0:
+        df["I_mA"] = df["I_A"]
+        df["I_A"] = df["I_A"] / 1e3
+    else:
+        df["I_mA"] = df["I_A"] * 1e3
     mask = (
         np.isfinite(df["I_mA"]) &
         np.isfinite(df["R_Ohm"]) &
