@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-20
+
+- Updated the temperature sensitivity Origin workflow to release generated
+  workbooks automatically so the "Open in Origin" button works reliably from
+  PyPlot.
+- Improved the current annealing logger to remember multi-loop runs, label log
+  files with the loop count, skip the initial zero-resistance sample, write
+  currents in milliamperes with an explicit header, and resume looping even
+  after reversing early at the 30 V limit.
+- Added an experiment utility for batch-converting legacy current annealing log
+  folders from amperes to milliamperes.
+
 ## 2025-10-19
 
 - Bumped pinned dependencies (matplotlib 3.10.7, numpy 2.2.6 (to satisfy opencv-python) , pandas 2.3.3, plotly 6.3.1, psutil 7.1.1, zeroconf 0.148.0, etc.), raised the runtime floor to Python 3.10, and migrated from `PyPDF2` to the actively maintained `pypdf` 6.1.2 via `pip-compile --upgrade`.

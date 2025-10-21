@@ -19,7 +19,13 @@ from matplotlib.typing import ColorType
 
 from ..config import load_config
 from .. import common
-from ..utils import save_figure, show_plots, apply_readability_fonts, apply_readability
+from ..utils import (
+    save_figure,
+    show_plots,
+    apply_readability_fonts,
+    apply_readability,
+    schedule_origin_release,
+)
 from ..backends import wants_matplotlib, wants_origin
 
 # Load default configuration
@@ -1189,6 +1195,8 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
             plt.close('all')
     else:
         plt.close('all')
+    if wants_origin(backend):
+        schedule_origin_release()
 
 
 

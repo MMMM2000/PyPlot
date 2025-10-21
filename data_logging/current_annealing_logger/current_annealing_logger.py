@@ -646,6 +646,75 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _current_loop_settings(self) -> Tuple[int, bool]:
+        """Return the configured loop count and whether infinite looping is enabled."""
+
+        loops = max(1, getattr(self, '_last_loop_value', 1))
+        spin = getattr(self.ui, 'spinBox_loops', None)
+        if isinstance(spin, QtWidgets.QSpinBox):
+            try:
+                loops = max(1, int(spin.value()))
+            except Exception:
+                loops = max(1, loops)
+        chk = getattr(self.ui, 'checkBox_infinite_loops', None)
+        infinite = bool(chk.isChecked()) if isinstance(chk, QtWidgets.QCheckBox) else False
+        return loops, infinite
+
+    def _apply_loop_suffix_to_base(self, base: str) -> str:
+        """Append or update the ``loops`` suffix in ``base`` based on current settings."""
+
+        base = base.strip()
+        loops, infinite = self._current_loop_settings()
+        if infinite or loops <= 1:
+            return base
+        suffix = f"{loops}loops"
+        tokens = base.split()
+        if tokens and tokens[-1].lower().endswith("loops"):
+            tokens[-1] = suffix
+        elif suffix not in base:
+            tokens.append(suffix)
+        else:
+            # Already contains a loops suffix elsewhere; leave untouched.
+            return base
+        return " ".join(tokens)
+
+    @staticmethod
+    def _format_sample_value(value: float) -> str:
+        text = format(float(value), ".12g")
+        # Normalise "-0" artefacts from floating point conversion.
+        return "0" if text == "-0" else text
+
+    def _write_sample_to_file(self, *, initial_sample: bool) -> None:
+        """Persist the latest sample to disk if appropriate."""
+
+        if initial_sample or not self.f_name:
+            return
+        current_mA = float(self.current_current_read) * 1000.0
+        voltage = float(self.current_voltage)
+        resistance = float(self.current_resistance)
+        if not math.isfinite(current_mA) or not math.isfinite(resistance):
+            return
+        if not self.f_out:
+            try:
+                Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                self.f_out = open(self.f_name, "a", encoding="utf-8")
+            except OSError:
+                self.f_out = None
+        if self.f_out:
+            line = "\t".join(
+                [
+                    self._format_sample_value(current_mA),
+                    self._format_sample_value(voltage),
+                    self._format_sample_value(resistance),
+                ]
+            ) + "\n"
+            self.f_out.write(line)
+            self.f_out.close()
+            self.f_out = None
+
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
         if isinstance(spin, QtWidgets.QSpinBox):
@@ -846,40 +915,25 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ZeroDivisionError:
                         self.lock.unlock()
                         return
-                    # Persist each sample to disk immediately after it arrives
-                    if not self.first_sample and self.f_name:
-                        if not self.f_out:
-                            try:
-                                Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
-                            except Exception:
-                                pass
-                            try:
-                                self.f_out = open(self.f_name, "a", encoding="utf-8")
-                            except OSError:
-                                self.f_out = None
-                        if self.f_out:
-                            current_mA = self.current_current_read * 1000.0
-                            line = f"{current_mA}\t{self.current_voltage}\t{self.current_resistance}\n"
-                            self.f_out.write(line)
-                            self.f_out.close()
-                            self.f_out = None
-
-                            # progress and rate tracking on each sample
-                            now = time.perf_counter()
-                            if self.last_sample_time is not None:
-                                dt = now - self.last_sample_time
-                                if dt > 0:
-                                    rate = 1.0 / dt
-                                    self._rate_window.append(rate)
-                                    self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                                    if self.total_steps:
-                                        remaining = max(0, self.total_steps - self.step_idx)
-                                        self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
-                            self.last_sample_time = now
-                            self.step_idx += 1
-                            if hasattr(self.ui, 'progressBar_process') and self.total_steps:
-                                self.ui.progressBar_process.setMaximum(self.total_steps)
-                                self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+                    initial_sample = self.first_sample
+                    self._write_sample_to_file(initial_sample=initial_sample)
+                    if not initial_sample:
+                        # progress and rate tracking on each sample
+                        now = time.perf_counter()
+                        if self.last_sample_time is not None:
+                            dt = now - self.last_sample_time
+                            if dt > 0:
+                                rate = 1.0 / dt
+                                self._rate_window.append(rate)
+                                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                                if self.total_steps:
+                                    remaining = max(0, self.total_steps - self.step_idx)
+                                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
+                        self.last_sample_time = now
+                        self.step_idx += 1
+                        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
+                            self.ui.progressBar_process.setMaximum(self.total_steps)
+                            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
                 if (
                     self.current_increment > 0
                     and self.current_voltage >= self.max_voltage
@@ -1123,17 +1177,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.label_custom_name.setVisible(True)
             if hasattr(self.ui, 'lineEdit_custom_name'):
                 self.ui.lineEdit_custom_name.setVisible(True)
-        loops = 1
-        infinite = False
-        if hasattr(self.ui, 'spinBox_loops'):
-            try:
-                loops = max(1, int(self.ui.spinBox_loops.value()))
-            except Exception:
-                loops = 1
-        if hasattr(self.ui, 'checkBox_infinite_loops'):
-            infinite = bool(self.ui.checkBox_infinite_loops.isChecked())
-        if loops > 1 and not infinite:
-            base = f"{base} {loops}loops"
+        base = self._apply_loop_suffix_to_base(base)
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.setText(base)
         self.store_name_preset()
@@ -1910,7 +1954,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     step = 0.001
             self.current_increment = -step
             self.line_color = "b"
-            self.force_stop_at_zero = True
+            self.force_stop_at_zero = not bool(getattr(self, "reverse_enabled", False))
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()
@@ -2094,7 +2138,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not fpath.endswith(".txt"):
                 fpath += ".txt"
             d = os.path.dirname(fpath)
-            b = os.path.splitext(os.path.basename(fpath))[0]
+            b = self._apply_loop_suffix_to_base(os.path.splitext(os.path.basename(fpath))[0])
             if hasattr(self.ui, 'lineEdit_log_dir'):
                 self.ui.lineEdit_log_dir.setText(d)
             if hasattr(self.ui, 'lineEdit_log_file'):
@@ -2123,7 +2167,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not fpath.endswith(".txt"):
                 fpath += ".txt"
             d = os.path.dirname(fpath)
-            b = os.path.splitext(os.path.basename(fpath))[0]
+            b = self._apply_loop_suffix_to_base(os.path.splitext(os.path.basename(fpath))[0])
             if hasattr(self.ui, 'lineEdit_log_dir'):
                 self.ui.lineEdit_log_dir.setText(d)
             if hasattr(self.ui, 'lineEdit_log_file'):
@@ -2151,12 +2195,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def build_log_path(self) -> str:
         try:
             d = self.ui.lineEdit_log_dir.text().strip()
-            b = self.ui.lineEdit_log_file.text().strip()
-            if not b:
-                b = "anneal_log"
+            base = self.ui.lineEdit_log_file.text().strip()
+            if not base:
+                base = "anneal_log"
+            base = self._apply_loop_suffix_to_base(base)
+            if not base:
+                base = "anneal_log"
             if d:
                 os.makedirs(d, exist_ok=True)
-                return os.path.join(d, f"{b}.txt")
+                return os.path.join(d, f"{base}.txt")
         except Exception:
             pass
         # Fallback to legacy full-path field if present
@@ -2199,8 +2246,9 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 mode = "w"
         try:
-            with open(path, mode):
-                pass
+            with open(path, mode, encoding="utf-8") as fh:
+                if mode != "a":
+                    fh.write("# Current (mA)\tVoltage (V)\tResistance (Ohm)\n")
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to open {path}: {exc}"
