@@ -678,6 +678,29 @@ class MainWindow(QtWidgets.QMainWindow):
             return base
         return " ".join(tokens)
 
+    def _loop_target_count(self) -> int:
+        """Return the configured loop target (at least 1)."""
+
+        try:
+            target = int(getattr(self, 'loop_target', 1))
+        except Exception:
+            target = 1
+        return max(1, target)
+
+    def _has_remaining_loops(self, next_index: int | None = None) -> bool:
+        """Return ``True`` if additional loops should execute after this cycle."""
+
+        if bool(getattr(self, 'infinite_loops', False)):
+            return True
+        target = self._loop_target_count()
+        if next_index is None:
+            try:
+                completed = int(getattr(self, 'loop_idx', 0))
+            except Exception:
+                completed = 0
+            return completed < target
+        return next_index < target
+
     @staticmethod
     def _format_sample_value(value: float) -> str:
         text = format(float(value), ".12g")
@@ -1519,6 +1542,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.label_time_to_limit.setText("To 30 V: N/A")
         self._display_ui_value('label_set_current', "0")
         self._max_voltage_dialog = False
+        self.first_sample = True
+        self.prev_value_x = None
+        self.prev_value_y = None
         
     def handle_send_new_command(self):
         if not self.process_running:
@@ -1740,20 +1766,22 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_serial_command()
             # completed descending to zero? manage loops or stop
             if (self.current_increment < 0) and (self.current_current_set < self.current_step_A):
-                if getattr(self, 'force_stop_at_zero', False) or not getattr(self, 'reverse_enabled', False):
+                next_loop = int(getattr(self, 'loop_idx', 0)) + 1
+                loops_pending = self._has_remaining_loops(next_loop)
+                force_stop = bool(getattr(self, 'force_stop_at_zero', False))
+                self.loop_idx = next_loop
+                if force_stop:
                     self.handle_toggle_process_clicked()
+                elif loops_pending:
+                    # prepare next loop
+                    self.current_increment = self.current_step_A
+                    self.current_current_set = 0.001
+                    self.line_color = "r"
+                    self.direction_ascending = True
+                    self._reset_voltage_projection()
+                    self.elapsed_seconds = 0
                 else:
-                    self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
-                    if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
-                        # prepare next loop
-                        self.current_increment = self.current_step_A
-                        self.current_current_set = 0.001
-                        self.line_color = "r"
-                        self.direction_ascending = True
-                        self._reset_voltage_projection()
-                        self.elapsed_seconds = 0
-                    else:
-                        self.handle_toggle_process_clicked()
+                    self.handle_toggle_process_clicked()
 
         else:
             pass
@@ -1954,7 +1982,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     step = 0.001
             self.current_increment = -step
             self.line_color = "b"
-            self.force_stop_at_zero = not bool(getattr(self, "reverse_enabled", False))
+            next_loop = int(getattr(self, 'loop_idx', 0)) + 1
+            if self._has_remaining_loops(next_loop):
+                self.force_stop_at_zero = False
+            else:
+                self.force_stop_at_zero = not bool(getattr(self, "reverse_enabled", False))
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()

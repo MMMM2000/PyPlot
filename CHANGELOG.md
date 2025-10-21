@@ -6,9 +6,9 @@
   workbooks automatically so the "Open in Origin" button works reliably from
   PyPlot.
 - Improved the current annealing logger to remember multi-loop runs, label log
-  files with the loop count, skip the initial zero-resistance sample, write
-  currents in milliamperes with an explicit header, and resume looping even
-  after reversing early at the 30 V limit.
+  files with the loop count, keep discarding the initial zero-resistance sample
+  even after restarting, write currents in milliamperes with an explicit header,
+  and honour loop counts after reversing early at the 30 V limit.
 - Added an experiment utility for batch-converting legacy current annealing log
   folders from amperes to milliamperes.
 

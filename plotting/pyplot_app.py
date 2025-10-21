@@ -1098,7 +1098,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self.host.open_origin_button.setEnabled(has_data)
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
-        self.host._update_project_actions()class VSMHysteresisPlugin(PyPlotPlugin):
+        self.host._update_project_actions()
+
+
+class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
     _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
