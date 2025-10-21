@@ -12,6 +12,10 @@
 - Added an experiment utility for batch-converting legacy current annealing log
   folders from amperes to milliamperes, and taught it to skip files that
   already store currents in milliamps.
+- Embedded the remaining legacy plotting scripts (stress dependence/sensitivity,
+  HSW distribution & load compare, Maxion continuous, PDF plotter, hysteresis
+  loops, and Strain 3D) as first-class PyPlot plugins with integrated panels,
+  including an overhauled HSW distribution dialog with inline file selection.
 
 ## 2025-10-19
 

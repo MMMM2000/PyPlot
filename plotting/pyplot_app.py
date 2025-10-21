@@ -29,6 +29,14 @@ from plotting.vsm_hysteresis_loops import VSMPlotter, _looks_like_vsm_name
 from plotting.temperature_dependence import core as temp_core
 from plotting.temperature_sensitivity import core as temp_sens_core
 from plotting.current_annealing import core as anneal_core
+from plotting.stress_dependence import stress_gui
+from plotting.stress_sensitivity import sens_gui
+from plotting.hsw_load_compare import load_compare_gui
+from plotting.maxion_continuous import maxion_gui
+from plotting.pdf_plotter import pdf_gui
+from plotting.hysteresis_loops import loops_gui
+from plotting.hsw_distribution import distribution_gui
+from plotting.strain_3d_plot import Strain3DPlotter
 
 
 class PyPlotPlugin:
@@ -208,6 +216,88 @@ class ExternalPlotterPlugin(PyPlotPlugin):
             self.host.open_origin_button.setEnabled(False)
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(False)
+
+
+class EmbeddedWidgetPlugin(PyPlotPlugin):
+    """Embed a legacy dialog or widget directly inside the PyPlot workbench."""
+
+    def __init__(
+        self,
+        host: "PyPlotWorkbench",
+        name: str,
+        widget_factory: Callable[[], QtWidgets.QWidget | None],
+    ) -> None:
+        super().__init__(host, name)
+        self._widget_factory = widget_factory
+        self._widget: QtWidgets.QWidget | None = None
+        self._panel: QtWidgets.QWidget | None = None
+
+    def activate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+        self._ensure_widget()
+        self.update_ui()
+
+    def deactivate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+        if self._widget is not None:
+            try:
+                self._widget.hide()
+            except Exception:
+                pass
+
+    def _ensure_widget(self) -> QtWidgets.QWidget:
+        if self._widget is None:
+            widget = self._widget_factory()
+            if widget is None:
+                widget = QtWidgets.QWidget(self.host)
+            self._widget = widget
+        return self._widget
+
+    def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        widget = self._ensure_widget()
+        widget.setParent(container)
+        widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        if isinstance(widget, QtWidgets.QDialog):
+            widget.setModal(False)
+            try:
+                widget.setSizeGripEnabled(False)
+            except Exception:
+                pass
+        try:
+            widget.setWindowFlag(QtCore.Qt.WindowType.Dialog, False)
+            widget.setWindowFlag(QtCore.Qt.WindowType.Window, False)
+        except Exception:
+            pass
+        widget.show()
+        layout.addWidget(widget)
+        self._panel = container
+        return container
+
+    def settings_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        return None
+
+    def update_ui(self) -> None:  # type: ignore[override]
+        for attr in (
+            "load_data_button",
+            "plot_button",
+            "save_graph_button",
+            "normalize_button",
+            "export_button",
+            "open_origin_button",
+            "popout_button",
+        ):
+            widget = getattr(self.host, attr, None)
+            if isinstance(widget, QtWidgets.QAbstractButton):
+                widget.setEnabled(False)
+                if attr == "plot_button":
+                    widget.setText("Generate")
 
 
 class TemperatureDependencePlugin(PyPlotPlugin):
@@ -1461,6 +1551,95 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             setattr(host, name, types.MethodType(func, host))
         host._vsm_methods_bound = True
 
+
+class StressDependencePlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            stress_gui.orig.ProgressDialog = stress_gui.ProgressDialog
+        except Exception:
+            pass
+        return stress_gui.SettingsDialog()
+
+
+class StressSensitivityPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            sens_gui.orig.ProgressDialog = sens_gui.ProgressDialog
+        except Exception:
+            pass
+        return sens_gui.SettingsDialog()
+
+
+class HswLoadComparePlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            load_compare_gui.orig.ProgressDialog = load_compare_gui.ProgressDialog
+        except Exception:
+            pass
+        return load_compare_gui.SettingsDialog()
+
+
+class MaxionContinuousPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            maxion_gui.orig.ProgressDialog = maxion_gui.ProgressDialog
+        except Exception:
+            pass
+        return maxion_gui.SettingsDialog()
+
+
+class PdfPlotterPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        return pdf_gui.PdfPlotterWindow()
+
+
+class HysteresisLoopsPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        return loops_gui.SettingsDialog()
+
+
+class HswDistributionPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        return distribution_gui.SettingsDialog()
+
+
+class Strain3DPlotPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_widget)
+
+    @staticmethod
+    def _create_widget() -> QtWidgets.QWidget:
+        return Strain3DPlotter()
+
+
 class PyPlotWorkbench(PyPlotWindow):
     """Lightweight harness for exercising shared PyPlotWindow features."""
 
@@ -2109,15 +2288,24 @@ def main(
     """Entry-point used by the launcher."""
 
     plugin_factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {}
+    plugin_classes: Dict[str, type[PyPlotPlugin]] = {
+        "VSM Hysteresis Loops": VSMHysteresisPlugin,
+        "Temperature Dependence": TemperatureDependencePlugin,
+        "Temperature Sensitivity": TemperatureSensitivityPlugin,
+        "Current Annealing": CurrentAnnealingPlugin,
+        "Stress Dependence": StressDependencePlugin,
+        "Stress Sensitivity": StressSensitivityPlugin,
+        "Hsw Load Compare": HswLoadComparePlugin,
+        "Maxion Continuous": MaxionContinuousPlugin,
+        "PDF Plotter": PdfPlotterPlugin,
+        "Hysteresis Loops": HysteresisLoopsPlugin,
+        "Hsw Distribution": HswDistributionPlugin,
+        "Strain 3D Plot": Strain3DPlotPlugin,
+    }
     for name, launcher in sorted((available_plotters or {}).items()):
-        if name == "VSM Hysteresis Loops":
-            plugin_factories[name] = lambda host, n=name: VSMHysteresisPlugin(host, n)
-        elif name == "Temperature Dependence":
-            plugin_factories[name] = lambda host, n=name: TemperatureDependencePlugin(host, n)
-        elif name == "Temperature Sensitivity":
-            plugin_factories[name] = lambda host, n=name: TemperatureSensitivityPlugin(host, n)
-        elif name == "Current Annealing":
-            plugin_factories[name] = lambda host, n=name: CurrentAnnealingPlugin(host, n)
+        plugin_cls = plugin_classes.get(name)
+        if plugin_cls is not None:
+            plugin_factories[name] = lambda host, cls=plugin_cls, n=name: cls(host, n)
         else:
             plugin_factories[name] = lambda host, l=launcher, n=name: ExternalPlotterPlugin(host, n, l)
 
