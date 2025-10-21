@@ -19,6 +19,8 @@
 - Rebuilt stress dependence as a native PyPlot plugin so it now loads data,
   generates Matplotlib tabs, and exports to Origin through the shared
   workbench controls instead of embedding the legacy window.
+- Repaired text encoding in PyPlot plugin controls so minus signs, ellipses,
+  and degree symbols display correctly again.
 
 ## 2025-10-19
 

@@ -319,7 +319,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
     _VAR_LABELS = {
         "sum": "T1+T2",
-        "dT": "T2Ã¢Ë†â€™T1",
+        "dT": "T2–T1",
         "T1": "T1",
         "T2": "T2",
     }
@@ -409,7 +409,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         output_edit = QtWidgets.QLineEdit(temp_core.OUTPUT_DIR, output_group)
         self._output_edit = output_edit
         output_layout.addWidget(output_edit, 2, 0, 1, 2)
-        browse_btn = QtWidgets.QPushButton("BrowseÃ¢â‚¬Â¦", output_group)
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
         output_layout.addWidget(browse_btn, 2, 2)
         subfolder_cb = QtWidgets.QCheckBox("Create subfolder per run", output_group)
         subfolder_cb.setChecked(False)
@@ -664,7 +664,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         baseline_layout.setVerticalSpacing(4)
         baseline_combo = QtWidgets.QComboBox(baseline_group)
         baseline_combo.addItem("Do not shift baseline", "none")
-        baseline_combo.addItem("Shift to zero at 25Â°C", "zero_25")
+        baseline_combo.addItem("Shift to zero at 25°C", "zero_25")
         baseline_combo.addItem("Plot both baselines", "both")
         baseline_value = temp_sens_core.BASELINE_MODE if temp_sens_core.BASELINE_MODE in {"none", "zero_25", "both"} else "none"
         baseline_combo.setCurrentIndex({"none": 0, "zero_25": 1, "both": 2}[baseline_value])
@@ -709,7 +709,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         output_edit = QtWidgets.QLineEdit(str(temp_sens_core.OUTPUT_DIR), output_group)
         self._output_edit = output_edit
         output_layout.addWidget(output_edit, 1, 1)
-        browse_btn = QtWidgets.QPushButton("BrowseÂ°Â°", output_group)
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
         output_layout.addWidget(browse_btn, 1, 2)
         subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
         subfolder_cb.setChecked(False)
@@ -838,7 +838,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         modes = [config["baseline_mode"]]
         if config["baseline_mode"] == "both":
             modes = ["none", "zero_25"]
-        mode_labels = {"none": "Raw", "zero_25": "Zero @25Â°C"}
+        mode_labels = {"none": "Raw", "zero_25": "Zero @25°C"}
         plots_created = 0
         grouped = dataframe.groupby(["composition", "anneal"], dropna=False)
         for (_, _), group in grouped:
@@ -997,7 +997,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         output_edit = QtWidgets.QLineEdit(str(anneal_core.OUTPUT_DIR), output_group)
         self._output_edit = output_edit
         output_layout.addWidget(output_edit, 1, 1)
-        browse_btn = QtWidgets.QPushButton("BrowseÂ°Â°", output_group)
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
         output_layout.addWidget(browse_btn, 1, 2)
         subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
         subfolder_cb.setChecked(False)
