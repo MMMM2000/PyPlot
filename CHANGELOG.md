@@ -10,7 +10,8 @@
   even after restarting, write currents in milliamperes with an explicit header,
   and honour loop counts after reversing early at the 30 V limit.
 - Added an experiment utility for batch-converting legacy current annealing log
-  folders from amperes to milliamperes.
+  folders from amperes to milliamperes, and taught it to skip files that
+  already store currents in milliamps.
 
 ## 2025-10-19
 

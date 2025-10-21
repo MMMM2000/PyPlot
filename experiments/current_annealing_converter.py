@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 from typing import Iterable, Tuple
 
@@ -12,6 +13,7 @@ from plotting.utils import ensure_app_theme, install_standard_menu
 
 
 CONVERSION_MARKER = "# Current annealing current units: mA"
+MILLIAMP_HEADER_RE = re.compile(r"(?:current|i)\s*[^\r\n]{0,8}[\[(]\s*m\s*a", re.IGNORECASE)
 
 
 def _format_value(value: float) -> str:
@@ -33,6 +35,16 @@ def _update_comment(line: str) -> str:
     return updated
 
 
+def _has_milliamp_header(lines: Iterable[str]) -> bool:
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        if MILLIAMP_HEADER_RE.search(stripped):
+            return True
+    return False
+
+
 def convert_file(path: Path) -> Tuple[str, str]:
     """Convert ``path`` in-place. Returns (status, detail)."""
 
@@ -41,8 +53,11 @@ def convert_file(path: Path) -> Tuple[str, str]:
     except OSError as exc:
         return "error", f"failed to read: {exc}"
 
-    if any(CONVERSION_MARKER in line for line in raw_lines[:5]):
+    head = raw_lines[:5]
+    if any(CONVERSION_MARKER in line for line in head):
         return "skipped", "already converted"
+    if _has_milliamp_header(head):
+        return "skipped", "already in mA"
 
     converted_lines: list[str] = []
     converted = False
