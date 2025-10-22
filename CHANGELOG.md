@@ -1,5 +1,14 @@
 # Changelog
 
+## 2025-10-22 13:27 UTC
+
+- Highlight the live voltage readout in red once it exceeds 25 V, fix the
+  "To 30 V" status line to use proper symbols, and refresh the associated
+  status messages so they render cleanly.
+- Rebuilt the current annealing progress tracking to account for partial loops
+  and 30 V reversals, ensuring the progress bar and time remaining estimates
+  stay accurate through multi-loop runs.
+
 ## 2025-10-20
 
 - Updated the temperature sensitivity Origin workflow to release generated

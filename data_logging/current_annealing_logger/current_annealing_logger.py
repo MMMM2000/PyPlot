@@ -213,6 +213,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finish_time: float | None = None
         self.step_idx = 0
         self.total_steps = 0
+        self._loop_sample_history: list[int] = []
+        self._current_loop_samples = 0
+        self._planned_loop_steps = 0
+        self._projected_loop_samples: int | None = None
         self._contact_lost = False
         self._zero_current_count = 0
         self._nonzero_current_seen = False
@@ -541,6 +545,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 canvas.draw()
 
     def _display_ui_value(self, attr: str, text: str) -> None:
+        if attr == 'label_live_voltage':
+            self._set_live_voltage_text(text)
+            return
         widget = getattr(self.ui, attr, None)
         if widget is None:
             return
@@ -552,6 +559,111 @@ class MainWindow(QtWidgets.QMainWindow):
         setter = getattr(target, 'setText', None)
         if callable(setter):
             setter(text)
+
+    def _set_live_voltage_text(self, text: str) -> None:
+        label = getattr(self, 'label_live_voltage', None)
+        if not isinstance(label, QtWidgets.QLabel):
+            widget = getattr(self.ui, 'label_live_voltage', None)
+            if isinstance(widget, QtWidgets.QLabel):
+                label = widget
+        if not isinstance(label, QtWidgets.QLabel):
+            widget = getattr(self.ui, 'label_live_voltage', None)
+            if widget is not None:
+                target = cast(Any, widget)
+                setter = getattr(target, 'setText', None)
+                if callable(setter):
+                    setter(text)
+            return
+        label.setText(text)
+        self._apply_voltage_label_style(label, text)
+
+    def _apply_voltage_label_style(self, label: QtWidgets.QLabel, text: str) -> None:
+        try:
+            value = float(text)
+        except Exception:
+            value = None
+        warning_style = getattr(self, '_voltage_warning_style', 'color: #c0392b;')
+        default_style = getattr(self, '_voltage_default_style', '')
+        if value is not None and value > 25.0:
+            label.setStyleSheet(warning_style)
+        else:
+            label.setStyleSheet(default_style)
+
+    def _reset_loop_tracking(self) -> None:
+        self._loop_sample_history = []
+        self._current_loop_samples = 0
+        self._planned_loop_steps = 0
+        self._projected_loop_samples = None
+        self.step_idx = 0
+        self.total_steps = 0
+        self._finish_time = None
+
+    def _init_loop_tracking(self, per_loop: int, loops: int, infinite: bool) -> None:
+        self._reset_loop_tracking()
+        self._planned_loop_steps = max(1, int(per_loop))
+        projected = self._planned_loop_steps
+        self._projected_loop_samples = projected
+        if infinite:
+            self.total_steps = 0
+        else:
+            self.total_steps = max(1, projected * max(1, int(loops)))
+        self.step_idx = 0
+        self._finish_time = None
+
+    def _note_loop_sample(self) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        self._current_loop_samples += 1
+        if self.total_steps > 0:
+            self._recalculate_total_steps()
+
+    def _finalize_loop_cycle(self) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        samples = getattr(self, '_current_loop_samples', 0)
+        if samples > 0:
+            self._loop_sample_history.append(samples)
+        self._current_loop_samples = 0
+        if self._loop_sample_history:
+            avg = sum(self._loop_sample_history) / len(self._loop_sample_history)
+            self._projected_loop_samples = max(1, int(math.ceil(avg)))
+        elif self._planned_loop_steps > 0:
+            self._projected_loop_samples = self._planned_loop_steps
+        else:
+            self._projected_loop_samples = None
+        self._recalculate_total_steps(0)
+
+    def _recalculate_total_steps(self, remaining_in_current_loop: int | None = None, projected_loop_steps: int | None = None) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        if bool(getattr(self, 'infinite_loops', False)) and not self.total_steps:
+            return
+        if self.total_steps <= 0 and remaining_in_current_loop is None and projected_loop_steps is None:
+            return
+        target_loops = self._loop_target_count()
+        completed_loops = len(self._loop_sample_history)
+        loops_remaining_after_current = max(0, target_loops - completed_loops - 1)
+        current_samples = max(0, self._current_loop_samples)
+        projected = projected_loop_steps
+        if projected is None:
+            projected = self._projected_loop_samples
+        if projected is None or projected <= 0:
+            projected = self._planned_loop_steps if self._planned_loop_steps > 0 else current_samples
+        projected = max(1, int(projected))
+        if remaining_in_current_loop is None:
+            remaining_current = max(0, projected - current_samples)
+        else:
+            remaining_current = max(0, int(remaining_in_current_loop))
+        estimated_total = int(self.step_idx + remaining_current + (loops_remaining_after_current * projected))
+        if estimated_total < self.step_idx:
+            estimated_total = self.step_idx
+        if estimated_total <= 0:
+            estimated_total = self.step_idx or projected
+        self.total_steps = estimated_total
+        if hasattr(self.ui, 'progressBar_process'):
+            self.ui.progressBar_process.setMaximum(self.total_steps if self.total_steps > 0 else 0)
+            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+        self._finish_time = None
 
     def _init_mode_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         settings_menu = menu_bar.addMenu("&Settings")
@@ -957,6 +1069,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                     self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
                         self.last_sample_time = now
                         self.step_idx += 1
+                        self._note_loop_sample()
                         if hasattr(self.ui, 'progressBar_process') and self.total_steps:
                             self.ui.progressBar_process.setMaximum(self.total_steps)
                             self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
@@ -1055,7 +1168,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"{prefix}: N/A"
         if self._time_to_voltage_limit == 0:
             if self._estimated_limit_current_mA is not None:
-                return f"{prefix}: reached (â‰ˆ {self._estimated_limit_current_mA:.0f} mA)"
+                return f"{prefix}: reached (≈ {self._estimated_limit_current_mA:.0f} mA)"
             return f"{prefix}: reached"
         if not self.direction_ascending or self.current_increment <= 0:
             return f"{prefix}: N/A"
@@ -1064,7 +1177,7 @@ class MainWindow(QtWidgets.QMainWindow):
         secs = max(0, int(self._time_to_voltage_limit + 0.999))
         text = self._format_secs(prefix, secs)
         if self._estimated_limit_current_mA is not None:
-            text += f" (â‰ˆ {self._estimated_limit_current_mA:.0f} mA)"
+            text += f" (≈ {self._estimated_limit_current_mA:.0f} mA)"
         return text
 
     def update_time_estimate(self):
@@ -1078,7 +1191,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.process_running:
             secs = self.compute_planned_seconds()
             if secs is None:
-                label.setText("Time remaining: âˆž")
+                label.setText("Time remaining: ∞")
             else:
                 label.setText(self._format_secs("Time remaining", secs))
             if limit_label is not None:
@@ -1376,6 +1489,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.first_sample = True
             self.direction_ascending = True
             self._reset_voltage_projection()
+            self._reset_loop_tracking()
             self.ui.pushButton_start_process.setText("Stop annealing process")
             if(self.operation_mode == 0):
                 pass
@@ -1413,7 +1527,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.init_graph_window()
                 self.send_init_commands()
                 # Immediately request the first sample instead of waiting
-                # for the oneâ€‘second timer interval to elapse.  This avoids
+                # for the one-second timer interval to elapse.  This avoids
                 # an unnecessary pause after the user presses *Start*.
                 self.handle_send_new_command()
                 self.timer_command.start(1000)
@@ -1446,12 +1560,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - 1) / max(1, step_mA)))
                 hold_steps = int(self.ui.spinBox_hold_duration.value())
                 down_steps = up_steps if self.reverse_enabled else 0
-                per_loop = up_steps + hold_steps + down_steps
-                if self.infinite_loops:
-                    self.total_steps = 0
-                else:
-                    self.total_steps = max(0, per_loop * int(self.loop_target or 1))
-                self.step_idx = 0
+                per_loop = max(1, up_steps + hold_steps + down_steps)
+                self._init_loop_tracking(per_loop, int(self.loop_target or 1), self.infinite_loops)
                 if hasattr(self.ui, 'progressBar_process'):
                     if self.total_steps:
                         self.ui.progressBar_process.setMaximum(self.total_steps)
@@ -1468,7 +1578,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.init_graph_window()
                 self.send_init_commands()
                 # Kick off the first acquisition immediately so the
-                # measurement starts without a oneâ€‘second delay.
+                # measurement starts without a one-second delay.
                 self.handle_send_new_command()
                 self.timer_command.start(1000)
                 
@@ -1564,6 +1674,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.first_sample = True
         self.prev_value_x = None
         self.prev_value_y = None
+        self._reset_loop_tracking()
         
     def handle_send_new_command(self):
         if not self.process_running:
@@ -1789,6 +1900,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 loops_pending = self._has_remaining_loops(next_loop)
                 force_stop = bool(getattr(self, 'force_stop_at_zero', False))
                 self.loop_idx = next_loop
+                self._finalize_loop_cycle()
                 if force_stop:
                     self.handle_toggle_process_clicked()
                 elif loops_pending:
@@ -1825,7 +1937,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_serial_command()
             # The original implementation paused for a full second between
             # initialisation commands, which caused a noticeable start-up
-            # delay.  A brief 200â€¯ms gap gives the supply time to process
+            # delay.  A brief 200 ms gap gives the supply time to process
             # each command while keeping the UI responsive.
             self.simple_delay(200)
             
@@ -1912,9 +2024,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lcd_current_mA = self.label_live_current
         self.ui.label_set_current = self.label_live_set
         self.ui.label_live_voltage = self.label_live_voltage
+        self._voltage_default_style = self.label_live_voltage.styleSheet() or ""
+        self._voltage_warning_style = "color: #c0392b;"
         setattr(self.ui.lcd_current_mA, "display", self.label_live_current.setText)
         setattr(self.ui.label_set_current, "display", self.label_live_set.setText)
-        setattr(self.ui.label_live_voltage, "display", self.label_live_voltage.setText)
+        setattr(self.ui.label_live_voltage, "display", self._set_live_voltage_text)
 
     def handle_max_voltage(self) -> None:
         self._max_voltage_dialog = True
@@ -1981,14 +2095,10 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             current_mA = 0.0
         remaining_steps = math.ceil(max(0.0, current_mA) / step_mA)
-        new_total = max(self.step_idx + remaining_steps, self.step_idx)
-        if new_total <= 0:
-            return
-        self.total_steps = new_total
-        if hasattr(self.ui, 'progressBar_process'):
-            self.ui.progressBar_process.setMaximum(self.total_steps)
-            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
-        self._finish_time = None
+        projected_loop = getattr(self, '_current_loop_samples', 0) + remaining_steps
+        if projected_loop > 0:
+            self._projected_loop_samples = max(1, int(projected_loop))
+        self._recalculate_total_steps(remaining_steps, self._projected_loop_samples)
 
     def _apply_max_voltage_action(self, action: str) -> None:
         if action not in MAX_VOLTAGE_ACTION_LABELS:
@@ -2010,9 +2120,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()
             self.update_time_estimate()
-            self._show_status_message("30 V reached â€” reversing to zero.")
+            self._show_status_message("30 V reached — reversing to zero.")
         elif action == "stop":
-            self._show_status_message("30 V reached â€” stopping measurement.")
+            self._show_status_message("30 V reached — stopping measurement.")
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
@@ -2024,7 +2134,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
-            self._show_status_message("30 V reached â€” holding current.")
+            self._show_status_message("30 V reached — holding current.")
 
     def _show_max_voltage_prompt(self) -> None:
         msg = QtWidgets.QMessageBox(self)
