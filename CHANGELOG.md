@@ -21,6 +21,9 @@
   workbench controls instead of embedding the legacy window.
 - Repaired text encoding in PyPlot plugin controls so minus signs, ellipses,
   and degree symbols display correctly again.
+- Warn the stress/temperature data logger and current annealing logger when
+  composition percentages do not add up to 100 %, while still allowing
+  measurements to proceed.
 
 ## 2025-10-19
 

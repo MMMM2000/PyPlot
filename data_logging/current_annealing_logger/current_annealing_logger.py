@@ -24,6 +24,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 from .ui_en import Ui_MainWindow
 from plotting.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 from data_logging.naming_history import LineEditHistory
+from data_logging.data_logger.file_name_builder import composition_warning_state
 
 import numpy as np
 import matplotlib
@@ -283,6 +284,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample','lineEdit_custom_name'):
             if hasattr(self.ui, name):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
+        if hasattr(self.ui, 'lineEdit_composition'):
+            self.ui.lineEdit_composition.textChanged.connect(self._handle_composition_text_changed)
         self.name_history.register('composition', getattr(self.ui, 'lineEdit_composition', None))
         self.name_history.register('microwire', getattr(self.ui, 'lineEdit_microwire', None))
         if hasattr(self.ui, 'pushButton_reset_preset'):
@@ -1204,6 +1207,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.setText(base)
         self.store_name_preset()
+        self._update_composition_warning()
 
     def store_name_preset(self):
         s = self.settings
@@ -1236,11 +1240,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_custom_name.blockSignals(False)
         except Exception:
             pass
+        self._update_composition_warning()
 
     def reset_name_preset(self):
         self.settings.clear()
         self.restore_name_preset()
         self.update_file_name_from_preset()
+
+    def _handle_composition_text_changed(self, _text: str) -> None:
+        self._update_composition_warning()
+
+    def _update_composition_warning(self) -> None:
+        edit = getattr(self.ui, 'lineEdit_composition', None)
+        if edit is None or not hasattr(edit, 'set_extra_warning'):
+            return
+        warn, total = composition_warning_state(edit.text())
+        if warn and total is not None:
+            message = f"Element percentages add up to {total:.2f} %, expected 100."
+            edit.set_extra_warning(True, message)
+        else:
+            edit.set_extra_warning(False)
 
     def open_log_dir(self) -> None:
         try:
