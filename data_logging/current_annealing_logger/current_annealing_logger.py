@@ -12,10 +12,12 @@ import os
 import time
 import math
 import re
+import json
+from datetime import datetime
 from pathlib import Path
 from collections import deque
 from importlib import import_module
-from typing import Any, Deque, Dict, Optional, SupportsBytes, TextIO, Tuple, cast
+from typing import Any, Deque, Dict, List, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
@@ -95,6 +97,87 @@ MAX_VOLTAGE_ACTION_LABELS = {
     "reverse": "Reverse to zero",
     "stop": "Stop measurement",
 }
+
+
+class MeasurementHistoryDialog(QtWidgets.QDialog):
+    """Display recently recorded resistance-current traces."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None, entries: List[Dict[str, Any]]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Measurement history")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        if not entries:
+            label = QtWidgets.QLabel("No measurements recorded yet.")
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        else:
+            tabs = QtWidgets.QTabWidget(self)
+            for idx, entry in enumerate(entries, start=1):
+                tab = QtWidgets.QWidget()
+                tab_layout = QtWidgets.QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.setSpacing(6)
+                title = entry.get("title") or f"Measurement {idx}"
+                currents = entry.get("currents", [])
+                resistances = entry.get("resistances", [])
+                timestamp = entry.get("timestamp", "")
+                source = entry.get("source", "")
+                if FigureCanvas is not None:
+                    figure = Figure(figsize=(5.5, 3.2))
+                    canvas = FigureCanvas(figure)
+                    canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                    ax = figure.add_subplot(111)
+                    ax.set_xlabel("Current [mA]")
+                    ax.set_ylabel("Resistance [Ohm]")
+                    ax.grid(True)
+                    if isinstance(currents, list) and isinstance(resistances, list) and len(currents) == len(resistances):
+                        if len(currents) == 1:
+                            ax.plot(currents, resistances, color='#d32f2f', marker='o', linestyle='None')
+                        else:
+                            for point in range(1, len(currents)):
+                                prev_c, curr_c = currents[point - 1], currents[point]
+                                prev_r, curr_r = resistances[point - 1], resistances[point]
+                                diff = curr_c - prev_c
+                                if abs(diff) <= 0.2:
+                                    color = '#27ae60'
+                                elif diff >= 0:
+                                    color = '#d32f2f'
+                                else:
+                                    color = '#1976d2'
+                                ax.plot(
+                                    [prev_c, curr_c],
+                                    [prev_r, curr_r],
+                                    color=color,
+                                    marker='o',
+                                    linestyle='-',
+                                )
+                    tab_layout.addWidget(canvas)
+                else:
+                    placeholder = QtWidgets.QLabel("Matplotlib backend not available.")
+                    placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    placeholder.setMinimumHeight(160)
+                    tab_layout.addWidget(placeholder)
+                details: list[str] = []
+                if timestamp:
+                    details.append(timestamp)
+                if source:
+                    details.append(source)
+                if details:
+                    info = QtWidgets.QLabel("\n".join(details))
+                    info.setWordWrap(True)
+                    tab_layout.addWidget(info)
+                tab_layout.addStretch(1)
+                tabs.addTab(tab, title)
+            layout.addWidget(tabs)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -233,9 +316,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._voltage_history: Deque[Tuple[float, float, float]] = deque(maxlen=60)
         self._time_to_voltage_limit: float | None = None
         self._estimated_limit_current_mA: float | None = None
+        self._applied_limit_current_mA: float | None = None
+        self._samples_current: List[float] = []
+        self._samples_resistance: List[float] = []
+        self._segment_lines_ax1: list[Line2D] = []
+        self._segment_lines_ax2: list[Line2D] = []
+        self._placeholder_text_ax1: Any = None
+        self._placeholder_text_ax2: Any = None
+        self._history_settings = QtCore.QSettings("microwire", "current_annealing_history")
+        self._measurement_history: List[Dict[str, Any]] = self._load_measurement_history()
 
-        self.prev_value_x: float | None = None
-        self.prev_value_y: float | None = None
         self.curr_value_x: float = 0.0
         self.curr_value_y: float = 0.0
         
@@ -269,6 +359,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.clicked.connect(self.handle_pushButton_reverse_now_clicked)
             self.ui.pushButton_reverse_now.setEnabled(False)
+        if hasattr(self.ui, 'pushButton_show_history'):
+            self.ui.pushButton_show_history.clicked.connect(self.handle_show_history_clicked)
+            self._update_history_button_state()
         # New UI pieces: port dropdown and separate log directory/name
         if hasattr(self.ui, 'comboBox_port'):
             self.ui.comboBox_port.currentIndexChanged.connect(self.handle_comboBox_port_changed)
@@ -384,9 +477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         # Variables used for plotting data
-        self.prev_value_x = None
         self.curr_value_x = 0.0
-        self.prev_value_y = None
         self.curr_value_y = 0.0
         self.first_sample = True
 
@@ -394,12 +485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax1 = None
         self.ax2 = None
                 
-        self.line_marker="o"
-        self.line_style="-"
         self.line_color="r"
-        
-        self.line1 = None
-        self.line2 = None
         # Initialize progress UI defaults
         if hasattr(self.ui, 'progressBar_process'):
             self.ui.progressBar_process.setMaximum(0)
@@ -418,7 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.init_graph_window()
             ax1 = getattr(self, 'ax1', None)
             if ax1 is not None:
-                ax1.text(
+                self._placeholder_text_ax1 = ax1.text(
                     0.5,
                     0.5,
                     'No data yet',
@@ -432,7 +518,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             ax2 = getattr(self, 'ax2', None)
             if ax2 is not None:
-                ax2.text(
+                self._placeholder_text_ax2 = ax2.text(
                     0.5,
                     0.5,
                     'No data yet',
@@ -588,6 +674,195 @@ class MainWindow(QtWidgets.QMainWindow):
             label.setStyleSheet(warning_style)
         else:
             label.setStyleSheet(default_style)
+
+    def _load_measurement_history(self) -> List[Dict[str, Any]]:
+        stored = self._history_settings.value("entries", "[]")
+        payload: List[Any]
+        if isinstance(stored, str):
+            try:
+                payload = json.loads(stored)
+            except Exception:
+                payload = []
+        elif isinstance(stored, (list, tuple)):
+            payload = list(stored)
+        else:
+            payload = []
+        entries: List[Dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            currents = item.get("currents")
+            resistances = item.get("resistances")
+            if not isinstance(currents, list) or not isinstance(resistances, list):
+                continue
+            if len(currents) != len(resistances) or len(currents) < 2:
+                continue
+            try:
+                current_vals = [float(value) for value in currents]
+                resistance_vals = [float(value) for value in resistances]
+            except Exception:
+                continue
+            entries.append(
+                {
+                    "currents": current_vals,
+                    "resistances": resistance_vals,
+                    "title": str(item.get("title", "")),
+                    "timestamp": str(item.get("timestamp", "")),
+                    "source": str(item.get("source", "")),
+                }
+            )
+            if len(entries) >= 3:
+                break
+        return entries
+
+    def _update_history_button_state(self) -> None:
+        button = getattr(self.ui, 'pushButton_show_history', None)
+        if isinstance(button, QtWidgets.QPushButton):
+            button.setEnabled(bool(self._measurement_history))
+
+    def _save_measurement_history(self) -> None:
+        payload: List[Dict[str, Any]] = []
+        for entry in self._measurement_history[:3]:
+            payload.append(
+                {
+                    "currents": [round(float(value), 6) for value in entry.get("currents", [])],
+                    "resistances": [round(float(value), 6) for value in entry.get("resistances", [])],
+                    "title": entry.get("title", ""),
+                    "timestamp": entry.get("timestamp", ""),
+                    "source": entry.get("source", ""),
+                }
+            )
+        try:
+            self._history_settings.setValue("entries", json.dumps(payload, ensure_ascii=False))
+            self._history_settings.sync()
+        except Exception:
+            pass
+        self._update_history_button_state()
+
+    def _reset_sample_buffers(self) -> None:
+        self._samples_current = []
+        self._samples_resistance = []
+        self._clear_segment_lines()
+
+    def _clear_segment_lines(self) -> None:
+        for container in (self._segment_lines_ax1, self._segment_lines_ax2):
+            for line in list(container):
+                try:
+                    line.remove()
+                except Exception:
+                    pass
+            container.clear()
+
+    def _remove_placeholder_text(self) -> None:
+        for attr in ('_placeholder_text_ax1', '_placeholder_text_ax2'):
+            text_item = getattr(self, attr, None)
+            if text_item is None:
+                continue
+            try:
+                text_item.remove()
+            except Exception:
+                try:
+                    text_item.set_visible(False)
+                except Exception:
+                    pass
+            setattr(self, attr, None)
+
+    def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
+        if not math.isfinite(current_mA) or not math.isfinite(resistance):
+            return
+        self._remove_placeholder_text()
+        self._samples_current.append(float(current_mA))
+        self._samples_resistance.append(float(resistance))
+        if len(self._samples_current) > 1:
+            step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
+            tolerance = max(0.5, step_value * 0.6)
+            trimmed_currents: List[float] = []
+            trimmed_resistances: List[float] = []
+            total = len(self._samples_current)
+            for idx, (curr, res) in enumerate(zip(self._samples_current, self._samples_resistance)):
+                if abs(curr - 1.0) <= tolerance and idx < total - 1:
+                    continue
+                trimmed_currents.append(curr)
+                trimmed_resistances.append(res)
+            if len(trimmed_currents) != len(self._samples_current):
+                self._samples_current = trimmed_currents
+                self._samples_resistance = trimmed_resistances
+        self.sample_index = len(self._samples_current)
+        self._redraw_segments()
+
+    def _redraw_segments(self) -> None:
+        ax1 = getattr(self, 'ax1', None)
+        ax2 = getattr(self, 'ax2', None)
+        if ax1 is None or ax2 is None:
+            return
+        self._clear_segment_lines()
+        currents = list(self._samples_current)
+        resistances = list(self._samples_resistance)
+        if not currents:
+            canvas = getattr(self, 'canvas', None)
+            if canvas is not None:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    canvas.draw()
+            return
+        if len(currents) == 1:
+            marker1 = Line2D([currents[0]], [resistances[0]], color='r', marker='o', linestyle='None')
+            marker2 = Line2D([1], [resistances[0]], color='r', marker='o', linestyle='None')
+            ax1.add_line(marker1)
+            ax2.add_line(marker2)
+            self._segment_lines_ax1.append(marker1)
+            self._segment_lines_ax2.append(marker2)
+        else:
+            step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
+            tolerance = max(0.5, step_value * 0.6)
+            for idx in range(1, len(currents)):
+                prev_c = currents[idx - 1]
+                curr_c = currents[idx]
+                prev_r = resistances[idx - 1]
+                curr_r = resistances[idx]
+                diff = curr_c - prev_c
+                if abs(diff) <= tolerance * 0.2:
+                    color = '#27ae60'
+                elif diff >= 0:
+                    color = '#d32f2f'
+                else:
+                    color = '#1976d2'
+                seg1 = Line2D([prev_c, curr_c], [prev_r, curr_r], color=color, marker='o', linestyle='-')
+                seg2 = Line2D([idx, idx + 1], [prev_r, curr_r], color=color, marker='o', linestyle='-')
+                ax1.add_line(seg1)
+                ax2.add_line(seg2)
+                self._segment_lines_ax1.append(seg1)
+                self._segment_lines_ax2.append(seg2)
+        for axis in (ax1, ax2):
+            axis.relim()
+            axis.autoscale_view()
+        canvas = getattr(self, 'canvas', None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+                canvas.flush_events()
+            except Exception:
+                canvas.draw()
+
+    def _finalize_measurement_history(self) -> None:
+        if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
+            return
+        title_source = self.f_name or ""
+        try:
+            base_title = format_annealing_title(Path(title_source).stem if title_source else "")
+        except Exception:
+            base_title = format_annealing_title(title_source)
+        entry = {
+            "currents": list(self._samples_current),
+            "resistances": list(self._samples_resistance),
+            "title": base_title or "Current annealing",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": str(title_source),
+        }
+        self._measurement_history.insert(0, entry)
+        self._measurement_history = self._measurement_history[:3]
+        self._save_measurement_history()
 
     def _reset_loop_tracking(self) -> None:
         self._loop_sample_history = []
@@ -1091,6 +1366,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._voltage_history.clear()
         self._time_to_voltage_limit = None
         self._estimated_limit_current_mA = None
+        self._applied_limit_current_mA = None
+        self._apply_voltage_projection_to_progress(None, force=True)
 
     def _note_voltage_limit_reached(self) -> None:
         """Record that the 30 V ceiling has been hit."""
@@ -1105,6 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             current_mA = 0.0
         self._estimated_limit_current_mA = max(0.0, current_mA)
+        self._apply_voltage_projection_to_progress(self._estimated_limit_current_mA, force=True)
 
     def _update_voltage_projection(self, timestamp: float) -> None:
         """Update the projection to the 30 V limit using recent samples."""
@@ -1143,6 +1421,70 @@ class MainWindow(QtWidgets.QMainWindow):
             time_est = 0.0
         self._time_to_voltage_limit = time_est
         self._estimated_limit_current_mA = current_est
+        self._apply_voltage_projection_to_progress(current_est)
+
+    def _apply_voltage_projection_to_progress(self, limit_mA: float | None, *, force: bool = False) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        if bool(getattr(self, 'infinite_loops', False)):
+            if limit_mA is None:
+                self._applied_limit_current_mA = None
+            return
+        if not self.process_running:
+            if limit_mA is None:
+                self._applied_limit_current_mA = None
+            return
+        if not self.direction_ascending or self.current_increment <= 0:
+            if limit_mA is None and self._applied_limit_current_mA is not None:
+                self._applied_limit_current_mA = None
+                projected = self._planned_loop_steps or self._projected_loop_samples
+                if projected:
+                    self._projected_loop_samples = int(projected)
+                    self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples)
+                    self.update_time_estimate()
+            return
+        try:
+            planned_max = float(self.ui.spinBox_max_current.value())
+        except Exception:
+            planned_max = float(getattr(self, 'max_current_mA', 0))
+        step_mA = abs(int(getattr(self, 'current_step_mA', 1) or 1))
+        if step_mA <= 0:
+            step_mA = 1
+        tolerance = step_mA * 0.5
+        if limit_mA is None:
+            if self._applied_limit_current_mA is not None or force:
+                self._applied_limit_current_mA = None
+                projected = self._planned_loop_steps or self._projected_loop_samples
+                if projected:
+                    self._projected_loop_samples = int(projected)
+                    self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples)
+                    self.update_time_estimate()
+            return
+        limit_value = max(0.0, float(limit_mA))
+        if not force and self._applied_limit_current_mA is not None and abs(self._applied_limit_current_mA - limit_value) <= tolerance:
+            return
+        if limit_value >= planned_max - tolerance:
+            if self._applied_limit_current_mA is not None or force:
+                self._applied_limit_current_mA = None
+                projected = self._planned_loop_steps or self._projected_loop_samples
+                if projected:
+                    self._projected_loop_samples = int(projected)
+                    self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples)
+                    self.update_time_estimate()
+            return
+        ascend_steps = max(1, int(math.ceil(max(0.0, limit_value - 1.0) / step_mA)))
+        try:
+            hold_steps = int(self.ui.spinBox_hold_duration.value())
+        except Exception:
+            hold_steps = int(getattr(self, 'hold_duration_s', 0))
+        if limit_value < planned_max - tolerance:
+            hold_steps = 0
+        reverse_steps = ascend_steps if getattr(self, 'reverse_enabled', False) else 0
+        projected_loop = max(1, ascend_steps + hold_steps + reverse_steps)
+        self._projected_loop_samples = projected_loop
+        self._applied_limit_current_mA = limit_value
+        self._recalculate_total_steps(projected_loop_steps=projected_loop)
+        self.update_time_estimate()
 
     def _record_voltage_progress(self) -> None:
         if not self.process_running:
@@ -1462,6 +1804,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resistance_percent_from_hold = self.current_resistance/self.resistance_at_hold_current*100
         self.ui.label_resistance_percent_from_hold.setText("{:.1f}".format(self.resistance_percent_from_hold))
 
+    def handle_show_history_clicked(self) -> None:
+        dialog = MeasurementHistoryDialog(self, list(self._measurement_history))
+        dialog.exec()
+
     def handle_toggle_process_clicked(self):
         if not self.process_running:
             self.process_running = True
@@ -1478,14 +1824,13 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_nonzero_current_time = None
             self._skip_current_sample = False
             self._clear_zero_placeholders()
+            self._reset_sample_buffers()
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
             self.force_stop_at_zero = False
             self.command_number = 0
             self.sample_index = 0
-            self.prev_value_x = None
-            self.prev_value_y = None
             self.first_sample = True
             self.direction_ascending = True
             self._reset_voltage_projection()
@@ -1521,8 +1866,6 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._display_ui_value('label_live_voltage', "0")
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
-                self.line_marker="o"
-                self.line_style="-"
                 self.line_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
@@ -1572,8 +1915,6 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_to_limit.setText("To 30 V: N/A")
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
-                self.line_marker="o"
-                self.line_style="-"
                 self.line_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
@@ -1638,6 +1979,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._process_start_time = None
         self._last_nonzero_current_time = None
         self._clear_zero_placeholders()
+        self._finalize_measurement_history()
+        self._reset_sample_buffers()
         try:
             self.timer_command.stop()
             self.hold_timer.stop()
@@ -1672,8 +2015,6 @@ class MainWindow(QtWidgets.QMainWindow):
         self._display_ui_value('label_set_current', "0")
         self._max_voltage_dialog = False
         self.first_sample = True
-        self.prev_value_x = None
-        self.prev_value_y = None
         self._reset_loop_tracking()
         
     def handle_send_new_command(self):
@@ -1717,48 +2058,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not skip_sample:
                 if self.first_sample:
                     self.first_sample = False
-                    self.prev_value_x = None
-                    self.prev_value_y = None
-                else:
-                    self.sample_index += 1
-                    if self.prev_value_x is not None and self.prev_value_y is not None:
-                        ax1 = getattr(self, 'ax1', None)
-                        ax2 = getattr(self, 'ax2', None)
-                        if ax1 is not None and ax2 is not None:
-                            prev_x = float(self.prev_value_x)
-                            prev_y = float(self.prev_value_y)
-                            curr_x = float(self.curr_value_x)
-                            curr_y = float(self.curr_value_y)
-                            self.line1 = Line2D(
-                                [prev_x, curr_x],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax1.add_line(self.line1)
-
-                            self.line2 = Line2D(
-                                [self.sample_index - 1, self.sample_index],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax2.add_line(self.line2)
-
-                            for axis in (ax1, ax2):
-                                axis.relim()
-                                axis.autoscale_view()
-
-                            fig = getattr(self, 'fig', None)
-                            canvas = getattr(fig, 'canvas', None) if fig is not None else None
-                            if canvas is not None:
-                                canvas.draw()
-                                canvas.flush_events()
-
-                self.prev_value_x = self.curr_value_x
-                self.prev_value_y = self.curr_value_y
+                self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
 
 
             # Iterate the current set point
@@ -1813,48 +2113,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not skip_sample:
                 if self.first_sample:
                     self.first_sample = False
-                    self.prev_value_x = None
-                    self.prev_value_y = None
-                else:
-                    self.sample_index += 1
-                    if self.prev_value_x is not None and self.prev_value_y is not None:
-                        ax1 = getattr(self, 'ax1', None)
-                        ax2 = getattr(self, 'ax2', None)
-                        if ax1 is not None and ax2 is not None:
-                            prev_x = float(self.prev_value_x)
-                            prev_y = float(self.prev_value_y)
-                            curr_x = float(self.curr_value_x)
-                            curr_y = float(self.curr_value_y)
-                            self.line1 = Line2D(
-                                [prev_x, curr_x],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax1.add_line(self.line1)
-
-                            self.line2 = Line2D(
-                                [self.sample_index - 1, self.sample_index],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax2.add_line(self.line2)
-
-                            for axis in (ax1, ax2):
-                                axis.relim()
-                                axis.autoscale_view()
-
-                            fig = getattr(self, 'fig', None)
-                            canvas = getattr(fig, 'canvas', None) if fig is not None else None
-                            if canvas is not None:
-                                canvas.draw()
-                                canvas.flush_events()
-
-                self.prev_value_x = self.curr_value_x
-                self.prev_value_y = self.curr_value_y
+                self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
 
 
 
@@ -2160,6 +2419,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.x_data_ax2 = []
         self.y_data_ax2 = []
         self.n_counter = 0
+        self._segment_lines_ax1 = []
+        self._segment_lines_ax2 = []
         """
     
         # Create an embedded Matplotlib figure on the right panel
@@ -2225,12 +2486,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax1.xaxis.label.set_color(text_rgb)
             self.ax1.yaxis.label.set_color(text_rgb)
 
-            self.line1 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax1.add_line(self.line1)
-
             self.ax2 = self.fig.add_subplot(212)
             self.ax2.set_facecolor(base_rgb)
-            self.ax2.set_xlabel("N [-]")
+            self.ax2.set_xlabel("N")
             self.ax2.set_ylabel("Resistance [Ohm]")
             self.ax2.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
             for spine in self.ax2.spines.values():
@@ -2238,8 +2496,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax2.tick_params(colors=text_rgb)
             self.ax2.xaxis.label.set_color(text_rgb)
             self.ax2.yaxis.label.set_color(text_rgb)
-            self.line2 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax2.add_line(self.line2)
             self._zero_placeholder_line1 = None
             self._zero_placeholder_line2 = None
             self._zero_placeholder_count = 0
@@ -2254,14 +2510,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax1.set_xlabel("Current [mA]")
             self.ax1.set_ylabel("Resistance [Ohm]")
             self.ax1.grid(True)
-            self.line1 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax1.add_line(self.line1)
             self.ax2 = self.fig.add_subplot(212)
-            self.ax2.set_xlabel("N [-]")
+            self.ax2.set_xlabel("N")
             self.ax2.set_ylabel("Resistance [Ohm]")
             self.ax2.grid(True)
-            self.line2 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax2.add_line(self.line2)
             self._zero_placeholder_line1 = None
             self._zero_placeholder_line2 = None
             self._zero_placeholder_count = 0

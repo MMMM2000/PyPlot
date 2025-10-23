@@ -1,5 +1,19 @@
 # Changelog
 
+## 2025-10-23 08:45 UTC
+
+- Added a measurement history dialog to the current annealing logger, pruning
+  interim 1 mA samples and persisting the latest three resistance–current plots
+  across sessions.
+- Retuned the logger’s progress estimator so 30 V projections immediately
+  recalibrate the progress bar and time remaining when the ceiling is lower than
+  the configured current limit.
+- Streamlined the current annealing PyPlot plugin by relying on shared workbench
+  actions for saving, Origin export, and data import while keeping only
+  annealing-specific settings.
+- Expanded PyPlot’s Object Manager tree to list every axis, legend, and line so
+  all plotted objects are visible for future editing.
+
 ## 2025-10-22 13:27 UTC
 
 - Highlight the live voltage readout in red once it exceeds 25 V, fix the

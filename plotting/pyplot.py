@@ -2698,8 +2698,109 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _handle_object_item_changed(self, *_: Any) -> None:
         """Subclasses should override to toggle line visibility."""
 
-    def _rebuild_object_manager_for_tab(self, *_: Any) -> None:
-        """Rebuild the object manager tree for ``tab``."""
+    def _rebuild_object_manager_for_tab(self, tab: QtWidgets.QWidget | None, *_: Any) -> None:
+        """Rebuild the object manager tree for ``tab`` with all axes, legends, and lines."""
+
+        tree = getattr(self, "object_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return
+        tree.blockSignals(True)
+        tree.clear()
+        if tab is None:
+            tree.blockSignals(False)
+            return
+        descriptor = self._tab_descriptors.get(tab)
+        canvas = self._canvas_by_tab.get(tab)
+        figure = None
+        if canvas is not None:
+            try:
+                figure = canvas.figure
+            except Exception:
+                figure = None
+        if figure is None and descriptor is not None:
+            axes_obj = getattr(descriptor, "axes", None)
+            if axes_obj is not None:
+                figure = getattr(axes_obj, "figure", None)
+        if figure is None:
+            tree.blockSignals(False)
+            return
+        title = ""
+        if descriptor is not None and descriptor.title:
+            title = descriptor.title
+        if not title:
+            try:
+                sup = getattr(figure, "_suptitle", None)
+                if sup is not None:
+                    title = sup.get_text()
+            except Exception:
+                title = ""
+        if not title:
+            title = "Figure"
+        root_item = QtWidgets.QTreeWidgetItem([title])
+        tree.addTopLevelItem(root_item)
+
+        try:
+            axes_list = list(getattr(figure, "axes", []))
+        except Exception:
+            axes_list = []
+
+        for axis_index, axis in enumerate(axes_list, start=1):
+            axis_title = ""
+            try:
+                axis_title = axis.get_title()
+            except Exception:
+                axis_title = ""
+            label = f"Axes {axis_index}"
+            if axis_title:
+                label = f"{label}: {axis_title}"
+            axis_item = QtWidgets.QTreeWidgetItem([label])
+            root_item.addChild(axis_item)
+            try:
+                x_label = axis.get_xlabel()
+            except Exception:
+                x_label = ""
+            axis_item.addChild(QtWidgets.QTreeWidgetItem([f"X axis: {x_label}" if x_label else "X axis"]))
+            try:
+                y_label = axis.get_ylabel()
+            except Exception:
+                y_label = ""
+            axis_item.addChild(QtWidgets.QTreeWidgetItem([f"Y axis: {y_label}" if y_label else "Y axis"]))
+            legend = None
+            try:
+                legend = axis.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    legend_title = legend.get_title().get_text() if legend.get_title() else "Legend"
+                except Exception:
+                    legend_title = "Legend"
+                legend_item = QtWidgets.QTreeWidgetItem([legend_title or "Legend"])
+                try:
+                    texts = legend.get_texts()
+                except Exception:
+                    texts = []
+                for entry in texts:
+                    try:
+                        text = entry.get_text()
+                    except Exception:
+                        text = ""
+                    legend_item.addChild(QtWidgets.QTreeWidgetItem([text or "Entry"]))
+                axis_item.addChild(legend_item)
+            try:
+                lines = list(axis.get_lines())
+            except Exception:
+                lines = []
+            for line_index, line in enumerate(lines, start=1):
+                try:
+                    line_label = line.get_label()
+                except Exception:
+                    line_label = ""
+                if not line_label or line_label.startswith("_line") or line_label == "_nolegend_":
+                    line_label = f"Line {line_index}"
+                axis_item.addChild(QtWidgets.QTreeWidgetItem([line_label]))
+        tree.expandAll()
+        tree.blockSignals(False)
 
     def _dispatch_object_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
         handler = getattr(self, "_handle_object_item_changed", None)

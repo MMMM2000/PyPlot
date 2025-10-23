@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+import math
 from pathlib import Path
 from typing import Any, List, Tuple, cast
 
@@ -130,6 +131,17 @@ def load_file(path: str) -> pd.DataFrame:
             df = df.iloc[: trimmed_currents.shape[0]].copy()
             df["I_mA"] = trimmed_currents
             df["R_Ohm"] = trimmed_resistances
+    if not df.empty:
+        tolerance = 0.6
+        mask = np.ones(len(df), dtype=bool)
+        values = df["I_mA"].to_numpy(dtype=float)
+        for idx, value in enumerate(values):
+            if not math.isfinite(value):
+                continue
+            if abs(value - 1.0) <= tolerance and idx < len(values) - 1:
+                mask[idx] = False
+        if not mask.all():
+            df = df.loc[mask].reset_index(drop=True)
     return df[["I_mA", "R_Ohm"]]
 
 

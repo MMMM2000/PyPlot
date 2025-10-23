@@ -491,7 +491,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
     def load_data(self) -> None:  # type: ignore[override]
         paths = [path for path in self.host._selected_paths() if path.is_file()]
         if not paths:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Select one or more data files first.")
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                self.name,
+                "Import current annealing logs via the Data menu, then select them before loading.",
+            )
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -950,15 +954,11 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._loaded_files: list[str] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
-        self._save_checkbox: QtWidgets.QCheckBox | None = None
-        self._format_combo: QtWidgets.QComboBox | None = None
-        self._dpi_spin: QtWidgets.QSpinBox | None = None
-        self._output_edit: QtWidgets.QLineEdit | None = None
-        self._subfolder_checkbox: QtWidgets.QCheckBox | None = None
         self._origin_mode_combo: QtWidgets.QComboBox | None = None
+        self._readability_ctrl: QtWidgets.QWidget | None = None
 
     def activate(self) -> None:  # type: ignore[override]
-        self.host._set_data_sources_visible(True)
+        self.host._set_data_sources_visible(False)
         self.update_ui()
 
     def deactivate(self) -> None:  # type: ignore[override]
@@ -969,7 +969,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
-        summary = QtWidgets.QLabel("Select current annealing log files then click Load data.")
+        summary = QtWidgets.QLabel(
+            "Use the Data menu to import current annealing logs, then select them before clicking Load data."
+        )
         summary.setWordWrap(True)
         layout.addWidget(summary)
         layout.addStretch(1)
@@ -984,59 +986,22 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        output_group = QtWidgets.QGroupBox("Output", container)
-        output_layout = QtWidgets.QGridLayout(output_group)
-        output_layout.setContentsMargins(8, 8, 8, 8)
-        output_layout.setHorizontalSpacing(6)
-        output_layout.setVerticalSpacing(4)
-        save_checkbox = QtWidgets.QCheckBox("Save plots to disk", output_group)
-        save_checkbox.setChecked(bool(anneal_core.SAVE_PLOTS))
-        self._save_checkbox = save_checkbox
-        output_layout.addWidget(save_checkbox, 0, 0, 1, 3)
-        output_layout.addWidget(QtWidgets.QLabel("Directory:"), 1, 0)
-        output_edit = QtWidgets.QLineEdit(str(anneal_core.OUTPUT_DIR), output_group)
-        self._output_edit = output_edit
-        output_layout.addWidget(output_edit, 1, 1)
-        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
-        output_layout.addWidget(browse_btn, 1, 2)
-        subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
-        subfolder_cb.setChecked(False)
-        self._subfolder_checkbox = subfolder_cb
-        output_layout.addWidget(subfolder_cb, 2, 0, 1, 3)
-        output_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
-        format_combo = QtWidgets.QComboBox(output_group)
-        format_combo.addItems(["png", "pdf", "svg"])
-        format_combo.setCurrentText(anneal_core.SAVE_FORMAT)
-        self._format_combo = format_combo
-        output_layout.addWidget(format_combo, 3, 1)
-        output_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
-        dpi_spin = QtWidgets.QSpinBox(output_group)
-        dpi_spin.setRange(72, 3000)
-        dpi_spin.setValue(int(anneal_core.PNG_DPI))
-        self._dpi_spin = dpi_spin
-        output_layout.addWidget(dpi_spin, 4, 1)
-        output_layout.addWidget(QtWidgets.QLabel("Origin mode:"), 5, 0)
-        origin_combo = QtWidgets.QComboBox(output_group)
+        origin_group = QtWidgets.QGroupBox("Origin export", container)
+        origin_layout = QtWidgets.QFormLayout(origin_group)
+        origin_combo = QtWidgets.QComboBox(origin_group)
         for mode in anneal_core.ORIGIN_MODES:
-            label = "Experimental" if mode == "experimental" else "Simple"
+            label = "Experimental (directional)" if mode == "experimental" else "Simple (single trace)"
             origin_combo.addItem(label, mode)
         index = origin_combo.findData(anneal_core.ORIGIN_MODE)
         origin_combo.setCurrentIndex(index if index >= 0 else 0)
         self._origin_mode_combo = origin_combo
-        output_layout.addWidget(origin_combo, 5, 1)
-        layout.addWidget(output_group)
+        origin_layout.addRow("Mode:", origin_combo)
+        layout.addWidget(origin_group)
 
-        def _browse_output() -> None:
-            directory = QtWidgets.QFileDialog.getExistingDirectory(
-                self.host,
-                "Select output directory",
-                output_edit.text() or str(Path.home()),
-            )
-            if directory:
-                output_edit.setText(directory)
-
-        browse_btn.clicked.connect(_browse_output)
-
+        self._readability_ctrl, readability_group = create_readability_group(
+            "current_annealing", anneal_core
+        )
+        layout.addWidget(readability_group)
         layout.addStretch(1)
         self._settings_widget = container
         return container
@@ -1051,27 +1016,18 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 pass
         print(message)
 
-    def _apply_settings_to_core(self) -> dict[str, Any]:
-        save_flag = bool(self._save_checkbox and self._save_checkbox.isChecked())
-        anneal_core.SAVE_PLOTS = save_flag
-        base_dir = self._output_edit.text().strip() if isinstance(self._output_edit, QtWidgets.QLineEdit) else str(anneal_core.OUTPUT_DIR)
-        subfolder = bool(self._subfolder_checkbox and self._subfolder_checkbox.isChecked())
-        output_dir = str(anneal_core.OUTPUT_DIR)
-        if save_flag:
-            output_dir = str(prepare_output_dir(base_dir or output_dir, "current_annealing", subfolder))
-            set_last_output_dir(base_dir or output_dir, key="current_annealing")
-        anneal_core.OUTPUT_DIR = output_dir
-        if isinstance(self._format_combo, QtWidgets.QComboBox):
-            anneal_core.SAVE_FORMAT = self._format_combo.currentText()
-        if isinstance(self._dpi_spin, QtWidgets.QSpinBox):
-            anneal_core.PNG_DPI = int(self._dpi_spin.value())
+    def _apply_settings_to_core(self) -> None:
         if isinstance(self._origin_mode_combo, QtWidgets.QComboBox):
             mode = self._origin_mode_combo.currentData()
             if isinstance(mode, str) and mode:
                 anneal_core.ORIGIN_MODE = mode
+        if self._readability_ctrl is not None:
+            try:
+                sync_readability(self._readability_ctrl, anneal_core)
+            except Exception:
+                pass
         anneal_core.SHOW_PLOTS = False
         anneal_core.BACKEND = "matplotlib"
-        return {"save": save_flag, "output_dir": output_dir}
 
     def load_data(self) -> None:  # type: ignore[override]
         paths = [path for path in self.host._selected_paths() if path.is_file()]
@@ -1109,7 +1065,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self.load_data()
         if not self._data_by_file:
             return
-        config = self._apply_settings_to_core()
+        self._apply_settings_to_core()
         anneal_core.apply_readability_fonts()
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
@@ -1125,22 +1081,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             df = self._data_by_file[path_str]
             title = format_annealing_title(Path(path_str).stem)
             try:
-                fig, fname = anneal_core.plot_one(df, title)
+                fig, _ = anneal_core.plot_one(df, title)
             except Exception as exc:
                 self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
                 continue
-            saved_path = ""
-            if config["save"]:
-                target_dir = Path(config["output_dir"])
-                try:
-                    target_dir.mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    pass
-                try:
-                    anneal_core.save_figure(fig, target_dir / fname, anneal_core.SAVE_FORMAT, anneal_core.PNG_DPI)
-                    saved_path = str(target_dir / fname)
-                except Exception as exc:
-                    self._log(f"Failed to save {fname}: {exc}", level="error")
             canvas = FigureCanvas(fig)
             canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
             tab = QtWidgets.QWidget()
@@ -1159,7 +1103,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 lines={},
                 metadata={
                     "source_file": path_str,
-                    "saved_path": saved_path,
+                    "saved_path": "",
                     "origin_mode": anneal_core.ORIGIN_MODE,
                 },
             )
