@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-23 13:05 UTC
+
+- Added a format toolbar to PyPlot that tracks the Object Manager selection so
+  line/marker styles, colours, and text emphasis can be tweaked directly inside
+  the main window.
+- Introduced a master toggle for readability settings, letting plotters fall
+  back to automatic sizing whenever the new checkbox in the Readability section
+  is cleared.
+- Synced imported data sources with the Load data workflow, opening the Data
+  menu from the menubar and auto-selecting newly imported files so scripts such
+  as current annealing can plot and export to Origin without re-entering paths.
+
 ## 2025-10-23 09:25 UTC
 
 - Normalised current annealing log headers so continued runs keep the

@@ -1031,7 +1031,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 anneal_core.ORIGIN_MODE = mode
         if self._readability_ctrl is not None:
             try:
-                sync_readability(self._readability_ctrl, anneal_core)
+                sync_readability("current_annealing", self._readability_ctrl, anneal_core)
             except Exception:
                 pass
         anneal_core.SHOW_PLOTS = False
@@ -2266,23 +2266,19 @@ class PyPlotWorkbench(PyPlotWindow):
         if not isinstance(data_menu, QtWidgets.QMenu):
             return False
         menu_bar = self.menuBar() if hasattr(self, "menuBar") else None
-        anchor_widget = getattr(self, "load_data_button", None)
-        global_pos: QtCore.QPoint | None = None
-        if isinstance(anchor_widget, QtWidgets.QWidget) and anchor_widget.isVisible():
+        if isinstance(menu_bar, QtWidgets.QMenuBar):
+            action = data_menu.menuAction()
             try:
-                rect = anchor_widget.rect()
-                global_pos = anchor_widget.mapToGlobal(rect.bottomLeft())
+                geometry = menu_bar.actionGeometry(action)
             except Exception:
-                global_pos = None
-        if global_pos is None and isinstance(menu_bar, QtWidgets.QMenuBar):
+                geometry = QtCore.QRect()
+            anchor_point = (
+                geometry.bottomLeft()
+                if geometry.isValid()
+                else QtCore.QPoint(0, menu_bar.height())
+            )
             try:
-                action = data_menu.menuAction()
-                rect = menu_bar.actionGeometry(action)
-            except Exception:
-                rect = QtCore.QRect()
-            anchor = rect.bottomLeft() if rect.isValid() else QtCore.QPoint(0, menu_bar.height())
-            try:
-                global_pos = menu_bar.mapToGlobal(anchor)
+                global_pos = menu_bar.mapToGlobal(anchor_point)
             except Exception:
                 global_pos = None
             if action is not None:
@@ -2290,12 +2286,14 @@ class PyPlotWorkbench(PyPlotWindow):
                     menu_bar.setActiveAction(action)
                 except Exception:
                     pass
-        if global_pos is None:
-            try:
-                global_pos = self.mapToGlobal(QtCore.QPoint(0, 0))
-            except Exception:
-                return False
-        data_menu.popup(global_pos)
+            if global_pos is not None:
+                data_menu.popup(global_pos)
+                return True
+        try:
+            fallback_pos = self.mapToGlobal(QtCore.QPoint(0, 0))
+        except Exception:
+            return False
+        data_menu.popup(fallback_pos)
         return True
 
     def _load_data(self) -> None:
@@ -2347,6 +2345,7 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         super()._import_paths(paths)
+        self._sync_selected_paths_with_imports()
         if self._current_plotter_name and self._last_directory is not None:
             self._plugin_last_directories[self._current_plotter_name] = self._last_directory
             payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
@@ -2494,6 +2493,7 @@ class PyPlotWorkbench(PyPlotWindow):
                     imported = True
         if imported:
             self._refresh_imported_data_summary()
+        self._sync_selected_paths_with_imports()
         self._update_action_states()
         self._update_project_actions()
         return True
@@ -2748,6 +2748,45 @@ class PyPlotWorkbench(PyPlotWindow):
                 last = path.parent
         if last is not None:
             self._last_directory = last
+
+    def _sync_selected_paths_with_imports(self) -> None:
+        ordered: list[Path] = []
+        seen: set[str] = set()
+
+        def _push(candidate: Path | None) -> None:
+            if not isinstance(candidate, Path):
+                return
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            ordered.append(resolved)
+
+        for selected in self._selected_path_entries:
+            _push(selected)
+
+        for workbook in self._workbooks.values():
+            _push(workbook.source)
+
+        if ordered != self._selected_path_entries:
+            self._selected_path_entries = ordered
+            formatted = self._format_paths(ordered)
+            if hasattr(self, "path_edit"):
+                try:
+                    self.path_edit.blockSignals(True)
+                except Exception:
+                    pass
+                self.path_edit.setText(formatted)
+                try:
+                    self.path_edit.blockSignals(False)
+                except Exception:
+                    pass
+        if ordered:
+            self._remember_directory_from_paths(ordered)
 
 
 

@@ -25,6 +25,9 @@ from functools import partial
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
+from matplotlib.text import Text
+from matplotlib import colors as mcolors
 import pandas as pd
 
 from plotting.utils import install_standard_menu, developer_options
@@ -32,6 +35,20 @@ from origin_clone.app import PythonConsoleWidget
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+
+
+@dataclass
+class FormatToolbarControls:
+    toolbar: QtWidgets.QToolBar | None = None
+    size_spin: QtWidgets.QSpinBox | None = None
+    bold_action: QtGui.QAction | None = None
+    italic_action: QtGui.QAction | None = None
+    underline_action: QtGui.QAction | None = None
+    color_button: QtWidgets.QToolButton | None = None
+    line_group: QtGui.QActionGroup | None = None
+    line_action: QtGui.QAction | None = None
+    scatter_action: QtGui.QAction | None = None
+    line_symbol_action: QtGui.QAction | None = None
 
 
 class _DockSwitcherWidget(QtWidgets.QWidget):
@@ -1070,6 +1087,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._history = _HistoryManager()
         self._retabify_pending = False
         self._import_storage_key = self._project_settings_key("import_sources")
+        self._format_controls = FormatToolbarControls()
+        self._format_selection: tuple[str, Any] | None = None
+        self._format_updating = False
 
         self._build_base_ui()
         self._update_project_title()
@@ -1248,7 +1268,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.object_tree = QtWidgets.QTreeWidget()
         self.object_tree.setHeaderLabels(["Object Manager"])
         self.object_tree.setColumnCount(1)
+        self.object_tree.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
         self.object_tree.itemChanged.connect(self._dispatch_object_item_changed)
+        self.object_tree.currentItemChanged.connect(
+            self._handle_object_selection_changed
+        )
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
@@ -1275,6 +1301,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, console_dock)
         console_dock.hide()
         self.console_dock = console_dock
+
+        self._setup_format_toolbar()
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
         if self._dock_switcher_supported():
@@ -1480,6 +1508,85 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._reorder_columns_action = reorder_action
 
         self._update_worksheet_actions()
+
+    def _setup_format_toolbar(self) -> None:
+        controls = self._format_controls
+        toolbar = QtWidgets.QToolBar("Format", self)
+        toolbar.setObjectName("mw_format_toolbar")
+        toolbar.setMovable(True)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+        controls.toolbar = toolbar
+
+        size_spin = QtWidgets.QSpinBox(toolbar)
+        size_spin.setRange(6, 96)
+        size_spin.setValue(18)
+        size_spin.setEnabled(False)
+        size_spin.valueChanged.connect(self._apply_text_size)
+        controls.size_spin = size_spin
+        toolbar.addWidget(size_spin)
+
+        bold_action = toolbar.addAction("B")
+        bold_action.setCheckable(True)
+        bold_action.setEnabled(False)
+        bold_action.triggered.connect(self._apply_text_bold)
+        bold_action.setToolTip("Toggle bold text")
+        controls.bold_action = bold_action
+
+        italic_action = toolbar.addAction("I")
+        italic_action.setCheckable(True)
+        italic_action.setEnabled(False)
+        italic_action.triggered.connect(self._apply_text_italic)
+        italic_action.setToolTip("Toggle italic text")
+        controls.italic_action = italic_action
+
+        underline_action = toolbar.addAction("U")
+        underline_action.setCheckable(True)
+        underline_action.setEnabled(False)
+        underline_action.triggered.connect(self._apply_text_underline)
+        underline_action.setToolTip("Toggle underlined text")
+        controls.underline_action = underline_action
+
+        color_button = QtWidgets.QToolButton(toolbar)
+        color_button.setText("Color…")
+        color_button.setEnabled(False)
+        color_button.clicked.connect(self._choose_format_color)
+        color_button.setToolTip("Select an object to adjust its colour")
+        controls.color_button = color_button
+        toolbar.addWidget(color_button)
+
+        toolbar.addSeparator()
+
+        line_group = QtGui.QActionGroup(toolbar)
+        line_group.setExclusive(True)
+        controls.line_group = line_group
+
+        line_action = toolbar.addAction("Line")
+        line_action.setCheckable(True)
+        line_action.setEnabled(False)
+        line_action.triggered.connect(lambda checked: self._apply_line_style("line", checked))
+        line_action.setToolTip("Show the selection as a line")
+        line_group.addAction(line_action)
+        controls.line_action = line_action
+
+        scatter_action = toolbar.addAction("Scatter")
+        scatter_action.setCheckable(True)
+        scatter_action.setEnabled(False)
+        scatter_action.triggered.connect(lambda checked: self._apply_line_style("scatter", checked))
+        scatter_action.setToolTip("Show only markers for the selection")
+        line_group.addAction(scatter_action)
+        controls.scatter_action = scatter_action
+
+        line_symbol_action = toolbar.addAction("Line + symbol")
+        line_symbol_action.setCheckable(True)
+        line_symbol_action.setEnabled(False)
+        line_symbol_action.triggered.connect(
+            lambda checked: self._apply_line_style("line_symbol", checked)
+        )
+        line_symbol_action.setToolTip("Show the selection with lines and markers")
+        line_group.addAction(line_symbol_action)
+        controls.line_symbol_action = line_symbol_action
 
     # ------------------------------------------------------------------ shared menu helpers
     def _project_settings_key(self, suffix: str) -> str:
@@ -2706,6 +2813,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         tree.blockSignals(True)
         tree.clear()
+        self._set_format_selection(None)
         if tab is None:
             tree.blockSignals(False)
             return
@@ -2737,12 +2845,33 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not title:
             title = "Figure"
         root_item = QtWidgets.QTreeWidgetItem([title])
+        root_item.setFlags(
+            root_item.flags()
+            | QtCore.Qt.ItemFlag.ItemIsEnabled
+            | QtCore.Qt.ItemFlag.ItemIsSelectable
+        )
+        root_item.setData(
+            0,
+            QtCore.Qt.ItemDataRole.UserRole,
+            {"kind": "figure", "object": figure},
+        )
         tree.addTopLevelItem(root_item)
 
         try:
             axes_list = list(getattr(figure, "axes", []))
         except Exception:
             axes_list = []
+
+        def _make_item(label: str, kind: str | None = None, obj: Any | None = None) -> QtWidgets.QTreeWidgetItem:
+            item = QtWidgets.QTreeWidgetItem([label])
+            item.setFlags(
+                item.flags()
+                | QtCore.Qt.ItemFlag.ItemIsEnabled
+                | QtCore.Qt.ItemFlag.ItemIsSelectable
+            )
+            if kind and obj is not None:
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, {"kind": kind, "object": obj})
+            return item
 
         for axis_index, axis in enumerate(axes_list, start=1):
             axis_title = ""
@@ -2753,18 +2882,36 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             label = f"Axes {axis_index}"
             if axis_title:
                 label = f"{label}: {axis_title}"
-            axis_item = QtWidgets.QTreeWidgetItem([label])
+            axis_item = _make_item(label, kind="axes", obj=axis)
             root_item.addChild(axis_item)
             try:
                 x_label = axis.get_xlabel()
             except Exception:
                 x_label = ""
-            axis_item.addChild(QtWidgets.QTreeWidgetItem([f"X axis: {x_label}" if x_label else "X axis"]))
+            x_label_text = f"X axis: {x_label}" if x_label else "X axis"
+            x_label_item = _make_item(x_label_text)
+            x_artist = getattr(getattr(axis, "xaxis", None), "label", None)
+            if isinstance(x_artist, Text):
+                x_label_item.setData(
+                    0,
+                    QtCore.Qt.ItemDataRole.UserRole,
+                    {"kind": "text", "object": x_artist},
+                )
+            axis_item.addChild(x_label_item)
             try:
                 y_label = axis.get_ylabel()
             except Exception:
                 y_label = ""
-            axis_item.addChild(QtWidgets.QTreeWidgetItem([f"Y axis: {y_label}" if y_label else "Y axis"]))
+            y_label_text = f"Y axis: {y_label}" if y_label else "Y axis"
+            y_label_item = _make_item(y_label_text)
+            y_artist = getattr(getattr(axis, "yaxis", None), "label", None)
+            if isinstance(y_artist, Text):
+                y_label_item.setData(
+                    0,
+                    QtCore.Qt.ItemDataRole.UserRole,
+                    {"kind": "text", "object": y_artist},
+                )
+            axis_item.addChild(y_label_item)
             legend = None
             try:
                 legend = axis.get_legend()
@@ -2775,7 +2922,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     legend_title = legend.get_title().get_text() if legend.get_title() else "Legend"
                 except Exception:
                     legend_title = "Legend"
-                legend_item = QtWidgets.QTreeWidgetItem([legend_title or "Legend"])
+                legend_item = _make_item(legend_title or "Legend", kind="legend", obj=legend)
                 try:
                     texts = legend.get_texts()
                 except Exception:
@@ -2785,7 +2932,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         text = entry.get_text()
                     except Exception:
                         text = ""
-                    legend_item.addChild(QtWidgets.QTreeWidgetItem([text or "Entry"]))
+                    entry_item = _make_item(text or "Entry")
+                    if isinstance(entry, Text):
+                        entry_item.setData(
+                            0,
+                            QtCore.Qt.ItemDataRole.UserRole,
+                            {"kind": "text", "object": entry},
+                        )
+                    legend_item.addChild(entry_item)
                 axis_item.addChild(legend_item)
             try:
                 lines = list(axis.get_lines())
@@ -2798,9 +2952,375 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     line_label = ""
                 if not line_label or line_label.startswith("_line") or line_label == "_nolegend_":
                     line_label = f"Line {line_index}"
-                axis_item.addChild(QtWidgets.QTreeWidgetItem([line_label]))
+                line_item = _make_item(line_label)
+                if isinstance(line, Line2D):
+                    line_item.setData(
+                        0,
+                        QtCore.Qt.ItemDataRole.UserRole,
+                        {"kind": "line", "object": line},
+                    )
+                axis_item.addChild(line_item)
         tree.expandAll()
         tree.blockSignals(False)
+
+    def _handle_object_selection_changed(
+        self,
+        current: QtWidgets.QTreeWidgetItem | None,
+        previous: QtWidgets.QTreeWidgetItem | None,
+    ) -> None:
+        _ = previous
+        selection: tuple[str, Any] | None = None
+        if isinstance(current, QtWidgets.QTreeWidgetItem):
+            data = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+            kind: str | None = None
+            target: Any | None = None
+            if isinstance(data, dict):
+                kind = data.get("kind")
+                target = data.get("object")
+            elif isinstance(data, tuple) and len(data) >= 2:
+                kind = cast(str, data[0])
+                target = data[1]
+            if kind == "text" and isinstance(target, Text):
+                selection = ("text", target)
+            elif kind == "line" and isinstance(target, Line2D):
+                selection = ("line", target)
+        self._set_format_selection(selection)
+
+    def _set_format_selection(self, selection: tuple[str, Any] | None) -> None:
+        if selection is not None:
+            kind, target = selection
+            if kind == "text" and not isinstance(target, Text):
+                selection = None
+            elif kind == "line" and not isinstance(target, Line2D):
+                selection = None
+        self._format_selection = selection
+        self._update_format_toolbar_state()
+
+    def _update_format_toolbar_state(self) -> None:
+        controls = self._format_controls
+        if controls.toolbar is None:
+            return
+        size_spin = controls.size_spin
+        bold_action = controls.bold_action
+        italic_action = controls.italic_action
+        underline_action = controls.underline_action
+        line_actions = (
+            (controls.line_action, "line"),
+            (controls.scatter_action, "scatter"),
+            (controls.line_symbol_action, "line_symbol"),
+        )
+        self._format_updating = True
+        try:
+            selection = self._format_selection
+            if selection is None:
+                if size_spin is not None:
+                    size_spin.blockSignals(True)
+                    size_spin.setEnabled(False)
+                    size_spin.blockSignals(False)
+                for action in (bold_action, italic_action, underline_action):
+                    if action is not None:
+                        action.blockSignals(True)
+                        action.setChecked(False)
+                        action.blockSignals(False)
+                        action.setEnabled(False)
+                for action, _ in line_actions:
+                    if action is not None:
+                        action.blockSignals(True)
+                        action.setChecked(False)
+                        action.blockSignals(False)
+                        action.setEnabled(False)
+                self._set_color_button_state(None, None)
+                return
+            kind, target = selection
+            if kind == "text" and isinstance(target, Text):
+                if size_spin is not None:
+                    size_spin.blockSignals(True)
+                    try:
+                        size_spin.setValue(int(round(float(target.get_fontsize()))))
+                    except Exception:
+                        pass
+                    size_spin.blockSignals(False)
+                    size_spin.setEnabled(True)
+                if bold_action is not None:
+                    bold_action.blockSignals(True)
+                    bold_action.setChecked(self._text_is_bold(target))
+                    bold_action.blockSignals(False)
+                    bold_action.setEnabled(True)
+                if italic_action is not None:
+                    italic_action.blockSignals(True)
+                    italic_action.setChecked(self._text_is_italic(target))
+                    italic_action.blockSignals(False)
+                    italic_action.setEnabled(True)
+                if underline_action is not None:
+                    underline_action.blockSignals(True)
+                    underline = False
+                    try:
+                        underline = bool(target.get_underline())
+                    except Exception:
+                        underline = False
+                    underline_action.setChecked(underline)
+                    underline_action.blockSignals(False)
+                    underline_action.setEnabled(True)
+                for action, _ in line_actions:
+                    if action is not None:
+                        action.blockSignals(True)
+                        action.setChecked(False)
+                        action.blockSignals(False)
+                        action.setEnabled(False)
+                self._set_color_button_state("text", self._qcolor_from_mpl(target.get_color()))
+                return
+            if kind == "line" and isinstance(target, Line2D):
+                if size_spin is not None:
+                    size_spin.blockSignals(True)
+                    size_spin.setEnabled(False)
+                    size_spin.blockSignals(False)
+                for action in (bold_action, italic_action, underline_action):
+                    if action is not None:
+                        action.blockSignals(True)
+                        action.setChecked(False)
+                        action.blockSignals(False)
+                        action.setEnabled(False)
+                style_key = self._line_style_key(target)
+                for action, key in line_actions:
+                    if action is None:
+                        continue
+                    action.blockSignals(True)
+                    action.setEnabled(True)
+                    action.setChecked(style_key == key)
+                    action.blockSignals(False)
+                self._set_color_button_state("line", self._qcolor_from_mpl(target.get_color()))
+                return
+            if size_spin is not None:
+                size_spin.blockSignals(True)
+                size_spin.setEnabled(False)
+                size_spin.blockSignals(False)
+            for action in (bold_action, italic_action, underline_action):
+                if action is not None:
+                    action.blockSignals(True)
+                    action.setChecked(False)
+                    action.blockSignals(False)
+                    action.setEnabled(False)
+            for action, _ in line_actions:
+                if action is not None:
+                    action.blockSignals(True)
+                    action.setChecked(False)
+                    action.blockSignals(False)
+                    action.setEnabled(False)
+            self._set_color_button_state(None, None)
+        finally:
+            self._format_updating = False
+
+    def _text_is_bold(self, text: Text) -> bool:
+        weight = text.get_fontweight()
+        if isinstance(weight, (int, float)):
+            return float(weight) >= 600
+        try:
+            return str(weight).lower() in {"bold", "semibold", "demibold", "heavy"}
+        except Exception:
+            return False
+
+    def _text_is_italic(self, text: Text) -> bool:
+        style = text.get_fontstyle()
+        try:
+            return str(style).lower() in {"italic", "oblique"}
+        except Exception:
+            return False
+
+    def _line_style_key(self, line: Line2D) -> str:
+        try:
+            linestyle = line.get_linestyle()
+        except Exception:
+            linestyle = "-"
+        try:
+            marker = line.get_marker()
+        except Exception:
+            marker = None
+        line_active = str(linestyle).strip().lower() not in {"", "none"}
+        marker_active = str(marker).strip().lower() not in {"", "none"}
+        if line_active and marker_active:
+            return "line_symbol"
+        if marker_active and not line_active:
+            return "scatter"
+        return "line"
+
+    def _apply_text_size(self, value: int) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        text = selection[1]
+        try:
+            text.set_fontsize(value)
+        except Exception:
+            return
+        self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _apply_text_bold(self, checked: bool) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        text = selection[1]
+        try:
+            text.set_fontweight("bold" if checked else "normal")
+        except Exception:
+            return
+        self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _apply_text_italic(self, checked: bool) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        text = selection[1]
+        try:
+            text.set_fontstyle("italic" if checked else "normal")
+        except Exception:
+            return
+        self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _apply_text_underline(self, checked: bool) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "text":
+            return
+        text = selection[1]
+        try:
+            text.set_underline(bool(checked))
+        except Exception:
+            return
+        self._redraw_artist(text)
+        self._update_format_toolbar_state()
+
+    def _choose_format_color(self) -> None:
+        if self._format_updating:
+            return
+        selection = self._format_selection
+        if selection is None:
+            return
+        role, target = selection
+        if role == "text" and isinstance(target, Text):
+            initial = self._qcolor_from_mpl(target.get_color())
+        elif role == "line" and isinstance(target, Line2D):
+            initial = self._qcolor_from_mpl(target.get_color())
+        else:
+            return
+        color = QtWidgets.QColorDialog.getColor(initial, self, "Select colour")
+        if not color.isValid():
+            return
+        mpl_color = self._mpl_color_from_qcolor(color)
+        try:
+            target.set_color(mpl_color)
+        except Exception:
+            return
+        self._redraw_artist(target)
+        self._update_format_toolbar_state()
+
+    def _apply_line_style(self, style: str, checked: bool) -> None:
+        if self._format_updating or not checked:
+            return
+        selection = self._format_selection
+        if not selection or selection[0] != "line":
+            return
+        line = selection[1]
+        try:
+            if style == "line":
+                line.set_linestyle("-")
+                line.set_marker(None)
+            elif style == "scatter":
+                line.set_linestyle("None")
+                line.set_marker("o")
+                self._ensure_marker_size(line)
+            elif style == "line_symbol":
+                line.set_linestyle("-")
+                marker = line.get_marker()
+                if str(marker).strip().lower() in {"", "none"}:
+                    line.set_marker("o")
+                self._ensure_marker_size(line)
+            else:
+                return
+        except Exception:
+            return
+        self._redraw_artist(line)
+        self._update_format_toolbar_state()
+
+    def _ensure_marker_size(self, line: Line2D) -> None:
+        try:
+            size = float(line.get_markersize())
+        except Exception:
+            size = 0.0
+        if size <= 0.0:
+            try:
+                line.set_markersize(6.0)
+            except Exception:
+                pass
+
+    def _set_color_button_state(self, role: str | None, color: QtGui.QColor | None) -> None:
+        button = self._format_controls.color_button
+        if button is None:
+            return
+        if role is None:
+            button.setEnabled(False)
+            button.setText("Color…")
+            button.setToolTip("Select an object to adjust its colour")
+            button.setIcon(QtGui.QIcon())
+            return
+        button.setEnabled(True)
+        if role == "text":
+            button.setText("Text color…")
+            button.setToolTip("Change the selected text colour")
+        elif role == "line":
+            button.setText("Line color…")
+            button.setToolTip("Change the selected line colour")
+        else:
+            button.setText("Color…")
+            button.setToolTip("Change the selected object's colour")
+        if color is None or not color.isValid():
+            button.setIcon(QtGui.QIcon())
+            return
+        pixmap = QtGui.QPixmap(16, 16)
+        pixmap.fill(color)
+        painter = QtGui.QPainter(pixmap)
+        painter.setPen(QtGui.QPen(QtGui.QColor(0, 0, 0, 80)))
+        painter.drawRect(pixmap.rect().adjusted(0, 0, -1, -1))
+        painter.end()
+        button.setIcon(QtGui.QIcon(pixmap))
+
+    def _qcolor_from_mpl(self, color: Any) -> QtGui.QColor:
+        try:
+            rgba = mcolors.to_rgba(color)
+        except (ValueError, TypeError):
+            return QtGui.QColor()
+        return QtGui.QColor.fromRgbF(rgba[0], rgba[1], rgba[2], rgba[3])
+
+    def _mpl_color_from_qcolor(self, color: QtGui.QColor) -> Any:
+        if color.alpha() < 255:
+            return (color.redF(), color.greenF(), color.blueF(), color.alphaF())
+        return color.name()
+
+    def _redraw_artist(self, artist: Any) -> None:
+        figure = getattr(artist, "figure", None)
+        if figure is None:
+            axes = getattr(artist, "axes", None)
+            if axes is not None:
+                figure = getattr(axes, "figure", None)
+        canvas = getattr(figure, "canvas", None) if figure is not None else None
+        if canvas is None:
+            return
+        try:
+            canvas.draw_idle()
+        except Exception:
+            try:
+                canvas.draw()
+            except Exception:
+                pass
 
     def _dispatch_object_item_changed(self, item: QtWidgets.QTreeWidgetItem, column: int) -> None:
         handler = getattr(self, "_handle_object_item_changed", None)
