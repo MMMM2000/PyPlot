@@ -2628,6 +2628,39 @@ class MainWindow(QtWidgets.QMainWindow):
             pass
         return os.path.join(DEFAULT_LOG_DIR, "anneal_log.txt")
 
+    def _ensure_log_header(self, path: str) -> None:
+        header_line = "# Current (mA)\tVoltage (V)\tResistance (Ohm)"
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return
+        lines = text.splitlines()
+        changed = False
+        if not lines:
+            lines = [header_line]
+            changed = True
+        else:
+            header_index: int | None = None
+            for idx, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if "Voltage" in stripped and "Resistance" in stripped:
+                    header_index = idx
+                    break
+            if header_index is None:
+                lines.insert(0, header_line)
+                changed = True
+            else:
+                if lines[header_index].strip() != header_line:
+                    lines[header_index] = header_line
+                    changed = True
+        if changed:
+            try:
+                Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except OSError:
+                pass
+
     def prepare_output_file(self) -> bool:
         """Create or prepare the output file, prompting if it exists.
 
@@ -2659,6 +2692,8 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 mode = "w"
         try:
+            if mode == "a":
+                self._ensure_log_header(path)
             with open(path, mode, encoding="utf-8") as fh:
                 if mode != "a":
                     fh.write("# Current (mA)\tVoltage (V)\tResistance (Ohm)\n")

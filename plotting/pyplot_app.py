@@ -56,6 +56,8 @@ from plotting.strain_3d_plot import Strain3DPlotter
 class PyPlotPlugin:
     """Base plugin contract for PyPlot script integrations."""
 
+    requires_imported_data: bool = False
+
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         self.host = host
         self.name = name
@@ -316,6 +318,8 @@ class EmbeddedWidgetPlugin(PyPlotPlugin):
 
 class TemperatureDependencePlugin(PyPlotPlugin):
     """Embed the temperature dependence workflow directly inside PyPlot."""
+
+    requires_imported_data = True
 
     _VAR_LABELS = {
         "sum": "T1+T2",
@@ -605,6 +609,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
 class TemperatureSensitivityPlugin(PyPlotPlugin):
     """Embed the temperature sensitivity workflow directly inside PyPlot."""
+
+    requires_imported_data = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -947,6 +953,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 
 class CurrentAnnealingPlugin(PyPlotPlugin):
     """Embed current annealing plotting inside PyPlot."""
+
+    requires_imported_data = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -1477,6 +1485,9 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         return ordered
 
     def _open_data_menu(self) -> bool:
+        show_menu = getattr(self.host, "_show_data_menu", None)
+        if callable(show_menu):
+            return bool(show_menu())
         data_menu = getattr(self.host, "_data_menu", None)
         if not isinstance(data_menu, QtWidgets.QMenu):
             return False
@@ -1512,6 +1523,8 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
 class StressDependencePlugin(PyPlotPlugin):
     """Port the stress dependence workflow into the shared PyPlot frame."""
+
+    requires_imported_data = True
 
     _VAR_LABELS = {
         "sum": "T1+T2",
@@ -2248,6 +2261,43 @@ class PyPlotWorkbench(PyPlotWindow):
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ project and data integration
+    def _show_data_menu(self) -> bool:
+        data_menu = getattr(self, "_data_menu", None)
+        if not isinstance(data_menu, QtWidgets.QMenu):
+            return False
+        menu_bar = self.menuBar() if hasattr(self, "menuBar") else None
+        anchor_widget = getattr(self, "load_data_button", None)
+        global_pos: QtCore.QPoint | None = None
+        if isinstance(anchor_widget, QtWidgets.QWidget) and anchor_widget.isVisible():
+            try:
+                rect = anchor_widget.rect()
+                global_pos = anchor_widget.mapToGlobal(rect.bottomLeft())
+            except Exception:
+                global_pos = None
+        if global_pos is None and isinstance(menu_bar, QtWidgets.QMenuBar):
+            try:
+                action = data_menu.menuAction()
+                rect = menu_bar.actionGeometry(action)
+            except Exception:
+                rect = QtCore.QRect()
+            anchor = rect.bottomLeft() if rect.isValid() else QtCore.QPoint(0, menu_bar.height())
+            try:
+                global_pos = menu_bar.mapToGlobal(anchor)
+            except Exception:
+                global_pos = None
+            if action is not None:
+                try:
+                    menu_bar.setActiveAction(action)
+                except Exception:
+                    pass
+        if global_pos is None:
+            try:
+                global_pos = self.mapToGlobal(QtCore.QPoint(0, 0))
+            except Exception:
+                return False
+        data_menu.popup(global_pos)
+        return True
+
     def _load_data(self) -> None:
         if self._current_plugin is None:
             QtWidgets.QMessageBox.information(
@@ -2256,7 +2306,20 @@ class PyPlotWorkbench(PyPlotWindow):
                 "Select a plotting script before loading data.",
             )
             return
-        self._current_plugin.load_data()
+        plugin = self._current_plugin
+        requires_data = bool(getattr(plugin, "requires_imported_data", False))
+        if requires_data:
+            has_selection = bool(self._selected_paths())
+            if not has_selection:
+                if self._show_data_menu():
+                    return
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "PyPlot",
+                    "Import data via the Data menu before loading it in this script.",
+                )
+                return
+        plugin.load_data()
         self._update_action_states()
 
     def _update_action_states(self) -> None:

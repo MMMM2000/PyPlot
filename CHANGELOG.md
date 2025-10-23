@@ -1,5 +1,13 @@
 # Changelog
 
+## 2025-10-23 09:25 UTC
+
+- Normalised current annealing log headers so continued runs keep the
+  `# Current (mA)` line instead of dropping back to bare column names.
+- Made "Load data" open the shared Data menu whenever a plotting plugin that
+  needs imported files has nothing selected, guiding users to import their
+  measurements before retrying.
+
 ## 2025-10-23 08:45 UTC
 
 - Added a measurement history dialog to the current annealing logger, pruning
