@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
+import pandas as pd
+
 from PyQt6 import QtCore, QtGui, QtWidgets
 from plotting.utils import ensure_app_theme, install_standard_menu
 
@@ -40,7 +42,9 @@ from .core import (
     _resistance_sanity_check,
     _group_microscope_measurements,
     _collect_video_metrics,
-    _load_strain_records,
+    _microwire_label,
+    _microwire_tuple_from_label,
+    _parse_strain_float,
 )
 
 
@@ -2363,6 +2367,226 @@ def _apply_microscope_overrides(
     return result
 
 
+
+class MiniDatabaseSection(QtWidgets.QWidget):
+    """Base widget for mini-database sections that process a subset of data."""
+
+    section_key = "base"
+    section_title = "Base"
+    supported_suffixes: tuple[str, ...] = ()
+    recursive_search = True
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.logger = logger
+        self._log_callback = log_callback
+        self.store = MiniDatabaseStore(self.section_key)
+        self.data = self.store.load()
+        self.model = DataFrameModel(self.data.table)
+        self.table_view: QtWidgets.QTableView | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.add_button = QtWidgets.QPushButton("Connect folder…")
+        self.add_button.clicked.connect(self._add_source)
+        controls.addWidget(self.add_button)
+
+        self.remove_button = QtWidgets.QPushButton("Remove")
+        self.remove_button.clicked.connect(self._remove_selected_source)
+        controls.addWidget(self.remove_button)
+
+        controls.addStretch(1)
+
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh)
+        controls.addWidget(self.refresh_button)
+
+        layout.addLayout(controls)
+
+        self.status_label = QtWidgets.QLabel()
+        layout.addWidget(self.status_label)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.sources_list = QtWidgets.QListWidget()
+        self.sources_list.itemSelectionChanged.connect(self._update_remove_enabled)
+        splitter.addWidget(self.sources_list)
+        splitter.setStretchFactor(0, 0)
+
+        right_panel = self.create_right_panel(splitter)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
+        self._populate_sources_list()
+        self.model.set_frame(self.data.table)
+        self._update_status()
+
+    # ------------------------------------------------------------------ UI helpers
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        self.table_view = table
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(table, 1)
+        return container
+
+    def _populate_sources_list(self) -> None:
+        self.sources_list.clear()
+        for source in self.data.sources:
+            self.sources_list.addItem(source)
+        self._update_remove_enabled()
+
+    def _update_remove_enabled(self) -> None:
+        has_selection = bool(self.sources_list.selectedItems())
+        self.remove_button.setEnabled(has_selection)
+
+    def _sync_sources(self) -> None:
+        sources: list[str] = []
+        for index in range(self.sources_list.count()):
+            item = self.sources_list.item(index)
+            if item is not None:
+                sources.append(item.text())
+        self.data.sources = sources
+        self.store.save(self.data)
+        self._update_status()
+
+    def _add_source(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
+        if not directory:
+            return
+        normalised = str(Path(directory).expanduser())
+        existing = {self.sources_list.item(idx).text() for idx in range(self.sources_list.count())}
+        if normalised not in existing:
+            self.sources_list.addItem(normalised)
+            self._sync_sources()
+
+    def _remove_selected_source(self) -> None:
+        for item in self.sources_list.selectedItems():
+            row = self.sources_list.row(item)
+            self.sources_list.takeItem(row)
+        self._sync_sources()
+
+    # ------------------------------------------------------------------ data handling
+    def _collect_candidates(self) -> List[Path]:
+        candidates: Dict[str, Path] = {}
+        for source in self.data.sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            iterator: Iterable[Path]
+            try:
+                iterator = root.rglob("*") if self.recursive_search else root.glob("*")
+            except Exception:
+                continue
+            for path in iterator:
+                if not path.is_file():
+                    continue
+                if self.supported_suffixes and path.suffix.lower() not in self.supported_suffixes:
+                    continue
+                try:
+                    resolved = str(path.resolve())
+                except Exception:
+                    resolved = str(path)
+                candidates.setdefault(resolved, path)
+        return sorted(candidates.values())
+
+    def _pending_paths(self) -> List[Path]:
+        pending: List[Path] = []
+        processed = self.data.processed
+        for path in self._collect_candidates():
+            key = str(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if float(processed.get(key, -1.0)) != float(mtime):
+                pending.append(path)
+        return pending
+
+    def _update_status(self) -> None:
+        sources_count = len(self.data.sources)
+        pending = self._pending_paths() if sources_count else []
+        if sources_count == 0:
+            self.status_label.setText("Connect one or more folders to begin.")
+            self.refresh_button.setEnabled(False)
+            return
+        self.refresh_button.setEnabled(True)
+        if pending:
+            self.status_label.setText(
+                f"⚠️ {len(pending)} new or updated file(s) pending processing."
+            )
+        elif not self.data.table.empty:
+            self.status_label.setText(
+                f"Up to date ({len(self.data.table)} record(s))."
+            )
+        else:
+            self.status_label.setText("No processed data available yet.")
+
+    def log(self, message: str) -> None:
+        try:
+            self._log_callback(message)
+        except Exception:
+            self.logger.info(message)
+
+    def refresh(self) -> None:
+        candidates = self._collect_candidates()
+        if not candidates:
+            self.log(f"{self.section_title}: no files found in connected folders.")
+            self.data.processed = {}
+            self.data.table = pd.DataFrame()
+            self.store.save(self.data)
+            self.model.set_frame(self.data.table)
+            self._update_status()
+            return
+        try:
+            result = self.process(candidates)
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            self.logger.exception("%s processing failed", self.section_title)
+            QtWidgets.QMessageBox.critical(
+                self,
+                self.section_title,
+                f"Failed to process data:\n{exc}",
+            )
+            return
+
+        existing_payloads = set(self.data.extra.get("payloads", {}).keys())
+        new_payloads = set(result.payloads.keys())
+        for name in existing_payloads - new_payloads:
+            self.store.clear_payload(name)
+
+        payload_map: Dict[str, str] = {}
+        for name, payload in result.payloads.items():
+            self.store.save_payload(name, payload)
+            payload_map[name] = name
+        if payload_map:
+            self.data.extra["payloads"] = payload_map
+        if result.extra:
+            self.data.extra.update(result.extra)
+        self.data.processed = result.processed
+        self.data.table = result.table
+        self.store.save(self.data)
+        self.model.set_frame(result.table)
+        self._update_status()
+        self.log(
+            f"{self.section_title}: processed {len(candidates)} file(s)."
+        )
+
+    # ------------------------------------------------------------------ hooks for subclasses
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        raise NotImplementedError
+
 class FabricationSection(MiniDatabaseSection):
     section_key = "fabrication"
     section_title = "Fabrication data"
@@ -2673,25 +2897,835 @@ class VideoSection(MiniDatabaseSection):
         )
 
 
+
 class StrainSection(MiniDatabaseSection):
     section_key = "strain"
     section_title = "Strain data"
-    supported_suffixes = (".xlsx", ".xls", ".xlsm")
+    supported_suffixes: tuple[str, ...] = ()
+    recursive_search = False
 
-    def process(self, paths: List[Path]) -> SectionProcessResult:
-        records = _load_strain_records(paths, self.logger)
-        table = _strain_records_to_frame(records)
-        processed: Dict[str, float] = {}
-        for path in paths:
-            try:
-                processed[str(path)] = float(path.stat().st_mtime)
-            except OSError:
-                continue
-        return SectionProcessResult(
-            table=table,
-            processed=processed,
-            payloads={"strain_records": records},
+    COLUMN_COMPOSITION = "Composition"
+    COLUMN_MICROWIRE = "Microwire"
+    COLUMN_DRAW = "Draw"
+    COLUMN_PIECE = "Piece"
+    COLUMN_D = "d (µm)"
+    COLUMN_MASS = "m"
+    COLUMN_M_LENGTH = "M length"
+    COLUMN_A_LENGTH = "A length"
+    COLUMN_STRAIN = "Strain"
+    COLUMN_BROKE = "Broke"
+    TABLE_COLUMNS = [
+        COLUMN_COMPOSITION,
+        COLUMN_MICROWIRE,
+        COLUMN_DRAW,
+        COLUMN_PIECE,
+        COLUMN_D,
+        COLUMN_MASS,
+        COLUMN_M_LENGTH,
+        COLUMN_A_LENGTH,
+        COLUMN_STRAIN,
+        COLUMN_BROKE,
+    ]
+    HIDDEN_COLUMNS = (COLUMN_DRAW, COLUMN_PIECE, COLUMN_BROKE)
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._wire_choices: Dict[str, Dict[str, tuple[int, int]]] = {}
+        self._d_lookup: Dict[tuple[str, int, int], float] = {}
+        self._suspend_auto_fill = False
+        self._editing_index: Optional[int] = None
+        self._editing_key: Optional[tuple[str, int, int]] = None
+        self._selected_wire_key: Optional[tuple[str, int, int]] = None
+        super().__init__(logger, log_callback, parent)
+        self.add_button.hide()
+        self.remove_button.hide()
+        self.refresh_button.hide()
+        self.sources_list.hide()
+        self.sources_list.setMaximumWidth(0)
+        self.status_label.setWordWrap(True)
+        self._ensure_table_structure()
+        self._refresh_table_view()
+        self._load_reference_data()
+        self._sync_payload()
+        if hasattr(self, "composition_combo"):
+            self._update_composition_suggestions()
+        self._update_status()
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        form_container = QtWidgets.QWidget(container)
+        form_layout = QtWidgets.QFormLayout(form_container)
+        form_layout.setContentsMargins(0, 0, 0, 0)
+        form_layout.setSpacing(6)
+
+        self.composition_combo = QtWidgets.QComboBox(form_container)
+        self.composition_combo.setEditable(True)
+        self.composition_combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
+        self.composition_combo.setSizeAdjustPolicy(
+            QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents
         )
+        line_edit = self.composition_combo.lineEdit()
+        if line_edit is not None:
+            line_edit.textEdited.connect(self._composition_text_edited)
+        self.composition_combo.currentTextChanged.connect(self._composition_changed)
+        form_layout.addRow("Composition", self.composition_combo)
+
+        self.microwire_combo = QtWidgets.QComboBox(form_container)
+        self.microwire_combo.currentIndexChanged.connect(self._microwire_changed)
+        form_layout.addRow("Microwire", self.microwire_combo)
+
+        self.d_edit = QtWidgets.QLineEdit(form_container)
+        self.d_edit.setPlaceholderText("auto")
+        self.d_edit.textChanged.connect(self._update_mass_display)
+        form_layout.addRow(self.COLUMN_D, self.d_edit)
+
+        self.mass_display = QtWidgets.QLineEdit(form_container)
+        self.mass_display.setReadOnly(True)
+        form_layout.addRow(self.COLUMN_MASS, self.mass_display)
+
+        self.M_length_edit = QtWidgets.QLineEdit(form_container)
+        self.M_length_edit.setPlaceholderText("mm")
+        self.M_length_edit.textChanged.connect(self._update_strain_display)
+        form_layout.addRow(self.COLUMN_M_LENGTH, self.M_length_edit)
+
+        self.A_length_edit = QtWidgets.QLineEdit(form_container)
+        self.A_length_edit.setPlaceholderText("mm or '-' if broke")
+        self.A_length_edit.textChanged.connect(self._update_strain_display)
+        form_layout.addRow(self.COLUMN_A_LENGTH, self.A_length_edit)
+
+        self.strain_display = QtWidgets.QLineEdit(form_container)
+        self.strain_display.setReadOnly(True)
+        form_layout.addRow(f"{self.COLUMN_STRAIN} (%)", self.strain_display)
+
+        layout.addWidget(form_container)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.add_update_button = QtWidgets.QPushButton("Add entry")
+        self.add_update_button.clicked.connect(self._save_entry)
+        button_row.addWidget(self.add_update_button)
+
+        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.clear_button.clicked.connect(self._clear_form)
+        button_row.addWidget(self.clear_button)
+
+        self.delete_button = QtWidgets.QPushButton("Remove entry")
+        self.delete_button.clicked.connect(self._delete_selected)
+        self.delete_button.setEnabled(False)
+        button_row.addWidget(self.delete_button)
+
+        button_row.addStretch(1)
+
+        self.refresh_sources_button = QtWidgets.QPushButton("Reload data")
+        self.refresh_sources_button.clicked.connect(self._reload_references_clicked)
+        button_row.addWidget(self.refresh_sources_button)
+
+        self.export_button = QtWidgets.QPushButton("Export to Excel…")
+        self.export_button.clicked.connect(self._export_to_excel)
+        self.export_button.setEnabled(False)
+        button_row.addWidget(self.export_button)
+
+        layout.addLayout(button_row)
+
+        self.table_view = QtWidgets.QTableView(container)
+        self.table_view.setModel(self.model)
+        self.table_view.setAlternatingRowColors(True)
+        self.table_view.horizontalHeader().setStretchLastSection(True)
+        self.table_view.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.table_view.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+        )
+        selection_model = self.table_view.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._handle_table_selection)
+        layout.addWidget(self.table_view, 1)
+
+        return container
+
+    def _update_status(self) -> None:
+        entries = len(self.data.table.index) if isinstance(self.data.table, pd.DataFrame) else 0
+        entry_word = "entry" if entries == 1 else "entries"
+        available = self._available_wire_count()
+        if not self._wire_choices:
+            suffix = "Process current annealing data to populate suggestions."
+        elif available:
+            suffix = f"{available} microwire(s) awaiting strain logging."
+        else:
+            suffix = "All processed microwires are represented."
+        self.status_label.setText(f"{entries} strain {entry_word} stored. {suffix}")
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(entries > 0)
+        if hasattr(self, "delete_button"):
+            has_selection = self._editing_index is not None and entries > 0
+            self.delete_button.setEnabled(has_selection)
+
+    def refresh(self) -> None:
+        self._load_reference_data()
+        if hasattr(self, "composition_combo"):
+            self._update_composition_suggestions()
+        self._update_status()
+
+    def _composition_text_edited(self, _: str) -> None:
+        if self._suspend_auto_fill:
+            return
+        self.composition_combo.showPopup()
+        self._update_microwire_options()
+
+    def _composition_changed(self, _: str) -> None:
+        if self._suspend_auto_fill:
+            return
+        self._update_microwire_options()
+
+    def _microwire_changed(self) -> None:
+        comp = self.composition_combo.currentText().strip()
+        data = self.microwire_combo.currentData()
+        key: Optional[tuple[int, int]] = None
+        if isinstance(data, tuple):
+            key = (int(data[0]), int(data[1]))
+        else:
+            parsed = _microwire_tuple_from_label(self.microwire_combo.currentText())
+            if parsed:
+                key = (int(parsed[0]), int(parsed[1]))
+        if key is None:
+            self._selected_wire_key = None
+            if not self._suspend_auto_fill:
+                self.d_edit.clear()
+                self._update_mass_display()
+            return
+        self._selected_wire_key = (comp, key[0], key[1])
+        if self._suspend_auto_fill:
+            return
+        d_value = self._d_lookup.get(self._selected_wire_key)
+        if d_value is not None:
+            self.d_edit.setText(f"{d_value:.4f}")
+        self._update_mass_display()
+
+    def _update_mass_display(self) -> None:
+        value = _parse_strain_float(self.d_edit.text())
+        mass = self._calculate_mass(value)
+        if mass is None:
+            self.mass_display.setText("")
+        else:
+            self.mass_display.setText(f"{mass:.6f}")
+
+    def _update_strain_display(self) -> None:
+        text = self.A_length_edit.text().strip()
+        if text == "-" or text.lower() == "broke":
+            self.strain_display.setText("broke")
+            return
+        m_length = _parse_strain_float(self.M_length_edit.text())
+        a_length = _parse_strain_float(text)
+        if m_length in (None, 0) or a_length is None:
+            self.strain_display.setText("")
+            return
+        try:
+            percent = ((m_length - a_length) / m_length) * 100
+        except ZeroDivisionError:
+            self.strain_display.setText("")
+            return
+        self.strain_display.setText(f"{percent:.3f}")
+
+    def _handle_table_selection(self, *_: Any) -> None:
+        self._load_row(self._selected_row_index())
+
+    def _selected_row_index(self) -> Optional[int]:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return None
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return None
+        rows = selection.selectedRows()
+        if not rows:
+            return None
+        return rows[0].row()
+
+    def _load_row(self, row_index: Optional[int]) -> None:
+        if row_index is None or row_index < 0 or row_index >= len(self.data.table.index):
+            self._editing_index = None
+            self._editing_key = None
+            self._suspend_auto_fill = True
+            self.composition_combo.setEditText("")
+            self.microwire_combo.clear()
+            self.d_edit.clear()
+            self.mass_display.clear()
+            self.M_length_edit.clear()
+            self.A_length_edit.clear()
+            self.strain_display.clear()
+            self._suspend_auto_fill = False
+            self.add_update_button.setText("Add entry")
+            self._update_status()
+            return
+
+        row = self.data.table.iloc[row_index]
+        composition = str(row.get(self.COLUMN_COMPOSITION) or "").strip()
+        microwire = str(row.get(self.COLUMN_MICROWIRE) or "").strip()
+        draw = row.get(self.COLUMN_DRAW)
+        piece = row.get(self.COLUMN_PIECE)
+        key: Optional[tuple[str, int, int]] = None
+        if pd.notna(draw) and pd.notna(piece):
+            try:
+                key = (composition, int(float(draw)), int(float(piece)))
+            except (TypeError, ValueError):
+                key = None
+        if key is None and microwire:
+            parsed = _microwire_tuple_from_label(microwire)
+            if parsed:
+                key = (composition, int(parsed[0]), int(parsed[1]))
+        self._editing_index = row_index
+        self._editing_key = key
+
+        self._suspend_auto_fill = True
+        self.composition_combo.setEditText(composition)
+        self._update_composition_suggestions()
+        self._update_microwire_options()
+        if microwire:
+            idx = self.microwire_combo.findText(microwire)
+            if idx >= 0:
+                self.microwire_combo.setCurrentIndex(idx)
+            elif key is not None:
+                self.microwire_combo.insertItem(0, microwire, (key[1], key[2]))
+                self.microwire_combo.setCurrentIndex(0)
+        d_value = _parse_strain_float(row.get(self.COLUMN_D))
+        self.d_edit.setText("" if d_value is None else f"{d_value:.4f}")
+        mass_value = _parse_strain_float(row.get(self.COLUMN_MASS))
+        self.mass_display.setText("" if mass_value is None else f"{mass_value:.6f}")
+        m_length = _parse_strain_float(row.get(self.COLUMN_M_LENGTH))
+        self.M_length_edit.setText("" if m_length is None else f"{m_length:.4f}")
+        a_entry = row.get(self.COLUMN_A_LENGTH)
+        if isinstance(a_entry, str) and a_entry.strip():
+            self.A_length_edit.setText(a_entry)
+        else:
+            a_length = _parse_strain_float(a_entry)
+            self.A_length_edit.setText("" if a_length is None else f"{a_length:.4f}")
+        strain_value = row.get(self.COLUMN_STRAIN)
+        if isinstance(strain_value, str) and strain_value.strip().lower() == "broke":
+            self.strain_display.setText("broke")
+        else:
+            strain_float = _parse_strain_float(strain_value)
+            self.strain_display.setText("" if strain_float is None else f"{strain_float:.3f}")
+        self._suspend_auto_fill = False
+        self.add_update_button.setText("Update entry")
+        self._update_status()
+
+    def _clear_form(self) -> None:
+        self._editing_index = None
+        self._editing_key = None
+        self._selected_wire_key = None
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            self.table_view.clearSelection()
+        self._suspend_auto_fill = True
+        self.composition_combo.setEditText("")
+        self.microwire_combo.clear()
+        self.d_edit.clear()
+        self.mass_display.clear()
+        self.M_length_edit.clear()
+        self.A_length_edit.clear()
+        self.strain_display.clear()
+        self._suspend_auto_fill = False
+        self.add_update_button.setText("Add entry")
+        if hasattr(self, "delete_button"):
+            self.delete_button.setEnabled(False)
+        self._update_composition_suggestions()
+        self._update_status()
+
+    def _save_entry(self) -> None:
+        composition = self.composition_combo.currentText().strip()
+        if not composition:
+            QtWidgets.QMessageBox.warning(self, self.section_title, "Enter a composition.")
+            return
+        if self.microwire_combo.count() == 0:
+            QtWidgets.QMessageBox.warning(self, self.section_title, "Select a microwire.")
+            return
+        label = self.microwire_combo.currentText().strip()
+        data = self.microwire_combo.currentData()
+        key: Optional[tuple[str, int, int]] = None
+        if isinstance(data, tuple):
+            key = (composition, int(data[0]), int(data[1]))
+        elif self._selected_wire_key and self._selected_wire_key[0] == composition:
+            key = self._selected_wire_key
+        else:
+            parsed = _microwire_tuple_from_label(label)
+            if parsed:
+                key = (composition, int(parsed[0]), int(parsed[1]))
+        if key is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "Unable to determine the draw/piece for the selected microwire.",
+            )
+            return
+        used = self._used_wire_keys()
+        if self._editing_key in used:
+            used.discard(self._editing_key)
+        if key in used:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "This microwire already has a strain entry.",
+            )
+            return
+
+        d_value = _parse_strain_float(self.d_edit.text())
+        if d_value is None or d_value <= 0:
+            QtWidgets.QMessageBox.warning(self, self.section_title, "Enter a valid diameter.")
+            return
+        mass_value = self._calculate_mass(d_value)
+
+        m_length = _parse_strain_float(self.M_length_edit.text())
+        a_text = self.A_length_edit.text().strip()
+        broke = a_text == "-" or a_text.lower() == "broke"
+        a_length = None if broke else _parse_strain_float(a_text)
+        if not broke and a_text and a_length is None:
+            QtWidgets.QMessageBox.warning(self, self.section_title, "Enter a valid A length or '-' if the wire broke.")
+            return
+        strain_percent = None
+        if broke:
+            strain_display = "broke"
+            a_display: object = "-"
+        else:
+            a_display = a_length
+            if m_length not in (None, 0) and a_length is not None:
+                try:
+                    strain_percent = ((m_length - a_length) / m_length) * 100
+                except ZeroDivisionError:
+                    strain_percent = None
+            strain_display = "" if strain_percent is None else f"{strain_percent:.3f}"
+
+        row_data = {
+            self.COLUMN_COMPOSITION: composition,
+            self.COLUMN_MICROWIRE: label,
+            self.COLUMN_DRAW: key[1],
+            self.COLUMN_PIECE: key[2],
+            self.COLUMN_D: d_value,
+            self.COLUMN_MASS: mass_value,
+            self.COLUMN_M_LENGTH: m_length,
+            self.COLUMN_A_LENGTH: a_display,
+            self.COLUMN_STRAIN: strain_display if broke else (None if strain_percent is None else round(strain_percent, 3)),
+            self.COLUMN_BROKE: broke,
+        }
+
+        if self._editing_index is not None and 0 <= self._editing_index < len(self.data.table.index):
+            idx = self._editing_index
+        else:
+            idx = len(self.data.table.index)
+        self.data.table.loc[idx, :] = row_data
+        self._editing_index = idx
+        self._editing_key = key
+        self._save_table()
+        self._select_key(key)
+        self.log(
+            f"Strain: recorded {composition} {label}"
+        )
+
+    def _delete_selected(self) -> None:
+        row_index = self._selected_row_index()
+        if row_index is None:
+            return
+        self.data.table = self.data.table.drop(index=row_index).reset_index(drop=True)
+        self._editing_index = None
+        self._editing_key = None
+        self._selected_wire_key = None
+        self._save_table()
+        self._clear_form()
+        self.log("Strain: removed selected entry.")
+
+    def _reload_references_clicked(self) -> None:
+        before = self._available_wire_count()
+        self._load_reference_data()
+        if hasattr(self, "composition_combo"):
+            self._update_composition_suggestions()
+        after = self._available_wire_count()
+        self.log(f"Strain: reloaded reference data ({after} microwire option(s) available).")
+        self._update_status()
+
+    def _export_to_excel(self) -> None:
+        if self.data.table.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No strain entries to export.",
+            )
+            return
+        suggested = Path.cwd() / "strain_data.xlsx"
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export strain worksheet",
+            str(suggested),
+            "Excel Workbook (*.xlsx)",
+        )
+        if not path:
+            return
+        export_path = Path(path)
+        if export_path.suffix.lower() != ".xlsx":
+            export_path = export_path.with_suffix(".xlsx")
+        frame = self.data.table[
+            [
+                self.COLUMN_COMPOSITION,
+                self.COLUMN_MICROWIRE,
+                self.COLUMN_D,
+                self.COLUMN_MASS,
+                self.COLUMN_M_LENGTH,
+                self.COLUMN_A_LENGTH,
+                self.COLUMN_STRAIN,
+            ]
+        ].copy()
+        try:
+            frame.to_excel(export_path, index=False)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                self.section_title,
+                f"Failed to export worksheet:\n{exc}",
+            )
+            return
+        self.log(f"Strain: exported worksheet to {export_path}")
+
+    def _update_composition_suggestions(self) -> None:
+        if not hasattr(self, "composition_combo"):
+            return
+        current_text = self.composition_combo.currentText().strip()
+        available: List[str] = []
+        used = self._used_wire_keys()
+        if self._editing_key in used:
+            used.discard(self._editing_key)
+        for composition, wires in self._wire_choices.items():
+            if any((composition, draw, piece) not in used for draw, piece in wires.values()):
+                available.append(composition)
+        available.sort(key=lambda value: value.lower())
+        was_blocked = self.composition_combo.blockSignals(True)
+        self.composition_combo.clear()
+        for composition in available:
+            self.composition_combo.addItem(composition)
+        self.composition_combo.setEditText(current_text)
+        self.composition_combo.blockSignals(was_blocked)
+        completer = self.composition_combo.completer()
+        if completer is not None:
+            completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+            completer.setModel(QtCore.QStringListModel(available, completer))
+        self._update_microwire_options()
+
+    def _update_microwire_options(self) -> None:
+        if not hasattr(self, "microwire_combo"):
+            return
+        composition = self.composition_combo.currentText().strip()
+        was_blocked = self.microwire_combo.blockSignals(True)
+        current_label = self.microwire_combo.currentText().strip()
+        self.microwire_combo.clear()
+        used = self._used_wire_keys()
+        if self._editing_key in used:
+            used.discard(self._editing_key)
+        options = []
+        for label, key in self._wire_choices.get(composition, {}).items():
+            if (composition, key[0], key[1]) in used:
+                continue
+            options.append((label, key))
+        options.sort(key=lambda item: (item[1][0], item[1][1], item[0]))
+        for label, key in options:
+            self.microwire_combo.addItem(label, key)
+        if self._editing_key and self._editing_key[0] == composition:
+            draw, piece = self._editing_key[1:]
+            label = _microwire_label(draw, piece)
+            if label and self.microwire_combo.findText(label) == -1:
+                self.microwire_combo.insertItem(0, label, (draw, piece))
+        if current_label:
+            idx = self.microwire_combo.findText(current_label)
+            if idx >= 0:
+                self.microwire_combo.setCurrentIndex(idx)
+        if self.microwire_combo.count() > 0 and self.microwire_combo.currentIndex() < 0:
+            self.microwire_combo.setCurrentIndex(0)
+        self.microwire_combo.blockSignals(was_blocked)
+        self._microwire_changed()
+
+    def _refresh_table_view(self) -> None:
+        self.model.set_frame(self.data.table)
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            self._update_hidden_columns()
+            self.table_view.resizeColumnsToContents()
+
+    def _update_hidden_columns(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        columns = list(self.data.table.columns)
+        for name in self.HIDDEN_COLUMNS:
+            if name in columns:
+                index = columns.index(name)
+                self.table_view.setColumnHidden(index, True)
+
+    def _available_wire_count(self) -> int:
+        count = 0
+        used = self._used_wire_keys()
+        for composition, wires in self._wire_choices.items():
+            for draw, piece in wires.values():
+                if (composition, draw, piece) not in used:
+                    count += 1
+        return count
+
+    def _used_wire_keys(self) -> set[tuple[str, int, int]]:
+        keys: set[tuple[str, int, int]] = set()
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            return keys
+        for _, row in frame.iterrows():
+            composition = str(row.get(self.COLUMN_COMPOSITION) or "").strip()
+            if not composition:
+                continue
+            draw = row.get(self.COLUMN_DRAW)
+            piece = row.get(self.COLUMN_PIECE)
+            if pd.notna(draw) and pd.notna(piece):
+                try:
+                    draw_int = int(float(draw))
+                    piece_int = int(float(piece))
+                except (TypeError, ValueError):
+                    continue
+                keys.add((composition, draw_int, piece_int))
+                continue
+            parsed = _microwire_tuple_from_label(str(row.get(self.COLUMN_MICROWIRE) or ""))
+            if parsed:
+                keys.add((composition, int(parsed[0]), int(parsed[1])))
+        return keys
+
+    def _select_key(self, key: tuple[str, int, int]) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        index = self._find_row_by_key(key)
+        if index is None:
+            return
+        selection_model = self.table_view.selectionModel()
+        if selection_model is None:
+            return
+        model_index = self.model.index(index, 0)
+        selection_model.select(
+            model_index,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect
+            | QtCore.QItemSelectionModel.SelectionFlag.Rows,
+        )
+        self.table_view.scrollTo(model_index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
+
+    def _find_row_by_key(self, key: tuple[str, int, int]) -> Optional[int]:
+        if not isinstance(self.data.table, pd.DataFrame) or self.data.table.empty:
+            return None
+        composition, draw, piece = key
+        for index, row in self.data.table.iterrows():
+            row_comp = str(row.get(self.COLUMN_COMPOSITION) or "").strip()
+            if row_comp != composition:
+                continue
+            row_draw = row.get(self.COLUMN_DRAW)
+            row_piece = row.get(self.COLUMN_PIECE)
+            try:
+                row_draw_int = int(float(row_draw))
+                row_piece_int = int(float(row_piece))
+            except (TypeError, ValueError):
+                continue
+            if row_draw_int == draw and row_piece_int == piece:
+                return index
+        return None
+
+    def _load_reference_data(self) -> None:
+        wire_choices: Dict[str, Dict[str, tuple[int, int]]] = {}
+        try:
+            annealing_store = MiniDatabaseStore("annealing")
+            records = annealing_store.load_payload("annealing_records")
+        except Exception:
+            records = None
+        if isinstance(records, list):
+            for record in records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw = getattr(metadata, "draw_x", None)
+                piece = getattr(metadata, "piece_y", None)
+                if not composition or draw is None or piece is None:
+                    continue
+                label = _microwire_label(int(draw), int(piece))
+                bucket = wire_choices.setdefault(composition, {})
+                bucket[label] = (int(draw), int(piece))
+        self._wire_choices = {
+            composition: dict(
+                sorted(bucket.items(), key=lambda item: (item[1][0], item[1][1], item[0]))
+            )
+            for composition, bucket in wire_choices.items()
+        }
+
+        d_lookup: Dict[tuple[str, int, int], float] = {}
+        try:
+            microscope_data = MiniDatabaseStore("microscope").load()
+            frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
+        except Exception:
+            frame = pd.DataFrame()
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for _, row in frame.iterrows():
+                composition = str(row.get("Composition") or "").strip()
+                draw = row.get("Draw")
+                piece = row.get("Piece")
+                if not composition:
+                    continue
+                try:
+                    draw_int = int(float(draw))
+                    piece_int = int(float(piece))
+                except (TypeError, ValueError):
+                    continue
+                d_value = _parse_strain_float(row.get("d (µm)"))
+                if d_value is None:
+                    continue
+                d_lookup[(composition, draw_int, piece_int)] = d_value
+        self._d_lookup = d_lookup
+
+    def _ensure_table_structure(self) -> None:
+        frame = self.data.table
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame(columns=self.TABLE_COLUMNS)
+        else:
+            frame = frame.copy()
+            legacy_map = {
+                "Strain (%)": self.COLUMN_STRAIN,
+            }
+            for old, new in legacy_map.items():
+                if old in frame.columns and new not in frame.columns:
+                    frame[new] = frame[old]
+            for column in self.TABLE_COLUMNS:
+                if column not in frame.columns:
+                    frame[column] = pd.Series([None] * len(frame))
+            frame = frame[self.TABLE_COLUMNS]
+        self.data.table = frame.reset_index(drop=True)
+        self._migrate_rows()
+
+    def _migrate_rows(self) -> None:
+        frame = self.data.table
+        if frame.empty:
+            return
+        for index, row in frame.iterrows():
+            microwire = str(row.get(self.COLUMN_MICROWIRE) or "").strip()
+            draw = row.get(self.COLUMN_DRAW)
+            piece = row.get(self.COLUMN_PIECE)
+            if microwire and (pd.isna(draw) or pd.isna(piece)):
+                parsed = _microwire_tuple_from_label(microwire)
+                if parsed:
+                    frame.at[index, self.COLUMN_DRAW] = int(parsed[0])
+                    frame.at[index, self.COLUMN_PIECE] = int(parsed[1])
+            a_value = row.get(self.COLUMN_A_LENGTH)
+            broke = bool(row.get(self.COLUMN_BROKE))
+            if isinstance(a_value, str) and a_value.strip() in {"-", "broke"}:
+                frame.at[index, self.COLUMN_A_LENGTH] = "-"
+                frame.at[index, self.COLUMN_BROKE] = True
+            elif broke and a_value != "-":
+                frame.at[index, self.COLUMN_A_LENGTH] = "-"
+        self._recompute_table_metrics()
+
+    def _recompute_table_metrics(self) -> None:
+        frame = self.data.table
+        for index, row in frame.iterrows():
+            d_value = _parse_strain_float(row.get(self.COLUMN_D))
+            mass = self._calculate_mass(d_value)
+            frame.at[index, self.COLUMN_MASS] = None if mass is None else round(mass, 6)
+            broke = bool(row.get(self.COLUMN_BROKE))
+            a_value = row.get(self.COLUMN_A_LENGTH)
+            if isinstance(a_value, str) and a_value.strip() in {"-", "broke"}:
+                broke = True
+                frame.at[index, self.COLUMN_A_LENGTH] = "-"
+            if broke:
+                frame.at[index, self.COLUMN_BROKE] = True
+                frame.at[index, self.COLUMN_STRAIN] = "broke"
+                continue
+            frame.at[index, self.COLUMN_BROKE] = False
+            m_length = _parse_strain_float(row.get(self.COLUMN_M_LENGTH))
+            a_length = _parse_strain_float(a_value)
+            if m_length in (None, 0) or a_length is None:
+                frame.at[index, self.COLUMN_STRAIN] = None
+                continue
+            try:
+                percent = ((m_length - a_length) / m_length) * 100
+            except ZeroDivisionError:
+                percent = None
+            frame.at[index, self.COLUMN_STRAIN] = None if percent is None else round(percent, 3)
+
+    def _save_table(self) -> None:
+        self._recompute_table_metrics()
+        frame = self.data.table[self.TABLE_COLUMNS].copy()
+        frame.reset_index(drop=True, inplace=True)
+        self.data.table = frame
+        self._sync_payload()
+        self.store.save(self.data)
+        self._refresh_table_view()
+        if hasattr(self, "composition_combo"):
+            self._update_composition_suggestions()
+        self._update_status()
+
+    def _build_records_from_table(self) -> Dict[tuple[str, int, int], StrainRecord]:
+        records: Dict[tuple[str, int, int], StrainRecord] = {}
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            return records
+        for _, row in frame.iterrows():
+            composition = str(row.get(self.COLUMN_COMPOSITION) or "").strip()
+            if not composition:
+                continue
+            draw = row.get(self.COLUMN_DRAW)
+            piece = row.get(self.COLUMN_PIECE)
+            try:
+                draw_int = int(float(draw))
+                piece_int = int(float(piece))
+            except (TypeError, ValueError):
+                continue
+            label = _microwire_label(draw_int, piece_int)
+            m_length = _parse_strain_float(row.get(self.COLUMN_M_LENGTH))
+            a_value = row.get(self.COLUMN_A_LENGTH)
+            broke = bool(row.get(self.COLUMN_BROKE))
+            if isinstance(a_value, str) and a_value.strip() in {"-", "broke"}:
+                broke = True
+                a_length = None
+            else:
+                a_length = _parse_strain_float(a_value)
+            strain_value = row.get(self.COLUMN_STRAIN)
+            if broke:
+                percent = None
+            else:
+                percent = _parse_strain_float(strain_value)
+                if percent is None and m_length not in (None, 0) and a_length is not None:
+                    try:
+                        percent = ((m_length - a_length) / m_length) * 100
+                    except ZeroDivisionError:
+                        percent = None
+            records[(composition, draw_int, piece_int)] = StrainRecord(
+                composition=composition,
+                draw=draw_int,
+                piece=piece_int,
+                microwire_label=label,
+                m_length=m_length,
+                a_length=a_length,
+                percent=percent,
+                broke=broke,
+                source=Path("manual_entry"),
+            )
+        return records
+
+    def _sync_payload(self) -> None:
+        records = self._build_records_from_table()
+        payloads = self.data.extra.get("payloads")
+        if not isinstance(payloads, dict):
+            payloads = {}
+        payloads["strain_records"] = "strain_records"
+        self.data.extra["payloads"] = payloads
+        self.store.save_payload("strain_records", records)
+
+    @staticmethod
+    def _calculate_mass(d_um: Optional[float]) -> Optional[float]:
+        if d_um is None or d_um <= 0:
+            return None
+        radius_m = (d_um * 1e-6) / 2.0
+        if radius_m <= 0:
+            return None
+        area = math.pi * radius_m * radius_m
+        return area * 1.0e11 / 9.80665
 
 
 class AssemblySection(QtWidgets.QWidget):
@@ -2915,225 +3949,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.tab_widget.addTab(assembly, "Assemble")
 
         install_standard_menu(self, help_topic="builder_database", console=self.log_view)
-
-class MiniDatabaseSection(QtWidgets.QWidget):
-    """Base widget for mini-database sections that process a subset of data."""
-
-    section_key = "base"
-    section_title = "Base"
-    supported_suffixes: tuple[str, ...] = ()
-    recursive_search = True
-
-    def __init__(
-        self,
-        logger: logging.Logger,
-        log_callback: Callable[[str], None],
-        parent: QtWidgets.QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.logger = logger
-        self._log_callback = log_callback
-        self.store = MiniDatabaseStore(self.section_key)
-        self.data = self.store.load()
-        self.model = DataFrameModel(self.data.table)
-        self.table_view: QtWidgets.QTableView | None = None
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        controls = QtWidgets.QHBoxLayout()
-        self.add_button = QtWidgets.QPushButton("Connect folder…")
-        self.add_button.clicked.connect(self._add_source)
-        controls.addWidget(self.add_button)
-
-        self.remove_button = QtWidgets.QPushButton("Remove")
-        self.remove_button.clicked.connect(self._remove_selected_source)
-        controls.addWidget(self.remove_button)
-
-        controls.addStretch(1)
-
-        self.refresh_button = QtWidgets.QPushButton("Refresh")
-        self.refresh_button.clicked.connect(self.refresh)
-        controls.addWidget(self.refresh_button)
-
-        layout.addLayout(controls)
-
-        self.status_label = QtWidgets.QLabel()
-        layout.addWidget(self.status_label)
-
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.sources_list = QtWidgets.QListWidget()
-        self.sources_list.itemSelectionChanged.connect(self._update_remove_enabled)
-        splitter.addWidget(self.sources_list)
-        splitter.setStretchFactor(0, 0)
-
-        right_panel = self.create_right_panel(splitter)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
-
-        self._populate_sources_list()
-        self.model.set_frame(self.data.table)
-        self._update_status()
-
-    # ------------------------------------------------------------------ UI helpers
-    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
-        table = QtWidgets.QTableView(parent)
-        table.setModel(self.model)
-        table.horizontalHeader().setStretchLastSection(True)
-        table.setAlternatingRowColors(True)
-        self.table_view = table
-        container = QtWidgets.QWidget(parent)
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(table, 1)
-        return container
-
-    def _populate_sources_list(self) -> None:
-        self.sources_list.clear()
-        for source in self.data.sources:
-            self.sources_list.addItem(source)
-        self._update_remove_enabled()
-
-    def _update_remove_enabled(self) -> None:
-        has_selection = bool(self.sources_list.selectedItems())
-        self.remove_button.setEnabled(has_selection)
-
-    def _sync_sources(self) -> None:
-        sources: list[str] = []
-        for index in range(self.sources_list.count()):
-            item = self.sources_list.item(index)
-            if item is not None:
-                sources.append(item.text())
-        self.data.sources = sources
-        self.store.save(self.data)
-        self._update_status()
-
-    def _add_source(self) -> None:
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
-        if not directory:
-            return
-        normalised = str(Path(directory).expanduser())
-        existing = {self.sources_list.item(idx).text() for idx in range(self.sources_list.count())}
-        if normalised not in existing:
-            self.sources_list.addItem(normalised)
-            self._sync_sources()
-
-    def _remove_selected_source(self) -> None:
-        for item in self.sources_list.selectedItems():
-            row = self.sources_list.row(item)
-            self.sources_list.takeItem(row)
-        self._sync_sources()
-
-    # ------------------------------------------------------------------ data handling
-    def _collect_candidates(self) -> List[Path]:
-        candidates: Dict[str, Path] = {}
-        for source in self.data.sources:
-            root = Path(source).expanduser()
-            if not root.exists():
-                continue
-            iterator: Iterable[Path]
-            try:
-                iterator = root.rglob("*") if self.recursive_search else root.glob("*")
-            except Exception:
-                continue
-            for path in iterator:
-                if not path.is_file():
-                    continue
-                if self.supported_suffixes and path.suffix.lower() not in self.supported_suffixes:
-                    continue
-                try:
-                    resolved = str(path.resolve())
-                except Exception:
-                    resolved = str(path)
-                candidates.setdefault(resolved, path)
-        return sorted(candidates.values())
-
-    def _pending_paths(self) -> List[Path]:
-        pending: List[Path] = []
-        processed = self.data.processed
-        for path in self._collect_candidates():
-            key = str(path)
-            try:
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            if float(processed.get(key, -1.0)) != float(mtime):
-                pending.append(path)
-        return pending
-
-    def _update_status(self) -> None:
-        sources_count = len(self.data.sources)
-        pending = self._pending_paths() if sources_count else []
-        if sources_count == 0:
-            self.status_label.setText("Connect one or more folders to begin.")
-            self.refresh_button.setEnabled(False)
-            return
-        self.refresh_button.setEnabled(True)
-        if pending:
-            self.status_label.setText(
-                f"⚠️ {len(pending)} new or updated file(s) pending processing."
-            )
-        elif not self.data.table.empty:
-            self.status_label.setText(
-                f"Up to date ({len(self.data.table)} record(s))."
-            )
-        else:
-            self.status_label.setText("No processed data available yet.")
-
-    def log(self, message: str) -> None:
-        try:
-            self._log_callback(message)
-        except Exception:
-            self.logger.info(message)
-
-    def refresh(self) -> None:
-        candidates = self._collect_candidates()
-        if not candidates:
-            self.log(f"{self.section_title}: no files found in connected folders.")
-            self.data.processed = {}
-            self.data.table = pd.DataFrame()
-            self.store.save(self.data)
-            self.model.set_frame(self.data.table)
-            self._update_status()
-            return
-        try:
-            result = self.process(candidates)
-        except Exception as exc:  # pragma: no cover - defensive UI guard
-            self.logger.exception("%s processing failed", self.section_title)
-            QtWidgets.QMessageBox.critical(
-                self,
-                self.section_title,
-                f"Failed to process data:\n{exc}",
-            )
-            return
-
-        existing_payloads = set(self.data.extra.get("payloads", {}).keys())
-        new_payloads = set(result.payloads.keys())
-        for name in existing_payloads - new_payloads:
-            self.store.clear_payload(name)
-
-        payload_map: Dict[str, str] = {}
-        for name, payload in result.payloads.items():
-            self.store.save_payload(name, payload)
-            payload_map[name] = name
-        if payload_map:
-            self.data.extra["payloads"] = payload_map
-        if result.extra:
-            self.data.extra.update(result.extra)
-        self.data.processed = result.processed
-        self.data.table = result.table
-        self.store.save(self.data)
-        self.model.set_frame(result.table)
-        self._update_status()
-        self.log(
-            f"{self.section_title}: processed {len(candidates)} file(s)."
-        )
-
-    # ------------------------------------------------------------------ hooks for subclasses
-    def process(self, paths: List[Path]) -> SectionProcessResult:
-        raise NotImplementedError
 
 def run_app() -> None:
     main()

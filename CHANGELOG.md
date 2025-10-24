@@ -1,5 +1,10 @@
 # Changelog
 
+## 2025-10-24 09:31 UTC
+
+- Fixed the microwire data builder launch error by instantiating `MiniDatabaseSection` before its subclasses so imports no longer raise a `NameError`.
+- Replaced the strain section with a persistent in-app worksheet that suggests compositions and microwires from processed annealing data, auto-fills diameters, derives mass/strain values, tracks used samples, and exports the curated table to Excel.
+
 ## 2025-10-24
 
 - Taught the current annealing plugin to build PyPlot worksheets during load,
