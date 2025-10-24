@@ -12,7 +12,6 @@ from PyQt6 import QtCore, QtWidgets
 from plotting.utils import ensure_app_theme, install_standard_menu
 
 
-CONVERSION_MARKER = "# Current annealing current units: mA"
 COLUMN_HEADER = "Current (mA)\tVoltage (V)\tResistance (Ohm)"
 MILLIAMP_HEADER_RE = re.compile(r"(?:current|i)\s*[^\r\n]{0,8}[\[(]\s*m\s*a", re.IGNORECASE)
 
@@ -66,7 +65,7 @@ def convert_file(path: Path) -> Tuple[str, str]:
         return "error", f"failed to read: {exc}"
 
     head = raw_lines[:5]
-    if any(CONVERSION_MARKER in line for line in head):
+    if any("# Current annealing current units: mA" in line for line in head):
         return "skipped", "already converted"
     if _has_milliamp_header(head):
         return "skipped", "already in mA"
@@ -100,16 +99,14 @@ def convert_file(path: Path) -> Tuple[str, str]:
     if not converted:
         return "skipped", "no numeric data"
 
-    if not any(line.strip().startswith("#") and _matches_header(line) for line in converted_lines):
-        converted_lines.insert(0, f"# {COLUMN_HEADER}")
+    filtered_lines: list[str] = []
+    for line in converted_lines:
+        if _matches_header(line):
+            continue
+        filtered_lines.append(line)
 
-    if not any(not line.strip().startswith("#") and _matches_header(line) for line in converted_lines):
-        insert_pos = 0
-        while insert_pos < len(converted_lines) and converted_lines[insert_pos].strip().startswith("#"):
-            insert_pos += 1
-        converted_lines.insert(insert_pos, COLUMN_HEADER)
-
-    converted_lines.insert(0, CONVERSION_MARKER)
+    converted_lines = filtered_lines
+    converted_lines.insert(0, f"# {COLUMN_HEADER}")
     try:
         path.write_text("\n".join(converted_lines) + "\n", encoding="utf-8")
     except OSError as exc:
@@ -139,8 +136,8 @@ class CurrentAnnealingConverter(QtWidgets.QWidget):
 
         intro = QtWidgets.QLabel(
             "Select a folder containing legacy current annealing logs. The converter will "
-            "rewrite the first column so currents are stored in milliamperes. A marker "
-            "is added to each converted file to avoid double conversion."
+            "rewrite the first column so currents are stored in milliamperes and ensure the "
+            "standard header is present so you can spot already converted files."
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)

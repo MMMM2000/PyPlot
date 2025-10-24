@@ -1,5 +1,11 @@
 # Changelog
 
+## 2025-10-24 11:26 UTC
+
+- Updated the current annealing unit converter so converted logs now keep a
+  single `# Current (mA)\tVoltage (V)\tResistance (Ohm)` header row without the
+  extra milliamp marker line, matching the logger output users expect.
+
 ## 2025-10-24 11:13 UTC
 
 - Updated the current annealing unit converter to insert the standard
