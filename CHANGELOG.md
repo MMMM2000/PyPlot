@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-10-24 16:00 UTC
+
+- Documented the full PaddleOCR setup workflow in the README, covering the
+  Windows redistributable requirement, installation order, optional model
+  prefetch, and verification steps so local environments configure Paddle before
+  running the Microwire Data Builder.
+
 ## 2025-10-24 15:05 UTC
 
 - Added progress bars with live time estimates to every Microwire Data Builder
