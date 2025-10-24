@@ -1,5 +1,13 @@
 # Changelog
 
+## 2025-10-24 13:45 UTC
+
+- Replaced the microwire OCR pipeline with PaddleOCR for both video frame and
+  microscope image analysis, retiring the Tesseract dependency while preserving
+  diameter detection metadata.
+- Added PaddleOCR/PaddlePaddle runtime requirements and bumped the NumPy pin to
+  2.3.4 so the new OCR backend installs cleanly on Windows/macOS laptops.
+
 ## 2025-10-24 12:15 UTC
 
 - Removed the extra milliamp comment row from converted current annealing logs

@@ -20,7 +20,7 @@ sys.modules.setdefault("microwire_data_builder.video", sys.modules.get(__name__)
 _METRIC_PATTERN = re.compile(r"(-?\d+(?:[.,]\d+)?)")
 
 try:
-    from .ocr import ensure_tesseract_available
+    from .ocr import get_paddle_ocr
 except ImportError:
     module_name = "microwire_data_builder.ocr"
     module_path = Path(__file__).with_name("ocr.py")
@@ -29,7 +29,7 @@ except ImportError:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        ensure_tesseract_available = module.ensure_tesseract_available
+        get_paddle_ocr = module.get_paddle_ocr
     else:
         raise
 
@@ -76,8 +76,8 @@ def extract_video_metrics(
 ) -> VideoExtractionResult:
     """Sample frames from *video_path* and attempt to OCR process metrics.
 
-    The function favours optional dependencies. If OpenCV or pytesseract are
-    not installed (or the Tesseract binary is missing), an empty result is
+    The function favours optional dependencies. If OpenCV or PaddleOCR are
+    not installed (or the runtime fails to initialise), an empty result is
     returned and a warning is logged instead of raising an exception.
     """
 
@@ -90,17 +90,12 @@ def extract_video_metrics(
         log.warning("OpenCV (cv2) is not installed; skipping video analysis for %s", video_path)
         return result
 
-    try:
-        import pytesseract  # type: ignore[import-not-found]
-    except ImportError:
-        log.warning("pytesseract is not installed; skipping video analysis for %s", video_path)
+    ocr = get_paddle_ocr(log)
+    if ocr is None:
+        log.warning(
+            "PaddleOCR is unavailable; skipping video analysis for %s", video_path
+        )
         return result
-
-    if not ensure_tesseract_available(pytesseract, log):
-        log.warning("Tesseract OCR executable is unavailable; skipping video analysis for %s", video_path)
-        return result
-
-    tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
 
     capture = cv2.VideoCapture(str(video_path))
     if not capture.isOpened():
@@ -141,14 +136,33 @@ def extract_video_metrics(
         if (frame_index - start_frame) % frame_step == 0:
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             enhanced = cv2.equalizeHist(gray)
+            bgr_image = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
             try:
-                text = pytesseract.image_to_string(enhanced, config="--psm 6")
-            except tesseract_not_found:
+                ocr_result = ocr.ocr(bgr_image, cls=True)
+            except Exception:
                 log.warning(
-                    "Tesseract OCR executable not found while analysing %s; aborting video extraction",
+                    "PaddleOCR failed while analysing %s; aborting video extraction",
                     video_path,
+                    exc_info=True,
                 )
                 break
+            lines: List[str] = []
+            for entry in ocr_result or []:
+                if not entry:
+                    continue
+                for detection in entry:
+                    if not detection:
+                        continue
+                    try:
+                        _, data = detection
+                    except (TypeError, ValueError):
+                        continue
+                    if not data:
+                        continue
+                    token = (data[0] or "").strip()
+                    if token:
+                        lines.append(token)
+            text = "\n".join(lines)
             result.texts.append(text)
             result.temperatures_c.extend(
                 _extract_metric_candidates(text, ("temp", "temperature"), ("c", f"{MICRO_SIGN}c"))

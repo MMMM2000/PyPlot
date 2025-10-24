@@ -49,7 +49,7 @@ except ImportError:
         raise
 
 try:
-    from .ocr import ensure_tesseract_available
+    from .ocr import get_paddle_ocr
 except ImportError:
     module_name = "microwire_data_builder.ocr"
     module_path = Path(__file__).with_name("ocr.py")
@@ -58,7 +58,7 @@ except ImportError:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        ensure_tesseract_available = module.ensure_tesseract_available
+        get_paddle_ocr = module.get_paddle_ocr
     else:
         raise
 
@@ -227,11 +227,6 @@ MICROSCOPE_VALUE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MICROSCOPE_SECONDARY_PREFIX = re.compile(r"\[2]\s*$", re.IGNORECASE)
-MICROSCOPE_OCR_CONFIG = (
-    "--oem 1 --psm 6 "
-    "-c tessedit_char_whitelist=0123456789[](){}Il" f"{MICRO_SIGN}umUM.,/ "
-    "-c classify_bln_numeric_mode=1"
-)
 MICROSCOPE_NUMBER_TOKEN = re.compile(r"^\d+(?:[.,]\d+)?$")
 MICROSCOPE_UNIT_HINTS = ("µm", "um", "μm")
 
@@ -1238,14 +1233,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
     """Attempt to OCR diameter annotations from a microscope capture."""
 
     log = logger or logging.getLogger(LOGGER_NAME)
-    try:
-        import pytesseract  # type: ignore[import-not-found]
-    except ImportError:
-        log.debug("pytesseract is not installed; skipping microscope OCR for %s", path)
-        return MicroscopeOCRResult()
-
-    if not ensure_tesseract_available(pytesseract, log):
-        log.debug("Tesseract executable unavailable; skipping microscope OCR for %s", path)
+    ocr = get_paddle_ocr(log)
+    if ocr is None:
+        log.debug("PaddleOCR is not available; skipping microscope OCR for %s", path)
         return MicroscopeOCRResult()
 
     try:
@@ -1311,13 +1301,6 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         ImageOps.invert(binary_gray),
     ]
 
-    configs: List[str] = []
-    for psm in (6, 7, 8, 11):
-        configs.append(MICROSCOPE_OCR_CONFIG.replace("--psm 6", f"--psm {psm}", 1))
-
-    tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
-    output_enum = getattr(pytesseract, "Output", None)
-
     @dataclass
     class _OCRWord:
         text: str
@@ -1327,66 +1310,71 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         height: int
         conf: Optional[float]
 
-    def _group_words(data_dict: dict) -> List[List[_OCRWord]]:
-        words: Dict[Tuple[int, int, int, int], List[_OCRWord]] = {}
-        texts = data_dict.get("text", [])
-        lefts = data_dict.get("left", [])
-        tops = data_dict.get("top", [])
-        widths = data_dict.get("width", [])
-        heights = data_dict.get("height", [])
-        confs = data_dict.get("conf", [])
-        page_nums = data_dict.get("page_num", [])
-        block_nums = data_dict.get("block_num", [])
-        par_nums = data_dict.get("par_num", [])
-        line_nums = data_dict.get("line_num", [])
-
-        def _item(seq: Sequence[object], index: int, default: int = 0) -> int:
-            try:
-                value = seq[index]
-            except Exception:
-                return default
-            try:
-                return int(value)
-            except Exception:
-                return default
-
-        def _float_item(seq: Sequence[object], index: int) -> Optional[float]:
-            try:
-                value = seq[index]
-            except Exception:
-                return None
-            try:
-                numeric = float(value)
-            except Exception:
-                return None
-            if not math.isfinite(numeric):
-                return None
-            return numeric
-
-        for idx, raw in enumerate(texts):
-            token = (raw or "").strip()
-            if not token:
+    def _group_paddle_words(raw_result) -> List[List[_OCRWord]]:
+        words: List[_OCRWord] = []
+        for entry in raw_result or []:
+            if not entry:
                 continue
-            key = (
-                _item(page_nums, idx),
-                _item(block_nums, idx),
-                _item(par_nums, idx),
-                _item(line_nums, idx),
-            )
-            word = _OCRWord(
-                text=token,
-                left=_item(lefts, idx),
-                top=_item(tops, idx),
-                width=max(_item(widths, idx), 0),
-                height=max(_item(heights, idx), 0),
-                conf=_float_item(confs, idx),
-            )
-            words.setdefault(key, []).append(word)
-
-        lines = []
-        for entries in words.values():
-            entries.sort(key=lambda w: w.left)
-            lines.append(entries)
+            for detection in entry:
+                if not detection:
+                    continue
+                try:
+                    points, data = detection
+                except (TypeError, ValueError):
+                    continue
+                if not data:
+                    continue
+                token = (data[0] or "").strip()
+                if not token:
+                    continue
+                score = None
+                if len(data) > 1:
+                    try:
+                        score = float(data[1])
+                    except (TypeError, ValueError):
+                        score = None
+                xs = [float(pt[0]) for pt in (points or []) if pt]
+                ys = [float(pt[1]) for pt in (points or []) if pt]
+                if not xs or not ys:
+                    continue
+                left = min(xs)
+                top = min(ys)
+                right = max(xs)
+                bottom = max(ys)
+                width = max(int(round(right - left)), 0)
+                height = max(int(round(bottom - top)), 0)
+                conf = None
+                if score is not None and math.isfinite(score):
+                    conf = float(score)
+                words.append(
+                    _OCRWord(
+                        text=token,
+                        left=int(round(left)),
+                        top=int(round(top)),
+                        width=width,
+                        height=height,
+                        conf=conf,
+                    )
+                )
+        if not words:
+            return []
+        words.sort(key=lambda w: (w.top, w.left))
+        lines: List[List[_OCRWord]] = []
+        for word in words:
+            placed = False
+            for line in lines:
+                baseline = line[0]
+                baseline_center = baseline.top + baseline.height / 2.0
+                word_center = word.top + word.height / 2.0
+                threshold = max(baseline.height, word.height, 1) * 0.6
+                if abs(word_center - baseline_center) <= threshold:
+                    line.append(word)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([word])
+        for line in lines:
+            line.sort(key=lambda w: w.left)
         return lines
 
     seen_detections: Set[Tuple[float, int, int, int, int]] = set()
@@ -1470,61 +1458,58 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
 
     for variant in variants:
         variant_size = variant.size
-        for config in configs:
-            try:
-                text = pytesseract.image_to_string(variant, config=config)
-            except tesseract_not_found:
-                log.warning(
-                    "Tesseract executable vanished while processing %s; aborting microscope OCR",
-                    path,
-                )
-                return result
-            except Exception:
+        variant_rgb = variant.convert("RGB")
+        variant_array = np.array(variant_rgb)
+        if variant_array.ndim == 2:
+            variant_array = np.stack([variant_array] * 3, axis=-1)
+        elif variant_array.ndim == 3 and variant_array.shape[2] == 4:
+            variant_array = variant_array[:, :, :3]
+        if variant_array.ndim != 3 or variant_array.shape[2] != 3:
+            continue
+        variant_array = variant_array.astype("uint8", copy=False)
+        bgr_image = variant_array[:, :, ::-1].copy()
+        try:
+            ocr_result = ocr.ocr(bgr_image, cls=True)
+        except Exception:
+            log.debug(
+                "PaddleOCR failed while processing %s; skipping this variant", path,
+                exc_info=True,
+            )
+            continue
+        lines = _group_paddle_words(ocr_result)
+        if not lines:
+            continue
+        combined_lines: List[str] = []
+        for line in lines:
+            if not line:
                 continue
-            _append_candidate(text)
-
-            if output_enum is not None:
-                try:
-                    data = pytesseract.image_to_data(
-                        variant,
-                        config=config,
-                        output_type=output_enum.DICT,
+            line_text = " ".join(word.text for word in line)
+            if line_text:
+                _append_candidate(line_text)
+                combined_lines.append(line_text)
+                for detection in _extract_line_detections(line, variant_size):
+                    bbox = detection.bbox or (0, 0, 0, 0)
+                    key = (
+                        round(detection.value, 2),
+                        bbox[0],
+                        bbox[1],
+                        bbox[2],
+                        bbox[3],
                     )
-                except tesseract_not_found:
-                    log.warning(
-                        "Tesseract executable vanished while processing %s; aborting microscope OCR",
-                        path,
-                    )
-                    return result
-                except Exception:
-                    data = None
-                if isinstance(data, dict) and data.get("text"):
-                    for line in _group_words(data):
-                        if not line:
-                            continue
-                        line_text = " ".join(word.text for word in line)
-                        _append_candidate(line_text)
-                        for detection in _extract_line_detections(line, variant_size):
-                            bbox = detection.bbox or (0, 0, 0, 0)
-                            key = (
-                                round(detection.value, 2),
-                                bbox[0],
-                                bbox[1],
-                                bbox[2],
-                                bbox[3],
-                            )
-                            if key in seen_detections:
-                                continue
-                            result.detections.append(detection)
-                            seen_detections.add(key)
-                            result.texts.append(line_text)
+                    if key in seen_detections:
+                        continue
+                    result.detections.append(detection)
+                    seen_detections.add(key)
+                    result.texts.append(line_text)
+        if combined_lines:
+            _append_candidate("\n".join(combined_lines))
 
-            if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
-                values = _parse_microscope_candidates(candidates)
-                if values:
-                    for value in values:
-                        result.append_value(value)
-                    break
+        if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
+            values = _parse_microscope_candidates(candidates)
+            if values:
+                for value in values:
+                    result.append_value(value)
+                break
         if result.values:
             break
 
