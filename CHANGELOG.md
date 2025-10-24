@@ -1,5 +1,18 @@
 # Changelog
 
+## 2025-10-24 15:05 UTC
+
+- Added progress bars with live time estimates to every Microwire Data Builder
+  section so long-running refreshes surface their status instead of appearing to
+  hang.
+- Let the current annealing tab export a summary worksheet that groups
+  microwires, lists the associated setpoints, and embeds 1000 mA / low-current
+  plots directly in Excel.
+- Taught the Assemble tab to preview the combined database in-app, select which
+  sections to include, and build partial exports without forcing unused data.
+- Fixed the fabrication tab crash caused by the missing `build_fabrication_index`
+  import so spreadsheets can be processed again after the OCR refactor.
+
 ## 2025-10-24 13:45 UTC
 
 - Replaced the microwire OCR pipeline with PaddleOCR for both video frame and

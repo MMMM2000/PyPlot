@@ -1843,12 +1843,20 @@ def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.L
 def build_fabrication_index(
     fabrication_files: Sequence[Path],
     logger: Optional[logging.Logger] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
 ) -> FabricationIndex:
     log = _logger(logger)
     index = FabricationIndex()
-    for path in fabrication_files:
+    unique_files = list(dict.fromkeys(Path(p) for p in fabrication_files))
+    total = len(unique_files)
+    for idx, path in enumerate(unique_files, start=1):
         if path.suffix.lower() != ".xlsx":
             log.debug("Skipping non-Excel file %s", path)
+            if progress_callback is not None:
+                try:
+                    progress_callback(idx, total)
+                except Exception:
+                    pass
             continue
         stem = path.stem
         parent_stem = path.parent.name
@@ -1856,6 +1864,11 @@ def build_fabrication_index(
             _parse_piece_workbook(path, index, log)
         else:
             _parse_composition_workbook(path, index, log)
+        if progress_callback is not None:
+            try:
+                progress_callback(idx, total)
+            except Exception:
+                pass
     return index
 
 
@@ -2893,6 +2906,7 @@ def build_database(
     analysis_progress_callback: Optional[Callable[[int, int], None]] = None,
     analysis_total: Optional[int] = None,
     root_for_relpaths: Optional[Path] = None,
+    skip_exports: bool = False,
     *,
     fabrication_index: FabricationIndex | None = None,
     measurement_records: Optional[Iterable[MeasurementRecord]] = None,
@@ -3344,7 +3358,14 @@ def build_database(
     else:
         df_out = pd.DataFrame(columns=output_columns)
     exports: Dict[str, Path] = {}
-    requested_formats = tuple(dict.fromkeys(config.export_formats)) if config.export_formats else ("csv",)
+    if skip_exports:
+        requested_formats: Tuple[str, ...] = ()
+    else:
+        requested_formats = (
+            tuple(dict.fromkeys(config.export_formats))
+            if config.export_formats
+            else ("csv",)
+        )
     behaviours = {
         (key.lower() if isinstance(key, str) else ""): str(value).lower()
         for key, value in (config.export_behaviour or {}).items()
