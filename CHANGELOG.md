@@ -1,11 +1,19 @@
 # Changelog
 
-## 2025-10-24 16:00 UTC
+## 2025-10-24 17:30 UTC
 
-- Documented the full PaddleOCR setup workflow in the README, covering the
-  Windows redistributable requirement, installation order, optional model
-  prefetch, and verification steps so local environments configure Paddle before
-  running the Microwire Data Builder.
+- Let Microwire Data Builder sections keep running while the rest of the UI
+  stays responsive, queuing additional refreshes until the active one
+  completes and logging a clear notice instead of flooding the terminal with
+  per-file resistance warnings.
+- Added live current-annealing previews with side-by-side 1000 mA and
+  low-current Matplotlib plots inside the tab so measurements can be reviewed
+  without leaving the app.
+- Reworked the builder workspace to match PyPlot’s docked layout: the tabbed
+  worksheet area now fills the window, a hover-to-open Project Explorer lists
+  connected folders and status per section, the Message Log moved into its own
+  dock, and the Assemble tab streams its preview dataframe into a Python
+  console before export.
 
 ## 2025-10-24 15:05 UTC
 
