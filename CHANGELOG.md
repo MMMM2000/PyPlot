@@ -1,5 +1,20 @@
 # Changelog
 
+## 2025-10-24
+
+- Taught the current annealing plugin to build PyPlot worksheets during load,
+  label increasing/decreasing traces, and show legends so the Object Manager
+  lists meaningful series names.
+- Ensured the Load data action summons the shared Data menu even when triggered
+  from Generate so current annealing runs can grab imported files without
+  re-selecting paths.
+- Added visibility checkboxes to the Object Manager for Matplotlib lines and
+  legends so plots can be toggled directly from the tree.
+- Reworked the Microwire Data Builder into a sectioned workflow that stores
+  mini-databases per data source, highlights pending files, lets microscope
+  measurements be reviewed and overridden, and assembles the final spreadsheet
+  from the cached results without rerunning heavy analysis.
+
 ## 2025-10-23 16:40 UTC
 
 - Converted the shared Load/Generate/Export buttons into a global PyPlot action

@@ -2908,6 +2908,16 @@ def build_database(
     analysis_progress_callback: Optional[Callable[[int, int], None]] = None,
     analysis_total: Optional[int] = None,
     root_for_relpaths: Optional[Path] = None,
+    *,
+    fabrication_index: FabricationIndex | None = None,
+    measurement_records: Optional[Iterable[MeasurementRecord]] = None,
+    microscope_index: Optional[
+        Dict[Tuple[str, int, int], MicroscopeMeasurements]
+    ] = None,
+    video_index: Optional[
+        Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]
+    ] = None,
+    strain_records: Optional[Dict[Tuple[str, int, int], StrainRecord]] = None,
 ) -> BuildResult:
     log = _logger(logger)
     output_dir = config.output_dir
@@ -2944,7 +2954,9 @@ def build_database(
     wants_matplotlib = "matplotlib" in plot_backends
     wants_origin_requested = "origin" in plot_backends
 
-    fabrication_index = build_fabrication_index(config.fabrication_files, log)
+    fabrication_index = fabrication_index or build_fabrication_index(
+        config.fabrication_files, log
+    )
     stats = BuildStats()
     grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
     plot_records: List[str] = []
@@ -2959,11 +2971,28 @@ def build_database(
     origin_dir = output_dir / config.origin_dir_name
     origin_enabled = wants_origin_requested
     origin_disabled_reason: Optional[str] = None
-    manual_microscope_files = [Path(p) for p in config.microscope_files]
-    auto_microscope_files = _auto_discover_microscope_paths(config.annealing_files, log)
-    microscope_sources = list(dict.fromkeys(manual_microscope_files + auto_microscope_files))
-    video_sources = list(dict.fromkeys(Path(p) for p in config.video_files))
-    strain_records = _load_strain_records(getattr(config, "strain_files", []), log)
+    manual_microscope_files: list[Path] = []
+    auto_microscope_files: list[Path] = []
+    microscope_sources: list[Path] = []
+    if microscope_index is None:
+        manual_microscope_files = [Path(p) for p in config.microscope_files]
+        auto_microscope_files = _auto_discover_microscope_paths(
+            config.annealing_files, log
+        )
+        microscope_sources = list(
+            dict.fromkeys(manual_microscope_files + auto_microscope_files)
+        )
+    else:
+        microscope_index = dict(microscope_index)
+    video_sources: list[Path] = []
+    if video_index is None:
+        video_sources = list(dict.fromkeys(Path(p) for p in config.video_files))
+    else:
+        video_index = dict(video_index)
+    if strain_records is None:
+        strain_records = _load_strain_records(getattr(config, "strain_files", []), log)
+    else:
+        strain_records = dict(strain_records)
 
     analysis_total_local = analysis_total
     if analysis_total_local is None:
@@ -3002,65 +3031,90 @@ def build_database(
     if analysis_total_local:
         _analysis_notify()
 
-    microscope_index = _group_microscope_measurements(
-        microscope_sources,
-        log,
-        progress_callback=micro_callback,
-    )
-    video_index = _collect_video_metrics(
-        video_sources,
-        log,
-        progress_callback=video_callback,
-    )
+    if microscope_index is None:
+        microscope_index = _group_microscope_measurements(
+            microscope_sources,
+            log,
+            progress_callback=micro_callback,
+        )
+    if video_index is None:
+        video_index = _collect_video_metrics(
+            video_sources,
+            log,
+            progress_callback=video_callback,
+        )
     microscope_crop_dir = output_dir / "microscope_crops"
     microscope_crop_map: Dict[str, Path] = {}
     ocr_highlights: Dict[str, Set[int]] = {}
     if analysis_total_local and analysis_done < analysis_total_local:
         analysis_done = analysis_total_local
         _analysis_notify()
-    total = len(config.annealing_files)
-    for idx, path in enumerate(config.annealing_files, start=1):
-        try:
-            df = _load_annealing(path)
-        except Exception:
-            log.exception("Failed to parse %s", path)
-            stats.skipped += 1
-            if progress_callback:
-                progress_callback(idx, total)
-            continue
-        metadata = _metadata_from_path(path, root_for_relpaths)
-        ok, mean_error = _resistance_sanity_check(df)
-        if not ok:
-            stats.resistance_checks_failed += 1
-            if mean_error is None:
-                log.warning("R≈V/I sanity check failed for %s", path)
-            else:
+    if measurement_records is not None:
+        records_list = [record for record in measurement_records]
+        total = len(records_list)
+        for idx, record in enumerate(records_list, start=1):
+            metadata = record.metadata
+            if not record.sanity_ok:
+                stats.resistance_checks_failed += 1
+            if metadata.draw_x is None or metadata.piece_y is None:
                 log.warning(
-                    "R≈V/I sanity check failed for %s (mean error %.2f%%)",
-                    path,
-                    mean_error * 100,
+                    "Skipping %s because the microwire draw/piece identifiers could not be parsed",
+                    record.path,
                 )
-        if metadata.draw_x is None or metadata.piece_y is None:
-            log.warning(
-                "Skipping %s because the microwire draw/piece identifiers could not be parsed",
-                path,
+                stats.skipped += 1
+            else:
+                key = (metadata.composition_token, metadata.draw_x, metadata.piece_y)
+                grouped.setdefault(key, []).append(record)
+                stats.parsed += 1
+            if progress_callback:
+                try:
+                    progress_callback(idx, total)
+                except Exception:
+                    pass
+    else:
+        total = len(config.annealing_files)
+        for idx, path in enumerate(config.annealing_files, start=1):
+            try:
+                df = _load_annealing(path)
+            except Exception:
+                log.exception("Failed to parse %s", path)
+                stats.skipped += 1
+                if progress_callback:
+                    progress_callback(idx, total)
+                continue
+            metadata = _metadata_from_path(path, root_for_relpaths)
+            ok, mean_error = _resistance_sanity_check(df)
+            if not ok:
+                stats.resistance_checks_failed += 1
+                if mean_error is None:
+                    log.warning("R≈V/I sanity check failed for %s", path)
+                else:
+                    log.warning(
+                        "R≈V/I sanity check failed for %s (mean error %.2f%%)",
+                        path,
+                        mean_error * 100,
+                    )
+            if metadata.draw_x is None or metadata.piece_y is None:
+                log.warning(
+                    "Skipping %s because the microwire draw/piece identifiers could not be parsed",
+                    path,
+                )
+                stats.skipped += 1
+                if progress_callback:
+                    progress_callback(idx, total)
+                continue
+            key = (metadata.composition_token, metadata.draw_x, metadata.piece_y)
+            record = MeasurementRecord(
+                path=path,
+                metadata=metadata,
+                dataframe=df,
+                sanity_ok=ok,
+                sanity_error=mean_error,
             )
-            stats.skipped += 1
+            grouped.setdefault(key, []).append(record)
+            stats.parsed += 1
             if progress_callback:
                 progress_callback(idx, total)
-            continue
-        key = (metadata.composition_token, metadata.draw_x, metadata.piece_y)
-        record = MeasurementRecord(
-            path=path,
-            metadata=metadata,
-            dataframe=df,
-            sanity_ok=ok,
-            sanity_error=mean_error,
-        )
-        grouped.setdefault(key, []).append(record)
-        stats.parsed += 1
-        if progress_callback:
-            progress_callback(idx, total)
     rows: List[Dict[str, object]] = []
     for (composition, draw_x, piece_y), records in sorted(grouped.items()):
         draw_info = fabrication_index.get_draw(composition, draw_x)

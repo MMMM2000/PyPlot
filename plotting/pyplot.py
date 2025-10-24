@@ -1110,6 +1110,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._format_controls = FormatToolbarControls()
         self._format_selection: tuple[str, Any] | None = None
         self._format_updating = False
+        self._object_tree_updating = False
 
         self._build_base_ui()
         self._update_project_title()
@@ -2923,8 +2924,70 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return None
 
     # Placeholder methods that subclasses may override or extend -----------------
-    def _handle_object_item_changed(self, *_: Any) -> None:
-        """Subclasses should override to toggle line visibility."""
+    def _apply_object_item_visibility(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        visible: bool,
+        *,
+        allow_toggle: bool = True,
+    ) -> None:
+        if allow_toggle:
+            if not item.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            state = (
+                QtCore.Qt.CheckState.Checked
+                if visible
+                else QtCore.Qt.CheckState.Unchecked
+            )
+            item.setCheckState(0, state)
+            item.setData(0, OBJECT_TREE_STATE_ROLE, state)
+        else:
+            item.setData(0, OBJECT_TREE_STATE_ROLE, QtCore.Qt.CheckState.Checked)
+
+    def _handle_object_item_changed(
+        self, item: QtWidgets.QTreeWidgetItem, column: int
+    ) -> None:
+        if self._object_tree_updating or column != 0:
+            return
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        kind = data.get("kind")
+        target = data.get("object")
+        if kind not in {"legend", "line"}:
+            return
+        new_state = item.checkState(0)
+        old_state = item.data(0, OBJECT_TREE_STATE_ROLE)
+        if new_state == old_state:
+            return
+        visible = new_state == QtCore.Qt.CheckState.Checked
+        changed = False
+        try:
+            if kind == "line" and isinstance(target, Line2D):
+                target.set_visible(visible)
+                changed = True
+            elif kind == "legend" and hasattr(target, "set_visible"):
+                target.set_visible(visible)
+                changed = True
+        except Exception:
+            changed = False
+        if changed:
+            item.setData(0, OBJECT_TREE_STATE_ROLE, new_state)
+            canvas = self._canvas_by_tab.get(self.tab_widget.currentWidget())
+            if canvas is not None:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    pass
+            return
+        self._object_tree_updating = True
+        fallback = (
+            QtCore.Qt.CheckState.Checked
+            if old_state == QtCore.Qt.CheckState.Checked
+            else QtCore.Qt.CheckState.Unchecked
+        )
+        item.setCheckState(0, fallback)
+        self._object_tree_updating = False
 
     def _rebuild_object_manager_for_tab(self, tab: QtWidgets.QWidget | None, *_: Any) -> None:
         """Rebuild the object manager tree for ``tab`` with all axes, legends, and lines."""
@@ -2933,9 +2996,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not isinstance(tree, QtWidgets.QTreeWidget):
             return
         tree.blockSignals(True)
+        self._object_tree_updating = True
         tree.clear()
         self._set_format_selection(None)
         if tab is None:
+            self._object_tree_updating = False
             tree.blockSignals(False)
             return
         descriptor = self._tab_descriptors.get(tab)
@@ -2951,6 +3016,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if axes_obj is not None:
                 figure = getattr(axes_obj, "figure", None)
         if figure is None:
+            self._object_tree_updating = False
             tree.blockSignals(False)
             return
         title = ""
@@ -2976,6 +3042,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             QtCore.Qt.ItemDataRole.UserRole,
             {"kind": "figure", "object": figure},
         )
+        self._apply_object_item_visibility(root_item, True, allow_toggle=False)
         tree.addTopLevelItem(root_item)
 
         try:
@@ -2992,6 +3059,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
             if kind and obj is not None:
                 item.setData(0, QtCore.Qt.ItemDataRole.UserRole, {"kind": kind, "object": obj})
+                if kind in {"legend", "line"}:
+                    visible = True
+                    getter = getattr(obj, "get_visible", None)
+                    if callable(getter):
+                        try:
+                            visible = bool(getter())
+                        except Exception:
+                            visible = True
+                    self._apply_object_item_visibility(item, visible)
             return item
 
         for axis_index, axis in enumerate(axes_list, start=1):
@@ -3082,6 +3158,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     )
                 axis_item.addChild(line_item)
         tree.expandAll()
+        self._object_tree_updating = False
         tree.blockSignals(False)
 
     def _handle_object_selection_changed(

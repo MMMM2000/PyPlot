@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 from .burnthrough import trim_burnthrough_glitch
 from ..utils import (
@@ -718,19 +719,24 @@ def plot_one(
     marker_size = 4.0
     line_width = 1.6
 
+    legend_handles: list[Line2D] = []
+    legend_kinds: set[str] = set()
     if currents.size == 0:
         pass
     elif currents.size == 1:
-        ax.plot(
+        line = ax.plot(
             currents,
             resistances,
             marker="o",
             linestyle="None",
             color="r",
             markersize=marker_size,
-        )
+        )[0]
+        line.set_label("Sample")
     else:
         previous_direction: float | None = None
+        inc_count = 0
+        dec_count = 0
         for start, end, direction in segments:
             color = "r" if direction >= 0 else "b"
             if end <= start:
@@ -750,7 +756,15 @@ def plot_one(
                 segment_resistances = np.concatenate(
                     ([resistances[start - 1]], segment_resistances)
                 )
-            ax.plot(
+            if direction >= 0:
+                inc_count += 1
+                label = f"Increasing {inc_count}"
+                legend_key = "increasing"
+            else:
+                dec_count += 1
+                label = f"Decreasing {dec_count}"
+                legend_key = "decreasing"
+            line = ax.plot(
                 segment_currents,
                 segment_resistances,
                 color=color,
@@ -760,13 +774,32 @@ def plot_one(
                 markerfacecolor=color,
                 markeredgecolor=color,
                 linewidth=line_width,
-            )
+                label=label,
+            )[0]
+            if legend_key not in legend_kinds:
+                legend_handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color=color,
+                        marker="o",
+                        linestyle="-",
+                        markersize=marker_size,
+                        linewidth=line_width,
+                        label="Increasing current"
+                        if legend_key == "increasing"
+                        else "Decreasing current",
+                    )
+                )
+                legend_kinds.add(legend_key)
             previous_direction = direction
 
     ax.set_xlabel("Current (mA)")
     ax.set_ylabel("Resistance (Ω)")
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="best")
     fig.tight_layout()
     cfg = dict(globals())
     apply_readability(ax, cfg)

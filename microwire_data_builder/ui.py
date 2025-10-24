@@ -8,12 +8,15 @@ import math
 import re
 import sys
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from plotting.utils import ensure_app_theme, install_standard_menu
+
+from .storage import MiniDatabaseData, MiniDatabaseStore
 
 from .core import (
     LOGGER_NAME,
@@ -22,11 +25,22 @@ from .core import (
     BuildResult,
     BuilderConfig,
     BuildCancelledError,
+    MicroscopeMeasurements,
+    MicroscopeDetection,
+    MeasurementRecord,
+    VideoMetricsSummary,
+    FabricationIndex,
+    StrainRecord,
     build_database,
     _normalise_output_name,
     _metadata_from_path,
     _microscope_key,
     _draw_key,
+    _load_annealing,
+    _resistance_sanity_check,
+    _group_microscope_measurements,
+    _collect_video_metrics,
+    _load_strain_records,
 )
 
 
@@ -686,7 +700,7 @@ class BuildWorker(QtCore.QObject):
             self.error.emit(message)
 
 
-class BuilderWindow(QtWidgets.QMainWindow):
+class LegacyBuilderWindow(QtWidgets.QMainWindow):
     """Main window that orchestrates the microwire database build."""
 
     log_message = QtCore.pyqtSignal(str)
@@ -2064,6 +2078,1062 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._save_settings()
         super().closeEvent(event)
 
+
+@dataclass
+class SectionProcessResult:
+    table: pd.DataFrame
+    processed: Dict[str, float]
+    payloads: Dict[str, Any] = field(default_factory=dict)
+    extra: Dict[str, Any] = field(default_factory=dict)
+
+
+class DataFrameModel(QtCore.QAbstractTableModel):
+    """Expose a pandas DataFrame to Qt view widgets."""
+
+    def __init__(self, frame: pd.DataFrame | None = None, parent: QtCore.QObject | None = None) -> None:
+        super().__init__(parent)
+        self._frame = frame.copy() if frame is not None else pd.DataFrame()
+
+    def set_frame(self, frame: pd.DataFrame | None) -> None:
+        self.beginResetModel()
+        self._frame = frame.copy() if frame is not None else pd.DataFrame()
+        self.endResetModel()
+
+    def frame(self) -> pd.DataFrame:
+        return self._frame
+
+    def rowCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # type: ignore[override]
+        if parent.isValid():
+            return 0
+        return len(self._frame.index)
+
+    def columnCount(self, parent: QtCore.QModelIndex = QtCore.QModelIndex()) -> int:  # type: ignore[override]
+        if parent.isValid():
+            return 0
+        return len(self._frame.columns)
+
+    def data(
+        self,
+        index: QtCore.QModelIndex,
+        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
+    ) -> Any:  # type: ignore[override]
+        if (
+            not index.isValid()
+            or role not in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.EditRole)
+        ):
+            return None
+        try:
+            value = self._frame.iat[index.row(), index.column()]
+        except Exception:
+            return None
+        if isinstance(value, float):
+            if math.isnan(value):
+                return ""
+            return f"{value:.4g}"
+        return str(value) if value is not None else ""
+
+    def headerData(
+        self,
+        section: int,
+        orientation: QtCore.Qt.Orientation,
+        role: int = QtCore.Qt.ItemDataRole.DisplayRole,
+    ) -> Any:  # type: ignore[override]
+        if role != QtCore.Qt.ItemDataRole.DisplayRole:
+            return None
+        if orientation == QtCore.Qt.Orientation.Horizontal:
+            try:
+                return str(self._frame.columns[section])
+            except Exception:
+                return ""
+        try:
+            label = self._frame.index[section]
+        except Exception:
+            return str(section + 1)
+        return str(label)
+
+
+def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
+    columns = [
+        "Composition",
+        "Draw",
+        "Piece",
+        "Length (m)",
+        "Resistance (Ω)",
+        "Temperature (°C)",
+        "Mass (g)",
+        "Production datetime",
+    ]
+    rows: List[Dict[str, Any]] = []
+    for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
+        draw_record = index.get_draw(composition, draw)
+        row: Dict[str, Any] = {
+            "Composition": composition,
+            "Draw": draw,
+            "Piece": piece,
+            "Length (m)": piece_record.get("length_m"),
+            "Resistance (Ω)": draw_record.get("fabrication_resistance_ohm"),
+            "Temperature (°C)": draw_record.get("fabrication_temperature_c"),
+            "Mass (g)": draw_record.get("mass_g"),
+            "Production datetime": draw_record.get("production_datetime"),
+        }
+        rows.append(row)
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _annealing_records_to_frame(records: List[MeasurementRecord]) -> pd.DataFrame:
+    columns = [
+        "File",
+        "Composition",
+        "Draw",
+        "Piece",
+        "Setpoint (mA)",
+        "Samples",
+        "Updated",
+    ]
+    rows: List[Dict[str, Any]] = []
+    for record in records:
+        metadata = record.metadata
+        path = record.path if isinstance(record.path, Path) else Path(str(record.path))
+        try:
+            mtime = path.stat().st_mtime
+            updated = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+        except Exception:
+            updated = ""
+        rows.append(
+            {
+                "File": path.name,
+                "Composition": metadata.composition_token,
+                "Draw": metadata.draw_x,
+                "Piece": metadata.piece_y,
+                "Setpoint (mA)": metadata.setpoint_mA,
+                "Samples": len(record.dataframe.index),
+                "Updated": updated,
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _microscope_index_to_frame(
+    index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
+    overrides: Dict[str, Dict[str, float]],
+) -> pd.DataFrame:
+    columns = [
+        "Composition",
+        "Draw",
+        "Piece",
+        "d (µm)",
+        "D (µm)",
+        "d/D",
+        "Images",
+        "_key",
+        "_images",
+    ]
+    rows: List[Dict[str, Any]] = []
+    for (composition, draw, piece), measurements in sorted(index.items()):
+        key = f"{composition}|{draw}|{piece}"
+        override = overrides.get(key, {})
+        d_value = override.get("d")
+        if d_value is None:
+            d_value = measurements.best_core()
+        D_value = override.get("D")
+        if D_value is None:
+            D_value = measurements.best_glass()
+        ratio = None
+        if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
+            try:
+                ratio = float(d_value) / float(D_value)
+            except ZeroDivisionError:
+                ratio = None
+        image_paths: List[str] = []
+        for bucket in (measurements.core, measurements.glass, measurements.other):
+            for detection in bucket:
+                path = getattr(detection, "image_path", None)
+                if path:
+                    image_paths.append(str(path))
+        rows.append(
+            {
+                "Composition": composition,
+                "Draw": draw,
+                "Piece": piece,
+                "d (µm)": d_value,
+                "D (µm)": D_value,
+                "d/D": ratio,
+                "Images": "; ".join(dict.fromkeys(image_paths)),
+                "_key": key,
+                "_images": image_paths,
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _video_index_to_frame(
+    index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]
+) -> pd.DataFrame:
+    columns = [
+        "Composition",
+        "Draw",
+        "Piece",
+        "Temperature (°C)",
+        "Underpressure",
+        "Winding speed (m/min)",
+        "Glass feeding (mm/min)",
+    ]
+    rows: List[Dict[str, Any]] = []
+    for (composition, draw, piece), summary in sorted(index.items()):
+        rows.append(
+            {
+                "Composition": composition,
+                "Draw": draw,
+                "Piece": piece,
+                "Temperature (°C)": summary.temperature(),
+                "Underpressure": summary.underpressure(),
+                "Winding speed (m/min)": summary.winding_speed(),
+                "Glass feeding (mm/min)": summary.glass_feed(),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _strain_records_to_frame(records: Dict[Tuple[str, int, int], StrainRecord]) -> pd.DataFrame:
+    columns = [
+        "Composition",
+        "Draw",
+        "Piece",
+        "Microwire",
+        "Strain (%)",
+        "Broke",
+    ]
+    rows: List[Dict[str, Any]] = []
+    for (composition, draw, piece), record in sorted(records.items()):
+        rows.append(
+            {
+                "Composition": composition,
+                "Draw": draw,
+                "Piece": piece,
+                "Microwire": record.microwire_label,
+                "Strain (%)": record.percent,
+                "Broke": bool(record.broke),
+            }
+        )
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(rows, columns=columns)
+
+
+def _apply_microscope_overrides(
+    index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
+    overrides: Dict[str, Dict[str, float]],
+) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
+    result: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+    for key, measurements in index.items():
+        clone = MicroscopeMeasurements(
+            core=list(measurements.core),
+            glass=list(measurements.glass),
+            other=list(measurements.other),
+        )
+        token = f"{key[0]}|{key[1]}|{key[2]}"
+        override = overrides.get(token, {})
+        d_value = override.get("d")
+        if isinstance(d_value, (int, float)) and d_value > 0:
+            detection = MicroscopeDetection(
+                value=float(d_value),
+                image_path=None,
+                source="manual",
+            )
+            detection.category = "core"
+            clone.core.insert(0, detection)
+        D_value = override.get("D")
+        if isinstance(D_value, (int, float)) and D_value > 0:
+            detection = MicroscopeDetection(
+                value=float(D_value),
+                image_path=None,
+                source="manual",
+            )
+            detection.category = "glass"
+            clone.glass.insert(0, detection)
+        result[key] = clone
+    return result
+
+
+class FabricationSection(MiniDatabaseSection):
+    section_key = "fabrication"
+    section_title = "Fabrication data"
+    supported_suffixes = (".xlsx", ".xls", ".xlsm")
+
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        index = build_fabrication_index(paths, self.logger)
+        table = _fabrication_index_to_frame(index)
+        processed: Dict[str, float] = {}
+        for path in paths:
+            try:
+                processed[str(path)] = float(path.stat().st_mtime)
+            except OSError:
+                continue
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"fabrication_index": index},
+        )
+
+
+class AnnealingSection(MiniDatabaseSection):
+    section_key = "annealing"
+    section_title = "Current annealing"
+    supported_suffixes = (".txt", ".csv", ".tsv")
+
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        records: List[MeasurementRecord] = []
+        processed: Dict[str, float] = {}
+        for path in paths:
+            try:
+                df = _load_annealing(path)
+            except Exception:
+                self.logger.exception("Failed to parse %s", path)
+                continue
+            metadata = _metadata_from_path(path)
+            ok, mean_error = _resistance_sanity_check(df)
+            if not ok:
+                self.logger.warning("R≈V/I sanity check failed for %s", path)
+            record = MeasurementRecord(
+                path=path,
+                metadata=metadata,
+                dataframe=df,
+                sanity_ok=ok,
+                sanity_error=mean_error,
+            )
+            records.append(record)
+            try:
+                processed[str(path)] = float(path.stat().st_mtime)
+            except OSError:
+                processed[str(path)] = 0.0
+        table = _annealing_records_to_frame(records)
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"annealing_records": records},
+        )
+
+
+class MicroscopeSection(MiniDatabaseSection):
+    section_key = "microscope"
+    section_title = "Microscope OCR"
+    supported_suffixes = MICROSCOPE_EXTENSIONS
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._overrides: Dict[str, Dict[str, float]] = {}
+        self._selected_key: str | None = None
+        super().__init__(logger, log_callback, parent)
+        stored_overrides = self.data.extra.get("overrides")
+        if isinstance(stored_overrides, dict):
+            self._overrides = {
+                str(key): {k: float(v) for k, v in value.items() if isinstance(v, (int, float))}
+                for key, value in stored_overrides.items()
+                if isinstance(value, dict)
+            }
+        if not self.data.table.empty:
+            self._apply_overrides_to_table()
+        self._update_hidden_columns()
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
+        table = QtWidgets.QTableView(splitter)
+        table.setModel(self.model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        self.table_view = table
+        selection_model = table.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._handle_selection_changed)
+
+        preview_container = QtWidgets.QWidget(splitter)
+        preview_layout = QtWidgets.QVBoxLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(6)
+
+        self.preview_label = QtWidgets.QLabel("Select a row to preview the image.")
+        self.preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumSize(220, 220)
+        self.preview_label.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        preview_layout.addWidget(self.preview_label, 1)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(4)
+
+        self.d_edit = QtWidgets.QLineEdit()
+        self.d_edit.setPlaceholderText("auto")
+        self.D_edit = QtWidgets.QLineEdit()
+        self.D_edit.setPlaceholderText("auto")
+        form.addRow("d (µm)", self.d_edit)
+        form.addRow("D (µm)", self.D_edit)
+        preview_layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        self.apply_override_button = QtWidgets.QPushButton("Apply override")
+        self.apply_override_button.clicked.connect(self._apply_override)
+        button_row.addWidget(self.apply_override_button)
+        self.clear_override_button = QtWidgets.QPushButton("Clear override")
+        self.clear_override_button.clicked.connect(self._clear_override)
+        button_row.addWidget(self.clear_override_button)
+        preview_layout.addLayout(button_row)
+
+        return splitter
+
+    def _update_hidden_columns(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = self.table_view.model()
+        if model is None:
+            return
+        for column_name in ("_key", "_images"):
+            try:
+                column_index = list(model.frame().columns).index(column_name)  # type: ignore[arg-type]
+            except Exception:
+                continue
+            self.table_view.setColumnHidden(column_index, True)
+
+    def _selected_row(self) -> Optional[pd.Series]:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return None
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return None
+        indexes = selection.selectedRows()
+        if not indexes:
+            return None
+        row = indexes[0].row()
+        try:
+            return self.data.table.iloc[row]
+        except Exception:
+            return None
+
+    def _handle_selection_changed(self, *_: Any) -> None:
+        row = self._selected_row()
+        if row is None:
+            self._selected_key = None
+            self.preview_label.setText("Select a row to preview the image.")
+            self.d_edit.clear()
+            self.D_edit.clear()
+            return
+        key = row.get("_key")
+        self._selected_key = str(key) if key is not None else None
+        d_value = row.get("d (µm)")
+        D_value = row.get("D (µm)")
+        self.d_edit.setText("" if d_value is None or (isinstance(d_value, float) and math.isnan(d_value)) else f"{float(d_value):.3f}")
+        self.D_edit.setText("" if D_value is None or (isinstance(D_value, float) and math.isnan(D_value)) else f"{float(D_value):.3f}")
+        images = row.get("_images") if isinstance(row.get("_images"), list) else []
+        if images:
+            first = Path(images[0])
+            if first.exists():
+                pixmap = QtGui.QPixmap(str(first))
+                if not pixmap.isNull():
+                    scaled = pixmap.scaled(
+                        self.preview_label.size(),
+                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+                        QtCore.Qt.TransformationMode.SmoothTransformation,
+                    )
+                    self.preview_label.setPixmap(scaled)
+                    return
+        self.preview_label.setPixmap(QtGui.QPixmap())
+        self.preview_label.setText("No preview available.")
+
+    def _apply_override(self) -> None:
+        if not self._selected_key:
+            return
+        d_text = self.d_edit.text().strip()
+        D_text = self.D_edit.text().strip()
+        override: Dict[str, float] = {}
+        if d_text:
+            try:
+                override["d"] = float(d_text)
+            except ValueError:
+                QtWidgets.QMessageBox.warning(self, self.section_title, "Invalid d value.")
+                return
+        if D_text:
+            try:
+                override["D"] = float(D_text)
+            except ValueError:
+                QtWidgets.QMessageBox.warning(self, self.section_title, "Invalid D value.")
+                return
+        if override:
+            self._overrides[self._selected_key] = override
+        else:
+            self._overrides.pop(self._selected_key, None)
+        self._store_overrides()
+
+    def _clear_override(self) -> None:
+        if not self._selected_key:
+            return
+        if self._selected_key in self._overrides:
+            self._overrides.pop(self._selected_key, None)
+            self._store_overrides()
+        self.d_edit.clear()
+        self.D_edit.clear()
+
+    def _store_overrides(self) -> None:
+        self.data.extra["overrides"] = self._overrides
+        self.store.save(self.data)
+        self._apply_overrides_to_table()
+        self._update_hidden_columns()
+
+    def _apply_overrides_to_table(self) -> None:
+        frame = self.data.table.copy()
+        if frame.empty:
+            self.model.set_frame(frame)
+            return
+        for index, row in frame.iterrows():
+            key = str(row.get("_key"))
+            override = self._overrides.get(key)
+            d_value = row.get("d (µm)")
+            D_value = row.get("D (µm)")
+            if override:
+                if "d" in override:
+                    d_value = override.get("d")
+                if "D" in override:
+                    D_value = override.get("D")
+            ratio = None
+            if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
+                try:
+                    ratio = float(d_value) / float(D_value)
+                except ZeroDivisionError:
+                    ratio = None
+            frame.at[index, "d (µm)"] = d_value
+            frame.at[index, "D (µm)"] = D_value
+            frame.at[index, "d/D"] = ratio
+        self.data.table = frame
+        self.model.set_frame(frame)
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._apply_overrides_to_table()
+        self._update_hidden_columns()
+
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        index = _group_microscope_measurements(paths, self.logger)
+        # Retain overrides only for existing keys
+        filtered_overrides = {
+            key: value
+            for key, value in self._overrides.items()
+            if any(
+                key == f"{comp}|{draw}|{piece}"
+                for comp, draw, piece in index.keys()
+            )
+        }
+        self._overrides = filtered_overrides
+        table = _microscope_index_to_frame(index, filtered_overrides)
+        processed: Dict[str, float] = {}
+        for path in paths:
+            try:
+                processed[str(path)] = float(path.stat().st_mtime)
+            except OSError:
+                continue
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"microscope_index": index},
+            extra={"overrides": filtered_overrides},
+        )
+
+    @property
+    def overrides(self) -> Dict[str, Dict[str, float]]:
+        return dict(self._overrides)
+
+
+class VideoSection(MiniDatabaseSection):
+    section_key = "videos"
+    section_title = "Fabrication videos"
+    supported_suffixes = VIDEO_EXTENSIONS
+
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        index = _collect_video_metrics(paths, self.logger)
+        table = _video_index_to_frame(index)
+        processed: Dict[str, float] = {}
+        for path in paths:
+            try:
+                processed[str(path)] = float(path.stat().st_mtime)
+            except OSError:
+                continue
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"video_index": index},
+        )
+
+
+class StrainSection(MiniDatabaseSection):
+    section_key = "strain"
+    section_title = "Strain data"
+    supported_suffixes = (".xlsx", ".xls", ".xlsm")
+
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        records = _load_strain_records(paths, self.logger)
+        table = _strain_records_to_frame(records)
+        processed: Dict[str, float] = {}
+        for path in paths:
+            try:
+                processed[str(path)] = float(path.stat().st_mtime)
+            except OSError:
+                continue
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"strain_records": records},
+        )
+
+
+class AssemblySection(QtWidgets.QWidget):
+    """Final step that merges prepared mini-databases into a spreadsheet."""
+
+    def __init__(
+        self,
+        sections: Dict[str, MiniDatabaseSection],
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.sections = sections
+        self.logger = logger
+        self._log_callback = log_callback
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self.output_dir_edit = QtWidgets.QLineEdit(str(Path.cwd()))
+        browse_button = QtWidgets.QPushButton("Browse…")
+        browse_button.clicked.connect(self._choose_output_dir)
+        dir_row = QtWidgets.QHBoxLayout()
+        dir_row.addWidget(self.output_dir_edit)
+        dir_row.addWidget(browse_button)
+        dir_container = QtWidgets.QWidget()
+        dir_container.setLayout(dir_row)
+        form.addRow("Output directory", dir_container)
+
+        self.output_name_edit = QtWidgets.QLineEdit(DEFAULT_OUTPUT_NAME)
+        form.addRow("Output name", self.output_name_edit)
+
+        layout.addLayout(form)
+
+        options_layout = QtWidgets.QHBoxLayout()
+        self.csv_checkbox = QtWidgets.QCheckBox("Export CSV")
+        self.csv_checkbox.setChecked(True)
+        options_layout.addWidget(self.csv_checkbox)
+        self.excel_checkbox = QtWidgets.QCheckBox("Export Excel")
+        options_layout.addWidget(self.excel_checkbox)
+        self.plots_checkbox = QtWidgets.QCheckBox("Create Matplotlib plots")
+        options_layout.addWidget(self.plots_checkbox)
+        self.origin_checkbox = QtWidgets.QCheckBox("Export Origin workbooks")
+        options_layout.addWidget(self.origin_checkbox)
+        options_layout.addStretch(1)
+        layout.addLayout(options_layout)
+
+        self.status_label = QtWidgets.QLabel("Ready to assemble once all sections are processed.")
+        layout.addWidget(self.status_label)
+
+        self.combine_button = QtWidgets.QPushButton("Combine database")
+        self.combine_button.clicked.connect(self._combine)
+        layout.addWidget(self.combine_button, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+
+    def log(self, message: str) -> None:
+        try:
+            self._log_callback(message)
+        except Exception:
+            self.logger.info(message)
+
+    def _choose_output_dir(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory")
+        if directory:
+            self.output_dir_edit.setText(directory)
+
+    def _load_payload(self, section_key: str, name: str) -> Any:
+        section = self.sections.get(section_key)
+        if section is None:
+            return None
+        return section.store.load_payload(name)
+
+    def _combine(self) -> None:
+        fabrication_index = self._load_payload("fabrication", "fabrication_index")
+        annealing_records = self._load_payload("annealing", "annealing_records")
+        microscope_index = self._load_payload("microscope", "microscope_index")
+        video_index = self._load_payload("videos", "video_index")
+        strain_records = self._load_payload("strain", "strain_records")
+
+        missing = []
+        if fabrication_index is None:
+            missing.append("fabrication")
+        if not annealing_records:
+            missing.append("annealing")
+        if microscope_index is None:
+            missing.append("microscope")
+        if video_index is None:
+            missing.append("videos")
+        if strain_records is None:
+            missing.append("strain")
+        if missing:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Process the following sections first: " + ", ".join(sorted(missing)),
+            )
+            return
+
+        overrides = {}
+        microscope_section = self.sections.get("microscope")
+        if isinstance(microscope_section, MicroscopeSection):
+            overrides = microscope_section.overrides
+            microscope_index = _apply_microscope_overrides(microscope_index, overrides)
+
+        output_dir = Path(self.output_dir_edit.text().strip() or Path.cwd())
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_name = _normalise_output_name(self.output_name_edit.text() or DEFAULT_OUTPUT_NAME)
+
+        formats: List[str] = []
+        if self.csv_checkbox.isChecked():
+            formats.append("csv")
+        if self.excel_checkbox.isChecked():
+            formats.append("excel")
+        backends: List[str] = []
+        if self.plots_checkbox.isChecked():
+            backends.append("matplotlib")
+        if self.origin_checkbox.isChecked():
+            backends.append("origin")
+
+        config = BuilderConfig(
+            annealing_files=[],
+            fabrication_files=[],
+            output_dir=output_dir,
+            microscope_files=[],
+            video_files=[],
+            strain_files=[],
+            make_plots=self.plots_checkbox.isChecked(),
+            export_formats=tuple(formats) if formats else ("csv",),
+            plot_backends=tuple(backends),
+            output_name=output_name,
+        )
+
+        try:
+            result = build_database(
+                config,
+                logger=self.logger,
+                fabrication_index=fabrication_index,
+                measurement_records=annealing_records,
+                microscope_index=microscope_index,
+                video_index=video_index,
+                strain_records=strain_records,
+            )
+        except Exception as exc:
+            self.logger.exception("Assembly failed")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Microwire Data Builder",
+                f"Failed to assemble database:\n{exc}",
+            )
+            return
+
+        exports_text = ", ".join(f"{fmt.upper()}: {path}" for fmt, path in result.exports.items())
+        if not exports_text:
+            exports_text = "No exports generated."
+        QtWidgets.QMessageBox.information(
+            self,
+            "Microwire Data Builder",
+            f"Database assembled successfully.\n{exports_text}",
+        )
+        self.log("Database combined successfully.")
+
+
+class BuilderWindow(QtWidgets.QMainWindow):
+    """New workbench for preparing and assembling microwire databases."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.logger = logging.getLogger(LOGGER_NAME)
+        self.setWindowTitle("Microwire Data Builder")
+        self.resize(1100, 720)
+
+        central = QtWidgets.QWidget(self)
+        layout = QtWidgets.QVBoxLayout(central)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.tab_widget = QtWidgets.QTabWidget(central)
+        layout.addWidget(self.tab_widget, 1)
+
+        self.log_view = QtWidgets.QPlainTextEdit(central)
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        layout.addWidget(self.log_view, 0)
+
+        self.setCentralWidget(central)
+
+        self.sections: Dict[str, MiniDatabaseSection] = {}
+
+        def _append_log(message: str) -> None:
+            self.log_view.appendPlainText(message)
+            scrollbar = self.log_view.verticalScrollBar()
+            if scrollbar is not None:
+                scrollbar.setValue(scrollbar.maximum())
+
+        self.fabrication_section = FabricationSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.fabrication_section, "Fabrication")
+        self.sections["fabrication"] = self.fabrication_section
+
+        self.annealing_section = AnnealingSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.annealing_section, "Current annealing")
+        self.sections["annealing"] = self.annealing_section
+
+        self.microscope_section = MicroscopeSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.microscope_section, "Microscope")
+        self.sections["microscope"] = self.microscope_section
+
+        self.video_section = VideoSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.video_section, "Videos")
+        self.sections["videos"] = self.video_section
+
+        self.strain_section = StrainSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.strain_section, "Strain")
+        self.sections["strain"] = self.strain_section
+
+        assembly = AssemblySection(self.sections, self.logger, _append_log)
+        self.tab_widget.addTab(assembly, "Assemble")
+
+        install_standard_menu(self, help_topic="builder_database", console=self.log_view)
+
+class MiniDatabaseSection(QtWidgets.QWidget):
+    """Base widget for mini-database sections that process a subset of data."""
+
+    section_key = "base"
+    section_title = "Base"
+    supported_suffixes: tuple[str, ...] = ()
+    recursive_search = True
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.logger = logger
+        self._log_callback = log_callback
+        self.store = MiniDatabaseStore(self.section_key)
+        self.data = self.store.load()
+        self.model = DataFrameModel(self.data.table)
+        self.table_view: QtWidgets.QTableView | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.add_button = QtWidgets.QPushButton("Connect folder…")
+        self.add_button.clicked.connect(self._add_source)
+        controls.addWidget(self.add_button)
+
+        self.remove_button = QtWidgets.QPushButton("Remove")
+        self.remove_button.clicked.connect(self._remove_selected_source)
+        controls.addWidget(self.remove_button)
+
+        controls.addStretch(1)
+
+        self.refresh_button = QtWidgets.QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.refresh)
+        controls.addWidget(self.refresh_button)
+
+        layout.addLayout(controls)
+
+        self.status_label = QtWidgets.QLabel()
+        layout.addWidget(self.status_label)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.sources_list = QtWidgets.QListWidget()
+        self.sources_list.itemSelectionChanged.connect(self._update_remove_enabled)
+        splitter.addWidget(self.sources_list)
+        splitter.setStretchFactor(0, 0)
+
+        right_panel = self.create_right_panel(splitter)
+        splitter.addWidget(right_panel)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
+        self._populate_sources_list()
+        self.model.set_frame(self.data.table)
+        self._update_status()
+
+    # ------------------------------------------------------------------ UI helpers
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        self.table_view = table
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(table, 1)
+        return container
+
+    def _populate_sources_list(self) -> None:
+        self.sources_list.clear()
+        for source in self.data.sources:
+            self.sources_list.addItem(source)
+        self._update_remove_enabled()
+
+    def _update_remove_enabled(self) -> None:
+        has_selection = bool(self.sources_list.selectedItems())
+        self.remove_button.setEnabled(has_selection)
+
+    def _sync_sources(self) -> None:
+        sources: list[str] = []
+        for index in range(self.sources_list.count()):
+            item = self.sources_list.item(index)
+            if item is not None:
+                sources.append(item.text())
+        self.data.sources = sources
+        self.store.save(self.data)
+        self._update_status()
+
+    def _add_source(self) -> None:
+        directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
+        if not directory:
+            return
+        normalised = str(Path(directory).expanduser())
+        existing = {self.sources_list.item(idx).text() for idx in range(self.sources_list.count())}
+        if normalised not in existing:
+            self.sources_list.addItem(normalised)
+            self._sync_sources()
+
+    def _remove_selected_source(self) -> None:
+        for item in self.sources_list.selectedItems():
+            row = self.sources_list.row(item)
+            self.sources_list.takeItem(row)
+        self._sync_sources()
+
+    # ------------------------------------------------------------------ data handling
+    def _collect_candidates(self) -> List[Path]:
+        candidates: Dict[str, Path] = {}
+        for source in self.data.sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            iterator: Iterable[Path]
+            try:
+                iterator = root.rglob("*") if self.recursive_search else root.glob("*")
+            except Exception:
+                continue
+            for path in iterator:
+                if not path.is_file():
+                    continue
+                if self.supported_suffixes and path.suffix.lower() not in self.supported_suffixes:
+                    continue
+                try:
+                    resolved = str(path.resolve())
+                except Exception:
+                    resolved = str(path)
+                candidates.setdefault(resolved, path)
+        return sorted(candidates.values())
+
+    def _pending_paths(self) -> List[Path]:
+        pending: List[Path] = []
+        processed = self.data.processed
+        for path in self._collect_candidates():
+            key = str(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if float(processed.get(key, -1.0)) != float(mtime):
+                pending.append(path)
+        return pending
+
+    def _update_status(self) -> None:
+        sources_count = len(self.data.sources)
+        pending = self._pending_paths() if sources_count else []
+        if sources_count == 0:
+            self.status_label.setText("Connect one or more folders to begin.")
+            self.refresh_button.setEnabled(False)
+            return
+        self.refresh_button.setEnabled(True)
+        if pending:
+            self.status_label.setText(
+                f"⚠️ {len(pending)} new or updated file(s) pending processing."
+            )
+        elif not self.data.table.empty:
+            self.status_label.setText(
+                f"Up to date ({len(self.data.table)} record(s))."
+            )
+        else:
+            self.status_label.setText("No processed data available yet.")
+
+    def log(self, message: str) -> None:
+        try:
+            self._log_callback(message)
+        except Exception:
+            self.logger.info(message)
+
+    def refresh(self) -> None:
+        candidates = self._collect_candidates()
+        if not candidates:
+            self.log(f"{self.section_title}: no files found in connected folders.")
+            self.data.processed = {}
+            self.data.table = pd.DataFrame()
+            self.store.save(self.data)
+            self.model.set_frame(self.data.table)
+            self._update_status()
+            return
+        try:
+            result = self.process(candidates)
+        except Exception as exc:  # pragma: no cover - defensive UI guard
+            self.logger.exception("%s processing failed", self.section_title)
+            QtWidgets.QMessageBox.critical(
+                self,
+                self.section_title,
+                f"Failed to process data:\n{exc}",
+            )
+            return
+
+        existing_payloads = set(self.data.extra.get("payloads", {}).keys())
+        new_payloads = set(result.payloads.keys())
+        for name in existing_payloads - new_payloads:
+            self.store.clear_payload(name)
+
+        payload_map: Dict[str, str] = {}
+        for name, payload in result.payloads.items():
+            self.store.save_payload(name, payload)
+            payload_map[name] = name
+        if payload_map:
+            self.data.extra["payloads"] = payload_map
+        if result.extra:
+            self.data.extra.update(result.extra)
+        self.data.processed = result.processed
+        self.data.table = result.table
+        self.store.save(self.data)
+        self.model.set_frame(result.table)
+        self._update_status()
+        self.log(
+            f"{self.section_title}: processed {len(candidates)} file(s)."
+        )
+
+    # ------------------------------------------------------------------ hooks for subclasses
+    def process(self, paths: List[Path]) -> SectionProcessResult:
+        raise NotImplementedError
 
 def run_app() -> None:
     main()

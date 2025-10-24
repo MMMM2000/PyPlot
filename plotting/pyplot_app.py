@@ -18,6 +18,7 @@ from matplotlib.figure import Figure
 import pandas as pd
 
 from plotting.pyplot import (
+    GraphLineState,
     PyPlotWindow,
     WorksheetColumnMeta,
     WorksheetData,
@@ -962,8 +963,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._data_by_file: dict[str, pd.DataFrame] = {}
         self._loaded_files: list[str] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
-        self._summary_label: QtWidgets.QLabel | None = None
         self._origin_mode_combo: QtWidgets.QComboBox | None = None
+        self._workbook_keys: dict[str, str] = {}
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
@@ -973,18 +974,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self.host._set_data_sources_visible(False)
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
-        container = QtWidgets.QWidget(self.host)
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        summary = QtWidgets.QLabel(
-            "Use the Data menu to import current annealing logs, then select them before clicking Load data."
-        )
-        summary.setWordWrap(True)
-        layout.addWidget(summary)
-        layout.addStretch(1)
-        self._summary_label = summary
-        return container
+        return None
 
     def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
         if self._settings_widget is not None:
@@ -1028,9 +1018,16 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         anneal_core.BACKEND = "matplotlib"
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.is_file()]
+        host = self.host
+        paths = [path for path in host._selected_paths() if path.is_file()]
         if not paths:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Select one or more data files first.")
+            host._sync_selected_paths_with_imports()
+            paths = [path for path in host._selected_paths() if path.is_file()]
+        if not paths:
+            opener = getattr(host, "_show_data_menu", None)
+            if callable(opener) and opener():
+                return
+            QtWidgets.QMessageBox.warning(host, self.name, "Select one or more data files first.")
             return
         data_by_file: dict[str, pd.DataFrame] = {}
         errors: list[str] = []
@@ -1046,18 +1043,14 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         if not data_by_file:
             self._data_by_file = {}
             self._loaded_files = []
-            self._summary_label.setText("No valid current annealing files were loaded.") if self._summary_label else None
             self.update_ui()
             return
         self._data_by_file = data_by_file
         self._loaded_files = list(data_by_file.keys())
-        if self._summary_label is not None and not self._summary_label.text().strip():
-            self._summary_label.setText(
-                "Use the Data menu to import current annealing logs, then select them before clicking Load data."
-            )
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
         self._log(f"Loaded {len(data_by_file)} current annealing file(s).")
+        self._register_workbooks()
         self.update_ui()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -1091,6 +1084,18 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
             ax = fig.axes[0] if fig.axes else None
+            lines: dict[tuple[str, float | str], GraphLineState] = {}
+            if ax is not None:
+                for index, line in enumerate(ax.get_lines(), start=1):
+                    label = line.get_label() or f"Series {index}"
+                    state = GraphLineState(
+                        key=(label, float(index)),
+                        label=label,
+                        line=line,
+                        base_x=line.get_xdata(),
+                        base_y=line.get_ydata(),
+                    )
+                    lines[state.key] = state
             descriptor = TabDescriptor(
                 kind="current_annealing",
                 title=ax.get_title() if ax else title,
@@ -1099,7 +1104,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 y_label=ax.get_ylabel() if ax else "Resistance",
                 canvas=canvas,
                 axes=ax,
-                lines={},
+                lines=lines,
                 metadata={
                     "source_file": path_str,
                     "saved_path": "",
@@ -1146,6 +1151,94 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
         self.host._update_project_actions()
+
+    def _register_workbooks(self) -> None:
+        host = self.host
+        created: list[str] = []
+        for path_str, df in self._data_by_file.items():
+            path = Path(path_str)
+            key = self._workbook_keys.get(path_str)
+            if not key:
+                key = f"annealing::{path_str}"
+                self._workbook_keys[path_str] = key
+            workbook = WorkbookData(
+                key=key,
+                name=f"{path.stem} (annealing)",
+                worksheets=[],
+                source=path,
+                folder=path.parent,
+            )
+            worksheet_objects: list[WorksheetData] = []
+            for sheet_name, frame in self._split_by_direction(df):
+                worksheet = host._create_worksheet_from_frame(workbook, sheet_name, frame)
+                columns = worksheet.columns
+                current_meta = columns.get("Current (mA)")
+                if isinstance(current_meta, WorksheetColumnMeta):
+                    current_meta.units = "mA"
+                    current_meta.long_name = "Current"
+                resistance_meta = columns.get("Resistance (Ω)")
+                if isinstance(resistance_meta, WorksheetColumnMeta):
+                    resistance_meta.units = "Ω"
+                    resistance_meta.long_name = "Resistance"
+                worksheet_objects.append(worksheet)
+            if not worksheet_objects:
+                continue
+            workbook.worksheets = [ws.key for ws in worksheet_objects]
+            host._register_imported_workbook(workbook, worksheet_objects)
+            created.append(path.name)
+        if created:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
+            self._log(
+                "Created worksheets for: " + ", ".join(created),
+            )
+
+    def _split_by_direction(self, df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+        if df.empty:
+            return []
+        if not {"I_mA", "R_Ohm"}.issubset(df.columns):
+            renamed = df.rename(
+                columns={"Current (mA)": "I_mA", "Resistance (Ω)": "R_Ohm"}
+            )
+        else:
+            renamed = df
+        currents = renamed["I_mA"].to_numpy(dtype=float)
+        _, segments = anneal_core._direction_profile(currents)
+        sheets: list[tuple[str, pd.DataFrame]] = []
+        inc = 0
+        dec = 0
+        for start, end, direction in segments:
+            if end <= start:
+                continue
+            segment = renamed.iloc[start:end].copy()
+            segment = segment.rename(
+                columns={"I_mA": "Current (mA)", "R_Ohm": "Resistance (Ω)"}
+            )
+            segment = segment.reset_index(drop=True)
+            for column in ("Current (mA)", "Resistance (Ω)"):
+                segment[column] = pd.to_numeric(segment[column], errors="coerce")
+            segment = segment.dropna(subset=["Current (mA)", "Resistance (Ω)"]).reset_index(
+                drop=True
+            )
+            if direction >= 0:
+                inc += 1
+                label = f"Increasing {inc}"
+            else:
+                dec += 1
+                label = f"Decreasing {dec}"
+            sheets.append((label, segment))
+        if not sheets:
+            fallback = renamed.rename(
+                columns={"I_mA": "Current (mA)", "R_Ohm": "Resistance (Ω)"}
+            )
+            fallback = fallback.reset_index(drop=True)
+            for column in ("Current (mA)", "Resistance (Ω)"):
+                fallback[column] = pd.to_numeric(fallback[column], errors="coerce")
+            fallback = fallback.dropna(subset=["Current (mA)", "Resistance (Ω)"]).reset_index(
+                drop=True
+            )
+            sheets.append(("Samples", fallback))
+        return sheets
 
 
 class VSMHysteresisPlugin(PyPlotPlugin):
@@ -2263,18 +2356,25 @@ class PyPlotWorkbench(PyPlotWindow):
                 global_pos = menu_bar.mapToGlobal(anchor_point)
             except Exception:
                 global_pos = None
-            if action is not None:
-                try:
-                    menu_bar.setActiveAction(action)
-                except Exception:
-                    pass
             if global_pos is not None:
-                chosen = data_menu.exec(global_pos)
-                try:
-                    menu_bar.setActiveAction(None)
-                except Exception:
-                    pass
-                return chosen is not None
+                if action is not None:
+                    try:
+                        menu_bar.setActiveAction(action)
+                    except Exception:
+                        pass
+
+                    def _clear_active_action() -> None:
+                        try:
+                            menu_bar.setActiveAction(None)
+                        except Exception:
+                            pass
+
+                    data_menu.aboutToHide.connect(  # type: ignore[arg-type]
+                        _clear_active_action,
+                        QtCore.Qt.ConnectionType.SingleShot,
+                    )
+                data_menu.popup(global_pos)
+                return True
         try:
             fallback_pos = self.mapToGlobal(QtCore.QPoint(0, 0))
         except Exception:
