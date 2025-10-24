@@ -1,5 +1,20 @@
 # Changelog
 
+## 2025-10-23 16:40 UTC
+
+- Converted the shared Load/Generate/Export buttons into a global PyPlot action
+  toolbar so every plotting script reuses the same controls and the Data menu
+  now opens directly from the menubar when sources are missing.
+- Started the Project Explorer and Object Manager docks in an opened state and
+  switched Matplotlib canvases to tabbed MDI view so each plot fills the window
+  by default while keeping the dock switcher behaviour.
+- Dropped the per-script readability panels, defaulted readability tweaks to
+  off across plotting modules, and left log messages to report load counts so
+  on-screen instructions stay uncluttered.
+- Refreshed the current annealing plotting workflow so multi-file runs create
+  full-sized tabs with automatic sizing and the Object Manager tree now lists
+  axes and lines for those plots.
+
 ## 2025-10-23 13:05 UTC
 
 - Added a format toolbar to PyPlot that tracks the Object Manager selection so

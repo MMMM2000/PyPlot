@@ -30,7 +30,7 @@ SAVE_PLOTS = False
 SAVE_FORMAT = "png"
 PNG_DPI = 1200
 BACKEND = "matplotlib"
-IMPROVE_READABILITY = True
+IMPROVE_READABILITY = False
 SHOW_LEGEND = True
 LEGEND_SIZE = 18
 LEGEND_ORIENTATION = "auto"
@@ -708,24 +708,15 @@ def plot_one(
     figsize: Tuple[float, float] | None = None,
 ) -> Tuple[Figure, str]:
     if not figsize:
-        figsize = (4.0, 2.25)
+        figsize = (8.0, 4.5)
     width, height = max(float(figsize[0]), 0.5), max(float(figsize[1]), 0.5)
     fig, ax = plt.subplots(figsize=(width, height))
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     _, segments = _direction_profile(currents)
-
-    base_width, base_height = 8.0, 4.5
-    scale = min(width / base_width, height / base_height)
-    if not np.isfinite(scale) or scale <= 0:
-        scale = min(width, height) / base_height
-    scale = max(0.3, float(scale))
-    tick_size = max(6, int(round(18 * scale)))
-    axis_size = max(6, int(round(18 * scale)))
-    title_size = max(8, int(round(22 * scale)))
-    marker_size = max(1.5, 4.0 * scale)
-    line_width = max(1.0, 1.5 * scale)
+    marker_size = 4.0
+    line_width = 1.6
 
     if currents.size == 0:
         pass
@@ -778,11 +769,6 @@ def plot_one(
     ax.grid(True, ls="--", alpha=0.3)
     fig.tight_layout()
     cfg = dict(globals())
-    cfg.update({
-        "TICK_SIZE": tick_size,
-        "AXIS_LABEL_SIZE": axis_size,
-        "TITLE_SIZE": title_size,
-    })
     apply_readability(ax, cfg)
     fname = title.replace(os.sep, "_")
     return fig, fname

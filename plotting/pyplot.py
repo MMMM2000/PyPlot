@@ -279,6 +279,26 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         elif not keep_indices and not self._floating_indices:
             self._expanded_index = None
 
+    def set_initial_visible(self, indices: Iterable[int]) -> None:
+        """Mark ``indices`` as persistent docks shown on startup."""
+
+        valid = [index for index in indices if 0 <= index < len(self._docks)]
+        if not valid:
+            return
+        # Keep the first dock pinned so it stays visible until toggled off.
+        self._pinned_index = valid[0]
+        keep: set[int] = set(valid)
+        for index in valid:
+            dock = self._docks[index]
+            dock.show()
+            if not dock.isFloating():
+                self._ensure_tabbed(dock)
+                width = self._dock_widths.get(dock, 0)
+                if width > 0:
+                    self._apply_dock_width(dock, width)
+        self._expanded_index = valid[0]
+        self._collapse_all(keep=keep)
+
     def _schedule_collapse(self) -> None:
         if self._collapse_timer.isActive() or self._floating_indices:
             return
@@ -1201,45 +1221,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._script_panel_layout.setSpacing(8)
         central_layout.addWidget(self._script_panel_container)
 
-        action_row = QtWidgets.QHBoxLayout()
-        self.load_data_button = QtWidgets.QPushButton("Load data")
-        self.load_data_button.setEnabled(False)
-        self.load_data_button.clicked.connect(self._load_data)
-        action_row.addWidget(self.load_data_button)
-
-        self.plot_button = QtWidgets.QPushButton("Generate plots")
-        self.plot_button.clicked.connect(self._generate_plots)
-        self.plot_button.setEnabled(False)
-        action_row.addWidget(self.plot_button)
-
-        self.popout_button = QtWidgets.QPushButton("Open in Matplotlib")
-        self.popout_button.clicked.connect(self._open_matplotlib_window)
-        self.popout_button.setEnabled(False)
-        action_row.addWidget(self.popout_button)
-
-        self.save_graph_button = QtWidgets.QPushButton("Save graph…")
-        self.save_graph_button.setEnabled(False)
-        self.save_graph_button.clicked.connect(self._save_current_graph)
-        action_row.addWidget(self.save_graph_button)
-
-        self.normalize_button = QtWidgets.QPushButton("Normalize Y")
-        self.normalize_button.setEnabled(False)
-        self.normalize_button.clicked.connect(self._normalize_current_graph)
-        action_row.addWidget(self.normalize_button)
-
-        self.export_button = QtWidgets.QPushButton("Export TXT…")
-        self.export_button.clicked.connect(self._export_txt)
-        self.export_button.setEnabled(False)
-        action_row.addWidget(self.export_button)
-
-        self.open_origin_button = QtWidgets.QPushButton("Open in Origin…")
-        self.open_origin_button.clicked.connect(self._open_origin_prompt)
-        self.open_origin_button.setEnabled(False)
-        action_row.addWidget(self.open_origin_button)
-
-        action_row.addStretch(1)
-        central_layout.addLayout(action_row)
-
         self.tab_widget = _MdiTabProxy()
         self.tab_widget.currentChanged.connect(self._handle_current_tab_changed)
         central_layout.addWidget(self.tab_widget, 1)
@@ -1302,15 +1283,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         console_dock.hide()
         self.console_dock = console_dock
 
+        self._setup_action_toolbar()
         self._setup_format_toolbar()
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
         if self._dock_switcher_supported():
             self._dock_switcher_panels.append(
-                self._create_dock_switcher((project_dock, log_dock, graph_dock), side="left")
+                self._create_dock_switcher(
+                    (project_dock, log_dock, graph_dock),
+                    side="left",
+                    initial_visible=(0,),
+                )
             )
             self._dock_switcher_panels.append(
-                self._create_dock_switcher((object_dock,), side="right")
+                self._create_dock_switcher((object_dock,), side="right", initial_visible=(0,))
             )
         else:
             self._dock_switcher_panels.extend([None, None])
@@ -1508,6 +1494,68 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._reorder_columns_action = reorder_action
 
         self._update_worksheet_actions()
+
+    def _setup_action_toolbar(self) -> None:
+        toolbar = QtWidgets.QToolBar("Plot actions", self)
+        toolbar.setObjectName("mw_action_toolbar")
+        toolbar.setMovable(True)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self._action_toolbar = toolbar
+
+        load_action = toolbar.addAction("Load data")
+        load_action.setEnabled(False)
+        load_action.triggered.connect(self._load_data)
+        self.load_data_button = load_action
+
+        generate_action = toolbar.addAction("Generate plots")
+        generate_action.setEnabled(False)
+        generate_action.triggered.connect(self._generate_plots)
+        self.plot_button = generate_action
+
+        popout_action = toolbar.addAction("Open in Matplotlib")
+        popout_action.setEnabled(False)
+        popout_action.triggered.connect(self._open_matplotlib_window)
+        self.popout_button = popout_action
+
+        toolbar.addSeparator()
+
+        save_action = toolbar.addAction("Save graph…")
+        save_action.setEnabled(False)
+        save_action.triggered.connect(self._save_current_graph)
+        self.save_graph_button = save_action
+
+        normalize_action = toolbar.addAction("Normalize Y")
+        normalize_action.setEnabled(False)
+        normalize_action.triggered.connect(self._normalize_current_graph)
+        self.normalize_button = normalize_action
+
+        export_action = toolbar.addAction("Export TXT…")
+        export_action.setEnabled(False)
+        export_action.triggered.connect(self._export_txt)
+        self.export_button = export_action
+
+        origin_action = toolbar.addAction("Open in Origin…")
+        origin_action.setEnabled(False)
+        origin_action.triggered.connect(self._open_origin_prompt)
+        self.open_origin_button = origin_action
+
+    def _update_save_graph_enabled(self) -> None:
+        button = getattr(self, "save_graph_button", None)
+        if hasattr(button, "setEnabled"):
+            try:
+                button.setEnabled(bool(self._tab_descriptors))
+            except Exception:
+                pass
+
+    def _update_normalize_enabled(self) -> None:
+        button = getattr(self, "normalize_button", None)
+        if hasattr(button, "setEnabled"):
+            try:
+                button.setEnabled(bool(self._tab_descriptors))
+            except Exception:
+                pass
 
     def _setup_format_toolbar(self) -> None:
         controls = self._format_controls
@@ -1712,6 +1760,72 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.tab_widget.addTab(tab, "Graph")
         self.tab_widget.setCurrentWidget(tab)
         self._register_plot_tab(tab, canvas, ax, descriptor)
+
+    def _register_plot_tab(
+        self,
+        tab: QtWidgets.QWidget,
+        canvas: FigureCanvas,
+        axes: Any,
+        descriptor: TabDescriptor | None = None,
+    ) -> None:
+        self._canvas_by_tab[tab] = canvas
+        self._axes_by_tab[tab] = axes
+        if descriptor is not None:
+            self._tab_descriptors[tab] = descriptor
+            item = self._ensure_graph_tree_item(tab, descriptor)
+            if item is not None:
+                self._graph_tree_items[tab] = item
+            if not self._history.is_replaying:
+                info_holder: Dict[str, Any] = {"info": None}
+
+                def _undo_creation() -> None:
+                    info_holder["info"] = self._remove_tab_internal(tab)
+
+                def _redo_creation() -> None:
+                    info = info_holder.get("info")
+                    if info is not None:
+                        self._restore_tab_from_info(info)
+
+                label = descriptor.root_label or descriptor.title or "Plot"
+                self._record_history_action(
+                    f"Add tab {label}",
+                    undo=_undo_creation,
+                    redo=_redo_creation,
+                )
+        self._update_save_graph_enabled()
+        self._update_normalize_enabled()
+        if self.tab_widget.currentWidget() is tab:
+            self._rebuild_object_manager_for_tab(tab)
+        self._update_tab_buttons()
+
+    def _ensure_graph_tree_item(
+        self, tab: QtWidgets.QWidget, descriptor: TabDescriptor
+    ) -> QtWidgets.QTreeWidgetItem | None:
+        tree = getattr(self, "project_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return None
+        root = self._ensure_graph_tree_root()
+        if root is None:
+            return None
+        label = descriptor.root_label or descriptor.title or "Plot"
+        item = QtWidgets.QTreeWidgetItem([label, descriptor.title or ""])
+        root.addChild(item)
+        item.setExpanded(True)
+        self._assign_project_payload(item, ("graph", tab))
+        return item
+
+    def _ensure_graph_tree_root(self) -> QtWidgets.QTreeWidgetItem | None:
+        tree = getattr(self, "project_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            return None
+        root = self._graph_tree_root
+        if root is None:
+            root = QtWidgets.QTreeWidgetItem(["Plots"])
+            root.setFirstColumnSpanned(True)
+            root.setExpanded(True)
+            tree.insertTopLevelItem(0, root)
+            self._graph_tree_root = root
+        return root
 
     def _insert_column(self, *, position: Literal["before", "after"]) -> None:
         context = self._worksheet_action_context()
@@ -2534,6 +2648,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         docks: Sequence[QtWidgets.QDockWidget],
         *,
         side: Literal["left", "right"],
+        initial_visible: Iterable[int] | None = None,
     ) -> QtWidgets.QDockWidget | None:
         if not docks:
             return None
@@ -2551,6 +2666,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         panel.setWidget(switcher)
         panel.setMinimumWidth(switcher.sizeHint().width())
         panel.setMaximumWidth(switcher.sizeHint().width())
+
+        if initial_visible is not None:
+            try:
+                switcher.set_initial_visible(initial_visible)
+            except Exception:
+                pass
 
         area = (
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
@@ -3716,8 +3837,13 @@ class _MdiTabProxy(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self._mdi = QtWidgets.QMdiArea(self)
-        self._mdi.setViewMode(QtWidgets.QMdiArea.ViewMode.SubWindowView)
+        self._mdi.setViewMode(QtWidgets.QMdiArea.ViewMode.TabbedView)
         self._mdi.setOption(QtWidgets.QMdiArea.AreaOption.DontMaximizeSubWindowOnActivation, True)
+        try:
+            self._mdi.setTabsClosable(False)
+            self._mdi.setTabsMovable(True)
+        except Exception:
+            pass
         layout.addWidget(self._mdi)
 
         self._widgets: list[QtWidgets.QWidget] = []

@@ -30,8 +30,6 @@ from plotting.utils import (
     set_last_output_dir,
     format_annealing_title,
     get_last_output_dir,
-    create_readability_group,
-    sync_readability,
     restore_backend_choice,
     store_backend_choice,
     selected_backend,
@@ -511,8 +509,10 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        if self._summary_label is not None:
-            self._summary_label.setText(f"Loaded {len(self._data)} rows from {len(paths)} file(s).")
+        if self._summary_label is not None and not self._summary_label.text().strip():
+            self._summary_label.setText(
+                "Select one or more temperature dependence files and click Load data."
+            )
         self._log(f"Loaded {len(paths)} temperature dependence file(s).")
         self.update_ui()
 
@@ -823,8 +823,10 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        if self._summary_label is not None:
-            self._summary_label.setText(f"Loaded {len(self._data)} rows from {len(paths)} file(s).")
+        if self._summary_label is not None and not self._summary_label.text().strip():
+            self._summary_label.setText(
+                "Select one or more temperature sensitivity files and click Load data."
+            )
         self._log(f"Loaded {len(paths)} temperature sensitivity file(s).")
         self.update_ui()
 
@@ -835,7 +837,6 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             return
         config = self._apply_settings_to_core()
         dataframe = temp_sens_core.maybe_handle_outliers(self._data.copy())
-        temp_sens_core.apply_readability_fonts()
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
             clear(self._plot_tabs)
@@ -963,7 +964,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
         self._origin_mode_combo: QtWidgets.QComboBox | None = None
-        self._readability_ctrl: QtWidgets.QWidget | None = None
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
@@ -1005,11 +1005,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self._origin_mode_combo = origin_combo
         origin_layout.addRow("Mode:", origin_combo)
         layout.addWidget(origin_group)
-
-        self._readability_ctrl, readability_group = create_readability_group(
-            "current_annealing", anneal_core
-        )
-        layout.addWidget(readability_group)
         layout.addStretch(1)
         self._settings_widget = container
         return container
@@ -1029,11 +1024,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             mode = self._origin_mode_combo.currentData()
             if isinstance(mode, str) and mode:
                 anneal_core.ORIGIN_MODE = mode
-        if self._readability_ctrl is not None:
-            try:
-                sync_readability("current_annealing", self._readability_ctrl, anneal_core)
-            except Exception:
-                pass
         anneal_core.SHOW_PLOTS = False
         anneal_core.BACKEND = "matplotlib"
 
@@ -1061,8 +1051,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             return
         self._data_by_file = data_by_file
         self._loaded_files = list(data_by_file.keys())
-        if self._summary_label is not None:
-            self._summary_label.setText(f"Loaded {len(data_by_file)} file(s).")
+        if self._summary_label is not None and not self._summary_label.text().strip():
+            self._summary_label.setText(
+                "Use the Data menu to import current annealing logs, then select them before clicking Load data."
+            )
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
         self._log(f"Loaded {len(data_by_file)} current annealing file(s).")
@@ -1074,7 +1066,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         if not self._data_by_file:
             return
         self._apply_settings_to_core()
-        anneal_core.apply_readability_fonts()
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
             clear(self._plot_tabs)
@@ -1552,7 +1543,6 @@ class StressDependencePlugin(PyPlotPlugin):
         self._processed_checkbox: QtWidgets.QCheckBox | None = None
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
-        self._readability_ctrl = None
         try:
             stress_core.ProgressDialog = stress_gui.ProgressDialog  # type: ignore[assignment]
         except Exception:
@@ -1702,11 +1692,6 @@ class StressDependencePlugin(PyPlotPlugin):
         output_layout.addWidget(browse_btn, 7, 2)
         layout.addWidget(output_group)
 
-        self._readability_ctrl, readability_group = create_readability_group(
-            "stress_dependence", stress_core
-        )
-        layout.addWidget(readability_group)
-
         layout.addStretch(1)
         self._settings_widget = container
         return container
@@ -1777,9 +1762,6 @@ class StressDependencePlugin(PyPlotPlugin):
             )
         stress_core.BACKEND = backend
 
-        if self._readability_ctrl is not None:
-            sync_readability("stress_dependence", self._readability_ctrl, stress_core)
-
         return {
             "variables": variables,
             "save": save_flag,
@@ -1811,9 +1793,9 @@ class StressDependencePlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        if self._summary_label is not None:
+        if self._summary_label is not None and not self._summary_label.text().strip():
             self._summary_label.setText(
-                f"Loaded {len(self._data)} rows from {len(paths)} file(s)."
+                "Select stress dependence files, load them, then generate plots."
             )
         self._log(f"Loaded {len(paths)} stress dependence file(s).")
         self.update_ui()
@@ -2287,8 +2269,12 @@ class PyPlotWorkbench(PyPlotWindow):
                 except Exception:
                     pass
             if global_pos is not None:
-                data_menu.popup(global_pos)
-                return True
+                chosen = data_menu.exec(global_pos)
+                try:
+                    menu_bar.setActiveAction(None)
+                except Exception:
+                    pass
+                return chosen is not None
         try:
             fallback_pos = self.mapToGlobal(QtCore.QPoint(0, 0))
         except Exception:
@@ -2307,8 +2293,33 @@ class PyPlotWorkbench(PyPlotWindow):
         plugin = self._current_plugin
         requires_data = bool(getattr(plugin, "requires_imported_data", False))
         if requires_data:
-            has_selection = bool(self._selected_paths())
-            if not has_selection:
+            selection = self._selected_paths()
+            if not selection:
+                self._sync_selected_paths_with_imports()
+                selection = self._selected_paths()
+            if not selection:
+                sources: list[Path] = []
+                for workbook in self._workbooks.values():
+                    source = getattr(workbook, "source", None)
+                    if isinstance(source, Path) and source.exists():
+                        sources.append(source)
+                if sources:
+                    self._selected_path_entries = sources
+                    formatted = self._format_paths(sources)
+                    if hasattr(self, "path_edit"):
+                        try:
+                            self.path_edit.blockSignals(True)
+                        except Exception:
+                            pass
+                        self.path_edit.setText(formatted)
+                        try:
+                            self.path_edit.blockSignals(False)
+                        except Exception:
+                            pass
+                    self._remember_directory_from_paths(sources)
+                    self._sync_selected_paths_with_imports()
+                    selection = sources
+            if not selection:
                 if self._show_data_menu():
                     return
                 QtWidgets.QMessageBox.information(
