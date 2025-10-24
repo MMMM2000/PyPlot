@@ -13,7 +13,8 @@ from plotting.utils import ensure_app_theme, install_standard_menu
 
 
 COLUMN_HEADER = "Current (mA)\tVoltage (V)\tResistance (Ohm)"
-MILLIAMP_HEADER_RE = re.compile(r"(?:current|i)\s*[^\r\n]{0,8}[\[(]\s*m\s*a", re.IGNORECASE)
+MILLIAMP_HEADER_RE = re.compile(r"(?:current|i)\s*[^\r\n]{0,12}[\[(]\s*m\s*a", re.IGNORECASE)
+AMP_HEADER_RE = re.compile(r"(?:current|i)\s*[^\r\n]{0,12}[\[(]\s*a", re.IGNORECASE)
 
 
 def _format_value(value: float) -> str:
@@ -35,23 +36,38 @@ def _update_comment(line: str) -> str:
     return updated
 
 
-def _has_milliamp_header(lines: Iterable[str]) -> bool:
-    for line in lines:
-        stripped = line.strip()
-        if not stripped.startswith("#"):
-            continue
-        if MILLIAMP_HEADER_RE.search(stripped):
-            return True
-    return False
+def _detect_unit_hint(line: str) -> str | None:
+    stripped = line.strip()
+    if not stripped:
+        return None
+    candidate = stripped.lstrip("#").strip()
+    if not candidate:
+        return None
+    lowered = candidate.lower()
+    if MILLIAMP_HEADER_RE.search(lowered) or "milli" in lowered:
+        return "ma"
+    if AMP_HEADER_RE.search(lowered):
+        if "ma" not in lowered:
+            return "a"
+    if "amp" in lowered and ("current" in lowered or lowered.startswith("i")):
+        if "ma" not in lowered:
+            return "a"
+    return None
 
 
-def _matches_header(line: str) -> bool:
+def _is_header_line(line: str) -> bool:
     stripped = line.strip()
     if not stripped:
         return False
-    if stripped.startswith("#"):
-        stripped = stripped.lstrip("#").strip()
-    normalized = re.sub(r"\s+", " ", stripped).lower()
+    candidate = stripped.lstrip("#").strip()
+    if not candidate:
+        return False
+    lowered = candidate.lower()
+    keywords = ("current", "voltage", "resistance", "i(", "u(", "r(")
+    hits = sum(1 for key in keywords if key in lowered)
+    if hits >= 2:
+        return True
+    normalized = re.sub(r"\s+", " ", candidate).lower()
     target = COLUMN_HEADER.replace("\t", " ").lower()
     return normalized == target
 
@@ -64,55 +80,58 @@ def convert_file(path: Path) -> Tuple[str, str]:
     except OSError as exc:
         return "error", f"failed to read: {exc}"
 
-    head = raw_lines[:5]
-    if any("# Current annealing current units: mA" in line for line in head):
-        return "skipped", "already converted"
-    if _has_milliamp_header(head):
-        return "skipped", "already in mA"
+    unit_hint: str | None = None
+    for probe in raw_lines[:10]:
+        hint = _detect_unit_hint(probe)
+        if hint:
+            unit_hint = hint
+            break
 
-    converted_lines: list[str] = []
+    needs_conversion = unit_hint != "ma"
+
+    output_lines: list[str] = []
+    comments: list[str] = []
     converted = False
     for line in raw_lines:
         stripped = line.strip()
         if not stripped:
-            converted_lines.append(line)
+            continue
+        if _is_header_line(line):
             continue
         if stripped.startswith("#"):
-            converted_lines.append(_update_comment(line))
+            comments.append(_update_comment(line))
             continue
         parts = stripped.replace(",", ".").split()
         if not parts:
-            converted_lines.append(line)
             continue
         try:
-            current_a = float(parts[0])
+            current_value = float(parts[0])
         except ValueError:
-            converted_lines.append(line)
+            comments.append(line)
             continue
-        if not math.isfinite(current_a):
-            converted_lines.append(line)
+        if not math.isfinite(current_value):
+            comments.append(line)
             continue
-        converted = True
-        parts[0] = _format_value(current_a * 1000.0)
-        converted_lines.append("\t".join(parts))
+        if needs_conversion:
+            current_value *= 1000.0
+            converted = True
+        parts[0] = _format_value(current_value)
+        output_lines.append("\t".join(parts))
 
-    if not converted:
+    if not output_lines:
         return "skipped", "no numeric data"
 
-    filtered_lines: list[str] = []
-    for line in converted_lines:
-        if _matches_header(line):
-            continue
-        filtered_lines.append(line)
-
-    converted_lines = filtered_lines
-    converted_lines.insert(0, f"# {COLUMN_HEADER}")
+    final_lines = [COLUMN_HEADER]
+    final_lines.extend(comments)
+    final_lines.extend(output_lines)
     try:
-        path.write_text("\n".join(converted_lines) + "\n", encoding="utf-8")
+        path.write_text("\n".join(final_lines) + "\n", encoding="utf-8")
     except OSError as exc:
         return "error", f"failed to write: {exc}"
 
-    return "converted", "converted"
+    if converted:
+        return "converted", "converted"
+    return "normalized", "header normalised"
 
 
 class CurrentAnnealingConverter(QtWidgets.QWidget):
@@ -224,12 +243,15 @@ class CurrentAnnealingConverter(QtWidgets.QWidget):
         if not files:
             self._log("No .txt files were found in the selected folder.")
             return
-        converted = skipped = errors = 0
+        converted = normalized = skipped = errors = 0
         for path in files:
             status, detail = convert_file(path)
             if status == "converted":
                 converted += 1
                 self._log(f"Converted {path.name}")
+            elif status == "normalized":
+                normalized += 1
+                self._log(f"Normalised {path.name}")
             elif status == "skipped":
                 skipped += 1
                 self._log(f"Skipped {path.name} ({detail})")
@@ -237,8 +259,9 @@ class CurrentAnnealingConverter(QtWidgets.QWidget):
                 errors += 1
                 self._log(f"Error {path.name}: {detail}")
         summary = (
-            f"Finished. Converted {converted} file(s), skipped {skipped}, encountered {errors} error(s)."
-        )
+            "Finished. Converted {converted} file(s), normalised {normalized}, skipped {skipped}, "
+            "encountered {errors} error(s)."
+        ).format(converted=converted, normalized=normalized, skipped=skipped, errors=errors)
         self._log(summary)
         QtWidgets.QMessageBox.information(self, "Conversion complete", summary)
 

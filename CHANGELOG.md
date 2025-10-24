@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-10-24 11:54 UTC
+
+- Hardened the current annealing unit converter so it respects existing
+  milliamp headers, only scales logs that declare amperes, and rewrites every
+  file to start with `Current (mA)\tVoltage (V)\tResistance (Ohm)` without the
+  leading comment marker.
+
 ## 2025-10-24 11:26 UTC
 
 - Updated the current annealing unit converter so converted logs now keep a
