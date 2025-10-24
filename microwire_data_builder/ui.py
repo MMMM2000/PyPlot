@@ -11,7 +11,7 @@ import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
@@ -2592,8 +2592,125 @@ class FabricationSection(MiniDatabaseSection):
     section_title = "Fabrication data"
     supported_suffixes = (".xlsx", ".xls", ".xlsm")
 
+    @staticmethod
+    def _normalise_int(value: object) -> Optional[int]:
+        if value is None:
+            return None
+        if isinstance(value, (int,)):
+            return int(value)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(numeric):
+            return None
+        return int(numeric)
+
+    def _load_relevant_map(
+        self,
+    ) -> Tuple[Dict[str, Dict[Optional[int], Set[Optional[int]]]], Set[str]]:
+        try:
+            store = MiniDatabaseStore("annealing")
+            records = store.load_payload("annealing_records")
+        except Exception:
+            records = None
+        relevant: Dict[str, Dict[Optional[int], Set[Optional[int]]]] = {}
+        if isinstance(records, list):
+            for record in records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                if not composition:
+                    continue
+                composition_key = str(composition).strip()
+                if not composition_key:
+                    continue
+                draw_value = self._normalise_int(getattr(metadata, "draw_x", None))
+                piece_value = self._normalise_int(getattr(metadata, "piece_y", None))
+                bucket = relevant.setdefault(composition_key, {})
+                piece_bucket = bucket.setdefault(draw_value, set())
+                piece_bucket.add(piece_value)
+        return relevant, set(relevant.keys())
+
+    @staticmethod
+    def _allow_draw(
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        composition: str,
+        draw: int,
+    ) -> bool:
+        draw_map = relevant_map.get(composition)
+        if not draw_map:
+            return True
+        if draw in draw_map:
+            return True
+        if None in draw_map:
+            return True
+        return False
+
+    @staticmethod
+    def _allow_piece(
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        composition: str,
+        draw: int,
+        piece: int,
+    ) -> bool:
+        draw_map = relevant_map.get(composition)
+        if not draw_map:
+            return True
+        allowed: Set[Optional[int]] = set()
+        direct = draw_map.get(draw)
+        if direct:
+            allowed.update(direct)
+        fallback = draw_map.get(None)
+        if fallback:
+            allowed.update(fallback)
+        if not allowed:
+            return False
+        if None in allowed:
+            return True
+        return piece in allowed
+
+    def _filter_index(
+        self,
+        index: FabricationIndex,
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        relevant_compositions: Set[str],
+    ) -> FabricationIndex:
+        filtered = FabricationIndex()
+        for (composition, draw), draw_data in index.draw_level.items():
+            comp_key = str(composition).strip()
+            if comp_key not in relevant_compositions:
+                continue
+            if self._allow_draw(relevant_map, comp_key, int(draw)):
+                filtered.set_draw(comp_key, int(draw), dict(draw_data))
+        for (composition, draw, piece), piece_data in index.piece_level.items():
+            comp_key = str(composition).strip()
+            if comp_key not in relevant_compositions:
+                continue
+            draw_int = int(draw)
+            piece_int = int(piece)
+            if not self._allow_draw(relevant_map, comp_key, draw_int):
+                continue
+            if not self._allow_piece(relevant_map, comp_key, draw_int, piece_int):
+                continue
+            filtered.set_piece(comp_key, draw_int, piece_int, dict(piece_data))
+        return filtered
+
     def process(self, paths: List[Path]) -> SectionProcessResult:
         index = build_fabrication_index(paths, self.logger)
+        relevant_map, relevant_compositions = self._load_relevant_map()
+        if relevant_compositions:
+            original_draws = len(index.draw_level)
+            original_pieces = len(index.piece_level)
+            index = self._filter_index(index, relevant_map, relevant_compositions)
+            removed_draws = original_draws - len(index.draw_level)
+            removed_pieces = original_pieces - len(index.piece_level)
+            if removed_draws > 0 or removed_pieces > 0:
+                self.log(
+                    "Fabrication data: skipped %d draw(s) and %d piece(s) without matching current annealing records."
+                    % (removed_draws, removed_pieces)
+                )
         table = _fabrication_index_to_frame(index)
         processed: Dict[str, float] = {}
         for path in paths:
@@ -3925,13 +4042,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if scrollbar is not None:
                 scrollbar.setValue(scrollbar.maximum())
 
-        self.fabrication_section = FabricationSection(self.logger, _append_log)
-        self.tab_widget.addTab(self.fabrication_section, "Fabrication")
-        self.sections["fabrication"] = self.fabrication_section
-
         self.annealing_section = AnnealingSection(self.logger, _append_log)
         self.tab_widget.addTab(self.annealing_section, "Current annealing")
         self.sections["annealing"] = self.annealing_section
+
+        self.fabrication_section = FabricationSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.fabrication_section, "Fabrication")
+        self.sections["fabrication"] = self.fabrication_section
 
         self.microscope_section = MicroscopeSection(self.logger, _append_log)
         self.tab_widget.addTab(self.microscope_section, "Microscope")

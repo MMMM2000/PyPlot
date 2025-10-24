@@ -1,5 +1,13 @@
 # Changelog
 
+## 2025-10-24 09:44 UTC
+
+- Moved the current annealing mini database tab to the first position so the
+  workflow starts with selecting measurement folders before other data types.
+- Filtered the fabrication mini database to keep only draws and pieces that
+  appear in stored current annealing records, preventing unrelated wires from
+  being ingested.
+
 ## 2025-10-24 09:31 UTC
 
 - Fixed the microwire data builder launch error by instantiating `MiniDatabaseSection` before its subclasses so imports no longer raise a `NameError`.
