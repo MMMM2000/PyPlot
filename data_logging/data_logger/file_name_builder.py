@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import re
 
+COMPOSITION_TOTAL_TARGET = 100.0
+COMPOSITION_TOTAL_TOLERANCE = 0.5
+_COMPOSITION_PART_RE = re.compile(r"([A-Za-z]{1,3})(\d+(?:[.,]\d+)?)")
+
 from PyQt6 import QtWidgets, QtGui, QtCore
 
 
@@ -32,6 +36,8 @@ class InfoLineEdit(QtWidgets.QLineEdit):
         # Disallow spaces and dashes by default to keep file names parseable
         self._pattern = re.compile(r"^[\w,.]*$")
         self._warning = "Only letters, numbers, comma, period, and '_' are allowed."
+        self._extra_warning_active = False
+        self._extra_warning_text: str | None = None
         self.textChanged.connect(self._validate)
 
     def set_validation(self, pattern: str, message: str) -> None:
@@ -41,12 +47,63 @@ class InfoLineEdit(QtWidgets.QLineEdit):
         self._warning = message
         self._validate(self.text())
 
+    def set_extra_warning(self, active: bool, message: str | None = None) -> None:
+        """Toggle an auxiliary warning message without blocking input."""
+
+        self._extra_warning_active = bool(active)
+        if message is not None:
+            self._extra_warning_text = message
+        elif not active:
+            self._extra_warning_text = None
+        self._validate(self.text())
+
     # slots -----------------------------------------------------------------
     def _validate(self, text: str) -> None:  # pragma: no cover - trivial
-        self._warn_action.setVisible(bool(text) and not self._pattern.fullmatch(text))
+        pattern_ok = not text or bool(self._pattern.fullmatch(text))
+        show = bool(text) and (not pattern_ok or self._extra_warning_active)
+        self._warn_action.setVisible(show)
 
     def _show_warning(self) -> None:  # pragma: no cover - trivial
-        QtWidgets.QMessageBox.warning(self, "Invalid input", self._warning)
+        text = self.text()
+        pattern_ok = not text or bool(self._pattern.fullmatch(text))
+        messages: list[str] = []
+        if not pattern_ok:
+            messages.append(self._warning)
+        if self._extra_warning_active and self._extra_warning_text:
+            messages.append(self._extra_warning_text)
+        if not messages:
+            messages.append(self._warning)
+        title = "Invalid input" if not pattern_ok else "Input warning"
+        if not pattern_ok and self._extra_warning_active:
+            title = "Input warning"
+        QtWidgets.QMessageBox.warning(self, title, "\n\n".join(messages))
+
+
+def estimate_composition_total(text: str) -> float | None:
+    """Return the summed percentages from a composition token, if available."""
+
+    matches = list(_COMPOSITION_PART_RE.finditer(text or ""))
+    if not matches:
+        return None
+    total = 0.0
+    for match in matches:
+        raw = match.group(2).replace(",", ".")
+        try:
+            total += float(raw)
+        except ValueError:
+            continue
+    return total
+
+
+def composition_warning_state(text: str, *, tolerance: float = COMPOSITION_TOTAL_TOLERANCE) -> tuple[bool, float | None]:
+    """Return whether the composition percentages deviate from 100 within tolerance."""
+
+    total = estimate_composition_total(text)
+    if total is None:
+        return False, None
+    if abs(total - COMPOSITION_TOTAL_TARGET) <= tolerance:
+        return False, total
+    return True, total
 
 
 class FileNameBuilderWidget(QtWidgets.QWidget):
@@ -205,8 +262,11 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
                 w.currentIndexChanged.connect(self.update_name)
             elif isinstance(w, (QtWidgets.QSpinBox, QtWidgets.QDoubleSpinBox)):
                 w.valueChanged.connect(self.update_name)
+        for edit in (self.s_comp, self.t_comp):
+            edit.textChanged.connect(self._handle_composition_text_changed)
         self.reset_btn.clicked.connect(self.reset_defaults)
         self.load_settings()
+        self._refresh_composition_warnings()
         self.on_format_change(self.combo_format.currentIndex())
 
     def on_format_change(self, idx: int) -> None:
@@ -217,6 +277,7 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
             self.update_name()
 
     def update_name(self) -> None:
+        self._refresh_composition_warnings()
         fmt = self.combo_format.currentText()
         if fmt == "Stress":
             comp = self.s_comp.text().strip()
@@ -307,11 +368,37 @@ class FileNameBuilderWidget(QtWidgets.QWidget):
         self.target.setText(s.value("custom_text", ""))
         for w in widgets:
             w.blockSignals(False)
+        self._refresh_composition_warnings()
 
     def reset_defaults(self) -> None:
         self.settings.clear()
         self.load_settings()
         self.update_name()
 
+    # composition helpers ------------------------------------------------
+    def _handle_composition_text_changed(self, _text: str) -> None:
+        edit = self.sender()
+        if isinstance(edit, QtWidgets.QLineEdit):
+            self._update_composition_warning(edit)
 
-__all__ = ["FileNameBuilderWidget", "InfoLineEdit"]
+    def _refresh_composition_warnings(self) -> None:
+        for edit in (self.s_comp, self.t_comp):
+            self._update_composition_warning(edit)
+
+    def _update_composition_warning(self, edit: QtWidgets.QLineEdit | None) -> None:
+        if edit is None or not hasattr(edit, "set_extra_warning"):
+            return
+        warn, total = composition_warning_state(edit.text())
+        if warn and total is not None:
+            message = f"Element percentages add up to {total:.2f} %, expected 100."
+            edit.set_extra_warning(True, message)
+        else:
+            edit.set_extra_warning(False)
+
+
+__all__ = [
+    "FileNameBuilderWidget",
+    "InfoLineEdit",
+    "estimate_composition_total",
+    "composition_warning_state",
+]

@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import os
 import re
+import math
 from pathlib import Path
 from typing import Any, List, Tuple, cast
 
@@ -10,6 +11,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 
 from .burnthrough import trim_burnthrough_glitch
 from ..utils import (
@@ -29,7 +31,7 @@ SAVE_PLOTS = False
 SAVE_FORMAT = "png"
 PNG_DPI = 1200
 BACKEND = "matplotlib"
-IMPROVE_READABILITY = True
+IMPROVE_READABILITY = False
 SHOW_LEGEND = True
 LEGEND_SIZE = 18
 LEGEND_ORIENTATION = "auto"
@@ -130,6 +132,17 @@ def load_file(path: str) -> pd.DataFrame:
             df = df.iloc[: trimmed_currents.shape[0]].copy()
             df["I_mA"] = trimmed_currents
             df["R_Ohm"] = trimmed_resistances
+    if not df.empty:
+        tolerance = 0.6
+        mask = np.ones(len(df), dtype=bool)
+        values = df["I_mA"].to_numpy(dtype=float)
+        for idx, value in enumerate(values):
+            if not math.isfinite(value):
+                continue
+            if abs(value - 1.0) <= tolerance and idx < len(values) - 1:
+                mask[idx] = False
+        if not mask.all():
+            df = df.loc[mask].reset_index(drop=True)
     return df[["I_mA", "R_Ohm"]]
 
 
@@ -696,38 +709,34 @@ def plot_one(
     figsize: Tuple[float, float] | None = None,
 ) -> Tuple[Figure, str]:
     if not figsize:
-        figsize = (4.0, 2.25)
+        figsize = (8.0, 4.5)
     width, height = max(float(figsize[0]), 0.5), max(float(figsize[1]), 0.5)
     fig, ax = plt.subplots(figsize=(width, height))
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     _, segments = _direction_profile(currents)
+    marker_size = 4.0
+    line_width = 1.6
 
-    base_width, base_height = 8.0, 4.5
-    scale = min(width / base_width, height / base_height)
-    if not np.isfinite(scale) or scale <= 0:
-        scale = min(width, height) / base_height
-    scale = max(0.3, float(scale))
-    tick_size = max(6, int(round(18 * scale)))
-    axis_size = max(6, int(round(18 * scale)))
-    title_size = max(8, int(round(22 * scale)))
-    marker_size = max(1.5, 4.0 * scale)
-    line_width = max(1.0, 1.5 * scale)
-
+    legend_handles: list[Line2D] = []
+    legend_kinds: set[str] = set()
     if currents.size == 0:
         pass
     elif currents.size == 1:
-        ax.plot(
+        line = ax.plot(
             currents,
             resistances,
             marker="o",
             linestyle="None",
             color="r",
             markersize=marker_size,
-        )
+        )[0]
+        line.set_label("Sample")
     else:
         previous_direction: float | None = None
+        inc_count = 0
+        dec_count = 0
         for start, end, direction in segments:
             color = "r" if direction >= 0 else "b"
             if end <= start:
@@ -747,7 +756,15 @@ def plot_one(
                 segment_resistances = np.concatenate(
                     ([resistances[start - 1]], segment_resistances)
                 )
-            ax.plot(
+            if direction >= 0:
+                inc_count += 1
+                label = f"Increasing {inc_count}"
+                legend_key = "increasing"
+            else:
+                dec_count += 1
+                label = f"Decreasing {dec_count}"
+                legend_key = "decreasing"
+            line = ax.plot(
                 segment_currents,
                 segment_resistances,
                 color=color,
@@ -757,20 +774,34 @@ def plot_one(
                 markerfacecolor=color,
                 markeredgecolor=color,
                 linewidth=line_width,
-            )
+                label=label,
+            )[0]
+            if legend_key not in legend_kinds:
+                legend_handles.append(
+                    Line2D(
+                        [],
+                        [],
+                        color=color,
+                        marker="o",
+                        linestyle="-",
+                        markersize=marker_size,
+                        linewidth=line_width,
+                        label="Increasing current"
+                        if legend_key == "increasing"
+                        else "Decreasing current",
+                    )
+                )
+                legend_kinds.add(legend_key)
             previous_direction = direction
 
     ax.set_xlabel("Current (mA)")
     ax.set_ylabel("Resistance (Ω)")
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
+    if legend_handles:
+        ax.legend(handles=legend_handles, loc="best")
     fig.tight_layout()
     cfg = dict(globals())
-    cfg.update({
-        "TICK_SIZE": tick_size,
-        "AXIS_LABEL_SIZE": axis_size,
-        "TITLE_SIZE": title_size,
-    })
     apply_readability(ax, cfg)
     fname = title.replace(os.sep, "_")
     return fig, fname

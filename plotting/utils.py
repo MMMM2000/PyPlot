@@ -2066,6 +2066,7 @@ def ensure_app_theme(app: QtWidgets.QApplication | QtWidgets.QWidget) -> None:
 
 class ReadabilityControls:
     def __init__(self) -> None:
+        self.enabled: QtWidgets.QCheckBox
         self.legend_show: QtWidgets.QCheckBox
         self.legend_size: QtWidgets.QSpinBox
         self.legend_orient: QtWidgets.QComboBox
@@ -2089,9 +2090,18 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     grp = QtWidgets.QGroupBox("Readability")
     lay = QtWidgets.QGridLayout(grp)
 
-    setattr(orig_module, "IMPROVE_READABILITY", True)
+    stored_toggle = s.value(
+        f"{key}_improve_readability",
+        getattr(orig_module, "IMPROVE_READABILITY", True),
+        type=bool,
+    )
+    improve_readability = bool(stored_toggle)
+    setattr(orig_module, "IMPROVE_READABILITY", improve_readability)
     if not hasattr(orig_module, "LEGEND_LOCATION"):
         setattr(orig_module, "LEGEND_LOCATION", "inside")
+
+    ctrl.enabled = QtWidgets.QCheckBox("Use readability overrides")
+    ctrl.enabled.setChecked(improve_readability)
 
     ctrl.legend_size = QtWidgets.QSpinBox()
     ctrl.legend_size.setRange(6, 72)
@@ -2156,26 +2166,36 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.title_show = QtWidgets.QCheckBox("Show")
     ctrl.title_show.setChecked(bool(s.value(f"{key}_show_title", getattr(orig_module, "SHOW_TITLE", True), type=bool)))
 
-    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 0, 0)
-    lay.addWidget(ctrl.legend_size, 0, 1)
-    lay.addWidget(ctrl.legend_show, 0, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 1, 0)
-    lay.addWidget(ctrl.legend_orient, 1, 1, 1, 2)
-    lay.addWidget(QtWidgets.QLabel("Legend location:"), 2, 0)
-    lay.addWidget(ctrl.legend_loc, 2, 1, 1, 2)
-    lay.addWidget(ctrl.legend_color_match, 3, 0, 1, 3)
-    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 4, 0)
-    lay.addWidget(ctrl.legend_symbol_size, 4, 1)
-    lay.addWidget(ctrl.legend_symbol, 4, 2)
-    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 5, 0)
-    lay.addWidget(ctrl.tick_size, 5, 1)
-    lay.addWidget(ctrl.tick_show, 5, 2)
-    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 6, 0)
-    lay.addWidget(ctrl.axis_size, 6, 1)
-    lay.addWidget(ctrl.axis_show, 6, 2)
-    lay.addWidget(QtWidgets.QLabel("Title size:"), 7, 0)
-    lay.addWidget(ctrl.title_size, 7, 1)
-    lay.addWidget(ctrl.title_show, 7, 2)
+    lay.addWidget(ctrl.enabled, 0, 0, 1, 3)
+
+    row = 1
+    lay.addWidget(QtWidgets.QLabel("Legend text size:"), row, 0)
+    lay.addWidget(ctrl.legend_size, row, 1)
+    lay.addWidget(ctrl.legend_show, row, 2)
+    row += 1
+    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), row, 0)
+    lay.addWidget(ctrl.legend_orient, row, 1, 1, 2)
+    row += 1
+    lay.addWidget(QtWidgets.QLabel("Legend location:"), row, 0)
+    lay.addWidget(ctrl.legend_loc, row, 1, 1, 2)
+    row += 1
+    lay.addWidget(ctrl.legend_color_match, row, 0, 1, 3)
+    row += 1
+    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), row, 0)
+    lay.addWidget(ctrl.legend_symbol_size, row, 1)
+    lay.addWidget(ctrl.legend_symbol, row, 2)
+    row += 1
+    lay.addWidget(QtWidgets.QLabel("Tick label size:"), row, 0)
+    lay.addWidget(ctrl.tick_size, row, 1)
+    lay.addWidget(ctrl.tick_show, row, 2)
+    row += 1
+    lay.addWidget(QtWidgets.QLabel("Axis label size:"), row, 0)
+    lay.addWidget(ctrl.axis_size, row, 1)
+    lay.addWidget(ctrl.axis_show, row, 2)
+    row += 1
+    lay.addWidget(QtWidgets.QLabel("Title size:"), row, 0)
+    lay.addWidget(ctrl.title_size, row, 1)
+    lay.addWidget(ctrl.title_show, row, 2)
 
     def _toggle_legend(checked: bool) -> None:
         ctrl.legend_size.setEnabled(checked)
@@ -2194,13 +2214,43 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.axis_show.toggled.connect(lambda checked: ctrl.axis_size.setEnabled(checked))
     ctrl.title_show.toggled.connect(lambda checked: ctrl.title_size.setEnabled(checked))
 
-    _toggle_legend(ctrl.legend_show.isChecked())
-    _toggle_symbol(ctrl.legend_symbol.isChecked())
-    ctrl.legend_loc.setEnabled(ctrl.legend_show.isChecked())
-    ctrl.legend_color_match.setEnabled(ctrl.legend_show.isChecked())
-    ctrl.tick_size.setEnabled(ctrl.tick_show.isChecked())
-    ctrl.axis_size.setEnabled(ctrl.axis_show.isChecked())
-    ctrl.title_size.setEnabled(ctrl.title_show.isChecked())
+    widgets_to_toggle: tuple[QtWidgets.QWidget, ...] = (
+        ctrl.legend_show,
+        ctrl.legend_size,
+        ctrl.legend_orient,
+        ctrl.legend_loc,
+        ctrl.legend_symbol,
+        ctrl.legend_symbol_size,
+        ctrl.legend_color_match,
+        ctrl.tick_show,
+        ctrl.tick_size,
+        ctrl.axis_show,
+        ctrl.axis_size,
+        ctrl.title_show,
+        ctrl.title_size,
+    )
+
+    def _apply_master_state(checked: bool) -> None:
+        for widget in widgets_to_toggle:
+            widget.setEnabled(checked)
+        if checked:
+            _toggle_legend(ctrl.legend_show.isChecked())
+            _toggle_symbol(ctrl.legend_symbol.isChecked())
+            ctrl.tick_size.setEnabled(ctrl.tick_show.isChecked())
+            ctrl.axis_size.setEnabled(ctrl.axis_show.isChecked())
+            ctrl.title_size.setEnabled(ctrl.title_show.isChecked())
+        else:
+            ctrl.legend_size.setEnabled(False)
+            ctrl.legend_orient.setEnabled(False)
+            ctrl.legend_loc.setEnabled(False)
+            ctrl.legend_symbol_size.setEnabled(False)
+            ctrl.legend_color_match.setEnabled(False)
+            ctrl.tick_size.setEnabled(False)
+            ctrl.axis_size.setEnabled(False)
+            ctrl.title_size.setEnabled(False)
+
+    ctrl.enabled.toggled.connect(_apply_master_state)
+    _apply_master_state(ctrl.enabled.isChecked())
 
     return ctrl, grp
 
@@ -2208,7 +2258,11 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
 def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     """Copy readability UI state into ``orig_module`` and persist to settings."""
 
-    orig_module.IMPROVE_READABILITY = True
+    toggle = getattr(ctrl, "enabled", None)
+    if isinstance(toggle, QtWidgets.QAbstractButton):
+        orig_module.IMPROVE_READABILITY = toggle.isChecked()
+    else:
+        orig_module.IMPROVE_READABILITY = True
     orig_module.SHOW_LEGEND = ctrl.legend_show.isChecked()
     orig_module.LEGEND_SIZE = int(ctrl.legend_size.value())
     orig_module.LEGEND_ORIENTATION = ctrl.legend_orient.currentText().lower()
@@ -2224,6 +2278,7 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     orig_module.SHOW_TITLE = ctrl.title_show.isChecked()
     orig_module.TITLE_SIZE = int(ctrl.title_size.value())
     s = _settings()
+    s.setValue(f"{key}_improve_readability", orig_module.IMPROVE_READABILITY)
     s.setValue(f"{key}_show_legend", orig_module.SHOW_LEGEND)
     s.setValue(f"{key}_legend_size", orig_module.LEGEND_SIZE)
     s.setValue(f"{key}_legend_orient", orig_module.LEGEND_ORIENTATION)
@@ -2241,6 +2296,9 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
 
 def apply_readability(ax: Axes, cfg: dict) -> None:
     """Apply common readability settings to ``ax`` using values from ``cfg``."""
+
+    if not cfg.get("IMPROVE_READABILITY", True):
+        return
 
     apply_readability_fonts(
         cfg.get("TITLE_SIZE", 22), cfg.get("TICK_SIZE", 18)

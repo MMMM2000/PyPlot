@@ -500,6 +500,12 @@ class Ui_MainWindow(object):
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
+        self.pushButton_show_history = QtWidgets.QPushButton("Measurement history")
+        self.pushButton_show_history.setFont(bfont)
+        self.pushButton_show_history.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         self.pushButton_reverse_now = QtWidgets.QPushButton("Reverse current now")
         self.pushButton_reverse_now.setFont(bfont)
         self.pushButton_reverse_now.setEnabled(False)
@@ -508,6 +514,7 @@ class Ui_MainWindow(object):
             QtWidgets.QSizePolicy.Policy.Fixed,
         )
         sticky_buttons_layout.addWidget(self.pushButton_start_process)
+        sticky_buttons_layout.addWidget(self.pushButton_show_history)
         sticky_buttons_layout.addWidget(self.pushButton_reverse_now)
 
         left_container_layout.setStretch(0, 1)

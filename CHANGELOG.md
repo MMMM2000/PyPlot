@@ -1,5 +1,149 @@
 # Changelog
 
+## 2025-10-24 12:15 UTC
+
+- Removed the extra milliamp comment row from converted current annealing logs
+  so rewritten files now contain only the standard header followed by numeric
+  data, matching the logger output format the user expects.
+
+## 2025-10-24 11:54 UTC
+
+- Hardened the current annealing unit converter so it respects existing
+  milliamp headers, only scales logs that declare amperes, and rewrites every
+  file to start with `Current (mA)\tVoltage (V)\tResistance (Ohm)` without the
+  leading comment marker.
+
+## 2025-10-24 11:26 UTC
+
+- Updated the current annealing unit converter so converted logs now keep a
+  single `# Current (mA)\tVoltage (V)\tResistance (Ohm)` header row without the
+  extra milliamp marker line, matching the logger output users expect.
+
+## 2025-10-24 11:13 UTC
+
+- Updated the current annealing unit converter to insert the standard
+  `Current (mA)\tVoltage (V)\tResistance (Ohm)` column header when legacy logs
+  are missing it, so converted files always expose the expected worksheet
+  titles alongside the milliamp marker.
+
+## 2025-10-24 10:03 UTC
+
+- Added an adjustable strain offset control to the microwire data builder so
+  the strain worksheet now calculates `((M length - A length) / M length + C) *
+  100` with a default `C` value of 7 that users can tune, and existing entries
+  recompute automatically when the offset changes.
+
+## 2025-10-24 09:44 UTC
+
+- Moved the current annealing mini database tab to the first position so the
+  workflow starts with selecting measurement folders before other data types.
+- Filtered the fabrication mini database to keep only draws and pieces that
+  appear in stored current annealing records, preventing unrelated wires from
+  being ingested.
+
+## 2025-10-24 09:31 UTC
+
+- Fixed the microwire data builder launch error by instantiating `MiniDatabaseSection` before its subclasses so imports no longer raise a `NameError`.
+- Replaced the strain section with a persistent in-app worksheet that suggests compositions and microwires from processed annealing data, auto-fills diameters, derives mass/strain values, tracks used samples, and exports the curated table to Excel.
+
+## 2025-10-24
+
+- Taught the current annealing plugin to build PyPlot worksheets during load,
+  label increasing/decreasing traces, and show legends so the Object Manager
+  lists meaningful series names.
+- Ensured the Load data action summons the shared Data menu even when triggered
+  from Generate so current annealing runs can grab imported files without
+  re-selecting paths.
+- Added visibility checkboxes to the Object Manager for Matplotlib lines and
+  legends so plots can be toggled directly from the tree.
+- Reworked the Microwire Data Builder into a sectioned workflow that stores
+  mini-databases per data source, highlights pending files, lets microscope
+  measurements be reviewed and overridden, and assembles the final spreadsheet
+  from the cached results without rerunning heavy analysis.
+
+## 2025-10-23 16:40 UTC
+
+- Converted the shared Load/Generate/Export buttons into a global PyPlot action
+  toolbar so every plotting script reuses the same controls and the Data menu
+  now opens directly from the menubar when sources are missing.
+- Started the Project Explorer and Object Manager docks in an opened state and
+  switched Matplotlib canvases to tabbed MDI view so each plot fills the window
+  by default while keeping the dock switcher behaviour.
+- Dropped the per-script readability panels, defaulted readability tweaks to
+  off across plotting modules, and left log messages to report load counts so
+  on-screen instructions stay uncluttered.
+- Refreshed the current annealing plotting workflow so multi-file runs create
+  full-sized tabs with automatic sizing and the Object Manager tree now lists
+  axes and lines for those plots.
+
+## 2025-10-23 13:05 UTC
+
+- Added a format toolbar to PyPlot that tracks the Object Manager selection so
+  line/marker styles, colours, and text emphasis can be tweaked directly inside
+  the main window.
+- Introduced a master toggle for readability settings, letting plotters fall
+  back to automatic sizing whenever the new checkbox in the Readability section
+  is cleared.
+- Synced imported data sources with the Load data workflow, opening the Data
+  menu from the menubar and auto-selecting newly imported files so scripts such
+  as current annealing can plot and export to Origin without re-entering paths.
+
+## 2025-10-23 09:25 UTC
+
+- Normalised current annealing log headers so continued runs keep the
+  `# Current (mA)` line instead of dropping back to bare column names.
+- Made "Load data" open the shared Data menu whenever a plotting plugin that
+  needs imported files has nothing selected, guiding users to import their
+  measurements before retrying.
+
+## 2025-10-23 08:45 UTC
+
+- Added a measurement history dialog to the current annealing logger, pruning
+  interim 1 mA samples and persisting the latest three resistance–current plots
+  across sessions.
+- Retuned the logger’s progress estimator so 30 V projections immediately
+  recalibrate the progress bar and time remaining when the ceiling is lower than
+  the configured current limit.
+- Streamlined the current annealing PyPlot plugin by relying on shared workbench
+  actions for saving, Origin export, and data import while keeping only
+  annealing-specific settings.
+- Expanded PyPlot’s Object Manager tree to list every axis, legend, and line so
+  all plotted objects are visible for future editing.
+
+## 2025-10-22 13:27 UTC
+
+- Highlight the live voltage readout in red once it exceeds 25 V, fix the
+  "To 30 V" status line to use proper symbols, and refresh the associated
+  status messages so they render cleanly.
+- Rebuilt the current annealing progress tracking to account for partial loops
+  and 30 V reversals, ensuring the progress bar and time remaining estimates
+  stay accurate through multi-loop runs.
+
+## 2025-10-20
+
+- Updated the temperature sensitivity Origin workflow to release generated
+  workbooks automatically so the "Open in Origin" button works reliably from
+  PyPlot.
+- Improved the current annealing logger to remember multi-loop runs, label log
+  files with the loop count, keep discarding the initial zero-resistance sample
+  even after restarting, write currents in milliamperes with an explicit header,
+  and honour loop counts after reversing early at the 30 V limit.
+- Added an experiment utility for batch-converting legacy current annealing log
+  folders from amperes to milliamperes, and taught it to skip files that
+  already store currents in milliamps.
+- Embedded the remaining legacy plotting scripts (stress dependence/sensitivity,
+  HSW distribution & load compare, Maxion continuous, PDF plotter, hysteresis
+  loops, and Strain 3D) as first-class PyPlot plugins with integrated panels,
+  including an overhauled HSW distribution dialog with inline file selection.
+- Rebuilt stress dependence as a native PyPlot plugin so it now loads data,
+  generates Matplotlib tabs, and exports to Origin through the shared
+  workbench controls instead of embedding the legacy window.
+- Repaired text encoding in PyPlot plugin controls so minus signs, ellipses,
+  and degree symbols display correctly again.
+- Warn the stress/temperature data logger and current annealing logger when
+  composition percentages do not add up to 100 %, while still allowing
+  measurements to proceed.
+
 ## 2025-10-19
 
 - Bumped pinned dependencies (matplotlib 3.10.7, numpy 2.2.6 (to satisfy opencv-python) , pandas 2.3.3, plotly 6.3.1, psutil 7.1.1, zeroconf 0.148.0, etc.), raised the runtime floor to Python 3.10, and migrated from `PyPDF2` to the actively maintained `pypdf` 6.1.2 via `pip-compile --upgrade`.

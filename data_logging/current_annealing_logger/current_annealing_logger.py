@@ -12,10 +12,12 @@ import os
 import time
 import math
 import re
+import json
+from datetime import datetime
 from pathlib import Path
 from collections import deque
 from importlib import import_module
-from typing import Any, Deque, Dict, Optional, SupportsBytes, TextIO, Tuple, cast
+from typing import Any, Deque, Dict, List, Optional, SupportsBytes, TextIO, Tuple, cast
 
 from PyQt6 import QtCore, QtWidgets, QtSerialPort, QtGui
 from PyQt6.QtWidgets import QFileDialog
@@ -24,6 +26,7 @@ from PyQt6.QtSerialPort import QSerialPortInfo
 from .ui_en import Ui_MainWindow
 from plotting.utils import ensure_app_theme, format_annealing_title, show_plots, install_standard_menu
 from data_logging.naming_history import LineEditHistory
+from data_logging.data_logger.file_name_builder import composition_warning_state
 
 import numpy as np
 import matplotlib
@@ -94,6 +97,87 @@ MAX_VOLTAGE_ACTION_LABELS = {
     "reverse": "Reverse to zero",
     "stop": "Stop measurement",
 }
+
+
+class MeasurementHistoryDialog(QtWidgets.QDialog):
+    """Display recently recorded resistance-current traces."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None, entries: List[Dict[str, Any]]) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Measurement history")
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        if not entries:
+            label = QtWidgets.QLabel("No measurements recorded yet.")
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+        else:
+            tabs = QtWidgets.QTabWidget(self)
+            for idx, entry in enumerate(entries, start=1):
+                tab = QtWidgets.QWidget()
+                tab_layout = QtWidgets.QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.setSpacing(6)
+                title = entry.get("title") or f"Measurement {idx}"
+                currents = entry.get("currents", [])
+                resistances = entry.get("resistances", [])
+                timestamp = entry.get("timestamp", "")
+                source = entry.get("source", "")
+                if FigureCanvas is not None:
+                    figure = Figure(figsize=(5.5, 3.2))
+                    canvas = FigureCanvas(figure)
+                    canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                    ax = figure.add_subplot(111)
+                    ax.set_xlabel("Current [mA]")
+                    ax.set_ylabel("Resistance [Ohm]")
+                    ax.grid(True)
+                    if isinstance(currents, list) and isinstance(resistances, list) and len(currents) == len(resistances):
+                        if len(currents) == 1:
+                            ax.plot(currents, resistances, color='#d32f2f', marker='o', linestyle='None')
+                        else:
+                            for point in range(1, len(currents)):
+                                prev_c, curr_c = currents[point - 1], currents[point]
+                                prev_r, curr_r = resistances[point - 1], resistances[point]
+                                diff = curr_c - prev_c
+                                if abs(diff) <= 0.2:
+                                    color = '#27ae60'
+                                elif diff >= 0:
+                                    color = '#d32f2f'
+                                else:
+                                    color = '#1976d2'
+                                ax.plot(
+                                    [prev_c, curr_c],
+                                    [prev_r, curr_r],
+                                    color=color,
+                                    marker='o',
+                                    linestyle='-',
+                                )
+                    tab_layout.addWidget(canvas)
+                else:
+                    placeholder = QtWidgets.QLabel("Matplotlib backend not available.")
+                    placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+                    placeholder.setMinimumHeight(160)
+                    tab_layout.addWidget(placeholder)
+                details: list[str] = []
+                if timestamp:
+                    details.append(timestamp)
+                if source:
+                    details.append(source)
+                if details:
+                    info = QtWidgets.QLabel("\n".join(details))
+                    info.setWordWrap(True)
+                    tab_layout.addWidget(info)
+                tab_layout.addStretch(1)
+                tabs.addTab(tab, title)
+            layout.addWidget(tabs)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.StandardButton.Close)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -212,6 +296,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self._finish_time: float | None = None
         self.step_idx = 0
         self.total_steps = 0
+        self._loop_sample_history: list[int] = []
+        self._current_loop_samples = 0
+        self._planned_loop_steps = 0
+        self._projected_loop_samples: int | None = None
         self._contact_lost = False
         self._zero_current_count = 0
         self._nonzero_current_seen = False
@@ -228,9 +316,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self._voltage_history: Deque[Tuple[float, float, float]] = deque(maxlen=60)
         self._time_to_voltage_limit: float | None = None
         self._estimated_limit_current_mA: float | None = None
+        self._applied_limit_current_mA: float | None = None
+        self._samples_current: List[float] = []
+        self._samples_resistance: List[float] = []
+        self._segment_lines_ax1: list[Line2D] = []
+        self._segment_lines_ax2: list[Line2D] = []
+        self._placeholder_text_ax1: Any = None
+        self._placeholder_text_ax2: Any = None
+        self._history_settings = QtCore.QSettings("microwire", "current_annealing_history")
+        self._measurement_history: List[Dict[str, Any]] = self._load_measurement_history()
 
-        self.prev_value_x: float | None = None
-        self.prev_value_y: float | None = None
         self.curr_value_x: float = 0.0
         self.curr_value_y: float = 0.0
         
@@ -264,6 +359,9 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.clicked.connect(self.handle_pushButton_reverse_now_clicked)
             self.ui.pushButton_reverse_now.setEnabled(False)
+        if hasattr(self.ui, 'pushButton_show_history'):
+            self.ui.pushButton_show_history.clicked.connect(self.handle_show_history_clicked)
+            self._update_history_button_state()
         # New UI pieces: port dropdown and separate log directory/name
         if hasattr(self.ui, 'comboBox_port'):
             self.ui.comboBox_port.currentIndexChanged.connect(self.handle_comboBox_port_changed)
@@ -283,6 +381,8 @@ class MainWindow(QtWidgets.QMainWindow):
         for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample','lineEdit_custom_name'):
             if hasattr(self.ui, name):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
+        if hasattr(self.ui, 'lineEdit_composition'):
+            self.ui.lineEdit_composition.textChanged.connect(self._handle_composition_text_changed)
         self.name_history.register('composition', getattr(self.ui, 'lineEdit_composition', None))
         self.name_history.register('microwire', getattr(self.ui, 'lineEdit_microwire', None))
         if hasattr(self.ui, 'pushButton_reset_preset'):
@@ -377,9 +477,7 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         # Variables used for plotting data
-        self.prev_value_x = None
         self.curr_value_x = 0.0
-        self.prev_value_y = None
         self.curr_value_y = 0.0
         self.first_sample = True
 
@@ -387,12 +485,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax1 = None
         self.ax2 = None
                 
-        self.line_marker="o"
-        self.line_style="-"
         self.line_color="r"
-        
-        self.line1 = None
-        self.line2 = None
         # Initialize progress UI defaults
         if hasattr(self.ui, 'progressBar_process'):
             self.ui.progressBar_process.setMaximum(0)
@@ -411,7 +504,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.init_graph_window()
             ax1 = getattr(self, 'ax1', None)
             if ax1 is not None:
-                ax1.text(
+                self._placeholder_text_ax1 = ax1.text(
                     0.5,
                     0.5,
                     'No data yet',
@@ -425,7 +518,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 )
             ax2 = getattr(self, 'ax2', None)
             if ax2 is not None:
-                ax2.text(
+                self._placeholder_text_ax2 = ax2.text(
                     0.5,
                     0.5,
                     'No data yet',
@@ -538,6 +631,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 canvas.draw()
 
     def _display_ui_value(self, attr: str, text: str) -> None:
+        if attr == 'label_live_voltage':
+            self._set_live_voltage_text(text)
+            return
         widget = getattr(self.ui, attr, None)
         if widget is None:
             return
@@ -549,6 +645,300 @@ class MainWindow(QtWidgets.QMainWindow):
         setter = getattr(target, 'setText', None)
         if callable(setter):
             setter(text)
+
+    def _set_live_voltage_text(self, text: str) -> None:
+        label = getattr(self, 'label_live_voltage', None)
+        if not isinstance(label, QtWidgets.QLabel):
+            widget = getattr(self.ui, 'label_live_voltage', None)
+            if isinstance(widget, QtWidgets.QLabel):
+                label = widget
+        if not isinstance(label, QtWidgets.QLabel):
+            widget = getattr(self.ui, 'label_live_voltage', None)
+            if widget is not None:
+                target = cast(Any, widget)
+                setter = getattr(target, 'setText', None)
+                if callable(setter):
+                    setter(text)
+            return
+        label.setText(text)
+        self._apply_voltage_label_style(label, text)
+
+    def _apply_voltage_label_style(self, label: QtWidgets.QLabel, text: str) -> None:
+        try:
+            value = float(text)
+        except Exception:
+            value = None
+        warning_style = getattr(self, '_voltage_warning_style', 'color: #c0392b;')
+        default_style = getattr(self, '_voltage_default_style', '')
+        if value is not None and value > 25.0:
+            label.setStyleSheet(warning_style)
+        else:
+            label.setStyleSheet(default_style)
+
+    def _load_measurement_history(self) -> List[Dict[str, Any]]:
+        stored = self._history_settings.value("entries", "[]")
+        payload: List[Any]
+        if isinstance(stored, str):
+            try:
+                payload = json.loads(stored)
+            except Exception:
+                payload = []
+        elif isinstance(stored, (list, tuple)):
+            payload = list(stored)
+        else:
+            payload = []
+        entries: List[Dict[str, Any]] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            currents = item.get("currents")
+            resistances = item.get("resistances")
+            if not isinstance(currents, list) or not isinstance(resistances, list):
+                continue
+            if len(currents) != len(resistances) or len(currents) < 2:
+                continue
+            try:
+                current_vals = [float(value) for value in currents]
+                resistance_vals = [float(value) for value in resistances]
+            except Exception:
+                continue
+            entries.append(
+                {
+                    "currents": current_vals,
+                    "resistances": resistance_vals,
+                    "title": str(item.get("title", "")),
+                    "timestamp": str(item.get("timestamp", "")),
+                    "source": str(item.get("source", "")),
+                }
+            )
+            if len(entries) >= 3:
+                break
+        return entries
+
+    def _update_history_button_state(self) -> None:
+        button = getattr(self.ui, 'pushButton_show_history', None)
+        if isinstance(button, QtWidgets.QPushButton):
+            button.setEnabled(bool(self._measurement_history))
+
+    def _save_measurement_history(self) -> None:
+        payload: List[Dict[str, Any]] = []
+        for entry in self._measurement_history[:3]:
+            payload.append(
+                {
+                    "currents": [round(float(value), 6) for value in entry.get("currents", [])],
+                    "resistances": [round(float(value), 6) for value in entry.get("resistances", [])],
+                    "title": entry.get("title", ""),
+                    "timestamp": entry.get("timestamp", ""),
+                    "source": entry.get("source", ""),
+                }
+            )
+        try:
+            self._history_settings.setValue("entries", json.dumps(payload, ensure_ascii=False))
+            self._history_settings.sync()
+        except Exception:
+            pass
+        self._update_history_button_state()
+
+    def _reset_sample_buffers(self) -> None:
+        self._samples_current = []
+        self._samples_resistance = []
+        self._clear_segment_lines()
+
+    def _clear_segment_lines(self) -> None:
+        for container in (self._segment_lines_ax1, self._segment_lines_ax2):
+            for line in list(container):
+                try:
+                    line.remove()
+                except Exception:
+                    pass
+            container.clear()
+
+    def _remove_placeholder_text(self) -> None:
+        for attr in ('_placeholder_text_ax1', '_placeholder_text_ax2'):
+            text_item = getattr(self, attr, None)
+            if text_item is None:
+                continue
+            try:
+                text_item.remove()
+            except Exception:
+                try:
+                    text_item.set_visible(False)
+                except Exception:
+                    pass
+            setattr(self, attr, None)
+
+    def _append_measurement_sample(self, current_mA: float, resistance: float) -> None:
+        if not math.isfinite(current_mA) or not math.isfinite(resistance):
+            return
+        self._remove_placeholder_text()
+        self._samples_current.append(float(current_mA))
+        self._samples_resistance.append(float(resistance))
+        if len(self._samples_current) > 1:
+            step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
+            tolerance = max(0.5, step_value * 0.6)
+            trimmed_currents: List[float] = []
+            trimmed_resistances: List[float] = []
+            total = len(self._samples_current)
+            for idx, (curr, res) in enumerate(zip(self._samples_current, self._samples_resistance)):
+                if abs(curr - 1.0) <= tolerance and idx < total - 1:
+                    continue
+                trimmed_currents.append(curr)
+                trimmed_resistances.append(res)
+            if len(trimmed_currents) != len(self._samples_current):
+                self._samples_current = trimmed_currents
+                self._samples_resistance = trimmed_resistances
+        self.sample_index = len(self._samples_current)
+        self._redraw_segments()
+
+    def _redraw_segments(self) -> None:
+        ax1 = getattr(self, 'ax1', None)
+        ax2 = getattr(self, 'ax2', None)
+        if ax1 is None or ax2 is None:
+            return
+        self._clear_segment_lines()
+        currents = list(self._samples_current)
+        resistances = list(self._samples_resistance)
+        if not currents:
+            canvas = getattr(self, 'canvas', None)
+            if canvas is not None:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    canvas.draw()
+            return
+        if len(currents) == 1:
+            marker1 = Line2D([currents[0]], [resistances[0]], color='r', marker='o', linestyle='None')
+            marker2 = Line2D([1], [resistances[0]], color='r', marker='o', linestyle='None')
+            ax1.add_line(marker1)
+            ax2.add_line(marker2)
+            self._segment_lines_ax1.append(marker1)
+            self._segment_lines_ax2.append(marker2)
+        else:
+            step_value = abs(float(getattr(self, 'current_step_mA', 1) or 1))
+            tolerance = max(0.5, step_value * 0.6)
+            for idx in range(1, len(currents)):
+                prev_c = currents[idx - 1]
+                curr_c = currents[idx]
+                prev_r = resistances[idx - 1]
+                curr_r = resistances[idx]
+                diff = curr_c - prev_c
+                if abs(diff) <= tolerance * 0.2:
+                    color = '#27ae60'
+                elif diff >= 0:
+                    color = '#d32f2f'
+                else:
+                    color = '#1976d2'
+                seg1 = Line2D([prev_c, curr_c], [prev_r, curr_r], color=color, marker='o', linestyle='-')
+                seg2 = Line2D([idx, idx + 1], [prev_r, curr_r], color=color, marker='o', linestyle='-')
+                ax1.add_line(seg1)
+                ax2.add_line(seg2)
+                self._segment_lines_ax1.append(seg1)
+                self._segment_lines_ax2.append(seg2)
+        for axis in (ax1, ax2):
+            axis.relim()
+            axis.autoscale_view()
+        canvas = getattr(self, 'canvas', None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+                canvas.flush_events()
+            except Exception:
+                canvas.draw()
+
+    def _finalize_measurement_history(self) -> None:
+        if len(self._samples_current) < 2 or len(self._samples_current) != len(self._samples_resistance):
+            return
+        title_source = self.f_name or ""
+        try:
+            base_title = format_annealing_title(Path(title_source).stem if title_source else "")
+        except Exception:
+            base_title = format_annealing_title(title_source)
+        entry = {
+            "currents": list(self._samples_current),
+            "resistances": list(self._samples_resistance),
+            "title": base_title or "Current annealing",
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "source": str(title_source),
+        }
+        self._measurement_history.insert(0, entry)
+        self._measurement_history = self._measurement_history[:3]
+        self._save_measurement_history()
+
+    def _reset_loop_tracking(self) -> None:
+        self._loop_sample_history = []
+        self._current_loop_samples = 0
+        self._planned_loop_steps = 0
+        self._projected_loop_samples = None
+        self.step_idx = 0
+        self.total_steps = 0
+        self._finish_time = None
+
+    def _init_loop_tracking(self, per_loop: int, loops: int, infinite: bool) -> None:
+        self._reset_loop_tracking()
+        self._planned_loop_steps = max(1, int(per_loop))
+        projected = self._planned_loop_steps
+        self._projected_loop_samples = projected
+        if infinite:
+            self.total_steps = 0
+        else:
+            self.total_steps = max(1, projected * max(1, int(loops)))
+        self.step_idx = 0
+        self._finish_time = None
+
+    def _note_loop_sample(self) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        self._current_loop_samples += 1
+        if self.total_steps > 0:
+            self._recalculate_total_steps()
+
+    def _finalize_loop_cycle(self) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        samples = getattr(self, '_current_loop_samples', 0)
+        if samples > 0:
+            self._loop_sample_history.append(samples)
+        self._current_loop_samples = 0
+        if self._loop_sample_history:
+            avg = sum(self._loop_sample_history) / len(self._loop_sample_history)
+            self._projected_loop_samples = max(1, int(math.ceil(avg)))
+        elif self._planned_loop_steps > 0:
+            self._projected_loop_samples = self._planned_loop_steps
+        else:
+            self._projected_loop_samples = None
+        self._recalculate_total_steps(0)
+
+    def _recalculate_total_steps(self, remaining_in_current_loop: int | None = None, projected_loop_steps: int | None = None) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        if bool(getattr(self, 'infinite_loops', False)) and not self.total_steps:
+            return
+        if self.total_steps <= 0 and remaining_in_current_loop is None and projected_loop_steps is None:
+            return
+        target_loops = self._loop_target_count()
+        completed_loops = len(self._loop_sample_history)
+        loops_remaining_after_current = max(0, target_loops - completed_loops - 1)
+        current_samples = max(0, self._current_loop_samples)
+        projected = projected_loop_steps
+        if projected is None:
+            projected = self._projected_loop_samples
+        if projected is None or projected <= 0:
+            projected = self._planned_loop_steps if self._planned_loop_steps > 0 else current_samples
+        projected = max(1, int(projected))
+        if remaining_in_current_loop is None:
+            remaining_current = max(0, projected - current_samples)
+        else:
+            remaining_current = max(0, int(remaining_in_current_loop))
+        estimated_total = int(self.step_idx + remaining_current + (loops_remaining_after_current * projected))
+        if estimated_total < self.step_idx:
+            estimated_total = self.step_idx
+        if estimated_total <= 0:
+            estimated_total = self.step_idx or projected
+        self.total_steps = estimated_total
+        if hasattr(self.ui, 'progressBar_process'):
+            self.ui.progressBar_process.setMaximum(self.total_steps if self.total_steps > 0 else 0)
+            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+        self._finish_time = None
 
     def _init_mode_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         settings_menu = menu_bar.addMenu("&Settings")
@@ -645,6 +1035,98 @@ class MainWindow(QtWidgets.QMainWindow):
             self.settings.setValue('loops_infinite', int(infinite))
         except Exception:
             pass
+
+    def _current_loop_settings(self) -> Tuple[int, bool]:
+        """Return the configured loop count and whether infinite looping is enabled."""
+
+        loops = max(1, getattr(self, '_last_loop_value', 1))
+        spin = getattr(self.ui, 'spinBox_loops', None)
+        if isinstance(spin, QtWidgets.QSpinBox):
+            try:
+                loops = max(1, int(spin.value()))
+            except Exception:
+                loops = max(1, loops)
+        chk = getattr(self.ui, 'checkBox_infinite_loops', None)
+        infinite = bool(chk.isChecked()) if isinstance(chk, QtWidgets.QCheckBox) else False
+        return loops, infinite
+
+    def _apply_loop_suffix_to_base(self, base: str) -> str:
+        """Append or update the ``loops`` suffix in ``base`` based on current settings."""
+
+        base = base.strip()
+        loops, infinite = self._current_loop_settings()
+        if infinite or loops <= 1:
+            return base
+        suffix = f"{loops}loops"
+        tokens = base.split()
+        if tokens and tokens[-1].lower().endswith("loops"):
+            tokens[-1] = suffix
+        elif suffix not in base:
+            tokens.append(suffix)
+        else:
+            # Already contains a loops suffix elsewhere; leave untouched.
+            return base
+        return " ".join(tokens)
+
+    def _loop_target_count(self) -> int:
+        """Return the configured loop target (at least 1)."""
+
+        try:
+            target = int(getattr(self, 'loop_target', 1))
+        except Exception:
+            target = 1
+        return max(1, target)
+
+    def _has_remaining_loops(self, next_index: int | None = None) -> bool:
+        """Return ``True`` if additional loops should execute after this cycle."""
+
+        if bool(getattr(self, 'infinite_loops', False)):
+            return True
+        target = self._loop_target_count()
+        if next_index is None:
+            try:
+                completed = int(getattr(self, 'loop_idx', 0))
+            except Exception:
+                completed = 0
+            return completed < target
+        return next_index < target
+
+    @staticmethod
+    def _format_sample_value(value: float) -> str:
+        text = format(float(value), ".12g")
+        # Normalise "-0" artefacts from floating point conversion.
+        return "0" if text == "-0" else text
+
+    def _write_sample_to_file(self, *, initial_sample: bool) -> None:
+        """Persist the latest sample to disk if appropriate."""
+
+        if initial_sample or not self.f_name:
+            return
+        current_mA = float(self.current_current_read) * 1000.0
+        voltage = float(self.current_voltage)
+        resistance = float(self.current_resistance)
+        if not math.isfinite(current_mA) or not math.isfinite(resistance):
+            return
+        if not self.f_out:
+            try:
+                Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            try:
+                self.f_out = open(self.f_name, "a", encoding="utf-8")
+            except OSError:
+                self.f_out = None
+        if self.f_out:
+            line = "\t".join(
+                [
+                    self._format_sample_value(current_mA),
+                    self._format_sample_value(voltage),
+                    self._format_sample_value(resistance),
+                ]
+            ) + "\n"
+            self.f_out.write(line)
+            self.f_out.close()
+            self.f_out = None
 
     def handle_checkBox_infinite_loops_toggled(self, checked: bool) -> None:
         spin = getattr(self.ui, 'spinBox_loops', None)
@@ -846,40 +1328,26 @@ class MainWindow(QtWidgets.QMainWindow):
                     except ZeroDivisionError:
                         self.lock.unlock()
                         return
-                    # Persist each sample to disk immediately after it arrives
-                    if not self.first_sample and self.f_name:
-                        if not self.f_out:
-                            try:
-                                Path(self.f_name).parent.mkdir(parents=True, exist_ok=True)
-                            except Exception:
-                                pass
-                            try:
-                                self.f_out = open(self.f_name, "a", encoding="utf-8")
-                            except OSError:
-                                self.f_out = None
-                        if self.f_out:
-                            current_mA = self.current_current_read * 1000.0
-                            line = f"{current_mA}\t{self.current_voltage}\t{self.current_resistance}\n"
-                            self.f_out.write(line)
-                            self.f_out.close()
-                            self.f_out = None
-
-                            # progress and rate tracking on each sample
-                            now = time.perf_counter()
-                            if self.last_sample_time is not None:
-                                dt = now - self.last_sample_time
-                                if dt > 0:
-                                    rate = 1.0 / dt
-                                    self._rate_window.append(rate)
-                                    self.sample_rate = sum(self._rate_window) / len(self._rate_window)
-                                    if self.total_steps:
-                                        remaining = max(0, self.total_steps - self.step_idx)
-                                        self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
-                            self.last_sample_time = now
-                            self.step_idx += 1
-                            if hasattr(self.ui, 'progressBar_process') and self.total_steps:
-                                self.ui.progressBar_process.setMaximum(self.total_steps)
-                                self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
+                    initial_sample = self.first_sample
+                    self._write_sample_to_file(initial_sample=initial_sample)
+                    if not initial_sample:
+                        # progress and rate tracking on each sample
+                        now = time.perf_counter()
+                        if self.last_sample_time is not None:
+                            dt = now - self.last_sample_time
+                            if dt > 0:
+                                rate = 1.0 / dt
+                                self._rate_window.append(rate)
+                                self.sample_rate = sum(self._rate_window) / len(self._rate_window)
+                                if self.total_steps:
+                                    remaining = max(0, self.total_steps - self.step_idx)
+                                    self._finish_time = now + (remaining / self.sample_rate) if self.sample_rate else None
+                        self.last_sample_time = now
+                        self.step_idx += 1
+                        self._note_loop_sample()
+                        if hasattr(self.ui, 'progressBar_process') and self.total_steps:
+                            self.ui.progressBar_process.setMaximum(self.total_steps)
+                            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
                 if (
                     self.current_increment > 0
                     and self.current_voltage >= self.max_voltage
@@ -898,6 +1366,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._voltage_history.clear()
         self._time_to_voltage_limit = None
         self._estimated_limit_current_mA = None
+        self._applied_limit_current_mA = None
+        self._apply_voltage_projection_to_progress(None, force=True)
 
     def _note_voltage_limit_reached(self) -> None:
         """Record that the 30 V ceiling has been hit."""
@@ -912,6 +1382,7 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             current_mA = 0.0
         self._estimated_limit_current_mA = max(0.0, current_mA)
+        self._apply_voltage_projection_to_progress(self._estimated_limit_current_mA, force=True)
 
     def _update_voltage_projection(self, timestamp: float) -> None:
         """Update the projection to the 30 V limit using recent samples."""
@@ -950,6 +1421,70 @@ class MainWindow(QtWidgets.QMainWindow):
             time_est = 0.0
         self._time_to_voltage_limit = time_est
         self._estimated_limit_current_mA = current_est
+        self._apply_voltage_projection_to_progress(current_est)
+
+    def _apply_voltage_projection_to_progress(self, limit_mA: float | None, *, force: bool = False) -> None:
+        if getattr(self, 'operation_mode', 2) != 2:
+            return
+        if bool(getattr(self, 'infinite_loops', False)):
+            if limit_mA is None:
+                self._applied_limit_current_mA = None
+            return
+        if not self.process_running:
+            if limit_mA is None:
+                self._applied_limit_current_mA = None
+            return
+        if not self.direction_ascending or self.current_increment <= 0:
+            if limit_mA is None and self._applied_limit_current_mA is not None:
+                self._applied_limit_current_mA = None
+                projected = self._planned_loop_steps or self._projected_loop_samples
+                if projected:
+                    self._projected_loop_samples = int(projected)
+                    self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples)
+                    self.update_time_estimate()
+            return
+        try:
+            planned_max = float(self.ui.spinBox_max_current.value())
+        except Exception:
+            planned_max = float(getattr(self, 'max_current_mA', 0))
+        step_mA = abs(int(getattr(self, 'current_step_mA', 1) or 1))
+        if step_mA <= 0:
+            step_mA = 1
+        tolerance = step_mA * 0.5
+        if limit_mA is None:
+            if self._applied_limit_current_mA is not None or force:
+                self._applied_limit_current_mA = None
+                projected = self._planned_loop_steps or self._projected_loop_samples
+                if projected:
+                    self._projected_loop_samples = int(projected)
+                    self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples)
+                    self.update_time_estimate()
+            return
+        limit_value = max(0.0, float(limit_mA))
+        if not force and self._applied_limit_current_mA is not None and abs(self._applied_limit_current_mA - limit_value) <= tolerance:
+            return
+        if limit_value >= planned_max - tolerance:
+            if self._applied_limit_current_mA is not None or force:
+                self._applied_limit_current_mA = None
+                projected = self._planned_loop_steps or self._projected_loop_samples
+                if projected:
+                    self._projected_loop_samples = int(projected)
+                    self._recalculate_total_steps(projected_loop_steps=self._projected_loop_samples)
+                    self.update_time_estimate()
+            return
+        ascend_steps = max(1, int(math.ceil(max(0.0, limit_value - 1.0) / step_mA)))
+        try:
+            hold_steps = int(self.ui.spinBox_hold_duration.value())
+        except Exception:
+            hold_steps = int(getattr(self, 'hold_duration_s', 0))
+        if limit_value < planned_max - tolerance:
+            hold_steps = 0
+        reverse_steps = ascend_steps if getattr(self, 'reverse_enabled', False) else 0
+        projected_loop = max(1, ascend_steps + hold_steps + reverse_steps)
+        self._projected_loop_samples = projected_loop
+        self._applied_limit_current_mA = limit_value
+        self._recalculate_total_steps(projected_loop_steps=projected_loop)
+        self.update_time_estimate()
 
     def _record_voltage_progress(self) -> None:
         if not self.process_running:
@@ -975,7 +1510,7 @@ class MainWindow(QtWidgets.QMainWindow):
             return f"{prefix}: N/A"
         if self._time_to_voltage_limit == 0:
             if self._estimated_limit_current_mA is not None:
-                return f"{prefix}: reached (â‰ˆ {self._estimated_limit_current_mA:.0f} mA)"
+                return f"{prefix}: reached (≈ {self._estimated_limit_current_mA:.0f} mA)"
             return f"{prefix}: reached"
         if not self.direction_ascending or self.current_increment <= 0:
             return f"{prefix}: N/A"
@@ -984,7 +1519,7 @@ class MainWindow(QtWidgets.QMainWindow):
         secs = max(0, int(self._time_to_voltage_limit + 0.999))
         text = self._format_secs(prefix, secs)
         if self._estimated_limit_current_mA is not None:
-            text += f" (â‰ˆ {self._estimated_limit_current_mA:.0f} mA)"
+            text += f" (≈ {self._estimated_limit_current_mA:.0f} mA)"
         return text
 
     def update_time_estimate(self):
@@ -998,7 +1533,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.process_running:
             secs = self.compute_planned_seconds()
             if secs is None:
-                label.setText("Time remaining: âˆž")
+                label.setText("Time remaining: ∞")
             else:
                 label.setText(self._format_secs("Time remaining", secs))
             if limit_label is not None:
@@ -1123,20 +1658,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.ui.label_custom_name.setVisible(True)
             if hasattr(self.ui, 'lineEdit_custom_name'):
                 self.ui.lineEdit_custom_name.setVisible(True)
-        loops = 1
-        infinite = False
-        if hasattr(self.ui, 'spinBox_loops'):
-            try:
-                loops = max(1, int(self.ui.spinBox_loops.value()))
-            except Exception:
-                loops = 1
-        if hasattr(self.ui, 'checkBox_infinite_loops'):
-            infinite = bool(self.ui.checkBox_infinite_loops.isChecked())
-        if loops > 1 and not infinite:
-            base = f"{base} {loops}loops"
+        base = self._apply_loop_suffix_to_base(base)
         if hasattr(self.ui, 'lineEdit_log_file'):
             self.ui.lineEdit_log_file.setText(base)
         self.store_name_preset()
+        self._update_composition_warning()
 
     def store_name_preset(self):
         s = self.settings
@@ -1169,11 +1695,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_custom_name.blockSignals(False)
         except Exception:
             pass
+        self._update_composition_warning()
 
     def reset_name_preset(self):
         self.settings.clear()
         self.restore_name_preset()
         self.update_file_name_from_preset()
+
+    def _handle_composition_text_changed(self, _text: str) -> None:
+        self._update_composition_warning()
+
+    def _update_composition_warning(self) -> None:
+        edit = getattr(self.ui, 'lineEdit_composition', None)
+        if edit is None or not hasattr(edit, 'set_extra_warning'):
+            return
+        warn, total = composition_warning_state(edit.text())
+        if warn and total is not None:
+            message = f"Element percentages add up to {total:.2f} %, expected 100."
+            edit.set_extra_warning(True, message)
+        else:
+            edit.set_extra_warning(False)
 
     def open_log_dir(self) -> None:
         try:
@@ -1263,6 +1804,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resistance_percent_from_hold = self.current_resistance/self.resistance_at_hold_current*100
         self.ui.label_resistance_percent_from_hold.setText("{:.1f}".format(self.resistance_percent_from_hold))
 
+    def handle_show_history_clicked(self) -> None:
+        dialog = MeasurementHistoryDialog(self, list(self._measurement_history))
+        dialog.exec()
+
     def handle_toggle_process_clicked(self):
         if not self.process_running:
             self.process_running = True
@@ -1279,17 +1824,17 @@ class MainWindow(QtWidgets.QMainWindow):
             self._last_nonzero_current_time = None
             self._skip_current_sample = False
             self._clear_zero_placeholders()
+            self._reset_sample_buffers()
             self._set_process_controls_enabled(False)
             if hasattr(self.ui, 'pushButton_reverse_now'):
                 self.ui.pushButton_reverse_now.setEnabled(True)
             self.force_stop_at_zero = False
             self.command_number = 0
             self.sample_index = 0
-            self.prev_value_x = None
-            self.prev_value_y = None
             self.first_sample = True
             self.direction_ascending = True
             self._reset_voltage_projection()
+            self._reset_loop_tracking()
             self.ui.pushButton_start_process.setText("Stop annealing process")
             if(self.operation_mode == 0):
                 pass
@@ -1321,13 +1866,11 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._display_ui_value('label_live_voltage', "0")
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
-                self.line_marker="o"
-                self.line_style="-"
                 self.line_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
                 # Immediately request the first sample instead of waiting
-                # for the oneâ€‘second timer interval to elapse.  This avoids
+                # for the one-second timer interval to elapse.  This avoids
                 # an unnecessary pause after the user presses *Start*.
                 self.handle_send_new_command()
                 self.timer_command.start(1000)
@@ -1360,12 +1903,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - 1) / max(1, step_mA)))
                 hold_steps = int(self.ui.spinBox_hold_duration.value())
                 down_steps = up_steps if self.reverse_enabled else 0
-                per_loop = up_steps + hold_steps + down_steps
-                if self.infinite_loops:
-                    self.total_steps = 0
-                else:
-                    self.total_steps = max(0, per_loop * int(self.loop_target or 1))
-                self.step_idx = 0
+                per_loop = max(1, up_steps + hold_steps + down_steps)
+                self._init_loop_tracking(per_loop, int(self.loop_target or 1), self.infinite_loops)
                 if hasattr(self.ui, 'progressBar_process'):
                     if self.total_steps:
                         self.ui.progressBar_process.setMaximum(self.total_steps)
@@ -1376,13 +1915,11 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.ui.label_time_to_limit.setText("To 30 V: N/A")
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
-                self.line_marker="o"
-                self.line_style="-"
                 self.line_color="r"
                 self.init_graph_window()
                 self.send_init_commands()
                 # Kick off the first acquisition immediately so the
-                # measurement starts without a oneâ€‘second delay.
+                # measurement starts without a one-second delay.
                 self.handle_send_new_command()
                 self.timer_command.start(1000)
                 
@@ -1442,6 +1979,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._process_start_time = None
         self._last_nonzero_current_time = None
         self._clear_zero_placeholders()
+        self._finalize_measurement_history()
+        self._reset_sample_buffers()
         try:
             self.timer_command.stop()
             self.hold_timer.stop()
@@ -1475,6 +2014,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.label_time_to_limit.setText("To 30 V: N/A")
         self._display_ui_value('label_set_current', "0")
         self._max_voltage_dialog = False
+        self.first_sample = True
+        self._reset_loop_tracking()
         
     def handle_send_new_command(self):
         if not self.process_running:
@@ -1517,48 +2058,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not skip_sample:
                 if self.first_sample:
                     self.first_sample = False
-                    self.prev_value_x = None
-                    self.prev_value_y = None
-                else:
-                    self.sample_index += 1
-                    if self.prev_value_x is not None and self.prev_value_y is not None:
-                        ax1 = getattr(self, 'ax1', None)
-                        ax2 = getattr(self, 'ax2', None)
-                        if ax1 is not None and ax2 is not None:
-                            prev_x = float(self.prev_value_x)
-                            prev_y = float(self.prev_value_y)
-                            curr_x = float(self.curr_value_x)
-                            curr_y = float(self.curr_value_y)
-                            self.line1 = Line2D(
-                                [prev_x, curr_x],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax1.add_line(self.line1)
-
-                            self.line2 = Line2D(
-                                [self.sample_index - 1, self.sample_index],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax2.add_line(self.line2)
-
-                            for axis in (ax1, ax2):
-                                axis.relim()
-                                axis.autoscale_view()
-
-                            fig = getattr(self, 'fig', None)
-                            canvas = getattr(fig, 'canvas', None) if fig is not None else None
-                            if canvas is not None:
-                                canvas.draw()
-                                canvas.flush_events()
-
-                self.prev_value_x = self.curr_value_x
-                self.prev_value_y = self.curr_value_y
+                self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
 
 
             # Iterate the current set point
@@ -1613,48 +2113,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not skip_sample:
                 if self.first_sample:
                     self.first_sample = False
-                    self.prev_value_x = None
-                    self.prev_value_y = None
-                else:
-                    self.sample_index += 1
-                    if self.prev_value_x is not None and self.prev_value_y is not None:
-                        ax1 = getattr(self, 'ax1', None)
-                        ax2 = getattr(self, 'ax2', None)
-                        if ax1 is not None and ax2 is not None:
-                            prev_x = float(self.prev_value_x)
-                            prev_y = float(self.prev_value_y)
-                            curr_x = float(self.curr_value_x)
-                            curr_y = float(self.curr_value_y)
-                            self.line1 = Line2D(
-                                [prev_x, curr_x],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax1.add_line(self.line1)
-
-                            self.line2 = Line2D(
-                                [self.sample_index - 1, self.sample_index],
-                                [prev_y, curr_y],
-                                color=self.line_color,
-                                marker=self.line_marker,
-                                linestyle=self.line_style,
-                            )
-                            ax2.add_line(self.line2)
-
-                            for axis in (ax1, ax2):
-                                axis.relim()
-                                axis.autoscale_view()
-
-                            fig = getattr(self, 'fig', None)
-                            canvas = getattr(fig, 'canvas', None) if fig is not None else None
-                            if canvas is not None:
-                                canvas.draw()
-                                canvas.flush_events()
-
-                self.prev_value_x = self.curr_value_x
-                self.prev_value_y = self.curr_value_y
+                self._append_measurement_sample(float(self.curr_value_x), float(self.curr_value_y))
 
 
 
@@ -1696,20 +2155,23 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_serial_command()
             # completed descending to zero? manage loops or stop
             if (self.current_increment < 0) and (self.current_current_set < self.current_step_A):
-                if getattr(self, 'force_stop_at_zero', False) or not getattr(self, 'reverse_enabled', False):
+                next_loop = int(getattr(self, 'loop_idx', 0)) + 1
+                loops_pending = self._has_remaining_loops(next_loop)
+                force_stop = bool(getattr(self, 'force_stop_at_zero', False))
+                self.loop_idx = next_loop
+                self._finalize_loop_cycle()
+                if force_stop:
                     self.handle_toggle_process_clicked()
+                elif loops_pending:
+                    # prepare next loop
+                    self.current_increment = self.current_step_A
+                    self.current_current_set = 0.001
+                    self.line_color = "r"
+                    self.direction_ascending = True
+                    self._reset_voltage_projection()
+                    self.elapsed_seconds = 0
                 else:
-                    self.loop_idx = int(getattr(self, 'loop_idx', 0)) + 1
-                    if self.infinite_loops or (self.loop_idx < int(getattr(self, 'loop_target', 1))):
-                        # prepare next loop
-                        self.current_increment = self.current_step_A
-                        self.current_current_set = 0.001
-                        self.line_color = "r"
-                        self.direction_ascending = True
-                        self._reset_voltage_projection()
-                        self.elapsed_seconds = 0
-                    else:
-                        self.handle_toggle_process_clicked()
+                    self.handle_toggle_process_clicked()
 
         else:
             pass
@@ -1734,7 +2196,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.send_serial_command()
             # The original implementation paused for a full second between
             # initialisation commands, which caused a noticeable start-up
-            # delay.  A brief 200â€¯ms gap gives the supply time to process
+            # delay.  A brief 200 ms gap gives the supply time to process
             # each command while keeping the UI responsive.
             self.simple_delay(200)
             
@@ -1821,9 +2283,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lcd_current_mA = self.label_live_current
         self.ui.label_set_current = self.label_live_set
         self.ui.label_live_voltage = self.label_live_voltage
+        self._voltage_default_style = self.label_live_voltage.styleSheet() or ""
+        self._voltage_warning_style = "color: #c0392b;"
         setattr(self.ui.lcd_current_mA, "display", self.label_live_current.setText)
         setattr(self.ui.label_set_current, "display", self.label_live_set.setText)
-        setattr(self.ui.label_live_voltage, "display", self.label_live_voltage.setText)
+        setattr(self.ui.label_live_voltage, "display", self._set_live_voltage_text)
 
     def handle_max_voltage(self) -> None:
         self._max_voltage_dialog = True
@@ -1890,14 +2354,10 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             current_mA = 0.0
         remaining_steps = math.ceil(max(0.0, current_mA) / step_mA)
-        new_total = max(self.step_idx + remaining_steps, self.step_idx)
-        if new_total <= 0:
-            return
-        self.total_steps = new_total
-        if hasattr(self.ui, 'progressBar_process'):
-            self.ui.progressBar_process.setMaximum(self.total_steps)
-            self.ui.progressBar_process.setValue(min(self.step_idx, self.total_steps))
-        self._finish_time = None
+        projected_loop = getattr(self, '_current_loop_samples', 0) + remaining_steps
+        if projected_loop > 0:
+            self._projected_loop_samples = max(1, int(projected_loop))
+        self._recalculate_total_steps(remaining_steps, self._projected_loop_samples)
 
     def _apply_max_voltage_action(self, action: str) -> None:
         if action not in MAX_VOLTAGE_ACTION_LABELS:
@@ -1910,14 +2370,18 @@ class MainWindow(QtWidgets.QMainWindow):
                     step = 0.001
             self.current_increment = -step
             self.line_color = "b"
-            self.force_stop_at_zero = True
+            next_loop = int(getattr(self, 'loop_idx', 0)) + 1
+            if self._has_remaining_loops(next_loop):
+                self.force_stop_at_zero = False
+            else:
+                self.force_stop_at_zero = not bool(getattr(self, "reverse_enabled", False))
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()
             self.update_time_estimate()
-            self._show_status_message("30 V reached â€” reversing to zero.")
+            self._show_status_message("30 V reached — reversing to zero.")
         elif action == "stop":
-            self._show_status_message("30 V reached â€” stopping measurement.")
+            self._show_status_message("30 V reached — stopping measurement.")
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
@@ -1929,7 +2393,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
-            self._show_status_message("30 V reached â€” holding current.")
+            self._show_status_message("30 V reached — holding current.")
 
     def _show_max_voltage_prompt(self) -> None:
         msg = QtWidgets.QMessageBox(self)
@@ -1955,6 +2419,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.x_data_ax2 = []
         self.y_data_ax2 = []
         self.n_counter = 0
+        self._segment_lines_ax1 = []
+        self._segment_lines_ax2 = []
         """
     
         # Create an embedded Matplotlib figure on the right panel
@@ -2020,12 +2486,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax1.xaxis.label.set_color(text_rgb)
             self.ax1.yaxis.label.set_color(text_rgb)
 
-            self.line1 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax1.add_line(self.line1)
-
             self.ax2 = self.fig.add_subplot(212)
             self.ax2.set_facecolor(base_rgb)
-            self.ax2.set_xlabel("N [-]")
+            self.ax2.set_xlabel("N")
             self.ax2.set_ylabel("Resistance [Ohm]")
             self.ax2.grid(True, color=(0.35,0.35,0.35,0.5) if scheme == QtCore.Qt.ColorScheme.Dark else (0.8,0.8,0.8,0.8))
             for spine in self.ax2.spines.values():
@@ -2033,8 +2496,6 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax2.tick_params(colors=text_rgb)
             self.ax2.xaxis.label.set_color(text_rgb)
             self.ax2.yaxis.label.set_color(text_rgb)
-            self.line2 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax2.add_line(self.line2)
             self._zero_placeholder_line1 = None
             self._zero_placeholder_line2 = None
             self._zero_placeholder_count = 0
@@ -2049,14 +2510,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ax1.set_xlabel("Current [mA]")
             self.ax1.set_ylabel("Resistance [Ohm]")
             self.ax1.grid(True)
-            self.line1 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax1.add_line(self.line1)
             self.ax2 = self.fig.add_subplot(212)
-            self.ax2.set_xlabel("N [-]")
+            self.ax2.set_xlabel("N")
             self.ax2.set_ylabel("Resistance [Ohm]")
             self.ax2.grid(True)
-            self.line2 = Line2D([], [], color=self.line_color, marker=self.line_marker, linestyle=self.line_style)
-            self.ax2.add_line(self.line2)
             self._zero_placeholder_line1 = None
             self._zero_placeholder_line2 = None
             self._zero_placeholder_count = 0
@@ -2094,7 +2551,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not fpath.endswith(".txt"):
                 fpath += ".txt"
             d = os.path.dirname(fpath)
-            b = os.path.splitext(os.path.basename(fpath))[0]
+            b = self._apply_loop_suffix_to_base(os.path.splitext(os.path.basename(fpath))[0])
             if hasattr(self.ui, 'lineEdit_log_dir'):
                 self.ui.lineEdit_log_dir.setText(d)
             if hasattr(self.ui, 'lineEdit_log_file'):
@@ -2123,7 +2580,7 @@ class MainWindow(QtWidgets.QMainWindow):
             if not fpath.endswith(".txt"):
                 fpath += ".txt"
             d = os.path.dirname(fpath)
-            b = os.path.splitext(os.path.basename(fpath))[0]
+            b = self._apply_loop_suffix_to_base(os.path.splitext(os.path.basename(fpath))[0])
             if hasattr(self.ui, 'lineEdit_log_dir'):
                 self.ui.lineEdit_log_dir.setText(d)
             if hasattr(self.ui, 'lineEdit_log_file'):
@@ -2151,12 +2608,15 @@ class MainWindow(QtWidgets.QMainWindow):
     def build_log_path(self) -> str:
         try:
             d = self.ui.lineEdit_log_dir.text().strip()
-            b = self.ui.lineEdit_log_file.text().strip()
-            if not b:
-                b = "anneal_log"
+            base = self.ui.lineEdit_log_file.text().strip()
+            if not base:
+                base = "anneal_log"
+            base = self._apply_loop_suffix_to_base(base)
+            if not base:
+                base = "anneal_log"
             if d:
                 os.makedirs(d, exist_ok=True)
-                return os.path.join(d, f"{b}.txt")
+                return os.path.join(d, f"{base}.txt")
         except Exception:
             pass
         # Fallback to legacy full-path field if present
@@ -2167,6 +2627,39 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return os.path.join(DEFAULT_LOG_DIR, "anneal_log.txt")
+
+    def _ensure_log_header(self, path: str) -> None:
+        header_line = "# Current (mA)\tVoltage (V)\tResistance (Ohm)"
+        try:
+            text = Path(path).read_text(encoding="utf-8")
+        except OSError:
+            return
+        lines = text.splitlines()
+        changed = False
+        if not lines:
+            lines = [header_line]
+            changed = True
+        else:
+            header_index: int | None = None
+            for idx, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if "Voltage" in stripped and "Resistance" in stripped:
+                    header_index = idx
+                    break
+            if header_index is None:
+                lines.insert(0, header_line)
+                changed = True
+            else:
+                if lines[header_index].strip() != header_line:
+                    lines[header_index] = header_line
+                    changed = True
+        if changed:
+            try:
+                Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+            except OSError:
+                pass
 
     def prepare_output_file(self) -> bool:
         """Create or prepare the output file, prompting if it exists.
@@ -2199,8 +2692,11 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 mode = "w"
         try:
-            with open(path, mode):
-                pass
+            if mode == "a":
+                self._ensure_log_header(path)
+            with open(path, mode, encoding="utf-8") as fh:
+                if mode != "a":
+                    fh.write("# Current (mA)\tVoltage (V)\tResistance (Ohm)\n")
         except OSError as exc:
             QtWidgets.QMessageBox.critical(
                 self, "Error", f"Failed to open {path}: {exc}"

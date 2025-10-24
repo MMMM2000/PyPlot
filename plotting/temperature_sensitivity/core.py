@@ -19,7 +19,13 @@ from matplotlib.typing import ColorType
 
 from ..config import load_config
 from .. import common
-from ..utils import save_figure, show_plots, apply_readability_fonts, apply_readability
+from ..utils import (
+    save_figure,
+    show_plots,
+    apply_readability_fonts,
+    apply_readability,
+    schedule_origin_release,
+)
 from ..backends import wants_matplotlib, wants_origin
 
 # Load default configuration
@@ -39,7 +45,7 @@ MEAN_MARKER = 'o'
 MEAN_MSIZE = 8
 MEAN_LW = 3
 LEGEND_MARKER_SIZE = 6
-IMPROVE_READABILITY = True
+IMPROVE_READABILITY = False
 SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
 LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
 LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
@@ -1189,6 +1195,8 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
             plt.close('all')
     else:
         plt.close('all')
+    if wants_origin(backend):
+        schedule_origin_release()
 
 
 

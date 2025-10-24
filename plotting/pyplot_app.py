@@ -18,21 +18,44 @@ from matplotlib.figure import Figure
 import pandas as pd
 
 from plotting.pyplot import (
+    GraphLineState,
     PyPlotWindow,
     WorksheetColumnMeta,
     WorksheetData,
     WorkbookData,
     TabDescriptor,
 )
-from plotting.utils import ensure_app_theme, prepare_output_dir, set_last_output_dir, format_annealing_title
+from plotting.utils import (
+    ensure_app_theme,
+    prepare_output_dir,
+    set_last_output_dir,
+    format_annealing_title,
+    get_last_output_dir,
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+    restore_png_dpi,
+    store_png_dpi,
+)
 from plotting.vsm_hysteresis_loops import VSMPlotter, _looks_like_vsm_name
 from plotting.temperature_dependence import core as temp_core
 from plotting.temperature_sensitivity import core as temp_sens_core
 from plotting.current_annealing import core as anneal_core
+from plotting.stress_dependence import core as stress_core
+from plotting.stress_dependence import stress_gui
+from plotting.stress_sensitivity import sens_gui
+from plotting.hsw_load_compare import load_compare_gui
+from plotting.maxion_continuous import maxion_gui
+from plotting.pdf_plotter import pdf_gui
+from plotting.hysteresis_loops import loops_gui
+from plotting.hsw_distribution import distribution_gui
+from plotting.strain_3d_plot import Strain3DPlotter
 
 
 class PyPlotPlugin:
     """Base plugin contract for PyPlot script integrations."""
+
+    requires_imported_data: bool = False
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         self.host = host
@@ -210,12 +233,96 @@ class ExternalPlotterPlugin(PyPlotPlugin):
             self.host.popout_button.setEnabled(False)
 
 
+class EmbeddedWidgetPlugin(PyPlotPlugin):
+    """Embed a legacy dialog or widget directly inside the PyPlot workbench."""
+
+    def __init__(
+        self,
+        host: "PyPlotWorkbench",
+        name: str,
+        widget_factory: Callable[[], QtWidgets.QWidget | None],
+    ) -> None:
+        super().__init__(host, name)
+        self._widget_factory = widget_factory
+        self._widget: QtWidgets.QWidget | None = None
+        self._panel: QtWidgets.QWidget | None = None
+
+    def activate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+        self._ensure_widget()
+        self.update_ui()
+
+    def deactivate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+        if self._widget is not None:
+            try:
+                self._widget.hide()
+            except Exception:
+                pass
+
+    def _ensure_widget(self) -> QtWidgets.QWidget:
+        if self._widget is None:
+            widget = self._widget_factory()
+            if widget is None:
+                widget = QtWidgets.QWidget(self.host)
+            self._widget = widget
+        return self._widget
+
+    def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        widget = self._ensure_widget()
+        widget.setParent(container)
+        widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        if isinstance(widget, QtWidgets.QDialog):
+            widget.setModal(False)
+            try:
+                widget.setSizeGripEnabled(False)
+            except Exception:
+                pass
+        try:
+            widget.setWindowFlag(QtCore.Qt.WindowType.Dialog, False)
+            widget.setWindowFlag(QtCore.Qt.WindowType.Window, False)
+        except Exception:
+            pass
+        widget.show()
+        layout.addWidget(widget)
+        self._panel = container
+        return container
+
+    def settings_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        return None
+
+    def update_ui(self) -> None:  # type: ignore[override]
+        for attr in (
+            "load_data_button",
+            "plot_button",
+            "save_graph_button",
+            "normalize_button",
+            "export_button",
+            "open_origin_button",
+            "popout_button",
+        ):
+            widget = getattr(self.host, attr, None)
+            if isinstance(widget, QtWidgets.QAbstractButton):
+                widget.setEnabled(False)
+                if attr == "plot_button":
+                    widget.setText("Generate")
+
+
 class TemperatureDependencePlugin(PyPlotPlugin):
     """Embed the temperature dependence workflow directly inside PyPlot."""
 
+    requires_imported_data = True
+
     _VAR_LABELS = {
         "sum": "T1+T2",
-        "dT": "T2Ã¢Ë†â€™T1",
+        "dT": "T2–T1",
         "T1": "T1",
         "T2": "T2",
     }
@@ -305,7 +412,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         output_edit = QtWidgets.QLineEdit(temp_core.OUTPUT_DIR, output_group)
         self._output_edit = output_edit
         output_layout.addWidget(output_edit, 2, 0, 1, 2)
-        browse_btn = QtWidgets.QPushButton("BrowseÃ¢â‚¬Â¦", output_group)
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
         output_layout.addWidget(browse_btn, 2, 2)
         subfolder_cb = QtWidgets.QCheckBox("Create subfolder per run", output_group)
         subfolder_cb.setChecked(False)
@@ -387,7 +494,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
     def load_data(self) -> None:  # type: ignore[override]
         paths = [path for path in self.host._selected_paths() if path.is_file()]
         if not paths:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Select one or more data files first.")
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                self.name,
+                "Import current annealing logs via the Data menu, then select them before loading.",
+            )
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -399,8 +510,10 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        if self._summary_label is not None:
-            self._summary_label.setText(f"Loaded {len(self._data)} rows from {len(paths)} file(s).")
+        if self._summary_label is not None and not self._summary_label.text().strip():
+            self._summary_label.setText(
+                "Select one or more temperature dependence files and click Load data."
+            )
         self._log(f"Loaded {len(paths)} temperature dependence file(s).")
         self.update_ui()
 
@@ -498,6 +611,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 class TemperatureSensitivityPlugin(PyPlotPlugin):
     """Embed the temperature sensitivity workflow directly inside PyPlot."""
 
+    requires_imported_data = True
+
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
         self._data: pd.DataFrame | None = None
@@ -560,7 +675,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         baseline_layout.setVerticalSpacing(4)
         baseline_combo = QtWidgets.QComboBox(baseline_group)
         baseline_combo.addItem("Do not shift baseline", "none")
-        baseline_combo.addItem("Shift to zero at 25Â°C", "zero_25")
+        baseline_combo.addItem("Shift to zero at 25°C", "zero_25")
         baseline_combo.addItem("Plot both baselines", "both")
         baseline_value = temp_sens_core.BASELINE_MODE if temp_sens_core.BASELINE_MODE in {"none", "zero_25", "both"} else "none"
         baseline_combo.setCurrentIndex({"none": 0, "zero_25": 1, "both": 2}[baseline_value])
@@ -605,7 +720,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         output_edit = QtWidgets.QLineEdit(str(temp_sens_core.OUTPUT_DIR), output_group)
         self._output_edit = output_edit
         output_layout.addWidget(output_edit, 1, 1)
-        browse_btn = QtWidgets.QPushButton("BrowseÂ°Â°", output_group)
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
         output_layout.addWidget(browse_btn, 1, 2)
         subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
         subfolder_cb.setChecked(False)
@@ -709,8 +824,10 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        if self._summary_label is not None:
-            self._summary_label.setText(f"Loaded {len(self._data)} rows from {len(paths)} file(s).")
+        if self._summary_label is not None and not self._summary_label.text().strip():
+            self._summary_label.setText(
+                "Select one or more temperature sensitivity files and click Load data."
+            )
         self._log(f"Loaded {len(paths)} temperature sensitivity file(s).")
         self.update_ui()
 
@@ -721,7 +838,6 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             return
         config = self._apply_settings_to_core()
         dataframe = temp_sens_core.maybe_handle_outliers(self._data.copy())
-        temp_sens_core.apply_readability_fonts()
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
             clear(self._plot_tabs)
@@ -734,7 +850,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         modes = [config["baseline_mode"]]
         if config["baseline_mode"] == "both":
             modes = ["none", "zero_25"]
-        mode_labels = {"none": "Raw", "zero_25": "Zero @25Â°C"}
+        mode_labels = {"none": "Raw", "zero_25": "Zero @25°C"}
         plots_created = 0
         grouped = dataframe.groupby(["composition", "anneal"], dropna=False)
         for (_, _), group in grouped:
@@ -840,37 +956,25 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 class CurrentAnnealingPlugin(PyPlotPlugin):
     """Embed current annealing plotting inside PyPlot."""
 
+    requires_imported_data = True
+
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
         self._data_by_file: dict[str, pd.DataFrame] = {}
         self._loaded_files: list[str] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
-        self._summary_label: QtWidgets.QLabel | None = None
-        self._save_checkbox: QtWidgets.QCheckBox | None = None
-        self._format_combo: QtWidgets.QComboBox | None = None
-        self._dpi_spin: QtWidgets.QSpinBox | None = None
-        self._output_edit: QtWidgets.QLineEdit | None = None
-        self._subfolder_checkbox: QtWidgets.QCheckBox | None = None
         self._origin_mode_combo: QtWidgets.QComboBox | None = None
+        self._workbook_keys: dict[str, str] = {}
 
     def activate(self) -> None:  # type: ignore[override]
-        self.host._set_data_sources_visible(True)
+        self.host._set_data_sources_visible(False)
         self.update_ui()
 
     def deactivate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
-        container = QtWidgets.QWidget(self.host)
-        layout = QtWidgets.QVBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-        summary = QtWidgets.QLabel("Select current annealing log files then click Load data.")
-        summary.setWordWrap(True)
-        layout.addWidget(summary)
-        layout.addStretch(1)
-        self._summary_label = summary
-        return container
+        return None
 
     def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
         if self._settings_widget is not None:
@@ -880,59 +984,17 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        output_group = QtWidgets.QGroupBox("Output", container)
-        output_layout = QtWidgets.QGridLayout(output_group)
-        output_layout.setContentsMargins(8, 8, 8, 8)
-        output_layout.setHorizontalSpacing(6)
-        output_layout.setVerticalSpacing(4)
-        save_checkbox = QtWidgets.QCheckBox("Save plots to disk", output_group)
-        save_checkbox.setChecked(bool(anneal_core.SAVE_PLOTS))
-        self._save_checkbox = save_checkbox
-        output_layout.addWidget(save_checkbox, 0, 0, 1, 3)
-        output_layout.addWidget(QtWidgets.QLabel("Directory:"), 1, 0)
-        output_edit = QtWidgets.QLineEdit(str(anneal_core.OUTPUT_DIR), output_group)
-        self._output_edit = output_edit
-        output_layout.addWidget(output_edit, 1, 1)
-        browse_btn = QtWidgets.QPushButton("BrowseÂ°Â°", output_group)
-        output_layout.addWidget(browse_btn, 1, 2)
-        subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
-        subfolder_cb.setChecked(False)
-        self._subfolder_checkbox = subfolder_cb
-        output_layout.addWidget(subfolder_cb, 2, 0, 1, 3)
-        output_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
-        format_combo = QtWidgets.QComboBox(output_group)
-        format_combo.addItems(["png", "pdf", "svg"])
-        format_combo.setCurrentText(anneal_core.SAVE_FORMAT)
-        self._format_combo = format_combo
-        output_layout.addWidget(format_combo, 3, 1)
-        output_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
-        dpi_spin = QtWidgets.QSpinBox(output_group)
-        dpi_spin.setRange(72, 3000)
-        dpi_spin.setValue(int(anneal_core.PNG_DPI))
-        self._dpi_spin = dpi_spin
-        output_layout.addWidget(dpi_spin, 4, 1)
-        output_layout.addWidget(QtWidgets.QLabel("Origin mode:"), 5, 0)
-        origin_combo = QtWidgets.QComboBox(output_group)
+        origin_group = QtWidgets.QGroupBox("Origin export", container)
+        origin_layout = QtWidgets.QFormLayout(origin_group)
+        origin_combo = QtWidgets.QComboBox(origin_group)
         for mode in anneal_core.ORIGIN_MODES:
-            label = "Experimental" if mode == "experimental" else "Simple"
+            label = "Experimental (directional)" if mode == "experimental" else "Simple (single trace)"
             origin_combo.addItem(label, mode)
         index = origin_combo.findData(anneal_core.ORIGIN_MODE)
         origin_combo.setCurrentIndex(index if index >= 0 else 0)
         self._origin_mode_combo = origin_combo
-        output_layout.addWidget(origin_combo, 5, 1)
-        layout.addWidget(output_group)
-
-        def _browse_output() -> None:
-            directory = QtWidgets.QFileDialog.getExistingDirectory(
-                self.host,
-                "Select output directory",
-                output_edit.text() or str(Path.home()),
-            )
-            if directory:
-                output_edit.setText(directory)
-
-        browse_btn.clicked.connect(_browse_output)
-
+        origin_layout.addRow("Mode:", origin_combo)
+        layout.addWidget(origin_group)
         layout.addStretch(1)
         self._settings_widget = container
         return container
@@ -947,32 +1009,25 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 pass
         print(message)
 
-    def _apply_settings_to_core(self) -> dict[str, Any]:
-        save_flag = bool(self._save_checkbox and self._save_checkbox.isChecked())
-        anneal_core.SAVE_PLOTS = save_flag
-        base_dir = self._output_edit.text().strip() if isinstance(self._output_edit, QtWidgets.QLineEdit) else str(anneal_core.OUTPUT_DIR)
-        subfolder = bool(self._subfolder_checkbox and self._subfolder_checkbox.isChecked())
-        output_dir = str(anneal_core.OUTPUT_DIR)
-        if save_flag:
-            output_dir = str(prepare_output_dir(base_dir or output_dir, "current_annealing", subfolder))
-            set_last_output_dir(base_dir or output_dir, key="current_annealing")
-        anneal_core.OUTPUT_DIR = output_dir
-        if isinstance(self._format_combo, QtWidgets.QComboBox):
-            anneal_core.SAVE_FORMAT = self._format_combo.currentText()
-        if isinstance(self._dpi_spin, QtWidgets.QSpinBox):
-            anneal_core.PNG_DPI = int(self._dpi_spin.value())
+    def _apply_settings_to_core(self) -> None:
         if isinstance(self._origin_mode_combo, QtWidgets.QComboBox):
             mode = self._origin_mode_combo.currentData()
             if isinstance(mode, str) and mode:
                 anneal_core.ORIGIN_MODE = mode
         anneal_core.SHOW_PLOTS = False
         anneal_core.BACKEND = "matplotlib"
-        return {"save": save_flag, "output_dir": output_dir}
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.is_file()]
+        host = self.host
+        paths = [path for path in host._selected_paths() if path.is_file()]
         if not paths:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Select one or more data files first.")
+            host._sync_selected_paths_with_imports()
+            paths = [path for path in host._selected_paths() if path.is_file()]
+        if not paths:
+            opener = getattr(host, "_show_data_menu", None)
+            if callable(opener) and opener():
+                return
+            QtWidgets.QMessageBox.warning(host, self.name, "Select one or more data files first.")
             return
         data_by_file: dict[str, pd.DataFrame] = {}
         errors: list[str] = []
@@ -988,16 +1043,14 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         if not data_by_file:
             self._data_by_file = {}
             self._loaded_files = []
-            self._summary_label.setText("No valid current annealing files were loaded.") if self._summary_label else None
             self.update_ui()
             return
         self._data_by_file = data_by_file
         self._loaded_files = list(data_by_file.keys())
-        if self._summary_label is not None:
-            self._summary_label.setText(f"Loaded {len(data_by_file)} file(s).")
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
         self._log(f"Loaded {len(data_by_file)} current annealing file(s).")
+        self._register_workbooks()
         self.update_ui()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -1005,8 +1058,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self.load_data()
         if not self._data_by_file:
             return
-        config = self._apply_settings_to_core()
-        anneal_core.apply_readability_fonts()
+        self._apply_settings_to_core()
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
             clear(self._plot_tabs)
@@ -1021,22 +1073,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             df = self._data_by_file[path_str]
             title = format_annealing_title(Path(path_str).stem)
             try:
-                fig, fname = anneal_core.plot_one(df, title)
+                fig, _ = anneal_core.plot_one(df, title)
             except Exception as exc:
                 self._log(f"Failed to plot {Path(path_str).name}: {exc}", level="error")
                 continue
-            saved_path = ""
-            if config["save"]:
-                target_dir = Path(config["output_dir"])
-                try:
-                    target_dir.mkdir(parents=True, exist_ok=True)
-                except Exception:
-                    pass
-                try:
-                    anneal_core.save_figure(fig, target_dir / fname, anneal_core.SAVE_FORMAT, anneal_core.PNG_DPI)
-                    saved_path = str(target_dir / fname)
-                except Exception as exc:
-                    self._log(f"Failed to save {fname}: {exc}", level="error")
             canvas = FigureCanvas(fig)
             canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
             tab = QtWidgets.QWidget()
@@ -1044,6 +1084,18 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             tab_layout.setContentsMargins(0, 0, 0, 0)
             tab_layout.addWidget(canvas)
             ax = fig.axes[0] if fig.axes else None
+            lines: dict[tuple[str, float | str], GraphLineState] = {}
+            if ax is not None:
+                for index, line in enumerate(ax.get_lines(), start=1):
+                    label = line.get_label() or f"Series {index}"
+                    state = GraphLineState(
+                        key=(label, float(index)),
+                        label=label,
+                        line=line,
+                        base_x=line.get_xdata(),
+                        base_y=line.get_ydata(),
+                    )
+                    lines[state.key] = state
             descriptor = TabDescriptor(
                 kind="current_annealing",
                 title=ax.get_title() if ax else title,
@@ -1052,10 +1104,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 y_label=ax.get_ylabel() if ax else "Resistance",
                 canvas=canvas,
                 axes=ax,
-                lines={},
+                lines=lines,
                 metadata={
                     "source_file": path_str,
-                    "saved_path": saved_path,
+                    "saved_path": "",
                     "origin_mode": anneal_core.ORIGIN_MODE,
                 },
             )
@@ -1098,7 +1150,98 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self.host.open_origin_button.setEnabled(has_data)
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
-        self.host._update_project_actions()class VSMHysteresisPlugin(PyPlotPlugin):
+        self.host._update_project_actions()
+
+    def _register_workbooks(self) -> None:
+        host = self.host
+        created: list[str] = []
+        for path_str, df in self._data_by_file.items():
+            path = Path(path_str)
+            key = self._workbook_keys.get(path_str)
+            if not key:
+                key = f"annealing::{path_str}"
+                self._workbook_keys[path_str] = key
+            workbook = WorkbookData(
+                key=key,
+                name=f"{path.stem} (annealing)",
+                worksheets=[],
+                source=path,
+                folder=path.parent,
+            )
+            worksheet_objects: list[WorksheetData] = []
+            for sheet_name, frame in self._split_by_direction(df):
+                worksheet = host._create_worksheet_from_frame(workbook, sheet_name, frame)
+                columns = worksheet.columns
+                current_meta = columns.get("Current (mA)")
+                if isinstance(current_meta, WorksheetColumnMeta):
+                    current_meta.units = "mA"
+                    current_meta.long_name = "Current"
+                resistance_meta = columns.get("Resistance (Ω)")
+                if isinstance(resistance_meta, WorksheetColumnMeta):
+                    resistance_meta.units = "Ω"
+                    resistance_meta.long_name = "Resistance"
+                worksheet_objects.append(worksheet)
+            if not worksheet_objects:
+                continue
+            workbook.worksheets = [ws.key for ws in worksheet_objects]
+            host._register_imported_workbook(workbook, worksheet_objects)
+            created.append(path.name)
+        if created:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
+            self._log(
+                "Created worksheets for: " + ", ".join(created),
+            )
+
+    def _split_by_direction(self, df: pd.DataFrame) -> list[tuple[str, pd.DataFrame]]:
+        if df.empty:
+            return []
+        if not {"I_mA", "R_Ohm"}.issubset(df.columns):
+            renamed = df.rename(
+                columns={"Current (mA)": "I_mA", "Resistance (Ω)": "R_Ohm"}
+            )
+        else:
+            renamed = df
+        currents = renamed["I_mA"].to_numpy(dtype=float)
+        _, segments = anneal_core._direction_profile(currents)
+        sheets: list[tuple[str, pd.DataFrame]] = []
+        inc = 0
+        dec = 0
+        for start, end, direction in segments:
+            if end <= start:
+                continue
+            segment = renamed.iloc[start:end].copy()
+            segment = segment.rename(
+                columns={"I_mA": "Current (mA)", "R_Ohm": "Resistance (Ω)"}
+            )
+            segment = segment.reset_index(drop=True)
+            for column in ("Current (mA)", "Resistance (Ω)"):
+                segment[column] = pd.to_numeric(segment[column], errors="coerce")
+            segment = segment.dropna(subset=["Current (mA)", "Resistance (Ω)"]).reset_index(
+                drop=True
+            )
+            if direction >= 0:
+                inc += 1
+                label = f"Increasing {inc}"
+            else:
+                dec += 1
+                label = f"Decreasing {dec}"
+            sheets.append((label, segment))
+        if not sheets:
+            fallback = renamed.rename(
+                columns={"I_mA": "Current (mA)", "R_Ohm": "Resistance (Ω)"}
+            )
+            fallback = fallback.reset_index(drop=True)
+            for column in ("Current (mA)", "Resistance (Ω)"):
+                fallback[column] = pd.to_numeric(fallback[column], errors="coerce")
+            fallback = fallback.dropna(subset=["Current (mA)", "Resistance (Ω)"]).reset_index(
+                drop=True
+            )
+            sheets.append(("Samples", fallback))
+        return sheets
+
+
+class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
     _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
@@ -1426,6 +1569,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         return ordered
 
     def _open_data_menu(self) -> bool:
+        show_menu = getattr(self.host, "_show_data_menu", None)
+        if callable(show_menu):
+            return bool(show_menu())
         data_menu = getattr(self.host, "_data_menu", None)
         if not isinstance(data_menu, QtWidgets.QMenu):
             return False
@@ -1457,6 +1603,552 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 continue
             setattr(host, name, types.MethodType(func, host))
         host._vsm_methods_bound = True
+
+
+class StressDependencePlugin(PyPlotPlugin):
+    """Port the stress dependence workflow into the shared PyPlot frame."""
+
+    requires_imported_data = True
+
+    _VAR_LABELS = {
+        "sum": "T1+T2",
+        "dT": "T2–T1",
+        "T1": "T1",
+        "T2": "T2",
+    }
+
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name)
+        self._data: pd.DataFrame | None = None
+        self._loaded_files: list[str] = []
+        self._plot_tabs: list[QtWidgets.QWidget] = []
+        self._summary_label: QtWidgets.QLabel | None = None
+        self._var_checks: dict[str, QtWidgets.QCheckBox] = {}
+        self._baseline_first: QtWidgets.QRadioButton | None = None
+        self._baseline_min: QtWidgets.QRadioButton | None = None
+        self._show_checkbox: QtWidgets.QCheckBox | None = None
+        self._save_checkbox: QtWidgets.QCheckBox | None = None
+        self._output_edit: QtWidgets.QLineEdit | None = None
+        self._subfolder_checkbox: QtWidgets.QCheckBox | None = None
+        self._backend_combo: QtWidgets.QComboBox | None = None
+        self._format_combo: QtWidgets.QComboBox | None = None
+        self._dpi_spin: QtWidgets.QSpinBox | None = None
+        self._processed_checkbox: QtWidgets.QCheckBox | None = None
+        self._med_spin: QtWidgets.QSpinBox | None = None
+        self._ma_spin: QtWidgets.QSpinBox | None = None
+        try:
+            stress_core.ProgressDialog = stress_gui.ProgressDialog  # type: ignore[assignment]
+        except Exception:
+            pass
+
+    # Lifecycle -----------------------------------------------------
+    def activate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(True)
+        self.update_ui()
+
+    def deactivate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+
+    # UI helpers ----------------------------------------------------
+    def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        summary = QtWidgets.QLabel(
+            "Select stress dependence files, load them, then generate plots."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        layout.addStretch(1)
+        self._summary_label = summary
+        return container
+
+    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
+        if self._settings_widget is not None:
+            return self._settings_widget
+
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        var_group = QtWidgets.QGroupBox("Variables to plot", container)
+        var_layout = QtWidgets.QVBoxLayout(var_group)
+        for key, label in self._VAR_LABELS.items():
+            checkbox = QtWidgets.QCheckBox(label, var_group)
+            checkbox.setChecked(key in getattr(stress_core, "PLOT_VARS", []))
+            self._var_checks[key] = checkbox
+            var_layout.addWidget(checkbox)
+        layout.addWidget(var_group)
+
+        baseline_group = QtWidgets.QGroupBox("Baseline", container)
+        baseline_layout = QtWidgets.QVBoxLayout(baseline_group)
+        first_rb = QtWidgets.QRadioButton("First", baseline_group)
+        min_rb = QtWidgets.QRadioButton("Min", baseline_group)
+        mode = getattr(stress_core, "BASELINE_MODE", "first")
+        if mode == "min":
+            min_rb.setChecked(True)
+        else:
+            first_rb.setChecked(True)
+        baseline_layout.addWidget(first_rb)
+        baseline_layout.addWidget(min_rb)
+        self._baseline_first = first_rb
+        self._baseline_min = min_rb
+        layout.addWidget(baseline_group)
+
+        proc_group = QtWidgets.QGroupBox("Processed curve", container)
+        proc_layout = QtWidgets.QGridLayout(proc_group)
+        proc_cb = QtWidgets.QCheckBox("Plot processed", proc_group)
+        proc_cb.setChecked(bool(getattr(stress_core, "PLOT_PROCESSED", False)))
+        self._processed_checkbox = proc_cb
+        proc_layout.addWidget(proc_cb, 0, 0, 1, 2)
+        med_spin = QtWidgets.QSpinBox(proc_group)
+        med_spin.setRange(1, 9999)
+        med_spin.setValue(int(getattr(stress_core, "MED_WINDOW", 5)))
+        self._med_spin = med_spin
+        ma_spin = QtWidgets.QSpinBox(proc_group)
+        ma_spin.setRange(1, 9999)
+        ma_spin.setValue(int(getattr(stress_core, "MA_WINDOW", 20)))
+        self._ma_spin = ma_spin
+        proc_layout.addWidget(QtWidgets.QLabel("Med window:"), 1, 0)
+        proc_layout.addWidget(med_spin, 1, 1)
+        proc_layout.addWidget(QtWidgets.QLabel("MA window:"), 2, 0)
+        proc_layout.addWidget(ma_spin, 2, 1)
+        layout.addWidget(proc_group)
+
+        output_group = QtWidgets.QGroupBox("Output", container)
+        output_layout = QtWidgets.QGridLayout(output_group)
+        show_cb = QtWidgets.QCheckBox("Show plots", output_group)
+        show_cb.setChecked(bool(getattr(stress_core, "SHOW_PLOTS", True)))
+        self._show_checkbox = show_cb
+        save_cb = QtWidgets.QCheckBox("Save plots", output_group)
+        save_cb.setChecked(bool(getattr(stress_core, "SAVE_PLOTS", False)))
+        self._save_checkbox = save_cb
+        output_layout.addWidget(show_cb, 0, 0, 1, 2)
+        output_layout.addWidget(save_cb, 1, 0, 1, 2)
+
+        output_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
+        backend_combo = QtWidgets.QComboBox(output_group)
+        backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        restore_backend_choice(
+            "stress_dependence",
+            backend_combo,
+            getattr(stress_core, "BACKEND", "matplotlib"),
+        )
+        self._backend_combo = backend_combo
+        output_layout.addWidget(backend_combo, 2, 1)
+
+        fmt_combo = QtWidgets.QComboBox(output_group)
+        fmt_combo.addItems(["png", "pdf", "svg"])
+        fmt_combo.setCurrentText(str(getattr(stress_core, "SAVE_FORMAT", "png")))
+        self._format_combo = fmt_combo
+        output_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
+        output_layout.addWidget(fmt_combo, 3, 1)
+
+        dpi_spin = QtWidgets.QSpinBox(output_group)
+        dpi_spin.setRange(72, 3000)
+        restore_png_dpi(
+            "stress_dependence",
+            dpi_spin,
+            int(getattr(stress_core, "PNG_DPI", 1200)),
+        )
+        self._dpi_spin = dpi_spin
+        output_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
+        output_layout.addWidget(dpi_spin, 4, 1)
+
+        subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
+        self._subfolder_checkbox = subfolder_cb
+        output_layout.addWidget(subfolder_cb, 5, 0, 1, 2)
+
+        output_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
+        output_edit = QtWidgets.QLineEdit(
+            get_last_output_dir(
+                getattr(stress_core, "OUTPUT_DIR", ""), key="stress_dependence"
+            )
+        )
+        self._output_edit = output_edit
+        output_layout.addWidget(output_edit, 7, 0, 1, 2)
+
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
+
+        def _browse() -> None:
+            directory = QtWidgets.QFileDialog.getExistingDirectory(
+                self.host,
+                "Select output directory",
+                output_edit.text() or str(Path.home()),
+            )
+            if directory:
+                output_edit.setText(directory)
+
+        browse_btn.clicked.connect(_browse)
+        output_layout.addWidget(browse_btn, 7, 2)
+        layout.addWidget(output_group)
+
+        layout.addStretch(1)
+        self._settings_widget = container
+        return container
+
+    # Behaviour -----------------------------------------------------
+    def _log(self, message: str, *, level: str = "info") -> None:
+        append = getattr(self.host, "_append_log", None)
+        if callable(append):
+            try:
+                append(message, level=level)
+                return
+            except Exception:
+                pass
+        print(message)
+
+    def _selected_variables(self) -> list[str]:
+        selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
+        return selected or ["sum"]
+
+    def _apply_settings_to_core(self) -> dict[str, Any]:
+        variables = self._selected_variables()
+        stress_core.PLOT_VARS = list(variables)
+        stress_core.PLOT_SUM = "sum" in variables
+        stress_core.PLOT_DT = "dT" in variables
+        stress_core.PLOT_T1 = "T1" in variables
+        stress_core.PLOT_T2 = "T2" in variables
+        baseline = "first"
+        if isinstance(self._baseline_min, QtWidgets.QRadioButton) and self._baseline_min.isChecked():
+            baseline = "min"
+        stress_core.BASELINE_MODE = baseline
+
+        show_flag = bool(self._show_checkbox and self._show_checkbox.isChecked())
+        save_flag = bool(self._save_checkbox and self._save_checkbox.isChecked())
+        stress_core.SHOW_PLOTS = show_flag
+        stress_core.SAVE_PLOTS = save_flag
+
+        output_dir = getattr(stress_core, "OUTPUT_DIR", str(Path.home()))
+        base_dir = (
+            self._output_edit.text().strip()
+            if isinstance(self._output_edit, QtWidgets.QLineEdit)
+            else output_dir
+        )
+        subfolder = bool(self._subfolder_checkbox and self._subfolder_checkbox.isChecked())
+        if save_flag:
+            resolved = prepare_output_dir(base_dir or output_dir, "stress_dependence", subfolder)
+            set_last_output_dir(base_dir or resolved, key="stress_dependence")
+            output_dir = resolved
+        elif base_dir:
+            output_dir = base_dir
+        stress_core.OUTPUT_DIR = output_dir
+
+        if isinstance(self._processed_checkbox, QtWidgets.QCheckBox):
+            stress_core.PLOT_PROCESSED = self._processed_checkbox.isChecked()
+        if isinstance(self._med_spin, QtWidgets.QSpinBox):
+            stress_core.MED_WINDOW = int(self._med_spin.value())
+        if isinstance(self._ma_spin, QtWidgets.QSpinBox):
+            stress_core.MA_WINDOW = int(self._ma_spin.value())
+        if isinstance(self._format_combo, QtWidgets.QComboBox):
+            stress_core.SAVE_FORMAT = self._format_combo.currentText()
+        if isinstance(self._dpi_spin, QtWidgets.QSpinBox):
+            stress_core.PNG_DPI = store_png_dpi(
+                "stress_dependence", int(self._dpi_spin.value())
+            )
+        backend = "matplotlib"
+        if isinstance(self._backend_combo, QtWidgets.QComboBox):
+            backend = store_backend_choice(
+                "stress_dependence", selected_backend(self._backend_combo)
+            )
+        stress_core.BACKEND = backend
+
+        return {
+            "variables": variables,
+            "save": save_flag,
+            "output_dir": output_dir,
+            "backend": backend,
+            "show": show_flag,
+        }
+
+    def load_data(self) -> None:  # type: ignore[override]
+        paths = [path for path in self.host._selected_paths() if path.exists() and path.is_file()]
+        if not paths:
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                self.name,
+                "Select one or more stress dependence files before loading data.",
+            )
+            return
+        string_paths = [str(path) for path in paths]
+        try:
+            self._data = stress_core.load_data(string_paths)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to load stress dependence data:\n{exc}",
+            )
+            self._data = None
+            return
+        self._loaded_files = string_paths
+        if paths:
+            self.host._plugin_last_directories[self.name] = paths[0].parent
+        if self._summary_label is not None and not self._summary_label.text().strip():
+            self._summary_label.setText(
+                "Select stress dependence files, load them, then generate plots."
+            )
+        self._log(f"Loaded {len(paths)} stress dependence file(s).")
+        self.update_ui()
+
+    def _clear_existing_tabs(self) -> None:
+        if not self._plot_tabs:
+            return
+        clear = getattr(self.host, "_clear_tab_list", None)
+        if callable(clear):
+            clear(self._plot_tabs)
+        else:
+            for tab in self._plot_tabs:
+                index = self.host.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.host.tab_widget.removeTab(index)
+        self._plot_tabs.clear()
+
+    def generate(self) -> None:  # type: ignore[override]
+        if self._data is None:
+            self.load_data()
+        if self._data is None:
+            return
+        config = self._apply_settings_to_core()
+        dataframe = stress_core.maybe_handle_outliers(self._data.copy())
+        grouped = list(
+            dataframe.groupby(["composition", "title", "sample_end", "anneal"], sort=False)
+        )
+        if not grouped:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "No valid stress dependence groups were found in the selected files.",
+            )
+            return
+        self._clear_existing_tabs()
+        total_steps = len(grouped) * len(config["variables"])
+        progress_dialog: QtWidgets.QProgressDialog | None = None
+        if total_steps > 1:
+            progress_dialog = QtWidgets.QProgressDialog(
+                "Generating stress dependence plots…",
+                "Cancel",
+                0,
+                total_steps,
+                self.host,
+            )
+            progress_dialog.setWindowTitle("Processing")
+            progress_dialog.setAutoClose(True)
+            progress_dialog.setAutoReset(True)
+            progress_dialog.show()
+
+        cancelled = False
+        plots_created = 0
+        for (composition, title, sample_end, anneal), group in grouped:
+            for variable in config["variables"]:
+                if progress_dialog is not None:
+                    QtWidgets.QApplication.processEvents()
+                    if progress_dialog.wasCanceled():
+                        cancelled = True
+                        break
+                try:
+                    fig, saved_name = stress_core.plot_variable(
+                        group.copy(), variable, config["save"], config["output_dir"]
+                    )
+                except Exception as exc:
+                    self._log(
+                        f"Failed to plot {variable} for {composition} {title}: {exc}",
+                        level="error",
+                    )
+                    continue
+                canvas = FigureCanvas(fig)
+                canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                tab = QtWidgets.QWidget()
+                tab_layout = QtWidgets.QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.addWidget(canvas)
+                ax = fig.axes[0] if fig.axes else None
+                tab_label = stress_core.LABELS.get(variable, variable)
+                descriptor = TabDescriptor(
+                    kind="stress_dependence",
+                    title=fig.axes[0].get_title() if fig.axes else tab_label,
+                    root_label=f"{composition} {title} {anneal}",
+                    x_label="Applied load (g)",
+                    y_label=stress_core.LABELS.get(variable, variable),
+                    canvas=canvas,
+                    axes=ax,
+                    lines={},
+                    metadata={
+                        "composition": composition,
+                        "title": title,
+                        "sample_end": stress_core.format_sample_end(sample_end),
+                        "anneal": anneal,
+                        "variable": variable,
+                        "saved_path": saved_name if config["save"] else "",
+                        "source_files": list(self._loaded_files),
+                    },
+                )
+                self.host.tab_widget.addTab(tab, tab_label)
+                self.host._register_plot_tab(tab, canvas, ax, descriptor)
+                self._plot_tabs.append(tab)
+                plots_created += 1
+                if progress_dialog is not None:
+                    progress_dialog.setValue(progress_dialog.value() + 1)
+            if cancelled:
+                break
+
+        if progress_dialog is not None:
+            progress_dialog.close()
+
+        if not self._plot_tabs:
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                self.name,
+                "No plots were generated. Check your settings and input files.",
+            )
+            return
+
+        self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+        if self._summary_label is not None:
+            self._summary_label.setText(
+                f"Generated {plots_created} plot(s) across {len(grouped)} group(s)."
+            )
+        if cancelled:
+            self._log("Plot generation cancelled by user.", level="error")
+        else:
+            self._log(f"Generated {plots_created} stress dependence plot(s).")
+
+        if config["backend"] in ("origin", "both"):
+            try:
+                stress_core.SHOW_PLOTS = False
+                stress_core.main(self._loaded_files, backend="origin")
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self.host,
+                    self.name,
+                    f"Origin export failed:\n{exc}",
+                )
+                self._log(f"Origin export failed: {exc}", level="error")
+            else:
+                self._log("Sent stress dependence plots to Origin.")
+
+        self.update_ui()
+
+    def open_origin(self) -> None:  # type: ignore[override]
+        if not self._loaded_files:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load stress dependence data before exporting to Origin.",
+            )
+            return
+        self._apply_settings_to_core()
+        try:
+            stress_core.SHOW_PLOTS = False
+            stress_core.main(self._loaded_files, backend="origin")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to export stress dependence plots to Origin:\n{exc}",
+            )
+            self._log(f"Origin export failed: {exc}", level="error")
+        else:
+            self._log("Sent stress dependence plots to Origin.")
+
+    def update_ui(self) -> None:
+        has_data = self._data is not None
+        has_files = bool(self._loaded_files)
+        has_plots = bool(self._plot_tabs)
+        if hasattr(self.host, "load_data_button"):
+            self.host.load_data_button.setEnabled(True)
+        if hasattr(self.host, "plot_button"):
+            self.host.plot_button.setEnabled(has_data or has_files)
+            self.host.plot_button.setText("Generate Stress Dependence")
+        if hasattr(self.host, "save_graph_button"):
+            self.host.save_graph_button.setEnabled(has_plots)
+        if hasattr(self.host, "normalize_button"):
+            self.host.normalize_button.setEnabled(False)
+        if hasattr(self.host, "export_button"):
+            self.host.export_button.setEnabled(False)
+        if hasattr(self.host, "open_origin_button"):
+            self.host.open_origin_button.setEnabled(has_files)
+        if hasattr(self.host, "popout_button"):
+            self.host.popout_button.setEnabled(has_plots)
+        self.host._update_project_actions()
+
+
+class StressSensitivityPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            sens_gui.orig.ProgressDialog = sens_gui.ProgressDialog
+        except Exception:
+            pass
+        return sens_gui.SettingsDialog()
+
+
+class HswLoadComparePlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            load_compare_gui.orig.ProgressDialog = load_compare_gui.ProgressDialog
+        except Exception:
+            pass
+        return load_compare_gui.SettingsDialog()
+
+
+class MaxionContinuousPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        try:
+            maxion_gui.orig.ProgressDialog = maxion_gui.ProgressDialog
+        except Exception:
+            pass
+        return maxion_gui.SettingsDialog()
+
+
+class PdfPlotterPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        return pdf_gui.PdfPlotterWindow()
+
+
+class HysteresisLoopsPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        return loops_gui.SettingsDialog()
+
+
+class HswDistributionPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_dialog)
+
+    @staticmethod
+    def _create_dialog() -> QtWidgets.QWidget:
+        return distribution_gui.SettingsDialog()
+
+
+class Strain3DPlotPlugin(EmbeddedWidgetPlugin):
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name, self._create_widget)
+
+    @staticmethod
+    def _create_widget() -> QtWidgets.QWidget:
+        return Strain3DPlotter()
+
 
 class PyPlotWorkbench(PyPlotWindow):
     """Lightweight harness for exercising shared PyPlotWindow features."""
@@ -1644,6 +2336,52 @@ class PyPlotWorkbench(PyPlotWindow):
         super().closeEvent(event)
 
     # ------------------------------------------------------------------ project and data integration
+    def _show_data_menu(self) -> bool:
+        data_menu = getattr(self, "_data_menu", None)
+        if not isinstance(data_menu, QtWidgets.QMenu):
+            return False
+        menu_bar = self.menuBar() if hasattr(self, "menuBar") else None
+        if isinstance(menu_bar, QtWidgets.QMenuBar):
+            action = data_menu.menuAction()
+            try:
+                geometry = menu_bar.actionGeometry(action)
+            except Exception:
+                geometry = QtCore.QRect()
+            anchor_point = (
+                geometry.bottomLeft()
+                if geometry.isValid()
+                else QtCore.QPoint(0, menu_bar.height())
+            )
+            try:
+                global_pos = menu_bar.mapToGlobal(anchor_point)
+            except Exception:
+                global_pos = None
+            if global_pos is not None:
+                if action is not None:
+                    try:
+                        menu_bar.setActiveAction(action)
+                    except Exception:
+                        pass
+
+                    def _clear_active_action() -> None:
+                        try:
+                            menu_bar.setActiveAction(None)
+                        except Exception:
+                            pass
+
+                    data_menu.aboutToHide.connect(  # type: ignore[arg-type]
+                        _clear_active_action,
+                        QtCore.Qt.ConnectionType.SingleShot,
+                    )
+                data_menu.popup(global_pos)
+                return True
+        try:
+            fallback_pos = self.mapToGlobal(QtCore.QPoint(0, 0))
+        except Exception:
+            return False
+        data_menu.popup(fallback_pos)
+        return True
+
     def _load_data(self) -> None:
         if self._current_plugin is None:
             QtWidgets.QMessageBox.information(
@@ -1652,7 +2390,45 @@ class PyPlotWorkbench(PyPlotWindow):
                 "Select a plotting script before loading data.",
             )
             return
-        self._current_plugin.load_data()
+        plugin = self._current_plugin
+        requires_data = bool(getattr(plugin, "requires_imported_data", False))
+        if requires_data:
+            selection = self._selected_paths()
+            if not selection:
+                self._sync_selected_paths_with_imports()
+                selection = self._selected_paths()
+            if not selection:
+                sources: list[Path] = []
+                for workbook in self._workbooks.values():
+                    source = getattr(workbook, "source", None)
+                    if isinstance(source, Path) and source.exists():
+                        sources.append(source)
+                if sources:
+                    self._selected_path_entries = sources
+                    formatted = self._format_paths(sources)
+                    if hasattr(self, "path_edit"):
+                        try:
+                            self.path_edit.blockSignals(True)
+                        except Exception:
+                            pass
+                        self.path_edit.setText(formatted)
+                        try:
+                            self.path_edit.blockSignals(False)
+                        except Exception:
+                            pass
+                    self._remember_directory_from_paths(sources)
+                    self._sync_selected_paths_with_imports()
+                    selection = sources
+            if not selection:
+                if self._show_data_menu():
+                    return
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "PyPlot",
+                    "Import data via the Data menu before loading it in this script.",
+                )
+                return
+        plugin.load_data()
         self._update_action_states()
 
     def _update_action_states(self) -> None:
@@ -1680,6 +2456,7 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         super()._import_paths(paths)
+        self._sync_selected_paths_with_imports()
         if self._current_plotter_name and self._last_directory is not None:
             self._plugin_last_directories[self._current_plotter_name] = self._last_directory
             payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
@@ -1827,6 +2604,7 @@ class PyPlotWorkbench(PyPlotWindow):
                     imported = True
         if imported:
             self._refresh_imported_data_summary()
+        self._sync_selected_paths_with_imports()
         self._update_action_states()
         self._update_project_actions()
         return True
@@ -2082,6 +2860,45 @@ class PyPlotWorkbench(PyPlotWindow):
         if last is not None:
             self._last_directory = last
 
+    def _sync_selected_paths_with_imports(self) -> None:
+        ordered: list[Path] = []
+        seen: set[str] = set()
+
+        def _push(candidate: Path | None) -> None:
+            if not isinstance(candidate, Path):
+                return
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            key = str(resolved)
+            if key in seen:
+                return
+            seen.add(key)
+            ordered.append(resolved)
+
+        for selected in self._selected_path_entries:
+            _push(selected)
+
+        for workbook in self._workbooks.values():
+            _push(workbook.source)
+
+        if ordered != self._selected_path_entries:
+            self._selected_path_entries = ordered
+            formatted = self._format_paths(ordered)
+            if hasattr(self, "path_edit"):
+                try:
+                    self.path_edit.blockSignals(True)
+                except Exception:
+                    pass
+                self.path_edit.setText(formatted)
+                try:
+                    self.path_edit.blockSignals(False)
+                except Exception:
+                    pass
+        if ordered:
+            self._remember_directory_from_paths(ordered)
+
 
 
     def _update_project_title(self) -> None:
@@ -2106,15 +2923,24 @@ def main(
     """Entry-point used by the launcher."""
 
     plugin_factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {}
+    plugin_classes: Dict[str, type[PyPlotPlugin]] = {
+        "VSM Hysteresis Loops": VSMHysteresisPlugin,
+        "Temperature Dependence": TemperatureDependencePlugin,
+        "Temperature Sensitivity": TemperatureSensitivityPlugin,
+        "Current Annealing": CurrentAnnealingPlugin,
+        "Stress Dependence": StressDependencePlugin,
+        "Stress Sensitivity": StressSensitivityPlugin,
+        "Hsw Load Compare": HswLoadComparePlugin,
+        "Maxion Continuous": MaxionContinuousPlugin,
+        "PDF Plotter": PdfPlotterPlugin,
+        "Hysteresis Loops": HysteresisLoopsPlugin,
+        "Hsw Distribution": HswDistributionPlugin,
+        "Strain 3D Plot": Strain3DPlotPlugin,
+    }
     for name, launcher in sorted((available_plotters or {}).items()):
-        if name == "VSM Hysteresis Loops":
-            plugin_factories[name] = lambda host, n=name: VSMHysteresisPlugin(host, n)
-        elif name == "Temperature Dependence":
-            plugin_factories[name] = lambda host, n=name: TemperatureDependencePlugin(host, n)
-        elif name == "Temperature Sensitivity":
-            plugin_factories[name] = lambda host, n=name: TemperatureSensitivityPlugin(host, n)
-        elif name == "Current Annealing":
-            plugin_factories[name] = lambda host, n=name: CurrentAnnealingPlugin(host, n)
+        plugin_cls = plugin_classes.get(name)
+        if plugin_cls is not None:
+            plugin_factories[name] = lambda host, cls=plugin_cls, n=name: cls(host, n)
         else:
             plugin_factories[name] = lambda host, l=launcher, n=name: ExternalPlotterPlugin(host, n, l)
 
