@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-10-24 10:03 UTC
+
+- Added an adjustable strain offset control to the microwire data builder so
+  the strain worksheet now calculates `((M length - A length) / M length + C) *
+  100` with a default `C` value of 7 that users can tune, and existing entries
+  recompute automatically when the offset changes.
+
 ## 2025-10-24 09:44 UTC
 
 - Moved the current annealing mini database tab to the first position so the

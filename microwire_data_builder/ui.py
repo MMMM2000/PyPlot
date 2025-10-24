@@ -3057,6 +3057,7 @@ class StrainSection(MiniDatabaseSection):
         self._editing_index: Optional[int] = None
         self._editing_key: Optional[tuple[str, int, int]] = None
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
+        self._strain_offset: float = 7.0
         super().__init__(logger, log_callback, parent)
         self.add_button.hide()
         self.remove_button.hide()
@@ -3064,6 +3065,20 @@ class StrainSection(MiniDatabaseSection):
         self.sources_list.hide()
         self.sources_list.setMaximumWidth(0)
         self.status_label.setWordWrap(True)
+        stored_offset = None
+        if isinstance(self.data.extra, dict):
+            stored_offset = self.data.extra.get("strain_offset")
+        if isinstance(stored_offset, (int, float)):
+            self._strain_offset = float(stored_offset)
+        else:
+            if not isinstance(self.data.extra, dict):
+                self.data.extra = {}
+            self.data.extra["strain_offset"] = self._strain_offset
+            self.store.save(self.data)
+        if hasattr(self, "strain_offset_spin"):
+            blocked = self.strain_offset_spin.blockSignals(True)
+            self.strain_offset_spin.setValue(self._strain_offset)
+            self.strain_offset_spin.blockSignals(blocked)
         self._ensure_table_structure()
         self._refresh_table_view()
         self._load_reference_data()
@@ -3117,6 +3132,14 @@ class StrainSection(MiniDatabaseSection):
         self.A_length_edit.setPlaceholderText("mm or '-' if broke")
         self.A_length_edit.textChanged.connect(self._update_strain_display)
         form_layout.addRow(self.COLUMN_A_LENGTH, self.A_length_edit)
+
+        self.strain_offset_spin = QtWidgets.QDoubleSpinBox(form_container)
+        self.strain_offset_spin.setDecimals(6)
+        self.strain_offset_spin.setRange(-1000.0, 1000.0)
+        self.strain_offset_spin.setSingleStep(0.1)
+        self.strain_offset_spin.setValue(self._strain_offset)
+        self.strain_offset_spin.valueChanged.connect(self._strain_offset_changed)
+        form_layout.addRow("C offset", self.strain_offset_spin)
 
         self.strain_display = QtWidgets.QLineEdit(form_container)
         self.strain_display.setReadOnly(True)
@@ -3244,9 +3267,8 @@ class StrainSection(MiniDatabaseSection):
         if m_length in (None, 0) or a_length is None:
             self.strain_display.setText("")
             return
-        try:
-            percent = ((m_length - a_length) / m_length) * 100
-        except ZeroDivisionError:
+        percent = self._compute_strain_percent(m_length, a_length)
+        if percent is None:
             self.strain_display.setText("")
             return
         self.strain_display.setText(f"{percent:.3f}")
@@ -3411,10 +3433,7 @@ class StrainSection(MiniDatabaseSection):
         else:
             a_display = a_length
             if m_length not in (None, 0) and a_length is not None:
-                try:
-                    strain_percent = ((m_length - a_length) / m_length) * 100
-                except ZeroDivisionError:
-                    strain_percent = None
+                strain_percent = self._compute_strain_percent(m_length, a_length)
             strain_display = "" if strain_percent is None else f"{strain_percent:.3f}"
 
         row_data = {
@@ -3759,10 +3778,7 @@ class StrainSection(MiniDatabaseSection):
             if m_length in (None, 0) or a_length is None:
                 frame.at[index, self.COLUMN_STRAIN] = None
                 continue
-            try:
-                percent = ((m_length - a_length) / m_length) * 100
-            except ZeroDivisionError:
-                percent = None
+            percent = self._compute_strain_percent(m_length, a_length)
             frame.at[index, self.COLUMN_STRAIN] = None if percent is None else round(percent, 3)
 
     def _save_table(self) -> None:
@@ -3808,10 +3824,7 @@ class StrainSection(MiniDatabaseSection):
             else:
                 percent = _parse_strain_float(strain_value)
                 if percent is None and m_length not in (None, 0) and a_length is not None:
-                    try:
-                        percent = ((m_length - a_length) / m_length) * 100
-                    except ZeroDivisionError:
-                        percent = None
+                    percent = self._compute_strain_percent(m_length, a_length)
             records[(composition, draw_int, piece_int)] = StrainRecord(
                 composition=composition,
                 draw=draw_int,
@@ -3833,6 +3846,35 @@ class StrainSection(MiniDatabaseSection):
         payloads["strain_records"] = "strain_records"
         self.data.extra["payloads"] = payloads
         self.store.save_payload("strain_records", records)
+
+    def _strain_offset_changed(self, value: float) -> None:
+        self._strain_offset = float(value)
+        if not isinstance(self.data.extra, dict):
+            self.data.extra = {}
+        self.data.extra["strain_offset"] = self._strain_offset
+        self._recompute_table_metrics()
+        self._refresh_table_view()
+        self._sync_payload()
+        self.store.save(self.data)
+        self._update_status()
+        self._update_strain_display()
+
+    def _compute_strain_percent(
+        self,
+        m_length: Optional[float],
+        a_length: Optional[float],
+    ) -> Optional[float]:
+        if m_length in (None, 0) or a_length is None:
+            return None
+        try:
+            base_ratio = (m_length - a_length) / m_length
+        except ZeroDivisionError:
+            return None
+        try:
+            offset = float(self._strain_offset)
+        except (TypeError, ValueError):
+            offset = 0.0
+        return (base_ratio + offset) * 100
 
     @staticmethod
     def _calculate_mass(d_um: Optional[float]) -> Optional[float]:
