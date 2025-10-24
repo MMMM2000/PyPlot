@@ -22,20 +22,6 @@ def _format_value(value: float) -> str:
     return "0" if text == "-0" else text
 
 
-def _update_comment(line: str) -> str:
-    replacements = (
-        ("I(A)", "I(mA)"),
-        ("Current (A)", "Current (mA)"),
-        ("Current[A]", "Current[mA]"),
-        ("I [A]", "I [mA]"),
-    )
-    updated = line
-    for old, new in replacements:
-        if old in updated:
-            updated = updated.replace(old, new)
-    return updated
-
-
 def _detect_unit_hint(line: str) -> str | None:
     stripped = line.strip()
     if not stripped:
@@ -90,7 +76,6 @@ def convert_file(path: Path) -> Tuple[str, str]:
     needs_conversion = unit_hint != "ma"
 
     output_lines: list[str] = []
-    comments: list[str] = []
     converted = False
     for line in raw_lines:
         stripped = line.strip()
@@ -99,7 +84,6 @@ def convert_file(path: Path) -> Tuple[str, str]:
         if _is_header_line(line):
             continue
         if stripped.startswith("#"):
-            comments.append(_update_comment(line))
             continue
         parts = stripped.replace(",", ".").split()
         if not parts:
@@ -107,10 +91,8 @@ def convert_file(path: Path) -> Tuple[str, str]:
         try:
             current_value = float(parts[0])
         except ValueError:
-            comments.append(line)
             continue
         if not math.isfinite(current_value):
-            comments.append(line)
             continue
         if needs_conversion:
             current_value *= 1000.0
@@ -122,7 +104,6 @@ def convert_file(path: Path) -> Tuple[str, str]:
         return "skipped", "no numeric data"
 
     final_lines = [COLUMN_HEADER]
-    final_lines.extend(comments)
     final_lines.extend(output_lines)
     try:
         path.write_text("\n".join(final_lines) + "\n", encoding="utf-8")

@@ -1,5 +1,11 @@
 # Changelog
 
+## 2025-10-24 12:15 UTC
+
+- Removed the extra milliamp comment row from converted current annealing logs
+  so rewritten files now contain only the standard header followed by numeric
+  data, matching the logger output format the user expects.
+
 ## 2025-10-24 11:54 UTC
 
 - Hardened the current annealing unit converter so it respects existing
