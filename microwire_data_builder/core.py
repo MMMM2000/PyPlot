@@ -1792,18 +1792,43 @@ def _parse_piece_rows(
         index.set_piece(composition, draw_x, piece_y, record)
 
 
-def _read_excel(path: Path) -> pd.DataFrame:
+def _read_excel(path: Path, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
     try:
-        df = pd.read_excel(path, header=None, dtype=object)
-    except ImportError as exc:  # pragma: no cover - pandas provides helpful message
+        return pd.read_excel(path, header=None, dtype=object)
+    except ImportError:
         raise
     except ValueError as exc:
-        raise
-    return df
+        engines: List[str] = []
+        suffix = path.suffix.lower()
+        if suffix in {".xlsx", ".xlsm"}:
+            engines.append("openpyxl")
+        if suffix in {".xls", ".xlsb"}:
+            engines.append("xlrd")
+        engines.extend(["openpyxl", "xlrd", "odf"])
+        for engine in engines:
+            try:
+                return pd.read_excel(path, header=None, dtype=object, engine=engine)
+            except ImportError:
+                continue
+            except ValueError:
+                continue
+            except Exception:
+                continue
+        if logger is not None:
+            logger.warning(
+                "%s: unable to determine Excel format (%s); skipping",
+                path,
+                exc,
+            )
+        return pd.DataFrame()
+    except Exception as exc:
+        if logger is not None:
+            logger.exception("Failed to read %s", path)
+        return pd.DataFrame()
 
 
 def _parse_composition_workbook(path: Path, index: FabricationIndex, logger: logging.Logger) -> None:
-    df = _read_excel(path)
+    df = _read_excel(path, logger)
     if df.empty:
         logger.warning("%s is empty", path)
         return
@@ -1815,7 +1840,7 @@ def _parse_composition_workbook(path: Path, index: FabricationIndex, logger: log
 
 
 def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.Logger) -> None:
-    df = _read_excel(path)
+    df = _read_excel(path, logger)
     if df.empty:
         logger.warning("%s is empty", path)
         return

@@ -19,6 +19,7 @@ from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequ
 import pandas as pd
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 import matplotlib.pyplot as plt
 
@@ -2231,6 +2232,33 @@ def _render_measurement_pixmap(
 ) -> Optional[QtGui.QPixmap]:
     if record is None:
         return None
+    frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        return None
+    if "I_A" in frame.columns and "R_ohm" in frame.columns:
+        plot_df = pd.DataFrame(
+            {
+                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+            }
+        ).dropna()
+    elif "I_mA" in frame.columns and "R_Ohm" in frame.columns:
+        plot_df = pd.DataFrame(
+            {
+                "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                "R_Ohm": pd.to_numeric(frame["R_Ohm"], errors="coerce"),
+            }
+        ).dropna()
+    else:
+        columns = [str(column) for column in frame.columns]
+        logger.debug(
+            "Annealing preview missing expected columns: %s",
+            ", ".join(columns),
+        )
+        return None
+    if plot_df.empty:
+        return None
+
     metadata = getattr(record, "metadata", None)
     title = ""
     if metadata is not None:
@@ -2239,14 +2267,14 @@ def _render_measurement_pixmap(
         except Exception:
             title = ""
     figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
-    canvas: FigureCanvasQTAgg | None = None
+    canvas_agg: FigureCanvasAgg | None = None
     figure = None
     try:
-        figure, _ = plot_annealing_curve(record.dataframe, title, figsize=figsize)
-        canvas = FigureCanvasQTAgg(figure)
-        canvas.draw()
-        width, height = canvas.get_width_height()
-        buffer = canvas.buffer_rgba()
+        figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
+        canvas_agg = FigureCanvasAgg(figure)
+        canvas_agg.draw()
+        width, height = canvas_agg.get_width_height()
+        buffer = canvas_agg.buffer_rgba()
         image = QtGui.QImage(buffer, width, height, 4 * width, QtGui.QImage.Format_RGBA8888)
         return QtGui.QPixmap.fromImage(image.copy())
     except Exception:
@@ -2256,12 +2284,6 @@ def _render_measurement_pixmap(
         )
         return None
     finally:
-        if canvas is not None:
-            canvas.setParent(None)
-            try:
-                canvas.deleteLater()
-            except Exception:
-                pass
         if figure is not None:
             plt.close(figure)
 

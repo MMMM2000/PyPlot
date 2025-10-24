@@ -1,5 +1,14 @@
 # Changelog
 
+## 2025-10-24 22:15 UTC
+
+- Restored the annealing thumbnails by converting raw measurements to mA before
+  plotting and rendering them with the Agg backend so the Message Log hover no
+  longer crashes the app and each row shows its paired graphs again.
+- Hardened fabrication imports to fall back to explicit Excel engines and skip
+  unknown workbooks instead of aborting the refresh when a sheet uses an
+  ambiguous format.
+
 ## 2025-10-24 19:45 UTC
 
 - Embedded the 1000 mA and low-current plots directly into the current
