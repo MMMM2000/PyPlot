@@ -1,5 +1,20 @@
 # Changelog
 
+## 2025-10-24 19:45 UTC
+
+- Embedded the 1000 mA and low-current plots directly into the current
+  annealing worksheet rows so each microwire now previews its measurements in
+  the grid instead of a separate pane.
+- Let mini-database refreshes queue behind the active section without blocking
+  other tabs, keeping the UI responsive while still processing files in order.
+- Streamlined section layouts by removing the inline folder list (the Project
+  Explorer now owns source management) and maximising the worksheet surface.
+- Synced fabrication folders to the videos tab automatically and exposed a
+  manual “Start video OCR” trigger so heavy OCR runs only when requested.
+- Restored PyPlot-style hover docks for the Project Explorer and Message Log,
+  preventing the crash on hover and keeping the console available for
+  worksheet previews.
+
 ## 2025-10-24 17:30 UTC
 
 - Let Microwire Data Builder sections keep running while the rest of the UI

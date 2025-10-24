@@ -8,6 +8,7 @@ import math
 import re
 import sys
 import time
+import os
 from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
@@ -19,6 +20,7 @@ import pandas as pd
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+import matplotlib.pyplot as plt
 
 from plotting.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot import _DockSwitcherWidget
@@ -2145,15 +2147,25 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         index: QtCore.QModelIndex,
         role: int = QtCore.Qt.ItemDataRole.DisplayRole,
     ) -> Any:  # type: ignore[override]
-        if (
-            not index.isValid()
-            or role not in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.EditRole)
-        ):
+        if not index.isValid():
             return None
         try:
             value = self._frame.iat[index.row(), index.column()]
         except Exception:
             return None
+        if role == QtCore.Qt.ItemDataRole.DecorationRole:
+            if isinstance(value, QtGui.QPixmap):
+                return value
+            if isinstance(value, QtGui.QImage):
+                return QtGui.QPixmap.fromImage(value)
+            return None
+        if role not in (
+            QtCore.Qt.ItemDataRole.DisplayRole,
+            QtCore.Qt.ItemDataRole.EditRole,
+        ):
+            return None
+        if isinstance(value, (QtGui.QPixmap, QtGui.QImage)):
+            return ""
         if isinstance(value, float):
             if math.isnan(value):
                 return ""
@@ -2210,36 +2222,124 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns)
 
 
-def _annealing_records_to_frame(records: List[MeasurementRecord]) -> pd.DataFrame:
+def _render_measurement_pixmap(
+    record: Optional[MeasurementRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int = 360,
+    height_px: int = 200,
+) -> Optional[QtGui.QPixmap]:
+    if record is None:
+        return None
+    metadata = getattr(record, "metadata", None)
+    title = ""
+    if metadata is not None:
+        try:
+            title = format_annealing_title(metadata)
+        except Exception:
+            title = ""
+    figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    canvas: FigureCanvasQTAgg | None = None
+    figure = None
+    try:
+        figure, _ = plot_annealing_curve(record.dataframe, title, figsize=figsize)
+        canvas = FigureCanvasQTAgg(figure)
+        canvas.draw()
+        width, height = canvas.get_width_height()
+        buffer = canvas.buffer_rgba()
+        image = QtGui.QImage(buffer, width, height, 4 * width, QtGui.QImage.Format_RGBA8888)
+        return QtGui.QPixmap.fromImage(image.copy())
+    except Exception:
+        logger.exception(
+            "Failed to render annealing preview for %s",
+            getattr(record, "path", "<unknown>"),
+        )
+        return None
+    finally:
+        if canvas is not None:
+            canvas.setParent(None)
+            try:
+                canvas.deleteLater()
+            except Exception:
+                pass
+        if figure is not None:
+            plt.close(figure)
+
+
+def _annealing_records_to_frame(
+    records: List[MeasurementRecord],
+    logger: logging.Logger,
+) -> pd.DataFrame:
     columns = [
-        "File",
         "Composition",
-        "Draw",
-        "Piece",
-        "Setpoint (mA)",
-        "Samples",
+        "Microwire",
+        "1000 mA setpoint",
+        "Samples @1000 mA",
+        "Graph — 1000 mA",
+        "Low current setpoint",
+        "Samples @low",
+        "Graph — low mA",
         "Updated",
     ]
-    rows: List[Dict[str, Any]] = []
+    grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
     for record in records:
-        metadata = record.metadata
-        path = record.path if isinstance(record.path, Path) else Path(str(record.path))
+        metadata = getattr(record, "metadata", None)
+        if metadata is None:
+            continue
+        composition = getattr(metadata, "composition_token", None)
+        draw = getattr(metadata, "draw_x", None)
+        piece = getattr(metadata, "piece_y", None)
+        if composition is None or draw is None or piece is None:
+            continue
         try:
-            mtime = path.stat().st_mtime
-            updated = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+            key = (str(composition), int(draw), int(piece))
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault(key, []).append(record)
+
+    rows: List[Dict[str, Any]] = []
+    for (composition, draw, piece), group in sorted(grouped.items()):
+        high_record, low_record = _select_high_low_pair(group)
+        try:
+            microwire = _microwire_label(draw, piece)
         except Exception:
-            updated = ""
+            microwire = f"{draw}/{piece}"
+
+        def _mtime(entry: MeasurementRecord) -> Optional[float]:
+            path = getattr(entry, "path", None)
+            if not path:
+                return None
+            try:
+                return Path(path).stat().st_mtime
+            except Exception:
+                return None
+
+        timestamps = [value for record in group if (value := _mtime(record)) is not None]
+        updated = (
+            datetime.fromtimestamp(max(timestamps)).isoformat(timespec="seconds")
+            if timestamps
+            else ""
+        )
+
+        high_setpoint = _format_setpoint(_extract_setpoint(high_record))
+        low_setpoint = _format_setpoint(_extract_setpoint(low_record))
+        high_samples = len(getattr(getattr(high_record, "dataframe", None), "index", [])) if high_record else ""
+        low_samples = len(getattr(getattr(low_record, "dataframe", None), "index", [])) if low_record else ""
+
         rows.append(
             {
-                "File": path.name,
-                "Composition": metadata.composition_token,
-                "Draw": metadata.draw_x,
-                "Piece": metadata.piece_y,
-                "Setpoint (mA)": metadata.setpoint_mA,
-                "Samples": len(record.dataframe.index),
+                "Composition": composition,
+                "Microwire": microwire,
+                "1000 mA setpoint": high_setpoint,
+                "Samples @1000 mA": high_samples,
+                "Graph — 1000 mA": _render_measurement_pixmap(high_record, logger),
+                "Low current setpoint": low_setpoint,
+                "Samples @low": low_samples,
+                "Graph — low mA": _render_measurement_pixmap(low_record, logger),
                 "Updated": updated,
             }
         )
+
     if not rows:
         return pd.DataFrame(columns=columns)
     return pd.DataFrame(rows, columns=columns)
@@ -2647,6 +2747,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
+    _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
 
     def __init__(
         self,
@@ -2703,16 +2804,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._progress_current: int = 0
         self._progress_start: float | None = None
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.sources_list = QtWidgets.QListWidget()
-        self.sources_list.itemSelectionChanged.connect(self._update_remove_enabled)
-        splitter.addWidget(self.sources_list)
-        splitter.setStretchFactor(0, 0)
+        self.sources_list = QtWidgets.QListWidget(self)
+        self.sources_list.hide()
 
-        right_panel = self.create_right_panel(splitter)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        right_panel = self.create_right_panel(self)
+        layout.addWidget(right_panel, 1)
 
         self._populate_sources_list()
         self.model.set_frame(self.data.table)
@@ -2739,8 +2835,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._update_remove_enabled()
 
     def _update_remove_enabled(self) -> None:
-        has_selection = bool(self.sources_list.selectedItems())
-        self.remove_button.setEnabled(has_selection)
+        self.remove_button.setEnabled(self.sources_list.count() > 0)
 
     def _reset_progress_ui(self) -> None:
         self.progress_bar.setRange(0, 100)
@@ -2839,6 +2934,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def _release_processing(self) -> None:
         if MiniDatabaseSection._processing_owner is self:
             MiniDatabaseSection._processing_owner = None
+            if MiniDatabaseSection._refresh_queue:
+                next_section = MiniDatabaseSection._refresh_queue.pop(0)
+                if isinstance(next_section, MiniDatabaseSection):
+                    QtCore.QTimer.singleShot(0, next_section.refresh)
 
     def _progress_callback(
         self, current: int, total: int, message: Optional[str] = None
@@ -2860,6 +2959,20 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
         self._update_status()
+        self._update_remove_enabled()
+
+    def set_sources(self, sources: Iterable[str]) -> None:
+        unique = []
+        seen: Set[str] = set()
+        for source in sources:
+            normalised = str(Path(source).expanduser())
+            if normalised not in seen:
+                seen.add(normalised)
+                unique.append(normalised)
+        self.sources_list.clear()
+        for path in unique:
+            self.sources_list.addItem(path)
+        self._sync_sources()
 
     def _add_source(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
@@ -2872,9 +2985,28 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self._sync_sources()
 
     def _remove_selected_source(self) -> None:
-        for item in self.sources_list.selectedItems():
-            row = self.sources_list.row(item)
-            self.sources_list.takeItem(row)
+        sources = [self.sources_list.item(idx).text() for idx in range(self.sources_list.count())]
+        if not sources:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No connected folders to remove.",
+            )
+            return
+        selection, ok = QtWidgets.QInputDialog.getItem(
+            self,
+            self.section_title,
+            "Select a folder to disconnect:",
+            sources,
+            0,
+            False,
+        )
+        if not ok or not selection:
+            return
+        for idx in range(self.sources_list.count() - 1, -1, -1):
+            item = self.sources_list.item(idx)
+            if item is not None and item.text() == selection:
+                self.sources_list.takeItem(idx)
         self._sync_sources()
 
     # ------------------------------------------------------------------ data handling
@@ -2954,15 +3086,18 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         owner = MiniDatabaseSection._processing_owner
         if owner is not None and owner is not self:
             other_title = getattr(owner, "section_title", "Another section")
-            message = (
-                f"{self.section_title}: waiting for {other_title} to finish before refreshing."
+            if self not in MiniDatabaseSection._refresh_queue:
+                MiniDatabaseSection._refresh_queue.append(self)
+            status_message = f"Queued — waiting for {other_title}"
+            self.status_label.setText(status_message)
+            try:
+                self.status_changed.emit(status_message)
+            except Exception:
+                pass
+            self.log(
+                f"{self.section_title}: queued refresh while {other_title} completes."
             )
-            self.log(message)
-            QtWidgets.QMessageBox.information(
-                self,
-                self.section_title,
-                f"{other_title} is still processing. Please wait until it completes.",
-            )
+            self._reset_progress_ui()
             return
         MiniDatabaseSection._processing_owner = self
         status_message = f"Processing {len(candidates)} file(s)…"
@@ -3183,7 +3318,6 @@ class AnnealingSection(MiniDatabaseSection):
     ) -> None:
         super().__init__(logger, log_callback, parent)
         self._record_groups: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
-        self._plot_panel: AnnealingPlotPanel | None = None
         self.export_button = QtWidgets.QPushButton("Export worksheet…")
         self.export_button.clicked.connect(self._export_worksheet)
         self.controls_layout.addWidget(self.export_button)
@@ -3191,9 +3325,7 @@ class AnnealingSection(MiniDatabaseSection):
         self._refresh_record_groups()
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Vertical, parent)
-
-        table = QtWidgets.QTableView(splitter)
+        table = QtWidgets.QTableView(parent)
         table.setModel(self.model)
         table.horizontalHeader().setStretchLastSection(True)
         table.setAlternatingRowColors(True)
@@ -3203,19 +3335,10 @@ class AnnealingSection(MiniDatabaseSection):
         table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
         )
+        table.setIconSize(QtCore.QSize(340, 200))
+        table.verticalHeader().setDefaultSectionSize(220)
         self.table_view = table
-        splitter.addWidget(table)
-
-        self._plot_panel = AnnealingPlotPanel(self.logger, splitter)
-        splitter.addWidget(self._plot_panel)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-
-        selection_model = table.selectionModel()
-        if selection_model is not None:
-            selection_model.selectionChanged.connect(self._handle_table_selection)
-
-        return splitter
+        return table
 
     def process(
         self,
@@ -3258,7 +3381,7 @@ class AnnealingSection(MiniDatabaseSection):
                     progress(idx, total, f"Parsed {path.name}")
                 except Exception:
                     pass
-        table = _annealing_records_to_frame(records)
+        table = _annealing_records_to_frame(records, self.logger)
         if sanity_failures:
             preview = ", ".join(p.name for p, _ in sanity_failures[:5])
             if len(sanity_failures) > 5:
@@ -3282,40 +3405,10 @@ class AnnealingSection(MiniDatabaseSection):
         super().refresh()
         self._refresh_record_groups()
         self._update_export_enabled()
-        self._update_plot_from_selection()
 
     def _update_export_enabled(self) -> None:
         if hasattr(self, "export_button"):
             self.export_button.setEnabled(not self.data.table.empty)
-
-    def _handle_table_selection(self, *_: Any) -> None:
-        self._update_plot_from_selection()
-
-    def _selected_group_key(self) -> Optional[Tuple[str, int, int]]:
-        if not isinstance(self.table_view, QtWidgets.QTableView):
-            return None
-        selection = self.table_view.selectionModel()
-        if selection is None:
-            return None
-        indexes = selection.selectedRows()
-        if not indexes:
-            return None
-        row_index = indexes[0].row()
-        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
-        if row_index < 0 or row_index >= len(frame.index):
-            return None
-        row = frame.iloc[row_index]
-        composition = str(row.get("Composition") or "").strip()
-        if not composition:
-            return None
-        draw_value = row.get("Draw")
-        piece_value = row.get("Piece")
-        try:
-            draw_int = int(float(draw_value))
-            piece_int = int(float(piece_value))
-        except (TypeError, ValueError):
-            return None
-        return (composition, draw_int, piece_int)
 
     def _refresh_record_groups(self) -> None:
         grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
@@ -3339,17 +3432,6 @@ class AnnealingSection(MiniDatabaseSection):
                     continue
                 grouped.setdefault(key, []).append(record)
         self._record_groups = grouped
-
-    def _update_plot_from_selection(self) -> None:
-        if self._plot_panel is None:
-            return
-        key = self._selected_group_key()
-        if key is None:
-            self._plot_panel.update_selection(None, None, None)
-            return
-        records = self._record_groups.get(key, [])
-        high_record, low_record = _select_high_low_pair(records)
-        self._plot_panel.update_selection(key, high_record, low_record)
 
     def _export_worksheet(self) -> None:
         records = self.store.load_payload("annealing_records")
@@ -3784,6 +3866,17 @@ class VideoSection(MiniDatabaseSection):
     section_key = "videos"
     section_title = "Fabrication videos"
     supported_suffixes = VIDEO_EXTENSIONS
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(logger, log_callback, parent)
+        self.add_button.hide()
+        self.remove_button.hide()
+        self.refresh_button.setText("Start video OCR")
 
     def process(
         self,
@@ -5070,6 +5163,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         self.setCentralWidget(central)
 
+        self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._retabbing_docks = False
+        self._retabify_pending = False
+
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
@@ -5111,6 +5208,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.assembly_section = assembly
         self.tab_widget.addTab(assembly, "Assemble")
 
+        self.fabrication_section.sources_changed.connect(
+            self._handle_fabrication_sources_changed
+        )
+        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Section", "Status / Source"])
         self.project_tree.header().setStretchLastSection(True)
@@ -5144,13 +5246,41 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.console_dock)
         self.console_dock.hide()
 
-        self._left_dock_switcher = self._create_dock_switcher(
-            [self.project_dock, self.log_dock],
-            side="left",
-            initial_visible=(0,),
-        )
+        self._dock_switcher_panels: List[QtWidgets.QDockWidget | None] = []
+        if self._dock_switcher_supported():
+            self._dock_switcher_panels.append(
+                self._create_dock_switcher(
+                    [self.project_dock, self.log_dock],
+                    side="left",
+                    initial_visible=(0,),
+                )
+            )
+        else:
+            self._dock_switcher_panels.append(None)
+
+        for dock in (self.project_dock, self.log_dock):
+            if dock is None:
+                continue
+            try:
+                dock.dockLocationChanged.connect(
+                    lambda area, d=dock: self._handle_primary_dock_location_change(d, area)
+                )
+            except Exception:
+                pass
+            try:
+                dock.visibilityChanged.connect(
+                    lambda _visible, d=dock: self._handle_primary_dock_visibility_changed(d)
+                )
+            except Exception:
+                pass
 
         install_standard_menu(self, help_topic="builder_database", console=self.log_view)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
+        self._retabify_primary_docks()
+
+    def _dock_switcher_supported(self) -> bool:
+        override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
+        return override.strip().lower() not in {"1", "true", "yes", "on"}
 
     def _create_dock_switcher(
         self,
@@ -5194,6 +5324,73 @@ class BuilderWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return panel
+
+    def _handle_fabrication_sources_changed(self, sources: Iterable[str]) -> None:
+        video = getattr(self, "video_section", None)
+        if isinstance(video, MiniDatabaseSection):
+            video.set_sources(sources)
+
+    def _collect_primary_docks(self) -> List[QtWidgets.QDockWidget]:
+        docks: List[QtWidgets.QDockWidget] = []
+        for candidate in (getattr(self, "project_dock", None), getattr(self, "log_dock", None)):
+            if isinstance(candidate, QtWidgets.QDockWidget):
+                docks.append(candidate)
+        return docks
+
+    def _handle_primary_dock_location_change(
+        self,
+        dock: QtWidgets.QDockWidget,
+        area: QtCore.Qt.DockWidgetArea,
+    ) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        if area == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea:
+            self._queue_retabify_primary_docks()
+
+    def _handle_primary_dock_visibility_changed(self, dock: QtWidgets.QDockWidget) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        _ = dock
+        self._queue_retabify_primary_docks()
+
+    def _queue_retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabify_pending", False):
+            return
+        self._retabify_pending = True
+        QtCore.QTimer.singleShot(0, self._run_queued_retabify)
+
+    def _run_queued_retabify(self) -> None:
+        self._retabify_pending = False
+        self._retabify_primary_docks()
+
+    def _retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        self._retabbing_docks = True
+        try:
+            docks = [dock for dock in self._collect_primary_docks() if not dock.isFloating()]
+            if not docks:
+                return
+            primary = docks[0]
+            for dock in docks[1:]:
+                try:
+                    self.tabifyDockWidget(primary, dock)
+                except Exception:
+                    continue
+            for dock in docks:
+                width = max(dock.width(), self._primary_dock_widths.get(dock, 240))
+                self._apply_dock_width(dock, width)
+        finally:
+            self._retabbing_docks = False
+
+    def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
+        if dock.isFloating() or width <= 0:
+            return
+        try:
+            dock.resize(width, dock.height())
+            self._primary_dock_widths[dock] = width
+        except Exception:
+            pass
 
     def _handle_section_status_changed(self, key: str, status: str) -> None:
         item = self._project_items.get(key)
