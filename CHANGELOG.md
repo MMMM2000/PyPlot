@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-10-24 11:13 UTC
+
+- Updated the current annealing unit converter to insert the standard
+  `Current (mA)\tVoltage (V)\tResistance (Ohm)` column header when legacy logs
+  are missing it, so converted files always expose the expected worksheet
+  titles alongside the milliamp marker.
+
 ## 2025-10-24 10:03 UTC
 
 - Added an adjustable strain offset control to the microwire data builder so

@@ -13,6 +13,7 @@ from plotting.utils import ensure_app_theme, install_standard_menu
 
 
 CONVERSION_MARKER = "# Current annealing current units: mA"
+COLUMN_HEADER = "Current (mA)\tVoltage (V)\tResistance (Ohm)"
 MILLIAMP_HEADER_RE = re.compile(r"(?:current|i)\s*[^\r\n]{0,8}[\[(]\s*m\s*a", re.IGNORECASE)
 
 
@@ -43,6 +44,17 @@ def _has_milliamp_header(lines: Iterable[str]) -> bool:
         if MILLIAMP_HEADER_RE.search(stripped):
             return True
     return False
+
+
+def _matches_header(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped:
+        return False
+    if stripped.startswith("#"):
+        stripped = stripped.lstrip("#").strip()
+    normalized = re.sub(r"\s+", " ", stripped).lower()
+    target = COLUMN_HEADER.replace("\t", " ").lower()
+    return normalized == target
 
 
 def convert_file(path: Path) -> Tuple[str, str]:
@@ -88,8 +100,14 @@ def convert_file(path: Path) -> Tuple[str, str]:
     if not converted:
         return "skipped", "no numeric data"
 
-    if not any(line.startswith("#") for line in converted_lines):
-        converted_lines.insert(0, "# Current (mA)\tVoltage (V)\tResistance (Ohm)")
+    if not any(line.strip().startswith("#") and _matches_header(line) for line in converted_lines):
+        converted_lines.insert(0, f"# {COLUMN_HEADER}")
+
+    if not any(not line.strip().startswith("#") and _matches_header(line) for line in converted_lines):
+        insert_pos = 0
+        while insert_pos < len(converted_lines) and converted_lines[insert_pos].strip().startswith("#"):
+            insert_pos += 1
+        converted_lines.insert(insert_pos, COLUMN_HEADER)
 
     converted_lines.insert(0, CONVERSION_MARKER)
     try:
