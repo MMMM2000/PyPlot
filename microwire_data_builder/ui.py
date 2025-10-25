@@ -61,6 +61,8 @@ from .core import (
     _select_low_measurement,
     _value_for_output,
     _compose_notes,
+    _format_dimension_display,
+    _clean_str,
 )
 
 
@@ -68,11 +70,11 @@ MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
 
 
-ANNEALING_GRAPH_WIDTH = 380
+ANNEALING_GRAPH_WIDTH = 420
 ANNEALING_GRAPH_HEIGHT = 200
-ANNEALING_TITLE_FONT_SIZE = 9
-ANNEALING_AXIS_FONT_SIZE = 7
-ANNEALING_TICK_FONT_SIZE = 7
+ANNEALING_TITLE_FONT_SIZE = 8
+ANNEALING_AXIS_FONT_SIZE = 6
+ANNEALING_TICK_FONT_SIZE = 6
 
 
 _STAGE_LABELS = {
@@ -2267,6 +2269,34 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self.endResetModel()
 
 
+def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        bucket = record.get(f"{field}__display")
+        if isinstance(bucket, (list, tuple)):
+            for entry in bucket:
+                text = _clean_str(entry)
+                if not text or text in seen:
+                    continue
+                values.append(text)
+                seen.add(text)
+        fallback = _value_for_output(record, field)
+        if fallback is None:
+            continue
+        display = _format_dimension_display(field, fallback)
+        if not display:
+            continue
+        if display not in seen:
+            values.append(display)
+            seen.add(display)
+    if not values:
+        return None
+    return "\n".join(values)
+
+
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     columns = [
         "Composition",
@@ -2298,18 +2328,9 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row["Length (m)"] = _value_for_output(piece_record, "length_m")
         row["Piece turns"] = _value_for_output(piece_record, "piece_turns")
         row["Piece date"] = _value_for_output(piece_record, "piece_date")
-        row["d (µm)"] = (
-            _value_for_output(piece_record, "d_um")
-            or _value_for_output(draw_record, "d_um")
-        )
-        row["D (µm)"] = (
-            _value_for_output(piece_record, "D_um")
-            or _value_for_output(draw_record, "D_um")
-        )
-        row["d/D"] = (
-            _value_for_output(piece_record, "d_over_D")
-            or _value_for_output(draw_record, "d_over_D")
-        )
+        row["d (µm)"] = _dimension_display("d_um", piece_record, draw_record)
+        row["D (µm)"] = _dimension_display("D_um", piece_record, draw_record)
+        row["d/D"] = _dimension_display("d_over_D", piece_record, draw_record)
         row["Resistance (Ω)"] = _value_for_output(draw_record, "fabrication_resistance_ohm")
         row["Temperature (°C)"] = _value_for_output(draw_record, "fabrication_temperature_c")
         row["Mass (g)"] = _value_for_output(draw_record, "mass_g")
@@ -2337,10 +2358,17 @@ def _render_measurement_pixmap(
     frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
     if frame.empty:
         return None
-    if "I_A" in frame.columns and "R_ohm" in frame.columns:
+    if "I_mA" in frame.columns and "R_ohm" in frame.columns:
         plot_df = pd.DataFrame(
             {
-                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce"),
+                "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+            }
+        ).dropna()
+    elif "I_A" in frame.columns and "R_ohm" in frame.columns:
+        plot_df = pd.DataFrame(
+            {
+                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
                 "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
             }
         ).dropna()
@@ -2383,7 +2411,7 @@ def _render_measurement_pixmap(
         with plt.rc_context(rc_overrides):
             figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
         if figure is not None:
-            figure.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.18)
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
             for ax in figure.axes:
                 try:
                     ax.tick_params(labelsize=ANNEALING_TICK_FONT_SIZE)
@@ -2704,14 +2732,29 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             raise ValueError("No data to plot")
-        if "I_A" not in frame.columns or "R_ohm" not in frame.columns:
+        if "I_mA" in frame.columns and "R_ohm" in frame.columns:
+            plot_df = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                    "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+                }
+            ).dropna()
+        elif "I_A" in frame.columns and "R_ohm" in frame.columns:
+            plot_df = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                    "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+                }
+            ).dropna()
+        elif "I_mA" in frame.columns and "R_Ohm" in frame.columns:
+            plot_df = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                    "R_Ohm": pd.to_numeric(frame["R_Ohm"], errors="coerce"),
+                }
+            ).dropna()
+        else:
             raise ValueError("Current annealing dataframe missing expected columns")
-        plot_df = pd.DataFrame(
-            {
-                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
-                "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
-            }
-        ).dropna()
         if plot_df.empty:
             raise ValueError("No valid samples to plot")
         path = getattr(record, "path", None)
@@ -2950,7 +2993,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     sources_changed = QtCore.pyqtSignal(list)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
-    _SCROLL_SINGLE_STEP = 24
+    _SCROLL_SINGLE_STEP = 12
 
     def __init__(
         self,
@@ -2973,13 +3016,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.main_layout = layout
 
         controls = QtWidgets.QHBoxLayout()
-        self.add_button = QtWidgets.QPushButton("Connect folder…")
-        self.add_button.clicked.connect(self._add_source)
-        controls.addWidget(self.add_button)
-
-        self.remove_button = QtWidgets.QPushButton("Remove")
-        self.remove_button.clicked.connect(self._remove_selected_source)
-        controls.addWidget(self.remove_button)
+        self.source_button = QtWidgets.QPushButton()
+        self.source_button.setText("Connect folder…")
+        self.source_button.clicked.connect(self._toggle_source)
+        controls.addWidget(self.source_button)
 
         self.open_sources_button = QtWidgets.QPushButton("Open source file(s)")
         self.open_sources_button.setEnabled(False)
@@ -3090,7 +3130,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             icon_width = 0
         if icon_width <= 0:
             icon_width = ANNEALING_GRAPH_WIDTH
-        graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 40
+        graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 60
         for idx, column_name in enumerate(frame.columns):
             label = str(column_name)
             if "Graph" not in label and "Figure" not in label:
@@ -3100,14 +3140,20 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             if target > 0:
                 table.setColumnWidth(idx, target)
 
+    def _update_source_button(self) -> None:
+        has_sources = self.sources_list.count() > 0
+        text = "Remove folder…" if has_sources else "Connect folder…"
+        self.source_button.setText(text)
+        if has_sources:
+            self.source_button.setToolTip("Disconnect the currently linked folder.")
+        else:
+            self.source_button.setToolTip("Select a folder to analyse.")
+
     def _populate_sources_list(self) -> None:
         self.sources_list.clear()
         for source in self.data.sources:
             self.sources_list.addItem(source)
-        self._update_remove_enabled()
-
-    def _update_remove_enabled(self) -> None:
-        self.remove_button.setEnabled(self.sources_list.count() > 0)
+        self._update_source_button()
 
     def _reset_progress_ui(self) -> None:
         self.progress_bar.setRange(0, 100)
@@ -3387,7 +3433,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
         self._update_status()
-        self._update_remove_enabled()
+        self._update_source_button()
 
     def set_sources(self, sources: Iterable[str]) -> None:
         unique = []
@@ -3402,6 +3448,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.sources_list.addItem(path)
         self._sync_sources()
 
+    def _toggle_source(self) -> None:
+        if self.sources_list.count() == 0:
+            self._add_source()
+        else:
+            self._prompt_remove_source()
+
     def _add_source(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
         if not directory:
@@ -3412,28 +3464,36 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.sources_list.addItem(normalised)
             self._sync_sources()
 
-    def _remove_selected_source(self) -> None:
+    def _prompt_remove_source(self) -> None:
         sources = [self.sources_list.item(idx).text() for idx in range(self.sources_list.count())]
         if not sources:
-            QtWidgets.QMessageBox.information(
+            return
+        target = sources[0]
+        if len(sources) > 1:
+            selection, ok = QtWidgets.QInputDialog.getItem(
                 self,
                 self.section_title,
-                "No connected folders to remove.",
+                "Select a folder to disconnect:",
+                sources,
+                0,
+                False,
             )
-            return
-        selection, ok = QtWidgets.QInputDialog.getItem(
-            self,
-            self.section_title,
-            "Select a folder to disconnect:",
-            sources,
-            0,
-            False,
-        )
-        if not ok or not selection:
+            if not ok or not selection:
+                return
+            target = selection
+        message = QtWidgets.QMessageBox(self)
+        message.setWindowTitle(self.section_title)
+        message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        message.setText("Remove the connected folder?")
+        message.setInformativeText(target)
+        remove_btn = message.addButton("Remove folder", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        message.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        message.exec()
+        if message.clickedButton() is not remove_btn:
             return
         for idx in range(self.sources_list.count() - 1, -1, -1):
             item = self.sources_list.item(idx)
-            if item is not None and item.text() == selection:
+            if item is not None and item.text() == target:
                 self.sources_list.takeItem(idx)
         self._sync_sources()
 
@@ -4223,19 +4283,16 @@ class AnnealingSection(MiniDatabaseSection):
                     headers = [
                         "Composition",
                         "Microwire",
-                        "1000 mA (mA)",
-                        "1000 mA samples",
                         "1000 mA file",
                         "Low mA (mA)",
-                        "Low mA samples",
                         "Low mA file",
                         "Graph — 1000 mA",
                         "Graph — low mA",
                     ]
                     worksheet.write_row(0, 0, headers, header_format)
                     worksheet.set_column(0, 1, 18)
-                    worksheet.set_column(2, 7, 18)
-                    worksheet.set_column(8, 9, 40)
+                    worksheet.set_column(2, 4, 22)
+                    worksheet.set_column(5, 6, 42)
 
                     plot_dir = Path(tmpdir)
                     row_idx = 1
@@ -4243,21 +4300,8 @@ class AnnealingSection(MiniDatabaseSection):
                         high_record, low_record = _select_high_low_pair(recs)
 
                         microwire_label = _microwire_label(draw_x, piece_y)
-                        high_setpoint = (
-                            high_record.metadata.setpoint_mA if high_record else None
-                        )
                         low_setpoint = (
                             low_record.metadata.setpoint_mA if low_record else None
-                        )
-                        high_samples = (
-                            len(high_record.dataframe.index)
-                            if high_record is not None
-                            else None
-                        )
-                        low_samples = (
-                            len(low_record.dataframe.index)
-                            if low_record is not None
-                            else None
                         )
                         high_file = (
                             high_record.metadata.file_name if high_record else ""
@@ -4265,6 +4309,7 @@ class AnnealingSection(MiniDatabaseSection):
                         low_file = (
                             low_record.metadata.file_name if low_record else ""
                         )
+                        formatted_low = _format_setpoint(low_setpoint)
 
                         worksheet.write_row(
                             row_idx,
@@ -4272,11 +4317,8 @@ class AnnealingSection(MiniDatabaseSection):
                             [
                                 composition,
                                 microwire_label,
-                                high_setpoint,
-                                high_samples,
                                 high_file,
-                                low_setpoint,
-                                low_samples,
+                                formatted_low,
                                 low_file,
                                 "",
                                 "",
@@ -4308,14 +4350,14 @@ class AnnealingSection(MiniDatabaseSection):
                         if high_plot is not None:
                             worksheet.insert_image(
                                 row_idx,
-                                8,
+                                5,
                                 str(high_plot),
                                 image_options,
                             )
                         if low_plot is not None:
                             worksheet.insert_image(
                                 row_idx,
-                                9,
+                                6,
                                 str(low_plot),
                                 image_options,
                             )
@@ -4626,8 +4668,7 @@ class VideoSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
-        self.add_button.hide()
-        self.remove_button.hide()
+        self.source_button.hide()
         self.refresh_button.setText("Start video OCR")
         self._hide_columns(["_sources"])
 
@@ -4732,8 +4773,7 @@ class StrainSection(MiniDatabaseSection):
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
         self._strain_offset: float = 7.0
         super().__init__(logger, log_callback, parent)
-        self.add_button.hide()
-        self.remove_button.hide()
+        self.source_button.hide()
         self.refresh_button.hide()
         if hasattr(self, "open_sources_button"):
             self.open_sources_button.hide()

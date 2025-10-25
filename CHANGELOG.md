@@ -1,5 +1,15 @@
 # Changelog
 
+## 2025-10-26 17:30 UTC
+
+- Fixed PaddleOCR initialisation on macOS/Windows by avoiding the deprecated
+  ``show_log`` flag and reporting setup failures through the in-app message log.
+- Treated current annealing inputs as milliamperes end-to-end, widened the
+  inline worksheet graphs with smaller typography, and removed redundant
+  setpoint/sample columns from the export workbook.
+- Surfaced every d, D, and d/D value captured in fabrication spreadsheets and
+  simplified the Connect Folder control into a single confirmable toggle.
+
 ## 2025-10-27
 
 - Simplified the annealing worksheet layout by leading with the composition/

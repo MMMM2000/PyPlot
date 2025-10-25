@@ -139,6 +139,7 @@ PIECE_NUMERIC_FIELDS = {
     "D_um",
     "d_over_D",
 }
+DIMENSION_FIELDS = {"d_um", "D_um", "d_over_D"}
 DATETIME_FIELDS = {"production_datetime"}
 DATE_FIELDS = {"piece_date"}
 RAW_VALUE_FIELDS = (
@@ -437,13 +438,33 @@ class FabricationIndex:
     def set_draw(self, composition: str, draw_x: int, data: Dict[str, object]) -> None:
         key = (composition, draw_x)
         existing = self.draw_level.get(key, {})
-        existing.update(data)
+        for field, value in data.items():
+            if field.endswith("__display") and isinstance(value, (list, tuple)):
+                merged: List[object] = []
+                for source in (existing.get(field), value):
+                    if isinstance(source, (list, tuple)):
+                        for item in source:
+                            if item not in merged:
+                                merged.append(item)
+                existing[field] = merged
+            else:
+                existing[field] = value
         self.draw_level[key] = existing
 
     def set_piece(self, composition: str, draw_x: int, piece_y: int, data: Dict[str, object]) -> None:
         key = (composition, draw_x, piece_y)
         existing = self.piece_level.get(key, {})
-        existing.update(data)
+        for field, value in data.items():
+            if field.endswith("__display") and isinstance(value, (list, tuple)):
+                merged: List[object] = []
+                for source in (existing.get(field), value):
+                    if isinstance(source, (list, tuple)):
+                        for item in source:
+                            if item not in merged:
+                                merged.append(item)
+                existing[field] = merged
+            else:
+                existing[field] = value
         self.piece_level[key] = existing
 
     def get_draw(self, composition: str, draw_x: Optional[int]) -> Dict[str, object]:
@@ -946,6 +967,41 @@ def _extract_field_value(field: str, value: object) -> Tuple[Optional[object], O
     if value is None or _is_nan(value):
         return None, raw
     return _normalise_text(value), raw
+
+
+def _format_dimension_display(field: str, value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not _is_nan(value):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        precision = 4 if field == "d_over_D" else 3
+        formatted = f"{numeric:.{precision}f}".rstrip("0").rstrip(".")
+        return formatted or f"{numeric:.{precision}f}"
+    text = _clean_str(value)
+    return text or None
+
+
+def _append_dimension_display(
+    record: Dict[str, object],
+    field: str,
+    parsed: Optional[object],
+    raw: Optional[str],
+) -> None:
+    if field not in DIMENSION_FIELDS:
+        return
+    key = f"{field}__display"
+    bucket = record.get(key)
+    if not isinstance(bucket, list):
+        bucket = [] if bucket is None else list(bucket if isinstance(bucket, (list, tuple)) else [bucket])
+    for candidate in (parsed, raw):
+        text = _format_dimension_display(field, candidate)
+        if not text:
+            continue
+        if text not in bucket:
+            bucket.append(text)
+    record[key] = bucket
 
 
 def _composition_from_path(path: Path) -> str:
@@ -1762,6 +1818,7 @@ def _parse_draw_rows(
             record[field] = parsed
             if field in RAW_VALUE_FIELDS:
                 record[f"{field}_raw"] = raw
+            _append_dimension_display(record, field, parsed, raw)
         index.set_draw(composition, draw_x, record)
 
 
@@ -1797,6 +1854,7 @@ def _parse_piece_rows(
             record[field] = parsed
             if field in RAW_VALUE_FIELDS:
                 record[f"{field}_raw"] = raw
+            _append_dimension_display(record, field, parsed, raw)
         index.set_piece(composition, draw_x, piece_y, record)
 
 
@@ -1979,18 +2037,24 @@ def _load_annealing(path: Path) -> pd.DataFrame:
     for column in ANNEALING_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["I_A", "R_ohm"]).reset_index(drop=True)
+    df.loc[:, "I_mA"] = df["I_A"].to_numpy(dtype=float)
+    df.loc[:, "I_A"] = df["I_mA"].to_numpy(dtype=float) / 1_000.0
 
     try:
         from plotting.current_annealing.burnthrough import trim_burnthrough_glitch
     except ImportError:
         return df
 
-    currents_mA = df["I_A"].to_numpy(dtype=float) * 1e3
+    currents_source = "I_mA" if "I_mA" in df.columns else "I_A"
+    currents_mA = df[currents_source].to_numpy(dtype=float)
+    if currents_source == "I_A":
+        currents_mA = currents_mA * 1e3
     resistances = df["R_ohm"].to_numpy(dtype=float)
     trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
     trimmed_count = int(trimmed_currents.shape[0])
     if trimmed_count < currents_mA.shape[0]:
         df = df.iloc[:trimmed_count].copy()
+        df.loc[:, "I_mA"] = trimmed_currents
         df.loc[:, "I_A"] = trimmed_currents / 1e3
         df.loc[:, "R_ohm"] = trimmed_resistances
         df = df.reset_index(drop=True)
@@ -2206,7 +2270,11 @@ def _plot_measurement_matplotlib(
 
     plot_dir.mkdir(parents=True, exist_ok=True)
     title = format_annealing_title(source.stem)
-    plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
+    if "I_mA" in df.columns:
+        currents = df["I_mA"]
+    else:
+        currents = df["I_A"] * 1e3
+    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": df["R_ohm"]})
     fig, fname = plot_one(plot_df, title, figsize=figsize)
     safe_stem = _safe_plot_stem(fname)
     plot_path = plot_dir / f"{safe_stem}.png"
@@ -2350,7 +2418,11 @@ def _plot_measurement_origin(
     except ImportError as exc:  # pragma: no cover - depends on optional module
         raise RuntimeError("originpro is not available") from exc
 
-    plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
+    if "I_mA" in df.columns:
+        currents = df["I_mA"]
+    else:
+        currents = df["I_A"] * 1e3
+    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": df["R_ohm"]})
     title = format_annealing_title(source.stem)
     handles = plot_one_origin(
         plot_df,
