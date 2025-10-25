@@ -1669,6 +1669,7 @@ def _group_microscope_measurements(
     microscope_files: Sequence[Path],
     logger: Optional[logging.Logger],
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    debug_callback: Optional[Callable[[Path, MicroscopeOCRResult], None]] = None,
 ) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
     log = _logger(logger)
     combined: List[Path] = []
@@ -1715,13 +1716,17 @@ def _group_microscope_measurements(
         category = _microscope_category(path)
         try:
             extracted = _extract_microscope_diameters(path, log)
+        except BuildCancelledError:
+            raise
         except Exception:
             log.exception("Microscope OCR failed for %s", path)
             _notify()
             continue
+        debug_texts: List[str] = []
         if isinstance(extracted, MicroscopeOCRResult):
             values = list(extracted.values)
             detections = list(extracted.detections)
+            debug_texts = list(extracted.texts)
         else:
             values = [
                 float(v)
@@ -1729,6 +1734,16 @@ def _group_microscope_measurements(
                 if isinstance(v, (int, float)) and math.isfinite(float(v)) and float(v) > 0
             ]
             detections = []
+        if debug_callback is not None:
+            debug_payload = MicroscopeOCRResult(
+                values=list(values), detections=list(detections), texts=list(debug_texts)
+            )
+            try:
+                debug_callback(path, debug_payload)
+            except Exception:
+                log.debug(
+                    "Microscope OCR debug callback failed for %s", path, exc_info=True
+                )
         if values or detections:
             record = grouped.setdefault(key, MicroscopeMeasurements())
             if detections:

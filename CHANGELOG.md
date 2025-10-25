@@ -1,5 +1,18 @@
 # Changelog
 
+## 2025-10-25 19:16 UTC
+
+- Populate the fabrication worksheet with every d, D, d/D, and resistance value
+  from the source spreadsheets, round ratios to three decimals, and surface both
+  draw and piece workbook paths so "Open source file(s)" launches the paired
+  Excel files together.
+- Add a Develop → Microscope OCR debug mode that logs PaddleOCR results for
+  each microscope image and wire the toggle into the microscope section so
+  troubleshooting noisy annotations is easier.
+- Widen inline annealing graph columns by using the pixmap size for icon layout
+  and stretching the cells, ensuring the embedded plots are fully visible in the
+  worksheet tables.
+
 ## 2025-10-27 20:30 UTC
 
 - Broadened fabrication diameter parsing to recognise additional core/glass

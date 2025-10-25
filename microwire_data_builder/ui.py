@@ -25,7 +25,12 @@ import matplotlib.pyplot as plt
 
 from plotting.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot import _DockSwitcherWidget
-from plotting.utils import ensure_app_theme, install_standard_menu, format_annealing_title
+from plotting.utils import (
+    ensure_app_theme,
+    install_standard_menu,
+    format_annealing_title,
+    developer_options,
+)
 from origin_clone.app import PythonConsoleWidget
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
@@ -39,6 +44,7 @@ from .core import (
     BuildCancelledError,
     MicroscopeMeasurements,
     MicroscopeDetection,
+    MicroscopeOCRResult,
     MeasurementRecord,
     VideoMetricsSummary,
     FabricationIndex,
@@ -2303,7 +2309,6 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Draw",
         "Piece",
         "Length (m)",
-        "Piece turns",
         "Piece date",
         "d (µm)",
         "D (µm)",
@@ -2316,7 +2321,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Underpressure",
         "Notes",
         "Production datetime",
-        "_source_path",
+        "_source_paths",
     ]
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
@@ -2326,12 +2331,13 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row["Draw"] = draw
         row["Piece"] = piece
         row["Length (m)"] = _value_for_output(piece_record, "length_m")
-        row["Piece turns"] = _value_for_output(piece_record, "piece_turns")
         row["Piece date"] = _value_for_output(piece_record, "piece_date")
         row["d (µm)"] = _dimension_display("d_um", piece_record, draw_record)
         row["D (µm)"] = _dimension_display("D_um", piece_record, draw_record)
         row["d/D"] = _dimension_display("d_over_D", piece_record, draw_record)
-        row["Resistance (Ω)"] = _value_for_output(draw_record, "fabrication_resistance_ohm")
+        piece_resistance = _value_for_output(piece_record, "fabrication_resistance_ohm")
+        draw_resistance = _value_for_output(draw_record, "fabrication_resistance_ohm")
+        row["Resistance (Ω)"] = piece_resistance if piece_resistance is not None else draw_resistance
         row["Temperature (°C)"] = _value_for_output(draw_record, "fabrication_temperature_c")
         row["Mass (g)"] = _value_for_output(draw_record, "mass_g")
         row["Winding speed (m/min)"] = _value_for_output(draw_record, "winding_speed_m_per_min")
@@ -2339,7 +2345,18 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row["Underpressure"] = _value_for_output(draw_record, "underpressure")
         row["Notes"] = _compose_notes(draw_record, piece_record)
         row["Production datetime"] = _value_for_output(draw_record, "production_datetime")
-        row["_source_path"] = piece_record.get("_source_path") or draw_record.get("_source_path")
+        sources: List[str] = []
+        for record in (piece_record, draw_record):
+            path_value = record.get("_source_path") if isinstance(record, dict) else None
+            if not path_value:
+                continue
+            try:
+                resolved = str(Path(path_value))
+            except Exception:
+                resolved = str(path_value)
+            if resolved and resolved not in sources:
+                sources.append(resolved)
+        row["_source_paths"] = sources
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -3099,6 +3116,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
+        try:
+            table.setIconSize(
+                QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
+            )
+        except Exception:
+            pass
         table.setVerticalScrollMode(
             QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
@@ -3132,7 +3155,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             icon_width = 0
         if icon_width <= 0:
             icon_width = ANNEALING_GRAPH_WIDTH
-        graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 60
+        graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 80
         for idx, column_name in enumerate(frame.columns):
             label = str(column_name)
             if "Graph" not in label and "Figure" not in label:
@@ -3666,7 +3689,7 @@ class FabricationSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
-        self._hide_columns(["_source_path"])
+        self._hide_columns(["_source_paths", "_source_path"])
 
     def _collect_candidates(self) -> List[Path]:
         _, relevant_compositions = self._load_relevant_map()
@@ -3969,16 +3992,22 @@ class FabricationSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
-        self._hide_columns(["_source_path"])
+        self._hide_columns(["_source_paths", "_source_path"])
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         sources: List[Path] = []
-        path_value = row.get("_source_path")
-        if isinstance(path_value, (str, Path)) and path_value:
+        raw_paths: List[str] = []
+        path_values = row.get("_source_paths")
+        if isinstance(path_values, (list, tuple, set)):
+            raw_paths.extend(str(value) for value in path_values if value)
+        fallback = row.get("_source_path")
+        if fallback:
+            raw_paths.append(str(fallback))
+        for entry in dict.fromkeys(raw_paths):
             try:
-                sources.append(Path(path_value))
+                sources.append(Path(entry))
             except Exception:
-                pass
+                continue
         return sources
 
 
@@ -4404,6 +4433,7 @@ class MicroscopeSection(MiniDatabaseSection):
     ) -> None:
         self._overrides: Dict[str, Dict[str, float]] = {}
         self._selected_key: str | None = None
+        self._ocr_debug_enabled = False
         super().__init__(logger, log_callback, parent)
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
@@ -4467,6 +4497,31 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.addLayout(button_row)
 
         return splitter
+
+    def set_ocr_debug_enabled(self, enabled: bool) -> None:
+        self._ocr_debug_enabled = bool(enabled)
+
+    def _ocr_debug_callback(self, path: Path, result: MicroscopeOCRResult) -> None:
+        if not self._ocr_debug_enabled:
+            return
+        values = [
+            f"{float(value):.3f}"
+            for value in result.values
+            if isinstance(value, (int, float)) and math.isfinite(float(value))
+        ]
+        value_text = ", ".join(values) if values else "—"
+        sample_texts: List[str] = []
+        for text in result.texts[:3]:
+            cleaned = str(text).replace("\n", " ").strip()
+            if cleaned:
+                sample_texts.append(cleaned)
+        if len(result.texts) > 3:
+            sample_texts.append("…")
+        text_preview = " | ".join(sample_texts)
+        message = f"OCR debug {Path(path).name}: values={value_text}"
+        if text_preview:
+            message += f"; text={text_preview}"
+        self.log(message, level=logging.INFO)
 
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -4631,7 +4686,13 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = _group_microscope_measurements(paths, self.logger, progress_callback=_progress if progress is not None else None)
+        debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
+        index = _group_microscope_measurements(
+            paths,
+            self.logger,
+            progress_callback=_progress if progress is not None else None,
+            debug_callback=debug_cb,
+        )
         self._check_cancelled()
         # Retain overrides only for existing keys
         filtered_overrides = {
@@ -6072,6 +6133,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.tab_widget.addTab(self.video_section, "Videos")
         self.sections["videos"] = self.video_section
 
+        self._developer_options = developer_options()
+        try:
+            self._developer_options.ocr_debug_changed.connect(
+                self._handle_ocr_debug_changed
+            )
+        except Exception:
+            pass
+        self._handle_ocr_debug_changed(self._developer_options.ocr_debug())
+
         self.strain_section = StrainSection(self.logger, _append_log)
         self.tab_widget.addTab(self.strain_section, "Strain")
         self.sections["strain"] = self.strain_section
@@ -6302,6 +6372,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._primary_dock_widths[dock] = width
         except Exception:
             pass
+
+    def _handle_ocr_debug_changed(self, enabled: bool) -> None:
+        section = getattr(self, "microscope_section", None)
+        if isinstance(section, MicroscopeSection):
+            try:
+                section.set_ocr_debug_enabled(bool(enabled))
+            except Exception:
+                pass
 
     def _handle_section_status_changed(self, key: str, status: str) -> None:
         item = self._project_items.get(key)
