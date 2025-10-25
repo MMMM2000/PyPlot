@@ -647,8 +647,9 @@ class VideoMetricsSummary:
     underpressures: List[float] = field(default_factory=list)
     winding_speeds: List[float] = field(default_factory=list)
     glass_feeds: List[float] = field(default_factory=list)
+    sources: set[Path] = field(default_factory=set)
 
-    def record(self, result) -> None:
+    def record(self, result, *, source: Optional[Path] = None) -> None:
         temp = getattr(result, "median_temperature", None)
         if callable(temp):
             value = temp()
@@ -677,6 +678,11 @@ class VideoMetricsSummary:
             feed_value = None
         if feed_value is not None and isinstance(feed_value, (int, float)) and math.isfinite(float(feed_value)):
             self.glass_feeds.append(float(feed_value))
+        if source is not None:
+            try:
+                self.sources.add(Path(source))
+            except Exception:
+                pass
 
     def temperature(self) -> Optional[float]:
         return _select_microscope_value(self.temperatures, "median", allow_negative=True)
@@ -1715,7 +1721,7 @@ def _collect_video_metrics(
             _notify()
             continue
         summary = aggregated.setdefault((composition, draw_x, piece_y), VideoMetricsSummary())
-        summary.record(result)
+        summary.record(result, source=path)
         _notify()
     return aggregated
 
@@ -1726,6 +1732,7 @@ def _parse_draw_rows(
     composition: str,
     index: FabricationIndex,
     logger: logging.Logger,
+    source_path: Path,
 ) -> None:
     seen_draws: set[int] = set()
     for _, row in df.iterrows():
@@ -1746,7 +1753,7 @@ def _parse_draw_rows(
         if draw_x in seen_draws:
             logger.debug("Duplicate draw %s in %s", draw_x, composition)
         seen_draws.add(draw_x)
-        record: Dict[str, object] = {}
+        record: Dict[str, object] = {"_source_path": str(source_path)}
         for col_idx, field in enumerate(headers):
             if col_idx == 0 or not field:
                 continue
@@ -1765,6 +1772,7 @@ def _parse_piece_rows(
     draw_x: Optional[int],
     index: FabricationIndex,
     logger: logging.Logger,
+    source_path: Path,
 ) -> None:
     if draw_x is None:
         logger.warning("Could not determine draw number for piece workbook %s", composition)
@@ -1780,7 +1788,7 @@ def _parse_piece_rows(
         if not m:
             continue
         piece_y = int(m.group("piece"))
-        record: Dict[str, object] = {}
+        record: Dict[str, object] = {"_source_path": str(source_path)}
         for col_idx, field in enumerate(headers):
             if col_idx == 0 or not field:
                 continue
@@ -1836,7 +1844,7 @@ def _parse_composition_workbook(path: Path, index: FabricationIndex, logger: log
     headers = [_header_key(value) for value in header_row]
     data = df.iloc[1:].reset_index(drop=True)
     composition = _composition_from_path(path)
-    _parse_draw_rows(data, headers, composition, index, logger)
+    _parse_draw_rows(data, headers, composition, index, logger, path)
 
 
 def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.Logger) -> None:
@@ -1862,7 +1870,7 @@ def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.L
     if match:
         draw_x = int(match.group("draw"))
         composition = match.group("comp")
-    _parse_piece_rows(data, headers, composition, draw_x, index, logger)
+    _parse_piece_rows(data, headers, composition, draw_x, index, logger, path)
 
 
 def build_fabrication_index(

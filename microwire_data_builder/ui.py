@@ -2143,6 +2143,16 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return 0
         return len(self._frame.columns)
 
+    @staticmethod
+    def _sort_value(value: Any) -> Any:
+        if isinstance(value, (QtGui.QPixmap, QtGui.QImage)):
+            return ""
+        if isinstance(value, (pd.Timestamp, datetime)):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join(str(item) for item in value)
+        return value
+
     def data(
         self,
         index: QtCore.QModelIndex,
@@ -2192,6 +2202,27 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return str(section + 1)
         return str(label)
 
+    def sort(self, column: int, order: QtCore.Qt.SortOrder = QtCore.Qt.SortOrder.AscendingOrder) -> None:  # type: ignore[override]
+        if self._frame.empty:
+            return
+        try:
+            column_label = self._frame.columns[column]
+        except Exception:
+            return
+        ascending = order != QtCore.Qt.SortOrder.DescendingOrder
+        try:
+            sorted_frame = self._frame.sort_values(
+                by=column_label,
+                ascending=ascending,
+                kind="mergesort",
+                key=lambda col: col.map(self._sort_value) if hasattr(col, "map") else col,
+            )
+        except Exception:
+            return
+        self.beginResetModel()
+        self._frame = sorted_frame.reset_index(drop=True)
+        self.endResetModel()
+
 
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     columns = [
@@ -2203,6 +2234,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Temperature (°C)",
         "Mass (g)",
         "Production datetime",
+        "_source_path",
     ]
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
@@ -2216,6 +2248,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
             "Temperature (°C)": draw_record.get("fabrication_temperature_c"),
             "Mass (g)": draw_record.get("mass_g"),
             "Production datetime": draw_record.get("production_datetime"),
+            "_source_path": piece_record.get("_source_path") or draw_record.get("_source_path"),
         }
         rows.append(row)
     if not rows:
@@ -2275,16 +2308,46 @@ def _render_measurement_pixmap(
         canvas_agg.draw()
         width, height = canvas_agg.get_width_height()
         buffer = canvas_agg.buffer_rgba()
-        try:
-            format_rgba = QtGui.QImage.Format.Format_RGBA8888  # PyQt6 style
-            format_argb = QtGui.QImage.Format.Format_ARGB32
-        except AttributeError:  # pragma: no cover - PyQt5 fallback
-            format_rgba = getattr(QtGui.QImage, "Format_RGBA8888", None)
-            format_argb = getattr(QtGui.QImage, "Format_ARGB32", None)
-        image_format = format_rgba or format_argb
-        image = QtGui.QImage(buffer, width, height, 4 * width, image_format)
-        if image.isNull() and format_argb is not None and image_format != format_argb:
-            image = QtGui.QImage(buffer, width, height, 4 * width, format_argb)
+        # PyQt6 exposes formats via the QtGui.QImage.Format enum; older builds fall
+        # back to module-level constants. Attempt the modern attribute first and
+        # gracefully degrade through sensible alternatives so we never raise an
+        # AttributeError (which previously prevented any thumbnails from
+        # rendering).
+        format_candidates: list[QtGui.QImage.Format | int] = []
+        for attr in ("Format_RGBA8888", "Format_RGBA8888_Premultiplied", "Format_ARGB32"):
+            candidate = None
+            try:
+                candidate = getattr(QtGui.QImage.Format, attr)
+            except AttributeError:
+                candidate = getattr(QtGui.QImage, attr, None)
+            if candidate is not None:
+                format_candidates.append(candidate)
+        if not format_candidates:
+            try:
+                fallback = QtGui.QImage.Format.Format_ARGB32
+            except AttributeError:
+                fallback = getattr(QtGui.QImage, "Format_ARGB32", None)
+            if fallback is None:
+                fallback = QtGui.QImage.Format_ARGB32  # type: ignore[attr-defined]
+            format_candidates.append(fallback)
+
+        image: QtGui.QImage | None = None
+        for fmt in format_candidates:
+            try:
+                candidate = QtGui.QImage(buffer, width, height, 4 * width, fmt)
+            except TypeError:
+                continue
+            if not candidate.isNull():
+                image = candidate
+                break
+        if image is None:
+            try:
+                fallback = QtGui.QImage.Format.Format_ARGB32
+            except AttributeError:
+                fallback = getattr(QtGui.QImage, "Format_ARGB32", None)
+            if fallback is None:
+                fallback = QtGui.QImage.Format_ARGB32  # type: ignore[attr-defined]
+            image = QtGui.QImage(buffer, width, height, 4 * width, fallback)
         return QtGui.QPixmap.fromImage(image.copy())
     except Exception:
         logger.exception(
@@ -2311,6 +2374,8 @@ def _annealing_records_to_frame(
         "Samples @low",
         "Graph — low mA",
         "Updated",
+        "_group_key",
+        "_sources",
     ]
     grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
     for record in records:
@@ -2357,6 +2422,14 @@ def _annealing_records_to_frame(
         high_samples = len(getattr(getattr(high_record, "dataframe", None), "index", [])) if high_record else ""
         low_samples = len(getattr(getattr(low_record, "dataframe", None), "index", [])) if low_record else ""
 
+        group_key = f"{composition}|{draw}|{piece}"
+        source_paths: List[str] = []
+        for entry in (high_record, low_record):
+            path = getattr(entry, "path", None)
+            if path:
+                source_paths.append(str(Path(path)))
+        if source_paths:
+            source_paths = list(dict.fromkeys(source_paths))
         rows.append(
             {
                 "Composition": composition,
@@ -2368,6 +2441,8 @@ def _annealing_records_to_frame(
                 "Samples @low": low_samples,
                 "Graph — low mA": _render_measurement_pixmap(low_record, logger),
                 "Updated": updated,
+                "_group_key": group_key,
+                "_sources": source_paths,
             }
         )
 
@@ -2657,6 +2732,8 @@ def _microscope_index_to_frame(
                 path = getattr(detection, "image_path", None)
                 if path:
                     image_paths.append(str(path))
+        if image_paths:
+            image_paths = list(dict.fromkeys(image_paths))
         rows.append(
             {
                 "Composition": composition,
@@ -2686,6 +2763,7 @@ def _video_index_to_frame(
         "Underpressure",
         "Winding speed (m/min)",
         "Glass feeding (mm/min)",
+        "_sources",
     ]
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), summary in sorted(index.items()):
@@ -2698,6 +2776,7 @@ def _video_index_to_frame(
                 "Underpressure": summary.underpressure(),
                 "Winding speed (m/min)": summary.winding_speed(),
                 "Glass feeding (mm/min)": summary.glass_feed(),
+                "_sources": sorted(str(path) for path in getattr(summary, "sources", set())),
             }
         )
     if not rows:
@@ -2809,6 +2888,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.remove_button.clicked.connect(self._remove_selected_source)
         controls.addWidget(self.remove_button)
 
+        self.open_sources_button = QtWidgets.QPushButton("Open source file(s)")
+        self.open_sources_button.setEnabled(False)
+        self.open_sources_button.clicked.connect(self._open_selected_sources)
+        controls.addWidget(self.open_sources_button)
+
         controls.addStretch(1)
 
         self.refresh_button = QtWidgets.QPushButton("Refresh")
@@ -2851,6 +2935,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.model.set_frame(self.data.table)
         self._update_status()
         self._reset_progress_ui()
+        self._hook_table_selection()
+        self._update_open_sources_enabled()
 
     # ------------------------------------------------------------------ UI helpers
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -2858,6 +2944,13 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         table.setModel(self.model)
         table.horizontalHeader().setStretchLastSection(True)
         table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
         self.table_view = table
         container = QtWidgets.QWidget(parent)
         layout = QtWidgets.QVBoxLayout(container)
@@ -2885,6 +2978,122 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._cancel_requested = False
         self.stop_button.setEnabled(False)
 
+    def _hide_columns(self, names: Sequence[str]) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = getattr(self.table_view, "model", lambda: None)()
+        frame: Optional[pd.DataFrame] = None
+        if hasattr(model, "frame"):
+            try:
+                frame = model.frame()
+            except Exception:
+                frame = None
+        if frame is None:
+            return
+        columns = list(frame.columns)
+        for name in names:
+            if name not in columns:
+                continue
+            index = columns.index(name)
+            try:
+                self.table_view.setColumnHidden(index, True)
+            except Exception:
+                continue
+
+    def _hook_table_selection(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        selection_model = self.table_view.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(
+                lambda *_: self._update_open_sources_enabled()
+            )
+        model = self.table_view.model()
+        if isinstance(model, QtCore.QAbstractItemModel):
+            model.modelReset.connect(self._update_open_sources_enabled)
+            model.dataChanged.connect(lambda *_: self._update_open_sources_enabled())
+
+    def _selected_rows(self) -> List[int]:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return []
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return []
+        rows = {index.row() for index in selection.selectedRows()}
+        return sorted(rows)
+
+    def _row_series(self, row: int) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        if row < 0 or row >= len(frame.index):
+            return None
+        try:
+            return frame.iloc[row]
+        except Exception:
+            return None
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        _ = row
+        return []
+
+    def _update_open_sources_enabled(self) -> None:
+        if not hasattr(self, "open_sources_button"):
+            return
+        rows = self._selected_rows()
+        enabled = False
+        if rows:
+            for row_index in rows:
+                series = self._row_series(row_index)
+                if series is None:
+                    continue
+                if self._row_sources(series):
+                    enabled = True
+                    break
+        self.open_sources_button.setEnabled(enabled)
+
+    def _open_file(self, path: Path) -> bool:
+        resolved = path.expanduser()
+        if not resolved.exists():
+            self.log(f"{self.section_title}: source file missing — {resolved}")
+            return False
+        url = QtCore.QUrl.fromLocalFile(str(resolved))
+        opened = QtGui.QDesktopServices.openUrl(url)
+        if not opened:
+            self.log(f"{self.section_title}: could not open {resolved}")
+        return opened
+
+    def _open_selected_sources(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their source files.",
+            )
+            return
+        opened_any = False
+        missing: List[Path] = []
+        seen: set[Path] = set()
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            for path in self._row_sources(series):
+                if path in seen:
+                    continue
+                seen.add(path)
+                if self._open_file(path):
+                    opened_any = True
+                else:
+                    missing.append(path)
+        if not opened_any and missing:
+            details = "\n".join(str(p) for p in missing[:5])
+            if len(missing) > 5:
+                details += "\n…"
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                f"None of the selected rows have available source files.\n\n{details}",
+            )
     def _start_progress(self, total: int) -> None:
         self._progress_total = max(int(total), 0)
         self._progress_current = 0
@@ -3219,6 +3428,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.log(
             f"{self.section_title}: processed {len(candidates)} file(s)."
         )
+        self._update_open_sources_enabled()
 
     # ------------------------------------------------------------------ hooks for subclasses
     def process(
@@ -3232,6 +3442,90 @@ class FabricationSection(MiniDatabaseSection):
     section_key = "fabrication"
     section_title = "Fabrication data"
     supported_suffixes = (".xlsx", ".xls", ".xlsm")
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(logger, log_callback, parent)
+        self._hide_columns(["_source_path"])
+
+    def _collect_candidates(self) -> List[Path]:
+        _, relevant_compositions = self._load_relevant_map()
+        tokens = {
+            self._normalise_token(comp)
+            for comp in relevant_compositions
+            if self._normalise_token(comp)
+        }
+        if not tokens:
+            return super()._collect_candidates()
+
+        candidates: Dict[str, Path] = {}
+
+        def _should_consider(path: Path, root: Path) -> bool:
+            try:
+                relative = path.relative_to(root)
+                text = self._normalise_token(str(relative))
+            except Exception:
+                text = self._normalise_token(path.name)
+            if not text:
+                return False
+            return any(token in text for token in tokens)
+
+        for source in self.data.sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            try:
+                resolved_root = root.resolve()
+            except Exception:
+                resolved_root = root
+            if self.recursive_search:
+                stack: List[Path] = [resolved_root]
+                while stack:
+                    current = stack.pop()
+                    try:
+                        entries = list(current.iterdir())
+                    except Exception:
+                        continue
+                    for entry in entries:
+                        if entry.is_dir():
+                            if entry is resolved_root or _should_consider(entry, resolved_root):
+                                stack.append(entry)
+                            continue
+                        if not entry.is_file():
+                            continue
+                        if self.supported_suffixes and entry.suffix.lower() not in self.supported_suffixes:
+                            continue
+                        if not _should_consider(entry, resolved_root):
+                            continue
+                        try:
+                            resolved = str(entry.resolve())
+                        except Exception:
+                            resolved = str(entry)
+                        candidates.setdefault(resolved, entry)
+            else:
+                try:
+                    entries = list(resolved_root.iterdir())
+                except Exception:
+                    entries = []
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    if self.supported_suffixes and entry.suffix.lower() not in self.supported_suffixes:
+                        continue
+                    if not _should_consider(entry, resolved_root):
+                        continue
+                    try:
+                        resolved = str(entry.resolve())
+                    except Exception:
+                        resolved = str(entry)
+                    candidates.setdefault(resolved, entry)
+        if not candidates:
+            return super()._collect_candidates()
+        return sorted(candidates.values())
 
     @staticmethod
     def _normalise_int(value: object) -> Optional[int]:
@@ -3456,6 +3750,20 @@ class FabricationSection(MiniDatabaseSection):
             payloads={"fabrication_index": index},
         )
 
+    def refresh(self) -> None:
+        super().refresh()
+        self._hide_columns(["_source_path"])
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        path_value = row.get("_source_path")
+        if isinstance(path_value, (str, Path)) and path_value:
+            try:
+                sources.append(Path(path_value))
+            except Exception:
+                pass
+        return sources
+
 
 class AnnealingSection(MiniDatabaseSection):
     section_key = "annealing"
@@ -3469,12 +3777,13 @@ class AnnealingSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
-        self._record_groups: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+        self._record_groups: Dict[str, List[MeasurementRecord]] = {}
         self.export_button = QtWidgets.QPushButton("Export worksheet…")
         self.export_button.clicked.connect(self._export_worksheet)
         self.controls_layout.addWidget(self.export_button)
         self._update_export_enabled()
         self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         table = QtWidgets.QTableView(parent)
@@ -3485,8 +3794,9 @@ class AnnealingSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        table.setSortingEnabled(True)
         table.setIconSize(QtCore.QSize(340, 200))
         table.verticalHeader().setDefaultSectionSize(220)
         self.table_view = table
@@ -3556,6 +3866,7 @@ class AnnealingSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
+        self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
         self._update_export_enabled()
 
@@ -3564,7 +3875,7 @@ class AnnealingSection(MiniDatabaseSection):
             self.export_button.setEnabled(not self.data.table.empty)
 
     def _refresh_record_groups(self) -> None:
-        grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+        grouped: Dict[str, List[MeasurementRecord]] = {}
         try:
             payload = self.store.load_payload("annealing_records")
         except Exception:
@@ -3580,11 +3891,35 @@ class AnnealingSection(MiniDatabaseSection):
                 if composition is None or draw is None or piece is None:
                     continue
                 try:
-                    key = (str(composition), int(draw), int(piece))
+                    key = f"{composition}|{int(draw)}|{int(piece)}"
                 except (TypeError, ValueError):
                     continue
                 grouped.setdefault(key, []).append(record)
         self._record_groups = grouped
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw_sources = row.get("_sources")
+        if isinstance(raw_sources, (list, tuple)):
+            for entry in raw_sources:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        key = row.get("_group_key")
+        if isinstance(key, str):
+            for record in self._record_groups.get(key, []):
+                path = getattr(record, "path", None)
+                if path:
+                    try:
+                        candidate = Path(path)
+                    except Exception:
+                        continue
+                    if candidate not in sources:
+                        sources.append(candidate)
+        return sources
 
     def _export_worksheet(self) -> None:
         records = self.store.load_payload("annealing_records")
@@ -3798,6 +4133,13 @@ class MicroscopeSection(MiniDatabaseSection):
         table.setModel(self.model)
         table.horizontalHeader().setStretchLastSection(True)
         table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
         self.table_view = table
         selection_model = table.selectionModel()
         if selection_model is not None:
@@ -3849,6 +4191,19 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 continue
             self.table_view.setColumnHidden(column_index, True)
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        images = row.get("_images")
+        if isinstance(images, (list, tuple, set)):
+            for entry in images:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
 
     def _selected_row(self) -> Optional[pd.Series]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -4032,6 +4387,7 @@ class VideoSection(MiniDatabaseSection):
         self.add_button.hide()
         self.remove_button.hide()
         self.refresh_button.setText("Start video OCR")
+        self._hide_columns(["_sources"])
 
     def process(
         self,
@@ -4070,6 +4426,23 @@ class VideoSection(MiniDatabaseSection):
             processed=processed,
             payloads={"video_index": index},
         )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._hide_columns(["_sources"])
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw = row.get("_sources")
+        if isinstance(raw, (list, tuple, set)):
+            for entry in raw:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
 
 
 
@@ -4120,6 +4493,8 @@ class StrainSection(MiniDatabaseSection):
         self.add_button.hide()
         self.remove_button.hide()
         self.refresh_button.hide()
+        if hasattr(self, "open_sources_button"):
+            self.open_sources_button.hide()
         self.sources_list.hide()
         self.sources_list.setMaximumWidth(0)
         self.status_label.setWordWrap(True)
@@ -4152,9 +4527,22 @@ class StrainSection(MiniDatabaseSection):
         layout.setSpacing(6)
 
         form_container = QtWidgets.QWidget(container)
-        form_layout = QtWidgets.QFormLayout(form_container)
+        form_layout = QtWidgets.QHBoxLayout(form_container)
         form_layout.setContentsMargins(0, 0, 0, 0)
-        form_layout.setSpacing(6)
+        form_layout.setSpacing(12)
+
+        def _add_field(label_text: str, widget: QtWidgets.QWidget) -> None:
+            field_box = QtWidgets.QWidget(form_container)
+            column = QtWidgets.QVBoxLayout(field_box)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(4)
+            label = QtWidgets.QLabel(label_text, field_box)
+            label.setAlignment(
+                QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            column.addWidget(label)
+            column.addWidget(widget)
+            form_layout.addWidget(field_box)
 
         self.composition_combo = QtWidgets.QComboBox(form_container)
         self.composition_combo.setEditable(True)
@@ -4166,30 +4554,30 @@ class StrainSection(MiniDatabaseSection):
         if line_edit is not None:
             line_edit.textEdited.connect(self._composition_text_edited)
         self.composition_combo.currentTextChanged.connect(self._composition_changed)
-        form_layout.addRow("Composition", self.composition_combo)
+        _add_field("Composition", self.composition_combo)
 
         self.microwire_combo = QtWidgets.QComboBox(form_container)
         self.microwire_combo.currentIndexChanged.connect(self._microwire_changed)
-        form_layout.addRow("Microwire", self.microwire_combo)
+        _add_field("Microwire", self.microwire_combo)
 
         self.d_edit = QtWidgets.QLineEdit(form_container)
         self.d_edit.setPlaceholderText("auto")
         self.d_edit.textChanged.connect(self._update_mass_display)
-        form_layout.addRow(self.COLUMN_D, self.d_edit)
+        _add_field(self.COLUMN_D, self.d_edit)
 
         self.mass_display = QtWidgets.QLineEdit(form_container)
         self.mass_display.setReadOnly(True)
-        form_layout.addRow(self.COLUMN_MASS, self.mass_display)
+        _add_field(self.COLUMN_MASS, self.mass_display)
 
         self.M_length_edit = QtWidgets.QLineEdit(form_container)
         self.M_length_edit.setPlaceholderText("mm")
         self.M_length_edit.textChanged.connect(self._update_strain_display)
-        form_layout.addRow(self.COLUMN_M_LENGTH, self.M_length_edit)
+        _add_field(self.COLUMN_M_LENGTH, self.M_length_edit)
 
         self.A_length_edit = QtWidgets.QLineEdit(form_container)
         self.A_length_edit.setPlaceholderText("mm or '-' if broke")
         self.A_length_edit.textChanged.connect(self._update_strain_display)
-        form_layout.addRow(self.COLUMN_A_LENGTH, self.A_length_edit)
+        _add_field(self.COLUMN_A_LENGTH, self.A_length_edit)
 
         self.strain_offset_spin = QtWidgets.QDoubleSpinBox(form_container)
         self.strain_offset_spin.setDecimals(6)
@@ -4197,11 +4585,13 @@ class StrainSection(MiniDatabaseSection):
         self.strain_offset_spin.setSingleStep(0.1)
         self.strain_offset_spin.setValue(self._strain_offset)
         self.strain_offset_spin.valueChanged.connect(self._strain_offset_changed)
-        form_layout.addRow("C offset", self.strain_offset_spin)
+        _add_field("C offset", self.strain_offset_spin)
 
         self.strain_display = QtWidgets.QLineEdit(form_container)
         self.strain_display.setReadOnly(True)
-        form_layout.addRow(f"{self.COLUMN_STRAIN} (%)", self.strain_display)
+        _add_field(f"{self.COLUMN_STRAIN} (%)", self.strain_display)
+
+        form_layout.addStretch(1)
 
         layout.addWidget(form_container)
 
@@ -4240,8 +4630,9 @@ class StrainSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.table_view.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.table_view.setSortingEnabled(True)
         selection_model = self.table_view.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_table_selection)

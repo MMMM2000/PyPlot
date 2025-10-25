@@ -1,5 +1,21 @@
 # Changelog
 
+## 2025-10-25 01:10 UTC
+
+- Hardened the annealing thumbnail renderer to fall back across all Qt image
+  formats so inline graphs render even on builds that omit
+  `Format_RGBA8888`.
+- Added an “Open source file(s)” action to the mini-database tables, wiring in
+  multi-row selection, column sorting, and hidden metadata so users can jump
+  from summaries to the original TXT/XLSX assets in one click.
+- Pruned fabrication discovery to descend only into composition-matched
+  folders before parsing, dramatically reducing the time spent scanning large
+  directory trees.
+- Surfaced raw video and microscope artefacts through the new source action,
+  and embedded video paths in the worksheet so OCR jobs expose their inputs.
+- Reworked the strain data form into a single horizontal row of inputs to keep
+  the layout consistent with the other tabs.
+
 ## 2025-10-24 23:10 UTC
 
 - Added a Stop control to every mini-database section and wired the refresh
