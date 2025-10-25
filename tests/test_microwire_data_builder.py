@@ -21,6 +21,7 @@ spec.loader.exec_module(core)
 
 BuilderConfig = core.BuilderConfig
 build_database = core.build_database
+_canonical_dimension_field = core._canonical_dimension_field
 _header_key = core._header_key
 _load_annealing = core._load_annealing
 _metadata_from_path = core._metadata_from_path
@@ -70,6 +71,13 @@ def test_header_normaliser_variants() -> None:
     assert _header_key("D (µm)") == "D_um"
     assert _header_key("d/D") == "d_over_D"
     assert _header_key("Poznámka") == "notes"
+
+
+def test_canonical_dimension_field_filters_non_diameter_columns() -> None:
+    assert _canonical_dimension_field("glass_feed_mm_per_min") is None
+    assert _canonical_dimension_field("core_diameter_um") == "d_um"
+    assert _canonical_dimension_field("glass_diameter_um_raw") == "D_um"
+    assert _canonical_dimension_field("ratio_d_core_to_D_glass") == "d_over_D"
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:

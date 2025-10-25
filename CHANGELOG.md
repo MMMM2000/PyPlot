@@ -1,5 +1,13 @@
 # Changelog
 
+## 2025-10-25 19:34 UTC
+
+- Prevent glass feed and other non-diameter spreadsheet columns from being
+  misclassified as d/D readings, ensuring fabrication rows show the true core
+  and glass diameters alongside rounded ratios.
+- Added regression coverage for the refined diameter mapping so future header
+  tweaks keep ignoring non-µm fields and still recognise core/glass dimensions.
+
 ## 2025-10-25 19:16 UTC
 
 - Populate the fabrication worksheet with every d, D, d/D, and resistance value

@@ -1009,27 +1009,39 @@ def _format_dimension_display(field: str, value: object) -> Optional[str]:
 
 
 def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
+    """Map parsed spreadsheet headers to canonical diameter buckets."""
+
     if not field:
         return None
     if field in DIMENSION_FIELDS:
         return field
-    base = field
-    if base.endswith("_raw"):
-        base = base[:-4]
+    base = field[:-4] if field.endswith("_raw") else field
     simplified = base.replace("__", "_")
     lowered = simplified.lower()
-    if lowered.startswith("d_over_d") or "d_over_d" in lowered:
+
+    if simplified in DIMENSION_FIELDS:
+        return simplified
+    lowered_map = {name.lower(): name for name in DIMENSION_FIELDS}
+    matched = lowered_map.get(lowered)
+    if matched is not None:
+        return matched
+
+    if "d_over_d" in lowered or "doverd" in lowered or "ratio_d" in lowered:
         return "d_over_D"
-    if lowered.startswith("ratio_d") and "_d" in lowered:
-        return "d_over_D"
-    if lowered.endswith("_um"):
-        if simplified.startswith("D") or "glass" in lowered or "sklo" in lowered:
-            return "D_um"
-        if simplified.startswith("d") or lowered.startswith("jadro") or lowered.startswith("core"):
-            return "d_um"
-    if any(token in lowered for token in ("jadro", "jadra", "jadier", "core")):
+
+    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
+
+    if not has_micron_hint:
+        return None
+
+    if any(token in lowered for token in ("core", "jadro", "jadra", "jadier", "inner")):
         return "d_um"
-    if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")):
+    if any(token in lowered for token in ("glass", "sklo", "clad", "cladding", "sheath", "outer")):
+        return "D_um"
+    first = simplified[:1]
+    if first == "d":
+        return "d_um"
+    if first == "D":
         return "D_um"
     return None
 
