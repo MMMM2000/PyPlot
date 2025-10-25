@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-27 20:30 UTC
+
+- Broadened fabrication diameter parsing to recognise additional core/glass
+  headings, normalise string fallbacks, and keep d/D ratios capped at three
+  decimals so every measurement from the spreadsheets appears without ellipses.
+- Reworked microscope OCR token handling to capture bracketed annotations like
+  "[1]6.7µm", attach detections to core/glass markers, and reuse the measured
+  values even when PaddleOCR splits number/unit tokens.
+- Returned the Project Explorer and Message Log to docked side panes by default
+  while retaining hover-driven toggling, so they no longer pop out as separate
+  windows unless the user chooses to float them.
+
 ## 2025-10-27 19:45 UTC
 
 - Capture every fabrication diameter variant by recognising additional header

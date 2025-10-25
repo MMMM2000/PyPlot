@@ -2861,6 +2861,8 @@ def _microscope_index_to_frame(
                 ratio = float(d_value) / float(D_value)
             except ZeroDivisionError:
                 ratio = None
+        if isinstance(ratio, (int, float)):
+            ratio = round(float(ratio), 3)
         image_paths: List[str] = []
         for bucket in (measurements.core, measurements.glass, measurements.other):
             for detection in bucket:
@@ -6123,11 +6125,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
                 | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
             )
-            dock.setProperty("mwOverlayPreferred", True)
-            try:
-                dock.setFloating(True)
-            except Exception:
-                pass
             dock.hide()
 
         self.console_widget = PythonConsoleWidget(self)

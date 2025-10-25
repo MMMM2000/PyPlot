@@ -780,7 +780,7 @@ def _header_key(value: object) -> Optional[str]:
             return "d_um"
         if "glass" in lowered or "sklo" in lowered:
             return "D_um"
-        if "jadro" in lowered or "core" in lowered:
+        if any(token in lowered for token in ("jadro", "jadra", "jadier", "core")):
             return "d_um"
         if re.search(r"\bd\s*/\s*D\b", ascii_simple, re.IGNORECASE):
             return "d_over_D"
@@ -798,9 +798,9 @@ def _header_key(value: object) -> Optional[str]:
         return "d_over_D"
     if "d/d" in lowered or simple_compact == "dd":
         return "d_over_D"
-    if ("jadro" in lowered or "core" in lowered) and re.search(r"\bd\d*\b", ascii_text):
+    if any(token in lowered for token in ("jadro", "jadra", "jadier", "core")) and re.search(r"\bd\d*\b", ascii_text):
         return "d_um"
-    if ("sklo" in lowered or "glass" in lowered) and re.search(r"\bD\d*\b", ascii_text):
+    if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")) and re.search(r"\bD\d*\b", ascii_text):
         return "D_um"
     if ("datum" in lowered or "dátum" in lowered) and "cas" not in lowered:
         return "piece_date"
@@ -998,6 +998,12 @@ def _format_dimension_display(field: str, value: object) -> Optional[str]:
         precision = 3
         formatted = f"{numeric:.{precision}f}".rstrip("0").rstrip(".")
         return formatted or f"{numeric:.{precision}f}"
+    if isinstance(value, str):
+        numeric = _parse_numeric(value)
+        if numeric is not None:
+            precision = 3
+            formatted = f"{numeric:.{precision}f}".rstrip("0").rstrip(".")
+            return formatted or f"{numeric:.{precision}f}"
     text = _clean_str(value)
     return text or None
 
@@ -1021,6 +1027,10 @@ def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
             return "D_um"
         if simplified.startswith("d") or lowered.startswith("jadro") or lowered.startswith("core"):
             return "d_um"
+    if any(token in lowered for token in ("jadro", "jadra", "jadier", "core")):
+        return "d_um"
+    if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")):
+        return "D_um"
     return None
 
 
@@ -1492,44 +1502,59 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             return detections
         scale_x = base_width / float(vw)
         scale_y = base_height / float(vh)
+        normalised_words = [_normalise_microscope_text(word.text) for word in words]
+        lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
         for idx, word in enumerate(words):
-            token = word.text
-            if not MICROSCOPE_NUMBER_TOKEN.match(token):
+            normalised = normalised_words[idx]
+            match = re.search(r"(\d+(?:[.,]\d+)?)", normalised)
+            if not match:
                 continue
-            raw_value = token.replace(",", ".")
+            raw_value = match.group(1).replace(",", ".")
             try:
                 value = float(raw_value)
             except ValueError:
                 continue
-            if not math.isfinite(value) or value <= 0:
+            if not math.isfinite(value) or value <= 0 or value > 1_000:
                 continue
+            suffix = normalised[match.end():].lower()
             unit_idx: Optional[int] = None
-            for offset in range(1, 4):
-                probe_idx = idx + offset
-                if probe_idx >= len(words):
-                    break
-                probe_text = words[probe_idx].text.lower().replace("μ", "µ")
-                if any(hint in probe_text for hint in MICROSCOPE_UNIT_HINTS):
-                    unit_idx = probe_idx
-                    break
+            if any(hint in suffix for hint in MICROSCOPE_UNIT_HINTS):
+                unit_idx = idx
+            else:
+                for offset in range(1, 4):
+                    probe_idx = idx + offset
+                    if probe_idx >= len(words):
+                        break
+                    probe_text = lowered_words[probe_idx]
+                    if any(hint in probe_text for hint in MICROSCOPE_UNIT_HINTS):
+                        unit_idx = probe_idx
+                        break
             if unit_idx is None:
                 continue
             marker: Optional[int] = None
             start_idx = idx
-            for offset in range(1, 3):
-                prev_idx = idx - offset
-                if prev_idx < 0:
-                    break
-                prev_text = words[prev_idx].text.strip().replace("μ", MICRO_SIGN)
-                if any(hint in prev_text for hint in ("[1", "1]", "[1]", "1", "[1")):
-                    marker = 1
-                    start_idx = min(start_idx, prev_idx)
-                    break
-                if any(hint in prev_text for hint in ("[2", "2]", "[2]", "2", "[2")):
-                    marker = 2
-                    start_idx = min(start_idx, prev_idx)
-                    break
+            prefix = normalised[: match.start()]
+            if any(hint in prefix for hint in ("[1", "1]", "[1]")) or "[1]" in normalised:
+                marker = 1
+            elif any(hint in prefix for hint in ("[2", "2]", "[2]")) or "[2]" in normalised:
+                marker = 2
+            if marker is None:
+                for offset in range(1, 3):
+                    prev_idx = idx - offset
+                    if prev_idx < 0:
+                        break
+                    prev_text = normalised_words[prev_idx]
+                    if any(hint in prev_text for hint in ("[1", "1]", "[1]")):
+                        marker = 1
+                        start_idx = min(start_idx, prev_idx)
+                        break
+                    if any(hint in prev_text for hint in ("[2", "2]", "[2]")):
+                        marker = 2
+                        start_idx = min(start_idx, prev_idx)
+                        break
             tokens = words[start_idx : unit_idx + 1]
+            if not tokens:
+                continue
             left = min(entry.left for entry in tokens)
             top = min(entry.top for entry in tokens)
             right = max(entry.left + entry.width for entry in tokens)
@@ -1604,6 +1629,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                         continue
                     result.detections.append(detection)
                     seen_detections.add(key)
+                    result.append_value(detection.value)
                     result.texts.append(line_text)
         if combined_lines:
             _append_candidate("\n".join(combined_lines))
@@ -1705,7 +1731,36 @@ def _group_microscope_measurements(
             detections = []
         if values or detections:
             record = grouped.setdefault(key, MicroscopeMeasurements())
-            record.extend(category, values, detections)
+            if detections:
+                grouped_detections: Dict[str, List[MicroscopeDetection]] = {}
+                for detection in detections:
+                    override_category = category
+                    if detection.marker == 1:
+                        override_category = "core"
+                    elif detection.marker == 2:
+                        override_category = "glass"
+                    grouped_detections.setdefault(override_category, []).append(detection)
+                used_keys: Set[float] = set()
+                for det_category, det_list in grouped_detections.items():
+                    numeric_values = [float(det.value) for det in det_list if isinstance(det.value, (int, float))]
+                    if not numeric_values:
+                        continue
+                    record.extend(det_category, numeric_values, det_list)
+                    for numeric in numeric_values:
+                        used_keys.add(round(float(numeric), 3))
+                residual_values: List[float] = []
+                for value in values:
+                    if not isinstance(value, (int, float)):
+                        continue
+                    numeric = float(value)
+                    rounded = round(numeric, 3)
+                    if rounded in used_keys:
+                        continue
+                    residual_values.append(numeric)
+                if residual_values:
+                    record.extend(category, residual_values, [])
+            else:
+                record.extend(category, values, detections)
         _notify()
     missing_references: List[str] = []
     mismatched_references: List[str] = []
