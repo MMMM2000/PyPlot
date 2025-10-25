@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-27 19:45 UTC
+
+- Capture every fabrication diameter variant by recognising additional header
+  patterns, aggregating duplicate readings, and rounding d/D ratios to three
+  decimals so the worksheet reflects the full source data.
+- Wire the builder logger into the in-app message log and have microscope OCR
+  report both successful detections and missing annotations, giving immediate
+  feedback when PaddleOCR is unavailable or yields no results.
+- Start the Project Explorer and Message Log as hover overlays that list full
+  source paths and processed files, keeping the workspace maximised until the
+  panels are explicitly pinned.
+
 ## 2025-10-26 17:30 UTC
 
 - Fixed PaddleOCR initialisation on macOS/Windows by avoiding the deprecated

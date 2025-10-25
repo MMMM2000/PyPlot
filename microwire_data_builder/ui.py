@@ -3639,6 +3639,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             f"{self.section_title}: processed {len(candidates)} file(s)."
         )
         self._update_open_sources_enabled()
+        try:
+            self.sources_changed.emit(list(self.data.sources))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ hooks for subclasses
     def process(
@@ -4595,7 +4599,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     ratio = None
             frame.at[index, "d (µm)"] = d_value
             frame.at[index, "D (µm)"] = D_value
-            frame.at[index, "d/D"] = ratio
+            frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
@@ -4644,6 +4648,19 @@ class MicroscopeSection(MiniDatabaseSection):
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
                 continue
+        total_records = len(index)
+        total_core = sum(len(measurements.core) for measurements in index.values())
+        total_glass = sum(len(measurements.glass) for measurements in index.values())
+        if total_core or total_glass:
+            self.log(
+                f"Microscope OCR detected {total_core} core and {total_glass} glass diameter(s) across {total_records} microwire(s).",
+                level=logging.INFO,
+            )
+        else:
+            self.log(
+                "Microscope OCR completed but no diameters were detected. Ensure the PaddleOCR models are installed and the microscope captures contain visible annotations.",
+                level=logging.WARNING,
+            )
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -6032,6 +6049,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
                     self._log_has_unread_errors = True
             self._update_log_highlight()
 
+        self._log_handler = QtLogHandler(_append_log)
+        self._log_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        if self._log_handler not in self.logger.handlers:
+            self.logger.addHandler(self._log_handler)
+
         self.annealing_section = AnnealingSection(self.logger, _append_log)
         self.tab_widget.addTab(self.annealing_section, "Current annealing")
         self.sections["annealing"] = self.annealing_section
@@ -6083,7 +6105,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.project_dock.setObjectName("builderProjectExplorerDock")
         self.project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.project_dock)
-        self.project_dock.show()
 
         self.log_dock = QtWidgets.QDockWidget("Message Log", self)
         self.log_dock.setObjectName("builderMessageLogDock")
@@ -6092,6 +6113,22 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_dock.visibilityChanged.connect(self._handle_log_visibility)
         self.log_dock.hide()
         self._update_log_highlight()
+
+        for dock in (self.project_dock, self.log_dock):
+            if dock is None:
+                continue
+            dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.AllDockWidgetAreas)
+            dock.setFeatures(
+                QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+                | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+                | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            )
+            dock.setProperty("mwOverlayPreferred", True)
+            try:
+                dock.setFloating(True)
+            except Exception:
+                pass
+            dock.hide()
 
         self.console_widget = PythonConsoleWidget(self)
         self.console_widget.set_environment({"window": self, "pd": pd})
@@ -6107,7 +6144,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 self._create_dock_switcher(
                     [self.project_dock, self.log_dock],
                     side="left",
-                    initial_visible=(0,),
+                    initial_visible=(),
                 )
             )
         else:
@@ -6279,11 +6316,37 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if item is None:
             return
         item.takeChildren()
+        section = self.sections.get(key)
+        processed: Dict[str, float] = {}
+        if isinstance(section, MiniDatabaseSection):
+            processed = dict(getattr(section.data, "processed", {}))
         for source in sources:
-            child = QtWidgets.QTreeWidgetItem(["", str(source)])
+            source_text = str(source)
+            child = QtWidgets.QTreeWidgetItem(["", source_text])
+            child.setToolTip(1, source_text)
+            source_path = Path(source_text)
+            related_files: List[str] = []
+            for path_text in sorted(processed.keys()):
+                try:
+                    path_obj = Path(path_text)
+                except Exception:
+                    continue
+                try:
+                    rel = path_obj.relative_to(source_path)
+                    related_files.append(str(rel))
+                except Exception:
+                    if path_text.startswith(source_text):
+                        related_files.append(path_text[len(source_text) :].lstrip(os.sep))
+            related_files = list(dict.fromkeys(related_files))
+            for rel_path in related_files:
+                if not rel_path:
+                    continue
+                leaf = QtWidgets.QTreeWidgetItem(["", rel_path])
+                leaf.setToolTip(1, rel_path)
+                child.addChild(leaf)
             item.addChild(child)
         if sources:
-            item.setExpanded(True)
+            item.setExpanded(False)
 
     def _display_dataframe_in_console(self, frame: pd.DataFrame) -> None:
         if not isinstance(frame, pd.DataFrame):

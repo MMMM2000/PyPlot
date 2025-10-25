@@ -771,6 +771,19 @@ def _header_key(value: object) -> Optional[str]:
         return "piece_turns"
     if "dlzk" in lowered or "dlžk" in lowered:
         return "length_m"
+    micron_hint = any(token in lowered for token in ("µm", "um", "μm", "mikro", "micro"))
+    ascii_simple = ascii_text.replace("\u00a0", " ")
+    if micron_hint:
+        if re.search(r"\bD\d*\b", ascii_text):
+            return "D_um"
+        if re.search(r"\bd\d*\b", ascii_text):
+            return "d_um"
+        if "glass" in lowered or "sklo" in lowered:
+            return "D_um"
+        if "jadro" in lowered or "core" in lowered:
+            return "d_um"
+        if re.search(r"\bd\s*/\s*D\b", ascii_simple, re.IGNORECASE):
+            return "d_over_D"
     if lowered.strip().startswith("d") and "µm" in lowered:
         first = ascii_text.strip()[:1]
         if first == "D":
@@ -781,8 +794,14 @@ def _header_key(value: object) -> Optional[str]:
         if first == "D":
             return "D_um"
         return "d_um"
+    if micron_hint and "d" in lowered and "d" in ascii_simple and "D" in ascii_simple:
+        return "d_over_D"
     if "d/d" in lowered or simple_compact == "dd":
         return "d_over_D"
+    if ("jadro" in lowered or "core" in lowered) and re.search(r"\bd\d*\b", ascii_text):
+        return "d_um"
+    if ("sklo" in lowered or "glass" in lowered) and re.search(r"\bD\d*\b", ascii_text):
+        return "D_um"
     if ("datum" in lowered or "dátum" in lowered) and "cas" not in lowered:
         return "piece_date"
     return None
@@ -976,11 +995,33 @@ def _format_dimension_display(field: str, value: object) -> Optional[str]:
         numeric = float(value)
         if not math.isfinite(numeric):
             return None
-        precision = 4 if field == "d_over_D" else 3
+        precision = 3
         formatted = f"{numeric:.{precision}f}".rstrip("0").rstrip(".")
         return formatted or f"{numeric:.{precision}f}"
     text = _clean_str(value)
     return text or None
+
+
+def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
+    if not field:
+        return None
+    if field in DIMENSION_FIELDS:
+        return field
+    base = field
+    if base.endswith("_raw"):
+        base = base[:-4]
+    simplified = base.replace("__", "_")
+    lowered = simplified.lower()
+    if lowered.startswith("d_over_d") or "d_over_d" in lowered:
+        return "d_over_D"
+    if lowered.startswith("ratio_d") and "_d" in lowered:
+        return "d_over_D"
+    if lowered.endswith("_um"):
+        if simplified.startswith("D") or "glass" in lowered or "sklo" in lowered:
+            return "D_um"
+        if simplified.startswith("d") or lowered.startswith("jadro") or lowered.startswith("core"):
+            return "d_um"
+    return None
 
 
 def _append_dimension_display(
@@ -989,14 +1030,15 @@ def _append_dimension_display(
     parsed: Optional[object],
     raw: Optional[str],
 ) -> None:
-    if field not in DIMENSION_FIELDS:
+    canonical = _canonical_dimension_field(field)
+    if canonical not in DIMENSION_FIELDS:
         return
-    key = f"{field}__display"
+    key = f"{canonical}__display"
     bucket = record.get(key)
     if not isinstance(bucket, list):
         bucket = [] if bucket is None else list(bucket if isinstance(bucket, (list, tuple)) else [bucket])
     for candidate in (parsed, raw):
-        text = _format_dimension_display(field, candidate)
+        text = _format_dimension_display(canonical, candidate)
         if not text:
             continue
         if text not in bucket:
