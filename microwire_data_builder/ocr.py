@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import logging
 from functools import lru_cache
 from typing import Optional
@@ -16,12 +17,18 @@ def _create_default_ocr() -> "PaddleOCR":
 
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    base_kwargs = {"lang": "en", "use_angle_cls": True}
+    kwargs = {"lang": "en", "use_angle_cls": True}
     try:
-        return PaddleOCR(show_log=False, **base_kwargs)
-    except TypeError:
-        # Older/newer PaddleOCR builds may not expose the ``show_log`` flag.
-        return PaddleOCR(**base_kwargs)
+        signature = inspect.signature(PaddleOCR.__init__)
+    except (TypeError, ValueError):  # pragma: no cover - CPython guard
+        signature = None
+    if signature is not None and "show_log" in signature.parameters:
+        kwargs["show_log"] = False
+    try:
+        return PaddleOCR(**kwargs)
+    except (TypeError, ValueError):
+        kwargs.pop("show_log", None)
+        return PaddleOCR(**kwargs)
 
 
 def get_paddle_ocr(logger: Optional[logging.Logger] = None):
@@ -33,12 +40,17 @@ def get_paddle_ocr(logger: Optional[logging.Logger] = None):
     except ImportError:
         global _MISSING_PADDLE_WARNED
         if not _MISSING_PADDLE_WARNED:
-            log.warning(
-                "paddleocr is not installed; OCR-dependent features are disabled"
+            log.error(
+                "paddleocr is not installed; OCR-dependent features are disabled."
+                " Install the pinned PaddlePaddle/PaddleOCR packages from requirements.txt."
             )
             _MISSING_PADDLE_WARNED = True
     except Exception as exc:  # pragma: no cover - defensive
-        log.warning("Failed to initialise PaddleOCR: %s", exc)
+        log.error(
+            "Failed to initialise PaddleOCR: %s. Ensure the PaddlePaddle/PaddleOCR"
+            " wheels listed in requirements.txt are installed.",
+            exc,
+        )
     return None
 
 

@@ -417,13 +417,17 @@ def _format_duration(seconds: float) -> str:
 class QtLogHandler(logging.Handler):
     """Logging handler that forwards records to a Qt slot."""
 
-    def __init__(self, emit: Callable[[str], None]) -> None:
+    def __init__(self, emit: Callable[[int, str], None]) -> None:
         super().__init__()
         self._emit = emit
 
     def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - thin wrapper
         message = self.format(record)
-        self._emit(message)
+        try:
+            self._emit(record.levelno, message)
+        except TypeError:
+            # Fallback for legacy callbacks that only accept a message.
+            self._emit(message)  # type: ignore[misc]
 
 
 class _ProgressTracker:
@@ -734,7 +738,7 @@ class BuildWorker(QtCore.QObject):
 class LegacyBuilderWindow(QtWidgets.QMainWindow):
     """Main window that orchestrates the microwire database build."""
 
-    log_message = QtCore.pyqtSignal(str)
+    log_message = QtCore.pyqtSignal(int, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -2089,7 +2093,8 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             self._thread = None
 
     # ------------------------------------------------------------------ Qt hooks
-    def _append_log(self, message: str) -> None:
+    def _append_log(self, level: int, message: str) -> None:
+        _ = level
         self.log_view.appendPlainText(message)
         scrollbar = self.log_view.verticalScrollBar()
         if scrollbar is not None:
@@ -2396,12 +2401,12 @@ def _annealing_records_to_frame(
     columns = [
         "Composition",
         "Microwire",
+        "Graph — 1000 mA",
+        "Graph — low mA",
         "1000 mA setpoint",
         "Samples @1000 mA",
-        "Graph — 1000 mA",
         "Low current setpoint",
         "Samples @low",
-        "Graph — low mA",
         "Updated",
         "_group_key",
         "_sources",
@@ -2463,12 +2468,12 @@ def _annealing_records_to_frame(
             {
                 "Composition": composition,
                 "Microwire": microwire,
+                "Graph — 1000 mA": None,
+                "Graph — low mA": None,
                 "1000 mA setpoint": high_setpoint,
                 "Samples @1000 mA": high_samples,
-                "Graph — 1000 mA": None,
                 "Low current setpoint": low_setpoint,
                 "Samples @low": low_samples,
-                "Graph — low mA": None,
                 "Updated": updated,
                 "_group_key": group_key,
                 "_sources": source_paths,
@@ -2887,11 +2892,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     sources_changed = QtCore.pyqtSignal(list)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
+    _SCROLL_SINGLE_STEP = 40
 
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2959,9 +2965,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
         right_panel = self.create_right_panel(self)
         layout.addWidget(right_panel, 1)
+        self._configure_table_view()
 
         self._populate_sources_list()
         self.model.set_frame(self.data.table)
+        self._auto_fit_columns()
         self._update_status()
         self._reset_progress_ui()
         self._hook_table_selection()
@@ -2986,6 +2994,29 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(table, 1)
         return container
+
+    def _configure_table_view(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        table.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        vertical_bar = table.verticalScrollBar()
+        if vertical_bar is not None:
+            vertical_bar.setSingleStep(self._SCROLL_SINGLE_STEP)
+
+    def _auto_fit_columns(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        try:
+            table.resizeColumnsToContents()
+        except Exception:
+            return
 
     def _populate_sources_list(self) -> None:
         self.sources_list.clear()
@@ -3082,12 +3113,18 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     def _open_file(self, path: Path) -> bool:
         resolved = path.expanduser()
         if not resolved.exists():
-            self.log(f"{self.section_title}: source file missing — {resolved}")
+            self.log(
+                f"{self.section_title}: source file missing — {resolved}",
+                level=logging.WARNING,
+            )
             return False
         url = QtCore.QUrl.fromLocalFile(str(resolved))
         opened = QtGui.QDesktopServices.openUrl(url)
         if not opened:
-            self.log(f"{self.section_title}: could not open {resolved}")
+            self.log(
+                f"{self.section_title}: could not open {resolved}",
+                level=logging.WARNING,
+            )
         return opened
 
     def _open_selected_sources(self) -> None:
@@ -3375,11 +3412,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, level: int = logging.INFO) -> None:
         try:
-            self._log_callback(message)
+            self._log_callback(level, message)
         except Exception:
-            self.logger.info(message)
+            self.logger.log(level, message)
 
     def refresh(self) -> None:
         candidates = self._collect_candidates()
@@ -3389,6 +3426,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.data.table = pd.DataFrame()
             self.store.save(self.data)
             self.model.set_frame(self.data.table)
+            self._auto_fit_columns()
             self._update_status()
             self._reset_progress_ui()
             return
@@ -3453,6 +3491,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data.table = result.table
         self.store.save(self.data)
         self.model.set_frame(result.table)
+        self._auto_fit_columns()
         self._update_status()
         self.log(
             f"{self.section_title}: processed {len(candidates)} file(s)."
@@ -3475,7 +3514,7 @@ class FabricationSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
@@ -3803,7 +3842,7 @@ class AnnealingSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
@@ -3890,8 +3929,8 @@ class AnnealingSection(MiniDatabaseSection):
             )
             if preview:
                 summary += f": {preview}"
-            self.log(summary)
-            self.logger.info(summary)
+            self.log(summary, level=logging.WARNING)
+            self.logger.warning(summary)
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -3937,7 +3976,7 @@ class AnnealingSection(MiniDatabaseSection):
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             return
-        sanitised = False
+        changed = False
         for column in ("Graph — 1000 mA", "Graph — low mA"):
             if column not in frame.columns:
                 continue
@@ -3951,11 +3990,32 @@ class AnnealingSection(MiniDatabaseSection):
             )
             if not cleaned.equals(series):
                 frame[column] = cleaned
-                sanitised = True
-        if sanitised:
+                changed = True
+        desired_order = [
+            "Composition",
+            "Microwire",
+            "Graph — 1000 mA",
+            "Graph — low mA",
+            "1000 mA setpoint",
+            "Samples @1000 mA",
+            "Low current setpoint",
+            "Samples @low",
+            "Updated",
+            "_group_key",
+            "_sources",
+        ]
+        current_columns = list(frame.columns)
+        preferred = [col for col in desired_order if col in frame.columns]
+        remainder = [col for col in current_columns if col not in desired_order]
+        new_order = preferred + remainder
+        if new_order != current_columns and new_order:
+            frame = frame.loc[:, new_order]
+            changed = True
+        if changed:
             self.data.table = frame
             if isinstance(self.model, DataFrameModel):
                 self.model.set_frame(frame)
+                self._auto_fit_columns()
             try:
                 self.store.save(self.data)
             except Exception:
@@ -4206,7 +4266,7 @@ class MicroscopeSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, float]] = {}
@@ -4411,6 +4471,7 @@ class MicroscopeSection(MiniDatabaseSection):
             frame.at[index, "d/D"] = ratio
         self.data.table = frame
         self.model.set_frame(frame)
+        self._auto_fit_columns()
 
     def refresh(self) -> None:
         super().refresh()
@@ -4476,7 +4537,7 @@ class VideoSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
@@ -4575,7 +4636,7 @@ class StrainSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._wire_choices: Dict[str, Dict[str, tuple[int, int]]] = {}
@@ -5130,7 +5191,7 @@ class StrainSection(MiniDatabaseSection):
         self.model.set_frame(self.data.table)
         if isinstance(self.table_view, QtWidgets.QTableView):
             self._update_hidden_columns()
-            self.table_view.resizeColumnsToContents()
+        self._auto_fit_columns()
 
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -5439,7 +5500,7 @@ class AssemblySection(QtWidgets.QWidget):
         self,
         sections: Dict[str, MiniDatabaseSection],
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         console_callback: Optional[Callable[[pd.DataFrame], None]] = None,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
@@ -5513,6 +5574,15 @@ class AssemblySection(QtWidgets.QWidget):
         self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.preview_table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        preview_bar = self.preview_table.verticalScrollBar()
+        if preview_bar is not None:
+            preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
         layout.addWidget(self.preview_table, 1)
         self.preview_table.show()
 
@@ -5526,11 +5596,11 @@ class AssemblySection(QtWidgets.QWidget):
         button_row.addWidget(self.combine_button)
         layout.addLayout(button_row)
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, level: int = logging.INFO) -> None:
         try:
-            self._log_callback(message)
+            self._log_callback(level, message)
         except Exception:
-            self.logger.info(message)
+            self.logger.log(level, message)
 
     def _choose_output_dir(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -5638,6 +5708,10 @@ class AssemblySection(QtWidgets.QWidget):
     def _update_preview(self, frame: pd.DataFrame) -> None:
         self.preview_model.set_frame(frame)
         self.preview_table.setVisible(True)
+        try:
+            self.preview_table.resizeColumnsToContents()
+        except Exception:
+            pass
         if self._console_callback is not None and isinstance(frame, pd.DataFrame):
             try:
                 self._console_callback(frame.copy())
@@ -5814,14 +5888,24 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setObjectName("builderMessageLogView")
 
         self.sections: Dict[str, MiniDatabaseSection] = {}
+        self._log_has_unread_errors = False
+        self._log_highlight_active = False
 
-        def _append_log(message: str) -> None:
+        def _append_log(level: int, message: str) -> None:
             self.log_view.appendPlainText(message)
             scrollbar = self.log_view.verticalScrollBar()
             if scrollbar is not None:
                 scrollbar.setValue(scrollbar.maximum())
+            if level >= logging.ERROR:
+                dock = getattr(self, "log_dock", None)
+                if isinstance(dock, QtWidgets.QDockWidget) and dock.isVisible() and self.isActiveWindow():
+                    self._log_has_unread_errors = False
+                else:
+                    self._log_has_unread_errors = True
+            self._update_log_highlight()
 
         self.annealing_section = AnnealingSection(self.logger, _append_log)
         self.tab_widget.addTab(self.annealing_section, "Current annealing")
@@ -5880,7 +5964,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_dock.setObjectName("builderMessageLogDock")
         self.log_dock.setWidget(self.log_view)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.log_dock)
+        self.log_dock.visibilityChanged.connect(self._handle_log_visibility)
         self.log_dock.hide()
+        self._update_log_highlight()
 
         self.console_widget = PythonConsoleWidget(self)
         self.console_widget.set_environment({"window": self, "pd": pd})
@@ -5968,6 +6054,28 @@ class BuilderWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return panel
+
+    def _handle_log_visibility(self, visible: bool) -> None:
+        if visible and getattr(self, "_log_has_unread_errors", False):
+            self._log_has_unread_errors = False
+            self._update_log_highlight()
+
+    def _update_log_highlight(self) -> None:
+        dock = getattr(self, "log_dock", None)
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return
+        highlight = bool(getattr(self, "_log_has_unread_errors", False))
+        if getattr(self, "_log_highlight_active", False) == highlight:
+            return
+        self._log_highlight_active = highlight
+        if highlight:
+            dock.setStyleSheet(
+                "QDockWidget#builderMessageLogDock { border: 1px solid #c62828; }"
+            )
+            self.log_view.setStyleSheet("background-color: #ffebee;")
+        else:
+            dock.setStyleSheet("")
+            self.log_view.setStyleSheet("")
 
     def _handle_fabrication_sources_changed(self, sources: Iterable[str]) -> None:
         video = getattr(self, "video_section", None)

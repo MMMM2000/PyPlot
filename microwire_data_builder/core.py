@@ -1241,13 +1241,13 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
     log = logger or logging.getLogger(LOGGER_NAME)
     ocr = get_paddle_ocr(log)
     if ocr is None:
-        log.debug("PaddleOCR is not available; skipping microscope OCR for %s", path)
+        log.warning("PaddleOCR is not available; skipping microscope OCR for %s", path)
         return MicroscopeOCRResult()
 
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
     except ImportError:
-        log.debug("Pillow is not installed; skipping microscope OCR for %s", path)
+        log.warning("Pillow is not installed; skipping microscope OCR for %s", path)
         return MicroscopeOCRResult()
 
     try:
