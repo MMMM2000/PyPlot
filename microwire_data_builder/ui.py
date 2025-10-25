@@ -59,11 +59,20 @@ from .core import (
     _plot_measurement_matplotlib,
     _select_high_measurement,
     _select_low_measurement,
+    _value_for_output,
+    _compose_notes,
 )
 
 
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
+
+
+ANNEALING_GRAPH_WIDTH = 360
+ANNEALING_GRAPH_HEIGHT = 200
+ANNEALING_TITLE_FONT_SIZE = 11
+ANNEALING_AXIS_FONT_SIZE = 8
+ANNEALING_TICK_FONT_SIZE = 8
 
 
 _STAGE_LABELS = {
@@ -2264,26 +2273,45 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Draw",
         "Piece",
         "Length (m)",
+        "Piece turns",
+        "Piece date",
+        "d (µm)",
+        "D (µm)",
+        "d/D",
         "Resistance (Ω)",
         "Temperature (°C)",
         "Mass (g)",
+        "Winding speed (m/min)",
+        "Glass feeding (mm/min)",
+        "Underpressure",
+        "Bistable status",
+        "Notes",
         "Production datetime",
         "_source_path",
     ]
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
         draw_record = index.get_draw(composition, draw)
-        row: Dict[str, Any] = {
-            "Composition": composition,
-            "Draw": draw,
-            "Piece": piece,
-            "Length (m)": piece_record.get("length_m"),
-            "Resistance (Ω)": draw_record.get("fabrication_resistance_ohm"),
-            "Temperature (°C)": draw_record.get("fabrication_temperature_c"),
-            "Mass (g)": draw_record.get("mass_g"),
-            "Production datetime": draw_record.get("production_datetime"),
-            "_source_path": piece_record.get("_source_path") or draw_record.get("_source_path"),
-        }
+        row: Dict[str, Any] = {column: None for column in columns}
+        row["Composition"] = composition
+        row["Draw"] = draw
+        row["Piece"] = piece
+        row["Length (m)"] = _value_for_output(piece_record, "length_m")
+        row["Piece turns"] = _value_for_output(piece_record, "piece_turns")
+        row["Piece date"] = _value_for_output(piece_record, "piece_date")
+        row["d (µm)"] = _value_for_output(piece_record, "d_um")
+        row["D (µm)"] = _value_for_output(piece_record, "D_um")
+        row["d/D"] = _value_for_output(piece_record, "d_over_D")
+        row["Resistance (Ω)"] = _value_for_output(draw_record, "fabrication_resistance_ohm")
+        row["Temperature (°C)"] = _value_for_output(draw_record, "fabrication_temperature_c")
+        row["Mass (g)"] = _value_for_output(draw_record, "mass_g")
+        row["Winding speed (m/min)"] = _value_for_output(draw_record, "winding_speed_m_per_min")
+        row["Glass feeding (mm/min)"] = _value_for_output(draw_record, "glass_feed_mm_per_min")
+        row["Underpressure"] = _value_for_output(draw_record, "underpressure")
+        row["Bistable status"] = _value_for_output(draw_record, "bistable_status")
+        row["Notes"] = _compose_notes(draw_record, piece_record)
+        row["Production datetime"] = _value_for_output(draw_record, "production_datetime")
+        row["_source_path"] = piece_record.get("_source_path") or draw_record.get("_source_path")
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -2294,8 +2322,8 @@ def _render_measurement_pixmap(
     record: Optional[MeasurementRecord],
     logger: logging.Logger,
     *,
-    width_px: int = 360,
-    height_px: int = 200,
+    width_px: int = ANNEALING_GRAPH_WIDTH,
+    height_px: int = ANNEALING_GRAPH_HEIGHT,
 ) -> Optional[QtGui.QPixmap]:
     if record is None:
         return None
@@ -2336,8 +2364,42 @@ def _render_measurement_pixmap(
     figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
     canvas_agg: FigureCanvasAgg | None = None
     figure = None
+    rc_overrides = {
+        "axes.titlesize": ANNEALING_TITLE_FONT_SIZE,
+        "axes.labelsize": ANNEALING_AXIS_FONT_SIZE,
+        "xtick.labelsize": ANNEALING_TICK_FONT_SIZE,
+        "ytick.labelsize": ANNEALING_TICK_FONT_SIZE,
+        "legend.fontsize": ANNEALING_AXIS_FONT_SIZE,
+    }
     try:
-        figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
+        with plt.rc_context(rc_overrides):
+            figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
+        if figure is not None:
+            for ax in figure.axes:
+                try:
+                    ax.tick_params(labelsize=ANNEALING_TICK_FONT_SIZE)
+                except Exception:
+                    pass
+                try:
+                    ax.xaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
+                    ax.yaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
+                except Exception:
+                    pass
+                if ax.get_title():
+                    try:
+                        ax.set_title(ax.get_title(), fontsize=ANNEALING_TITLE_FONT_SIZE)
+                    except Exception:
+                        pass
+                legend = ax.get_legend()
+                if legend is not None:
+                    try:
+                        legend.remove()
+                    except Exception:
+                        legend.set_visible(False)
+                try:
+                    ax.figure.subplots_adjust(left=0.16, right=0.98, top=0.9, bottom=0.2)
+                except Exception:
+                    pass
         canvas_agg = FigureCanvasAgg(figure)
         canvas_agg.draw()
         width, height = canvas_agg.get_width_height()
@@ -3017,6 +3079,30 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             table.resizeColumnsToContents()
         except Exception:
             return
+        model = getattr(table, "model", lambda: None)()
+        frame: Optional[pd.DataFrame] = None
+        if hasattr(model, "frame"):
+            try:
+                frame = model.frame()
+            except Exception:
+                frame = None
+        if frame is None or getattr(frame, "empty", False):
+            return
+        try:
+            icon_width = table.iconSize().width()
+        except Exception:
+            icon_width = 0
+        if icon_width <= 0:
+            icon_width = ANNEALING_GRAPH_WIDTH
+        graph_width = max(int(icon_width) + 24, 0)
+        for idx, column_name in enumerate(frame.columns):
+            label = str(column_name)
+            if "Graph" not in label and "Figure" not in label:
+                continue
+            current = table.columnWidth(idx)
+            target = graph_width if graph_width > current else current
+            if target > 0:
+                table.setColumnWidth(idx, target)
 
     def _populate_sources_list(self) -> None:
         self.sources_list.clear()
@@ -3870,8 +3956,14 @@ class AnnealingSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         table.setSortingEnabled(True)
-        table.setIconSize(QtCore.QSize(340, 200))
-        table.verticalHeader().setDefaultSectionSize(220)
+        table.setIconSize(
+            QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
+        )
+        header = table.verticalHeader()
+        if header is not None:
+            default_height = ANNEALING_GRAPH_HEIGHT + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
         self.table_view = table
         return table
 

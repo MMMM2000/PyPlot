@@ -2,16 +2,19 @@
 
 ## 2025-10-26
 
-- Auto-fit every microwire worksheet to its contents, reorder the current
-  annealing grid so the 1000 mA/low-current plots appear beside the composition
-  metadata, and switch table scrolling to a smoother per-pixel step so browsing
-  large batches feels controllable again.
+- Auto-fit every microwire worksheet to its contents, expand the annealing
+  previews so each graph column matches the rendered plot width, and shrink the
+  inline chart typography (with legends removed) so the visual data dominates
+  the row instead of oversized labels.
 - Highlight the Message Log dock in red until unread errors are viewed and route
   all section issues through the log handler, making failures impossible to miss
   outside the VS Code terminal.
 - Allow PaddleOCR to initialise on builds without the `show_log` flag, warn when
   OCR or Pillow is unavailable, and surface setup guidance directly in the log
   so microscope/video OCR explains what the environment still needs.
+- Surface the full fabrication metadata—including winding speed, glass feed,
+  underpressure, bistable status, piece turns and combined notes—directly in the
+  fabrication worksheet so no spreadsheet context is lost when reviewing rows.
 
 ## 2025-10-25 02:45 UTC
 

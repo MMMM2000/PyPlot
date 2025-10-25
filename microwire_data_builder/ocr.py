@@ -17,18 +17,30 @@ def _create_default_ocr() -> "PaddleOCR":
 
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    kwargs = {"lang": "en", "use_angle_cls": True}
+    base_kwargs = {"lang": "en", "use_angle_cls": True}
+    attempts = []
     try:
         signature = inspect.signature(PaddleOCR.__init__)
     except (TypeError, ValueError):  # pragma: no cover - CPython guard
         signature = None
     if signature is not None and "show_log" in signature.parameters:
-        kwargs["show_log"] = False
-    try:
-        return PaddleOCR(**kwargs)
-    except (TypeError, ValueError):
-        kwargs.pop("show_log", None)
-        return PaddleOCR(**kwargs)
+        attempt_with_flag = dict(base_kwargs)
+        attempt_with_flag["show_log"] = False
+        attempts.append(attempt_with_flag)
+    attempts.append(dict(base_kwargs))
+
+    last_exc: Optional[Exception] = None
+    for kwargs in attempts:
+        try:
+            return PaddleOCR(**kwargs)
+        except Exception as exc:  # pragma: no cover - defensive
+            last_exc = exc
+            if "show_log" in kwargs and "show_log" in str(exc):
+                continue
+            break
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Unable to initialise PaddleOCR")
 
 
 def get_paddle_ocr(logger: Optional[logging.Logger] = None):
