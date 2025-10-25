@@ -2275,7 +2275,16 @@ def _render_measurement_pixmap(
         canvas_agg.draw()
         width, height = canvas_agg.get_width_height()
         buffer = canvas_agg.buffer_rgba()
-        image = QtGui.QImage(buffer, width, height, 4 * width, QtGui.QImage.Format_RGBA8888)
+        try:
+            format_rgba = QtGui.QImage.Format.Format_RGBA8888  # PyQt6 style
+            format_argb = QtGui.QImage.Format.Format_ARGB32
+        except AttributeError:  # pragma: no cover - PyQt5 fallback
+            format_rgba = getattr(QtGui.QImage, "Format_RGBA8888", None)
+            format_argb = getattr(QtGui.QImage, "Format_ARGB32", None)
+        image_format = format_rgba or format_argb
+        image = QtGui.QImage(buffer, width, height, 4 * width, image_format)
+        if image.isNull() and format_argb is not None and image_format != format_argb:
+            image = QtGui.QImage(buffer, width, height, 4 * width, format_argb)
         return QtGui.QPixmap.fromImage(image.copy())
     except Exception:
         logger.exception(
@@ -2784,6 +2793,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data = self.store.load()
         self.model = DataFrameModel(self.data.table)
         self.table_view: QtWidgets.QTableView | None = None
+        self._cancel_requested = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2804,6 +2814,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.refresh_button = QtWidgets.QPushButton("Refresh")
         self.refresh_button.clicked.connect(self.refresh)
         controls.addWidget(self.refresh_button)
+
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._request_cancel)
+        controls.addWidget(self.stop_button)
 
         layout.addLayout(controls)
         self.controls_layout = controls
@@ -2867,6 +2882,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._progress_total = 0
         self._progress_current = 0
         self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
 
     def _start_progress(self, total: int) -> None:
         self._progress_total = max(int(total), 0)
@@ -2925,6 +2942,24 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             QtCore.QEventLoop.ProcessEventsFlag.AllEvents
         )
 
+    def _request_cancel(self) -> None:
+        if self._cancel_requested:
+            return
+        self._cancel_requested = True
+        self.stop_button.setEnabled(False)
+        self.progress_label.setText("Cancelling…")
+        self.progress_bar.setRange(0, 0)
+        QtWidgets.QApplication.processEvents(
+            QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+        )
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_requested
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_requested:
+            raise BuildCancelledError()
+
     def _finish_progress(self) -> None:
         if self._progress_total > 0:
             self.progress_bar.setRange(0, 100)
@@ -2943,6 +2978,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         else:
             self.progress_eta_label.clear()
         self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
         self._release_processing()
 
     def _fail_progress(self) -> None:
@@ -2951,6 +2988,18 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.progress_label.setText("Failed")
         self.progress_eta_label.clear()
         self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
+        self._release_processing()
+
+    def _cancel_progress(self) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Cancelled")
+        self.progress_eta_label.clear()
+        self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
         self._release_processing()
 
     def _release_processing(self) -> None:
@@ -3105,6 +3154,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self._update_status()
             self._reset_progress_ui()
             return
+        self._cancel_requested = False
+        self.stop_button.setEnabled(True)
         owner = MiniDatabaseSection._processing_owner
         if owner is not None and owner is not self:
             other_title = getattr(owner, "section_title", "Another section")
@@ -3120,6 +3171,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 f"{self.section_title}: queued refresh while {other_title} completes."
             )
             self._reset_progress_ui()
+            self.stop_button.setEnabled(False)
             return
         MiniDatabaseSection._processing_owner = self
         status_message = f"Processing {len(candidates)} file(s)…"
@@ -3131,6 +3183,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._start_progress(len(candidates))
         try:
             result = self.process(candidates, progress=self._progress_callback)
+        except BuildCancelledError:
+            self.log(f"{self.section_title}: processing cancelled by user.")
+            self._cancel_progress()
+            return
         except Exception as exc:  # pragma: no cover - defensive UI guard
             self.logger.exception("%s processing failed", self.section_title)
             self._fail_progress()
@@ -3282,6 +3338,61 @@ class FabricationSection(MiniDatabaseSection):
             filtered.set_piece(comp_key, draw_int, piece_int, dict(piece_data))
         return filtered
 
+    @staticmethod
+    def _normalise_token(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+    def _filter_candidates_for_relevance(
+        self,
+        candidates: List[Path],
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        relevant_compositions: Set[str],
+    ) -> Tuple[List[Path], int, bool]:
+        if not relevant_compositions:
+            return candidates, 0, False
+        composition_tokens = {
+            comp: self._normalise_token(comp)
+            for comp in relevant_compositions
+            if self._normalise_token(comp)
+        }
+        if not composition_tokens:
+            return candidates, 0, False
+        draw_tokens: Dict[str, Set[str]] = {}
+        for comp, draw_map in relevant_map.items():
+            comp_key = self._normalise_token(comp)
+            if not comp_key:
+                continue
+            bucket = draw_tokens.setdefault(comp_key, set())
+            for draw, pieces in draw_map.items():
+                if draw is not None:
+                    bucket.add(self._normalise_token(draw))
+                for piece in pieces:
+                    if piece is not None:
+                        bucket.add(self._normalise_token(f"{draw}{piece}"))
+        filtered: List[Path] = []
+        skipped = 0
+        for path in candidates:
+            text = self._normalise_token(path)
+            if not text:
+                filtered.append(path)
+                continue
+            matched = False
+            for _, token in composition_tokens.items():
+                if token and token in text:
+                    matched = True
+                    break
+                draw_set = draw_tokens.get(token)
+                if draw_set and any(draw_token in text for draw_token in draw_set if draw_token):
+                    matched = True
+                    break
+            if matched:
+                filtered.append(path)
+            else:
+                skipped += 1
+        if not filtered:
+            return candidates, 0, True
+        return filtered, skipped, False
+
     def process(
         self,
         paths: List[Path],
@@ -3289,19 +3400,38 @@ class FabricationSection(MiniDatabaseSection):
     ) -> SectionProcessResult:
         unique_paths = list(dict.fromkeys(Path(p) for p in paths))
 
+        relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered_paths, skipped, reverted = self._filter_candidates_for_relevance(
+            unique_paths, relevant_map, relevant_compositions
+        )
+        if reverted:
+            self.log(
+                "Fabrication data: relevance filter could not match any files; falling back to full file list."
+            )
+        elif skipped:
+            self.log(
+                f"Fabrication data: skipped {skipped} file(s) without matching current annealing composition."
+            )
+
         def _progress(idx: int, total: int) -> None:
+            self._check_cancelled()
             if progress is None:
                 return
             message: Optional[str] = None
-            if 0 < idx <= len(unique_paths):
-                message = f"Parsing {unique_paths[idx - 1].name}"
+            if 0 < idx <= len(filtered_paths):
+                message = f"Parsing {filtered_paths[idx - 1].name}"
             try:
                 progress(idx, total, message)
             except Exception:
                 pass
 
-        index = build_fabrication_index(unique_paths, self.logger, progress_callback=_progress)
-        relevant_map, relevant_compositions = self._load_relevant_map()
+        index = build_fabrication_index(
+            filtered_paths,
+            self.logger,
+            progress_callback=_progress,
+            cancel_callback=self.is_cancelled,
+        )
+        self._check_cancelled()
         if relevant_compositions:
             original_draws = len(index.draw_level)
             original_pieces = len(index.piece_level)
@@ -3315,7 +3445,7 @@ class FabricationSection(MiniDatabaseSection):
                 )
         table = _fabrication_index_to_frame(index)
         processed: Dict[str, float] = {}
-        for path in unique_paths:
+        for path in filtered_paths:
             try:
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
@@ -3372,6 +3502,7 @@ class AnnealingSection(MiniDatabaseSection):
         total = len(paths)
         sanity_failures: List[Tuple[Path, Optional[float]]] = []
         for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
             try:
                 df = _load_annealing(path)
             except Exception:
@@ -3841,6 +3972,7 @@ class MicroscopeSection(MiniDatabaseSection):
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
         def _progress(idx: int, total: int) -> None:
+            self._check_cancelled()
             if progress is None:
                 return
             message = None
@@ -3855,6 +3987,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 pass
 
         index = _group_microscope_measurements(paths, self.logger, progress_callback=_progress if progress is not None else None)
+        self._check_cancelled()
         # Retain overrides only for existing keys
         filtered_overrides = {
             key: value
@@ -3908,6 +4041,7 @@ class VideoSection(MiniDatabaseSection):
         unique_paths = list(dict.fromkeys(Path(p) for p in paths))
 
         def _progress(idx: int, total: int) -> None:
+            self._check_cancelled()
             if progress is None:
                 return
             message: Optional[str] = None
@@ -3923,6 +4057,7 @@ class VideoSection(MiniDatabaseSection):
             self.logger,
             progress_callback=_progress if progress is not None else None,
         )
+        self._check_cancelled()
         table = _video_index_to_frame(index)
         processed: Dict[str, float] = {}
         for path in unique_paths:
@@ -4891,8 +5026,8 @@ class AssemblySection(QtWidgets.QWidget):
         self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
         self.preview_table.horizontalHeader().setStretchLastSection(True)
-        self.preview_table.hide()
         layout.addWidget(self.preview_table, 1)
+        self.preview_table.show()
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)

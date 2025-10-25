@@ -1,5 +1,19 @@
 # Changelog
 
+## 2025-10-24 23:10 UTC
+
+- Added a Stop control to every mini-database section and wired the refresh
+  loops to honour cancellation so long-running OCR or spreadsheet scans can be
+  halted without closing the builder.
+- Fixed the current-annealing thumbnail renderer to use the Qt 6 image format
+  APIs, restoring the inline graphs on platforms that previously raised
+  `Format_RGBA8888` errors.
+- Narrowed fabrication parsing to the compositions found in the current
+  annealing dataset, skipping unrelated workbooks (with a message-log note) and
+  falling back gracefully when nothing matches.
+- Made the assembly preview table visible by default so combined data appears
+  in the UI as soon as a preview is generated.
+
 ## 2025-10-24 22:15 UTC
 
 - Restored the annealing thumbnails by converting raw measurements to mA before

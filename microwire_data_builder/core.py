@@ -1869,12 +1869,15 @@ def build_fabrication_index(
     fabrication_files: Sequence[Path],
     logger: Optional[logging.Logger] = None,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> FabricationIndex:
     log = _logger(logger)
     index = FabricationIndex()
     unique_files = list(dict.fromkeys(Path(p) for p in fabrication_files))
     total = len(unique_files)
     for idx, path in enumerate(unique_files, start=1):
+        if cancel_callback is not None and cancel_callback():
+            raise BuildCancelledError()
         if path.suffix.lower() != ".xlsx":
             log.debug("Skipping non-Excel file %s", path)
             if progress_callback is not None:
