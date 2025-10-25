@@ -16,7 +16,12 @@ def _create_default_ocr() -> "PaddleOCR":
 
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    return PaddleOCR(lang="en", use_angle_cls=True, show_log=False)
+    base_kwargs = {"lang": "en", "use_angle_cls": True}
+    try:
+        return PaddleOCR(show_log=False, **base_kwargs)
+    except TypeError:
+        # Older/newer PaddleOCR builds may not expose the ``show_log`` flag.
+        return PaddleOCR(**base_kwargs)
 
 
 def get_paddle_ocr(logger: Optional[logging.Logger] = None):

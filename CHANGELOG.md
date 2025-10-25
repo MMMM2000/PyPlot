@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-25 02:45 UTC
+
+- Prevented current-annealing refresh failures by keeping preview pixmaps in
+  memory, sanitising legacy tables, and wiring the worksheet grid to render
+  cached plots per row instead of pickling Qt objects.
+- Fixed PaddleOCR initialisation so macOS installs without the optional
+  ``show_log`` flag load successfully and the microscope/video OCR tabs run
+  again.
+- Tightened fabrication workbook discovery to scan top-level composition
+  folders first before descending, reducing needless traversal on large shared
+  drives.
+
 ## 2025-10-25 01:10 UTC
 
 - Hardened the annealing thumbnail renderer to fall back across all Qt image

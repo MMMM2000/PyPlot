@@ -2124,11 +2124,24 @@ class DataFrameModel(QtCore.QAbstractTableModel):
     def __init__(self, frame: pd.DataFrame | None = None, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._frame = frame.copy() if frame is not None else pd.DataFrame()
+        self._decoration_provider: Optional[
+            Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]
+        ] = None
 
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
         self._frame = frame.copy() if frame is not None else pd.DataFrame()
         self.endResetModel()
+
+    def set_decoration_provider(
+        self,
+        provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]],
+    ) -> None:
+        self._decoration_provider = provider
+        try:
+            self.layoutChanged.emit()
+        except Exception:
+            pass
 
     def frame(self) -> pd.DataFrame:
         return self._frame
@@ -2165,6 +2178,22 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         except Exception:
             return None
         if role == QtCore.Qt.ItemDataRole.DecorationRole:
+            provider = getattr(self, "_decoration_provider", None)
+            if provider is not None:
+                try:
+                    column_label = str(self._frame.columns[index.column()])
+                    row_series = self._frame.iloc[index.row()]
+                except Exception:
+                    pass
+                else:
+                    try:
+                        decoration = provider(row_series, column_label)
+                    except Exception:
+                        decoration = None
+                    if isinstance(decoration, (QtGui.QPixmap, QtGui.QImage)):
+                        if isinstance(decoration, QtGui.QImage):
+                            return QtGui.QPixmap.fromImage(decoration)
+                        return decoration
             if isinstance(value, QtGui.QPixmap):
                 return value
             if isinstance(value, QtGui.QImage):
@@ -2436,10 +2465,10 @@ def _annealing_records_to_frame(
                 "Microwire": microwire,
                 "1000 mA setpoint": high_setpoint,
                 "Samples @1000 mA": high_samples,
-                "Graph — 1000 mA": _render_measurement_pixmap(high_record, logger),
+                "Graph — 1000 mA": None,
                 "Low current setpoint": low_setpoint,
                 "Samples @low": low_samples,
-                "Graph — low mA": _render_measurement_pixmap(low_record, logger),
+                "Graph — low mA": None,
                 "Updated": updated,
                 "_group_key": group_key,
                 "_sources": source_paths,
@@ -3483,23 +3512,24 @@ class FabricationSection(MiniDatabaseSection):
             except Exception:
                 resolved_root = root
             if self.recursive_search:
-                stack: List[Path] = [resolved_root]
+                stack: List[Tuple[Path, bool]] = [(resolved_root, False)]
                 while stack:
-                    current = stack.pop()
+                    current, matched = stack.pop()
                     try:
                         entries = list(current.iterdir())
                     except Exception:
                         continue
                     for entry in entries:
                         if entry.is_dir():
-                            if entry is resolved_root or _should_consider(entry, resolved_root):
-                                stack.append(entry)
+                            next_matched = matched or _should_consider(entry, resolved_root)
+                            if current is resolved_root or next_matched:
+                                stack.append((entry, next_matched))
                             continue
                         if not entry.is_file():
                             continue
                         if self.supported_suffixes and entry.suffix.lower() not in self.supported_suffixes:
                             continue
-                        if not _should_consider(entry, resolved_root):
+                        if not (matched or _should_consider(entry, resolved_root)):
                             continue
                         try:
                             resolved = str(entry.resolve())
@@ -3777,6 +3807,10 @@ class AnnealingSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(logger, log_callback, parent)
+        self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
+        self._sanitize_graph_columns()
         self._record_groups: Dict[str, List[MeasurementRecord]] = {}
         self.export_button = QtWidgets.QPushButton("Export worksheet…")
         self.export_button.clicked.connect(self._export_worksheet)
@@ -3866,6 +3900,7 @@ class AnnealingSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
+        self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
         self._update_export_enabled()
@@ -3896,6 +3931,67 @@ class AnnealingSection(MiniDatabaseSection):
                     continue
                 grouped.setdefault(key, []).append(record)
         self._record_groups = grouped
+        self._invalidate_previews()
+
+    def _sanitize_graph_columns(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            return
+        sanitised = False
+        for column in ("Graph — 1000 mA", "Graph — low mA"):
+            if column not in frame.columns:
+                continue
+            series = frame[column]
+            if not hasattr(series, "apply"):
+                continue
+            cleaned = series.apply(
+                lambda value: None
+                if isinstance(value, (QtGui.QPixmap, QtGui.QImage))
+                else value
+            )
+            if not cleaned.equals(series):
+                frame[column] = cleaned
+                sanitised = True
+        if sanitised:
+            self.data.table = frame
+            if isinstance(self.model, DataFrameModel):
+                self.model.set_frame(frame)
+            try:
+                self.store.save(self.data)
+            except Exception:
+                pass
+        self._invalidate_previews()
+
+    def _invalidate_previews(self) -> None:
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column not in {"Graph — 1000 mA", "Graph — low mA"}:
+            return None
+        key = row.get("_group_key")
+        if not isinstance(key, str) or not key:
+            return None
+        cache_key = (key, column)
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(key)
+        if not records:
+            self._pixmap_cache[cache_key] = None
+            return None
+        high_record, low_record = _select_high_low_pair(records)
+        target = high_record if column == "Graph — 1000 mA" else low_record
+        pixmap = _render_measurement_pixmap(target, self.logger)
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         sources: List[Path] = []
