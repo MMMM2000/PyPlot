@@ -1,5 +1,20 @@
 # Changelog
 
+## 2025-10-27
+
+- Simplified the annealing worksheet layout by leading with the composition/
+  microwire identifiers, widening the graph columns to the full inline plot,
+  and slimming the plot typography so the data area fills each cell without
+  oversized labels.
+- Removed redundant 1000 mA setpoint/sample columns, kept low-current details,
+  and stopped re-scaling currents that already arrive in milliamps to keep the
+  worksheet aligned with the raw measurements.
+- Collected every available d, D, and d/D value (falling back to draw-level
+  records when necessary) while trimming the obsolete bistable column so the
+  fabrication sheet shows only the context still used downstream.
+- Retried PaddleOCR initialisation without the deprecated `show_log` keyword to
+  unblock microscope/video OCR on macOS/Windows builds that ship without it.
+
 ## 2025-10-26
 
 - Auto-fit every microwire worksheet to its contents, expand the annealing

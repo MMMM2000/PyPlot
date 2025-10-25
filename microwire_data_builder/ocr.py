@@ -18,7 +18,7 @@ def _create_default_ocr() -> "PaddleOCR":
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
     base_kwargs = {"lang": "en", "use_angle_cls": True}
-    attempts = []
+    attempts = [dict(base_kwargs)]
     try:
         signature = inspect.signature(PaddleOCR.__init__)
     except (TypeError, ValueError):  # pragma: no cover - CPython guard
@@ -27,7 +27,6 @@ def _create_default_ocr() -> "PaddleOCR":
         attempt_with_flag = dict(base_kwargs)
         attempt_with_flag["show_log"] = False
         attempts.append(attempt_with_flag)
-    attempts.append(dict(base_kwargs))
 
     last_exc: Optional[Exception] = None
     for kwargs in attempts:

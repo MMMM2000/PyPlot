@@ -68,11 +68,11 @@ MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
 
 
-ANNEALING_GRAPH_WIDTH = 360
+ANNEALING_GRAPH_WIDTH = 380
 ANNEALING_GRAPH_HEIGHT = 200
-ANNEALING_TITLE_FONT_SIZE = 11
-ANNEALING_AXIS_FONT_SIZE = 8
-ANNEALING_TICK_FONT_SIZE = 8
+ANNEALING_TITLE_FONT_SIZE = 9
+ANNEALING_AXIS_FONT_SIZE = 7
+ANNEALING_TICK_FONT_SIZE = 7
 
 
 _STAGE_LABELS = {
@@ -2284,7 +2284,6 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Winding speed (m/min)",
         "Glass feeding (mm/min)",
         "Underpressure",
-        "Bistable status",
         "Notes",
         "Production datetime",
         "_source_path",
@@ -2299,16 +2298,24 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row["Length (m)"] = _value_for_output(piece_record, "length_m")
         row["Piece turns"] = _value_for_output(piece_record, "piece_turns")
         row["Piece date"] = _value_for_output(piece_record, "piece_date")
-        row["d (µm)"] = _value_for_output(piece_record, "d_um")
-        row["D (µm)"] = _value_for_output(piece_record, "D_um")
-        row["d/D"] = _value_for_output(piece_record, "d_over_D")
+        row["d (µm)"] = (
+            _value_for_output(piece_record, "d_um")
+            or _value_for_output(draw_record, "d_um")
+        )
+        row["D (µm)"] = (
+            _value_for_output(piece_record, "D_um")
+            or _value_for_output(draw_record, "D_um")
+        )
+        row["d/D"] = (
+            _value_for_output(piece_record, "d_over_D")
+            or _value_for_output(draw_record, "d_over_D")
+        )
         row["Resistance (Ω)"] = _value_for_output(draw_record, "fabrication_resistance_ohm")
         row["Temperature (°C)"] = _value_for_output(draw_record, "fabrication_temperature_c")
         row["Mass (g)"] = _value_for_output(draw_record, "mass_g")
         row["Winding speed (m/min)"] = _value_for_output(draw_record, "winding_speed_m_per_min")
         row["Glass feeding (mm/min)"] = _value_for_output(draw_record, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_record, "underpressure")
-        row["Bistable status"] = _value_for_output(draw_record, "bistable_status")
         row["Notes"] = _compose_notes(draw_record, piece_record)
         row["Production datetime"] = _value_for_output(draw_record, "production_datetime")
         row["_source_path"] = piece_record.get("_source_path") or draw_record.get("_source_path")
@@ -2333,7 +2340,7 @@ def _render_measurement_pixmap(
     if "I_A" in frame.columns and "R_ohm" in frame.columns:
         plot_df = pd.DataFrame(
             {
-                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce"),
                 "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
             }
         ).dropna()
@@ -2369,12 +2376,14 @@ def _render_measurement_pixmap(
         "axes.labelsize": ANNEALING_AXIS_FONT_SIZE,
         "xtick.labelsize": ANNEALING_TICK_FONT_SIZE,
         "ytick.labelsize": ANNEALING_TICK_FONT_SIZE,
-        "legend.fontsize": ANNEALING_AXIS_FONT_SIZE,
+        "lines.linewidth": 1.0,
+        "lines.markersize": 3.0,
     }
     try:
         with plt.rc_context(rc_overrides):
             figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
         if figure is not None:
+            figure.subplots_adjust(left=0.12, right=0.98, top=0.92, bottom=0.18)
             for ax in figure.axes:
                 try:
                     ax.tick_params(labelsize=ANNEALING_TICK_FONT_SIZE)
@@ -2396,10 +2405,6 @@ def _render_measurement_pixmap(
                         legend.remove()
                     except Exception:
                         legend.set_visible(False)
-                try:
-                    ax.figure.subplots_adjust(left=0.16, right=0.98, top=0.9, bottom=0.2)
-                except Exception:
-                    pass
         canvas_agg = FigureCanvasAgg(figure)
         canvas_agg.draw()
         width, height = canvas_agg.get_width_height()
@@ -2465,10 +2470,7 @@ def _annealing_records_to_frame(
         "Microwire",
         "Graph — 1000 mA",
         "Graph — low mA",
-        "1000 mA setpoint",
-        "Samples @1000 mA",
         "Low current setpoint",
-        "Samples @low",
         "Updated",
         "_group_key",
         "_sources",
@@ -2513,10 +2515,7 @@ def _annealing_records_to_frame(
             else ""
         )
 
-        high_setpoint = _format_setpoint(_extract_setpoint(high_record))
         low_setpoint = _format_setpoint(_extract_setpoint(low_record))
-        high_samples = len(getattr(getattr(high_record, "dataframe", None), "index", [])) if high_record else ""
-        low_samples = len(getattr(getattr(low_record, "dataframe", None), "index", [])) if low_record else ""
 
         group_key = f"{composition}|{draw}|{piece}"
         source_paths: List[str] = []
@@ -2532,10 +2531,7 @@ def _annealing_records_to_frame(
                 "Microwire": microwire,
                 "Graph — 1000 mA": None,
                 "Graph — low mA": None,
-                "1000 mA setpoint": high_setpoint,
-                "Samples @1000 mA": high_samples,
                 "Low current setpoint": low_setpoint,
-                "Samples @low": low_samples,
                 "Updated": updated,
                 "_group_key": group_key,
                 "_sources": source_paths,
@@ -2954,7 +2950,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     sources_changed = QtCore.pyqtSignal(list)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
-    _SCROLL_SINGLE_STEP = 40
+    _SCROLL_SINGLE_STEP = 24
 
     def __init__(
         self,
@@ -3094,7 +3090,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             icon_width = 0
         if icon_width <= 0:
             icon_width = ANNEALING_GRAPH_WIDTH
-        graph_width = max(int(icon_width) + 24, 0)
+        graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 40
         for idx, column_name in enumerate(frame.columns):
             label = str(column_name)
             if "Graph" not in label and "Figure" not in label:
@@ -4088,10 +4084,7 @@ class AnnealingSection(MiniDatabaseSection):
             "Microwire",
             "Graph — 1000 mA",
             "Graph — low mA",
-            "1000 mA setpoint",
-            "Samples @1000 mA",
             "Low current setpoint",
-            "Samples @low",
             "Updated",
             "_group_key",
             "_sources",
