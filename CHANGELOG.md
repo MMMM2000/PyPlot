@@ -433,6 +433,14 @@
   composition percentages do not add up to 100 %, while still allowing
   measurements to proceed.
 
+## 2025-10-21 15:30 UTC
+
+- Added a Tesseract-backed microscope OCR fallback so bracketed micrometer
+  annotations (e.g. `[1]6.7 µm`) populate the builder even when PaddleOCR returns
+  no text, and surfaced the captured strings in debug logs.
+- Added regression coverage that stubs pytesseract to ensure the fallback keeps
+  recording both core and glass diameters in the database worksheet.
+
 ## 2025-10-19
 
 - Bumped pinned dependencies (matplotlib 3.10.7, numpy 2.2.6 (to satisfy opencv-python) , pandas 2.3.3, plotly 6.3.1, psutil 7.1.1, zeroconf 0.148.0, etc.), raised the runtime floor to Python 3.10, and migrated from `PyPDF2` to the actively maintained `pypdf` 6.1.2 via `pip-compile --upgrade`.

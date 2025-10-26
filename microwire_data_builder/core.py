@@ -1496,8 +1496,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
     log = logger or logging.getLogger(LOGGER_NAME)
     ocr = get_paddle_ocr(log)
     if ocr is None:
-        log.warning("PaddleOCR is not available; skipping microscope OCR for %s", path)
-        return MicroscopeOCRResult()
+        log.warning(
+            "PaddleOCR is not available; falling back to Tesseract for %s", path
+        )
 
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
@@ -1666,6 +1667,106 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         if variant is None:
             continue
         variant_entries.append((label, variant, (0, 0), reference_size))
+
+    def _run_tesseract_fallback() -> bool:
+        try:  # pragma: no cover - optional dependency
+            import pytesseract  # type: ignore[import-not-found]
+            from pytesseract import TesseractNotFoundError  # type: ignore[import-not-found]
+        except Exception:
+            return False
+
+        try:  # pragma: no cover - optional dependency
+            pytesseract.get_tesseract_version()
+        except TesseractNotFoundError:
+            log.debug(
+                "Tesseract binary not found; skipping fallback OCR for %s", path
+            )
+            return False
+        except Exception:
+            # Other exceptions (for example, permission errors) should be logged but
+            # are not fatal for the main OCR run.
+            log.debug("Tesseract version probe failed", exc_info=True)
+
+        tess_config = (
+            "--oem 3 --psm 6 "
+            "-c tessedit_char_whitelist=0123456789[].,umµ"
+        )
+
+        seen_variants: Set[str] = set()
+        marker_values: Dict[Tuple[int, float], float] = {}
+        appended = False
+
+        def _prepare_variant(label: str, image: Image.Image) -> None:
+            nonlocal appended
+            if image is None:
+                return
+            if label in seen_variants:
+                return
+            seen_variants.add(label)
+            try:
+                processed = image.convert("L")
+            except Exception:
+                return
+            enhanced = ImageEnhance.Contrast(processed).enhance(2.5)
+            binary = processed.point(lambda p: 255 if p > 170 else 0, mode="1")
+            binary_gray = binary.convert("L")
+            for suffix, variant in (
+                ("base", processed),
+                ("contrast", enhanced),
+                ("binary", binary_gray),
+            ):
+                variant_label = f"{label}/{suffix}"
+                if variant_label in seen_variants:
+                    continue
+                seen_variants.add(variant_label)
+                try:
+                    text = pytesseract.image_to_string(variant, config=tess_config)
+                except Exception:
+                    log.debug(
+                        "Tesseract failed while processing %s (%s)",
+                        path,
+                        variant_label,
+                        exc_info=True,
+                    )
+                    continue
+                cleaned = _normalise_microscope_text(text or "")
+                if not cleaned:
+                    continue
+                _append_candidate(cleaned)
+                tagged = f"tesseract/{variant_label}: {cleaned}"
+                if tagged not in seen_texts:
+                    result.texts.append(tagged)
+                    seen_texts.add(tagged)
+                for match in re.finditer(r"\[(?P<label>[12Il])\]\s*(?P<value>\d+(?:[.,]\d+)?)", cleaned):
+                    label = match.group("label")
+                    if label in {"I", "l"}:
+                        label = "1"
+                    try:
+                        numeric = float(match.group("value").replace(",", "."))
+                    except ValueError:
+                        continue
+                    if not math.isfinite(numeric) or numeric <= 0:
+                        continue
+                    try:
+                        label_idx = int(label)
+                    except ValueError:
+                        continue
+                    key = (label_idx, round(numeric, 3))
+                    if key in marker_values:
+                        continue
+                    marker_values[key] = numeric
+                    result.append_value(numeric)
+                appended = True
+
+        _prepare_variant("original", base)
+        for label, image, _offset, _ref in variant_entries:
+            _prepare_variant(label, image)
+
+        if appended:
+            parsed = _parse_microscope_candidates(candidates)
+            for value in parsed:
+                result.append_value(value)
+        return appended
 
     @dataclass
     class _OCRWord:
@@ -1918,53 +2019,58 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return False
 
     processed_any_variant = False
-    try:
-        direct_result = ocr.ocr(str(path), cls=True)
-    except Exception:
-        direct_result = None
-    if direct_result:
-        if _consume_ocr_output("original", direct_result, (original_width, original_height)):
-            processed_any_variant = True
-
-    for label, variant, offset, ref_size in variant_entries:
-        if variant is None:
-            continue
-        variant_size = variant.size
-        variant_rgb = variant.convert("RGB")
-        variant_array = np.array(variant_rgb)
-        if variant_array.ndim == 2:
-            variant_array = np.stack([variant_array] * 3, axis=-1)
-        elif variant_array.ndim == 3 and variant_array.shape[2] == 4:
-            variant_array = variant_array[:, :, :3]
-        if variant_array.ndim != 3 or variant_array.shape[2] != 3:
-            continue
-        variant_array = variant_array.astype("uint8", copy=False)
-        bgr_image = variant_array[:, :, ::-1].copy()
+    if ocr is not None:
         try:
-            ocr_result = ocr.ocr(bgr_image, cls=True)
+            direct_result = ocr.ocr(str(path), cls=True)
         except Exception:
-            log.debug(
-                "PaddleOCR failed while processing %s; skipping this variant", path,
-                exc_info=True,
-            )
-            continue
-        if _consume_ocr_output(
-            label,
-            ocr_result,
-            variant_size,
-            offset=offset,
-            reference_size=ref_size,
-        ):
-            processed_any_variant = True
+            direct_result = None
+        if direct_result:
+            if _consume_ocr_output("original", direct_result, (original_width, original_height)):
+                processed_any_variant = True
 
-        if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
-            values = _parse_microscope_candidates(candidates)
-            if values:
-                for value in values:
-                    result.append_value(value)
+        for label, variant, offset, ref_size in variant_entries:
+            if variant is None:
+                continue
+            variant_size = variant.size
+            variant_rgb = variant.convert("RGB")
+            variant_array = np.array(variant_rgb)
+            if variant_array.ndim == 2:
+                variant_array = np.stack([variant_array] * 3, axis=-1)
+            elif variant_array.ndim == 3 and variant_array.shape[2] == 4:
+                variant_array = variant_array[:, :, :3]
+            if variant_array.ndim != 3 or variant_array.shape[2] != 3:
+                continue
+            variant_array = variant_array.astype("uint8", copy=False)
+            bgr_image = variant_array[:, :, ::-1].copy()
+            try:
+                ocr_result = ocr.ocr(bgr_image, cls=True)
+            except Exception:
+                log.debug(
+                    "PaddleOCR failed while processing %s; skipping this variant",
+                    path,
+                    exc_info=True,
+                )
+                continue
+            if _consume_ocr_output(
+                label,
+                ocr_result,
+                variant_size,
+                offset=offset,
+                reference_size=ref_size,
+            ):
+                processed_any_variant = True
+
+            if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
+                values = _parse_microscope_candidates(candidates)
+                if values:
+                    for value in values:
+                        result.append_value(value)
+                    break
+            if result.values:
                 break
-        if result.values:
-            break
+
+    if not result.values and _run_tesseract_fallback():
+        processed_any_variant = True
 
     if not processed_any_variant:
         log.debug("PaddleOCR produced no candidate text for %s", path)
