@@ -25,6 +25,9 @@ except Exception:  # pragma: no cover - optional dependency
     TesseractNotFoundError = RuntimeError
 
 
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
+
+
 VARIANT_ORDER: Tuple[str, ...] = (
     "base",
     "grayscale",
@@ -124,6 +127,7 @@ class OcrDebugWidget(QtWidgets.QWidget):
         self.setWindowTitle("Microscope OCR Debug")
         self.resize(960, 640)
         self._logger = logging.getLogger("microwire_data_builder.ocr_debug")
+        self._last_scanned_folder: Optional[Path] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -143,13 +147,20 @@ class OcrDebugWidget(QtWidgets.QWidget):
         directory_row.addWidget(browse_button)
         layout.addLayout(directory_row)
 
-        controls_row = QtWidgets.QHBoxLayout()
-        controls_row.setSpacing(12)
+        self.directory_edit.editingFinished.connect(self._refresh_image_list)
 
-        self.engine_combo = QtWidgets.QComboBox()
-        self.engine_combo.addItems(["PaddleOCR", "Tesseract", "Both"])
-        controls_row.addWidget(QtWidgets.QLabel("Engine:"))
-        controls_row.addWidget(self.engine_combo)
+        lists_row = QtWidgets.QHBoxLayout()
+        lists_row.setSpacing(12)
+
+        image_container = QtWidgets.QVBoxLayout()
+        image_container.setSpacing(6)
+        image_container.addWidget(QtWidgets.QLabel("Images (select one or more):"))
+        self.image_list = QtWidgets.QListWidget()
+        self.image_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.image_list.setUniformItemSizes(True)
+        self.image_list.setMinimumHeight(180)
+        image_container.addWidget(self.image_list)
+        lists_row.addLayout(image_container, 1)
 
         self.variant_list = QtWidgets.QListWidget()
         self.variant_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
@@ -163,13 +174,29 @@ class OcrDebugWidget(QtWidgets.QWidget):
         variant_container.addWidget(self.variant_list)
         variant_widget = QtWidgets.QWidget()
         variant_widget.setLayout(variant_container)
-        controls_row.addWidget(variant_widget, 1)
+        lists_row.addWidget(variant_widget, 1)
+        layout.addLayout(lists_row)
+
+        controls_row = QtWidgets.QHBoxLayout()
+        controls_row.setSpacing(12)
+
+        self.engine_combo = QtWidgets.QComboBox()
+        self.engine_combo.addItems(["PaddleOCR", "Tesseract", "Both"])
+        controls_row.addWidget(QtWidgets.QLabel("Engine:"))
+        controls_row.addWidget(self.engine_combo)
 
         run_button = QtWidgets.QPushButton("Run OCR")
         run_button.clicked.connect(self.run_analysis)
         controls_row.addWidget(run_button)
         controls_row.addStretch(1)
         layout.addLayout(controls_row)
+
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 1)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setTextVisible(False)
+        self.progress_bar.hide()
+        layout.addWidget(self.progress_bar)
 
         self.output_edit = QtWidgets.QPlainTextEdit()
         self.output_edit.setReadOnly(True)
@@ -183,12 +210,15 @@ class OcrDebugWidget(QtWidgets.QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
 
+        self._refresh_image_list()
+
     # UI helpers -----------------------------------------------------------------
     def _browse_for_directory(self) -> None:
         current = Path(self.directory_edit.text().strip() or ".").resolve()
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select microscope image folder", str(current))
         if directory:
             self.directory_edit.setText(directory)
+            self._refresh_image_list()
 
     def _selected_variants(self) -> List[str]:
         variants: List[str] = []
@@ -204,15 +234,12 @@ class OcrDebugWidget(QtWidgets.QWidget):
         if not folder.exists():
             QtWidgets.QMessageBox.warning(self, "OCR Debug", f"Folder {folder} does not exist.")
             return
-        images = sorted(
-            [
-                path
-                for path in folder.iterdir()
-                if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
-            ]
-        )
+        if folder != self._last_scanned_folder:
+            self._refresh_image_list()
+
+        images = self._selected_images(folder)
         if not images:
-            QtWidgets.QMessageBox.information(self, "OCR Debug", "No microscope images found in the selected folder.")
+            QtWidgets.QMessageBox.information(self, "OCR Debug", "No microscope images selected or found in the folder.")
             return
 
         engine_choice = self.engine_combo.currentText()
@@ -221,6 +248,7 @@ class OcrDebugWidget(QtWidgets.QWidget):
         selected_variants = self._selected_variants()
 
         output_lines: List[str] = []
+        self._begin_progress(len(images))
         for image_path in images:
             output_lines.append(f"Image: {image_path.name}")
             if run_paddle:
@@ -230,7 +258,9 @@ class OcrDebugWidget(QtWidgets.QWidget):
                 tesseract_lines = self._run_tesseract(image_path, selected_variants)
                 output_lines.extend(tesseract_lines)
             output_lines.append("")
+            self._advance_progress()
         self.output_edit.setPlainText("\n".join(output_lines).rstrip())
+        self._end_progress()
 
     def _run_paddle(self, image_path: Path) -> List[str]:
         ocr = get_paddle_ocr(self._logger)
@@ -275,6 +305,83 @@ class OcrDebugWidget(QtWidgets.QWidget):
             result = EngineResult(label=f"Tesseract/{name}", texts=[cleaned] if cleaned else [], values=values)
             lines.extend(result.to_lines())
         return lines
+
+    def _refresh_image_list(self) -> None:
+        folder = Path(self.directory_edit.text().strip() or ".")
+        if not folder.exists() or not folder.is_dir():
+            self.image_list.clear()
+            self._last_scanned_folder = None
+            return
+
+        existing_selection = {
+            str(data)
+            for data in (item.data(QtCore.Qt.ItemDataRole.UserRole) for item in self.image_list.selectedItems())
+            if data
+        }
+        self.image_list.clear()
+
+        images = [path.resolve() for path in self._all_images_in_folder(folder)]
+
+        for path in images:
+            item = QtWidgets.QListWidgetItem(path.name)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, str(path))
+            item.setToolTip(str(path))
+            if str(path) in existing_selection:
+                item.setSelected(True)
+            self.image_list.addItem(item)
+
+        if self.image_list.count() and not self.image_list.selectedItems():
+            self.image_list.item(0).setSelected(True)
+
+        self._last_scanned_folder = folder
+
+    def _selected_images(self, folder: Path) -> List[Path]:
+        selected: List[Path] = []
+        for item in self.image_list.selectedItems():
+            data = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if not data:
+                continue
+            candidate = Path(data)
+            if candidate.exists():
+                selected.append(candidate)
+
+        if selected:
+            return selected
+
+        # Fall back to all images in the folder when nothing is selected.
+        return self._all_images_in_folder(folder)
+
+    def _all_images_in_folder(self, folder: Path) -> List[Path]:
+        if not folder.exists() or not folder.is_dir():
+            return []
+        return sorted(
+            [path.resolve() for path in folder.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES],
+            key=lambda path: path.name.lower(),
+        )
+
+    def _begin_progress(self, total: int) -> None:
+        if total <= 0:
+            self.progress_bar.hide()
+            return
+        self.progress_bar.setRange(0, total)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("Processing %p%")
+        self.progress_bar.setTextVisible(True)
+        self.progress_bar.show()
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+
+    def _advance_progress(self) -> None:
+        if not self.progress_bar.isVisible():
+            return
+        self.progress_bar.setValue(self.progress_bar.value() + 1)
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+
+    def _end_progress(self) -> None:
+        if not self.progress_bar.isVisible():
+            return
+        self.progress_bar.setFormat("Completed")
+        QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        self.progress_bar.hide()
 
 
 def main() -> Optional[QtWidgets.QWidget]:

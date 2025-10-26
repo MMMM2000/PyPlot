@@ -1,5 +1,10 @@
 # Changelog
 
+## 2025-10-26 12:15 UTC
+
+- Added an image picker and progress bar to the Microscope OCR Debug experiment
+  so batches can target specific photos while showing live completion status.
+
 ## 2025-10-26 11:32 UTC
 
 - Removed inline microscope thumbnails in the worksheet and promoted the side
