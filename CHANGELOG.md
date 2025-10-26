@@ -433,6 +433,15 @@
   composition percentages do not add up to 100 %, while still allowing
   measurements to proceed.
 
+## 2025-10-22 11:00 UTC
+
+- Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
+  between raw strings and `[1]`-tagged d/D values, with previews and summaries
+  filtered to the selected preprocessing variants.
+- Disabled the automatic Tesseract fallback during debug runs and exposed the
+  new `allow_tesseract_fallback` flag on `_extract_microscope_diameters` to keep
+  PaddleOCR-only experiments focused on the chosen engine.
+
 ## 2025-10-21 15:30 UTC
 
 - Added a Tesseract-backed microscope OCR fallback so bracketed micrometer

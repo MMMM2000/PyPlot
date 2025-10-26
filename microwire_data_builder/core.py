@@ -1490,15 +1490,26 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
     return [float(v) for v in selected.values()]
 
 
-def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> MicroscopeOCRResult:
+def _extract_microscope_diameters(
+    path: Path,
+    logger: logging.Logger,
+    *,
+    allow_tesseract_fallback: bool = True,
+) -> MicroscopeOCRResult:
     """Attempt to OCR diameter annotations from a microscope capture."""
 
     log = logger or logging.getLogger(LOGGER_NAME)
     ocr = get_paddle_ocr(log)
     if ocr is None:
-        log.warning(
-            "PaddleOCR is not available; falling back to Tesseract for %s", path
-        )
+        if allow_tesseract_fallback:
+            log.warning(
+                "PaddleOCR is not available; falling back to Tesseract for %s", path
+            )
+        else:
+            log.warning(
+                "PaddleOCR is not available; skipping microscope OCR fallback for %s",
+                path,
+            )
 
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
@@ -2069,7 +2080,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             if result.values:
                 break
 
-    if not result.values and _run_tesseract_fallback():
+    if allow_tesseract_fallback and not result.values and _run_tesseract_fallback():
         processed_any_variant = True
 
     if not processed_any_variant:

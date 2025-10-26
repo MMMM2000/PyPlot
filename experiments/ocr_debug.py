@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import re
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +41,79 @@ VARIANT_ORDER: Tuple[str, ...] = (
     "binary_invert",
     "fourier",
 )
+
+
+OUTPUT_MODE_OPTIONS: Tuple[Tuple[str, str], ...] = (
+    ("Raw text", "raw"),
+    ("d/D markers ([1])", "markers"),
+)
+
+
+PRIMARY_MARKER_PATTERN = re.compile(r"\[\s*1\s*\]\s*(\d+(?:[.,]\d+)?)")
+
+
+def _marker_values_from_detections(detections: Sequence[object]) -> List[float]:
+    values: List[float] = []
+    for detection in detections or []:
+        marker = getattr(detection, "marker", None)
+        if marker != 1:
+            continue
+        value = getattr(detection, "value", None)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        values.append(numeric)
+    return values
+
+
+def _marker_values_from_texts(texts: Sequence[str]) -> List[float]:
+    values: List[float] = []
+    for text in texts or []:
+        if not text:
+            continue
+        normalised = _normalise_microscope_text(text)
+        for match in PRIMARY_MARKER_PATTERN.finditer(normalised):
+            raw_value = match.group(1).replace(",", ".")
+            try:
+                numeric = float(raw_value)
+            except ValueError:
+                continue
+            if not math.isfinite(numeric) or numeric <= 0:
+                continue
+            values.append(numeric)
+    return values
+
+
+def _normalise_marker_values(values: Sequence[float]) -> List[float]:
+    ordered: List[float] = []
+    seen: set[float] = set()
+    for value in values:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if not math.isfinite(numeric) or numeric <= 0:
+            continue
+        rounded = round(numeric, 3)
+        if rounded in seen:
+            continue
+        seen.add(rounded)
+        ordered.append(rounded)
+    return ordered
+
+
+def _filter_marker_texts(texts: Sequence[str]) -> List[str]:
+    filtered: List[str] = []
+    for text in texts or []:
+        if not text:
+            continue
+        normalised = _normalise_microscope_text(text)
+        if "[1" in normalised or "1]" in normalised:
+            filtered.append(text)
+    return filtered
 
 
 def _fourier_sharpen(image: Image.Image) -> Image.Image:
@@ -228,6 +303,16 @@ class OcrDebugWidget(QtWidgets.QWidget):
         engine_row.addWidget(self.engine_combo, 1)
         left_layout.addLayout(engine_row)
 
+        mode_row = QtWidgets.QHBoxLayout()
+        mode_row.setSpacing(6)
+        mode_label = QtWidgets.QLabel("Output:")
+        self.output_mode_combo = QtWidgets.QComboBox()
+        for label, data in OUTPUT_MODE_OPTIONS:
+            self.output_mode_combo.addItem(label, data)
+        mode_row.addWidget(mode_label)
+        mode_row.addWidget(self.output_mode_combo, 1)
+        left_layout.addLayout(mode_row)
+
         run_button = QtWidgets.QPushButton("Run OCR")
         run_button.clicked.connect(self.run_analysis)
         left_layout.addWidget(run_button)
@@ -281,9 +366,10 @@ class OcrDebugWidget(QtWidgets.QWidget):
         splitter.setSizes([260, 540, 360])
 
         note = QtWidgets.QLabel(
-            "PaddleOCR always runs with the microwire data builder pipeline and emits per-variant"
-            " logs when OCR debug mode is enabled. Tesseract executes only the selected"
-            " preprocessing variants."
+            "PaddleOCR runs through the microwire data builder pipeline without the automatic"
+            " Tesseract fallback, while the Output selector controls whether raw strings or"
+            " bracketed d/D values are shown. Tesseract executes only the preprocessing"
+            " variants you enable above."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -316,6 +402,67 @@ class OcrDebugWidget(QtWidgets.QWidget):
     def _handle_variant_change(self, _: QtWidgets.QListWidgetItem) -> None:
         self._update_previews()
 
+    def _expected_measurement_label(self, image_path: Path) -> Optional[str]:
+        name = image_path.name.lower()
+        if "core" in name:
+            return "d"
+        if "glass" in name:
+            return "D"
+        return None
+
+    def _format_output(
+        self,
+        label: str,
+        image_path: Path,
+        texts: Sequence[str],
+        values: Sequence[float],
+        detections: Sequence[object],
+        output_mode: str,
+    ) -> List[str]:
+        if output_mode != "markers":
+            return EngineResult(
+                label=label,
+                texts=list(texts),
+                values=list(values),
+            ).to_lines()
+
+        expected = self._expected_measurement_label(image_path)
+        heading = label
+        if expected:
+            heading = f"{label} ({expected})"
+
+        marker_values = _marker_values_from_detections(detections)
+        marker_values.extend(_marker_values_from_texts(texts))
+        marker_values = _normalise_marker_values(marker_values)
+        if marker_values:
+            value_text = ", ".join(f"{value:.3f}" for value in marker_values)
+        else:
+            value_text = "—"
+
+        lines: List[str] = [f"  {heading}: values={value_text}"]
+
+        debug_texts: List[str] = []
+        for detection in detections or []:
+            if getattr(detection, "marker", None) == 1:
+                detected_text = getattr(detection, "text", None)
+                if detected_text:
+                    debug_texts.append(detected_text)
+        debug_texts.extend(_filter_marker_texts(texts))
+
+        seen: set[str] = set()
+        for text in debug_texts:
+            normalised = _normalise_microscope_text(text)
+            if normalised in seen:
+                continue
+            seen.add(normalised)
+            wrapped = textwrap.wrap(text, width=96)
+            if wrapped:
+                lines.extend(f"    {line}" for line in wrapped)
+
+        if len(lines) == 1:
+            lines.append("    (no [1] markers recognised)")
+        return lines
+
     # OCR execution ---------------------------------------------------------------
     def run_analysis(self) -> None:
         folder = Path(self.directory_edit.text().strip() or ".")
@@ -334,37 +481,53 @@ class OcrDebugWidget(QtWidgets.QWidget):
         run_paddle = engine_choice in {"PaddleOCR", "Both"}
         run_tesseract = engine_choice in {"Tesseract", "Both"}
         selected_variants = self._selected_variants()
+        output_mode = self.output_mode_combo.currentData() or "raw"
 
         output_lines: List[str] = []
         self._begin_progress(len(images))
         for image_path in images:
             output_lines.append(f"Image: {image_path.name}")
             if run_paddle:
-                paddle_lines = self._run_paddle(image_path)
+                paddle_lines = self._run_paddle(image_path, output_mode)
                 output_lines.extend(paddle_lines)
             if run_tesseract:
-                tesseract_lines = self._run_tesseract(image_path, selected_variants)
+                tesseract_lines = self._run_tesseract(image_path, selected_variants, output_mode)
                 output_lines.extend(tesseract_lines)
             output_lines.append("")
             self._advance_progress()
         self.output_edit.setPlainText("\n".join(output_lines).rstrip())
         self._end_progress()
 
-    def _run_paddle(self, image_path: Path) -> List[str]:
+    def _run_paddle(self, image_path: Path, output_mode: str) -> List[str]:
         ocr = get_paddle_ocr(self._logger)
         if ocr is None:
             return ["  PaddleOCR: unavailable (install paddlepaddle/paddleocr)" ]
         try:
-            result = _extract_microscope_diameters(image_path, self._logger)
+            result = _extract_microscope_diameters(
+                image_path,
+                self._logger,
+                allow_tesseract_fallback=False,
+            )
         except Exception as exc:  # pragma: no cover - defensive
             return [f"  PaddleOCR error: {exc}"]
-        return EngineResult(
-            label="PaddleOCR",
-            texts=[text for text in getattr(result, "texts", [])],
-            values=list(getattr(result, "values", [])),
-        ).to_lines()
+        texts = list(getattr(result, "texts", []))
+        values = list(getattr(result, "values", []))
+        detections = list(getattr(result, "detections", []))
+        return self._format_output(
+            "PaddleOCR",
+            image_path,
+            texts,
+            values,
+            detections,
+            output_mode,
+        )
 
-    def _run_tesseract(self, image_path: Path, variants: Sequence[str]) -> List[str]:
+    def _run_tesseract(
+        self,
+        image_path: Path,
+        variants: Sequence[str],
+        output_mode: str,
+    ) -> List[str]:
         if pytesseract is None:  # pragma: no cover - optional dependency
             return ["  Tesseract: pytesseract is not installed"]
         try:
@@ -390,8 +553,17 @@ class OcrDebugWidget(QtWidgets.QWidget):
                 continue
             cleaned = _normalise_microscope_text(text or "")
             values = _parse_microscope_candidates([cleaned])
-            result = EngineResult(label=f"Tesseract/{name}", texts=[cleaned] if cleaned else [], values=values)
-            lines.extend(result.to_lines())
+            texts = [cleaned] if cleaned else []
+            lines.extend(
+                self._format_output(
+                    f"Tesseract/{name}",
+                    image_path,
+                    texts,
+                    values,
+                    [],
+                    output_mode,
+                )
+            )
         return lines
 
     def _refresh_image_list(self) -> None:
