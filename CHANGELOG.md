@@ -1,5 +1,14 @@
 # Changelog
 
+## 2025-10-26 20:05 UTC
+
+- Added HSV-based red-text detection and a numpy fallback so microscope focus
+  crops capture bracketed annotations even when grayscale thresholds miss them,
+  improving PaddleOCR hit rates on the sample captures.
+- Surfaced PaddleOCR’s raw detection strings per preprocessing variant inside
+  the Microscope OCR Debug tool so you can inspect exactly what the engine
+  returns before heuristics filter the values.
+
 ## 2025-10-26 17:28 UTC
 
 - Tuned PaddleOCR initialisation with higher-sensitivity detection defaults and

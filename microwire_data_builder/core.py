@@ -1642,6 +1642,18 @@ def _extract_microscope_diameters(
     except Exception:  # pragma: no cover - optional dependency
         cv2 = None  # type: ignore[assignment]
 
+    def _append_focus_crop(label: str, rect: Tuple[int, int, int, int]) -> None:
+        x0, y0, x1, y1 = rect
+        width = max(x1 - x0, 0)
+        height = max(y1 - y0, 0)
+        if width < 40 or height < 25:
+            return
+        try:
+            crop = base_resized.crop((x0, y0, x1, y1))
+        except Exception:
+            return
+        focus_variants.append((label, crop, (x0, y0)))
+
     if cv2 is not None:
         try:
             base_array = np.array(base_resized.convert("RGB"))
@@ -1649,49 +1661,102 @@ def _extract_microscope_diameters(
             base_array = None
         if base_array is not None and base_array.ndim == 3 and base_array.shape[2] == 3:
             try:
-                gray = cv2.cvtColor(base_array[:, :, ::-1], cv2.COLOR_BGR2GRAY)
+                bgr = base_array[:, :, ::-1]
+                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
             except Exception:
                 gray = None
+                bgr = None
             if gray is not None:
                 blur = cv2.GaussianBlur(gray, (5, 5), 0)
-                _, mask = cv2.threshold(blur, 215, 255, cv2.THRESH_BINARY)
+                _, mask = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
                 kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
                 mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                contours_info = cv2.findContours(
-                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                )
-                if len(contours_info) == 3:
-                    _, contours, _ = contours_info
-                else:
-                    contours, _ = contours_info
-                rois: List[Tuple[int, int, int, int]] = []
-                for contour in contours or []:
+                mask = cv2.dilate(mask, kernel, iterations=1)
+
+                def _collect_rois(mask_array: np.ndarray, prefix: str) -> None:
                     try:
-                        x, y, w, h = cv2.boundingRect(contour)
+                        contours_info = cv2.findContours(
+                            mask_array, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                        )
                     except Exception:
-                        continue
-                    if w <= 0 or h <= 0:
-                        continue
-                    aspect = w / float(h)
-                    area = w * h
-                    if w < 60 or h < 30 or aspect < 1.0 or aspect > 10.0 or area < 2000:
-                        continue
-                    pad_x = int(round(w * 0.3))
-                    pad_y = int(round(h * 0.4))
-                    x0 = max(x - pad_x, 0)
-                    y0 = max(y - pad_y, 0)
-                    x1 = min(x + w + pad_x, resized_width)
-                    y1 = min(y + h + pad_y, resized_height)
-                    if x1 - x0 < 40 or y1 - y0 < 25:
-                        continue
-                    rois.append((x0, y0, x1, y1))
-                rois.sort(key=lambda rect: (rect[0], rect[1]))
-                for idx, (x0, y0, x1, y1) in enumerate(rois[:4]):
+                        return
+                    if len(contours_info) == 3:
+                        _, contours, _ = contours_info
+                    else:
+                        contours, _ = contours_info
+                    rois: List[Tuple[int, int, int, int]] = []
+                    for contour in contours or []:
+                        try:
+                            x, y, w, h = cv2.boundingRect(contour)
+                        except Exception:
+                            continue
+                        if w <= 0 or h <= 0:
+                            continue
+                        aspect = w / float(h)
+                        area = w * h
+                        if w < 50 or h < 24 or aspect < 0.9 or aspect > 11.0 or area < 1500:
+                            continue
+                        pad_x = int(round(max(w, 60) * 0.35))
+                        pad_y = int(round(max(h, 40) * 0.45))
+                        x0 = max(x - pad_x, 0)
+                        y0 = max(y - pad_y, 0)
+                        x1 = min(x + w + pad_x, resized_width)
+                        y1 = min(y + h + pad_y, resized_height)
+                        if x1 - x0 < 40 or y1 - y0 < 25:
+                            continue
+                        rois.append((x0, y0, x1, y1))
+                    rois.sort(key=lambda rect: (rect[0], rect[1]))
+                    for idx, rect in enumerate(rois[:6]):
+                        _append_focus_crop(f"focus{prefix}{idx + 1}", rect)
+
+                _collect_rois(mask, "")
+
+                if bgr is not None:
                     try:
-                        crop = base_resized.crop((x0, y0, x1, y1))
+                        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
                     except Exception:
-                        continue
-                    focus_variants.append((f"focus{idx + 1}", crop, (x0, y0)))
+                        hsv = None
+                    if hsv is not None:
+                        lower_red1 = np.array([0, 90, 110], dtype=np.uint8)
+                        upper_red1 = np.array([12, 255, 255], dtype=np.uint8)
+                        lower_red2 = np.array([160, 90, 110], dtype=np.uint8)
+                        upper_red2 = np.array([180, 255, 255], dtype=np.uint8)
+                        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+                        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+                        red_mask_cv = cv2.bitwise_or(mask1, mask2)
+                        if red_mask_cv is not None:
+                            red_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                            red_mask_cv = cv2.morphologyEx(
+                                red_mask_cv, cv2.MORPH_CLOSE, red_kernel, iterations=2
+                            )
+                            red_mask_cv = cv2.dilate(red_mask_cv, red_kernel, iterations=1)
+                            _collect_rois(red_mask_cv, "r")
+
+    if not focus_variants:
+        try:
+            base_array = np.array(base_resized.convert("RGB"))
+        except Exception:
+            base_array = None
+        if base_array is not None and base_array.ndim == 3:
+            red = base_array[:, :, 0].astype(np.float32)
+            green = base_array[:, :, 1].astype(np.float32)
+            blue = base_array[:, :, 2].astype(np.float32)
+            emphasised = red - 0.6 * green - 0.4 * blue
+            mask = emphasised > 50.0
+            coords = np.argwhere(mask)
+            if coords.size:
+                y0 = int(coords[:, 0].min())
+                y1 = int(coords[:, 0].max()) + 1
+                x0 = int(coords[:, 1].min())
+                x1 = int(coords[:, 1].max()) + 1
+                pad_x = int(round((x1 - x0) * 0.35))
+                pad_y = int(round((y1 - y0) * 0.45))
+                x0 = max(x0 - pad_x, 0)
+                y0 = max(y0 - pad_y, 0)
+                x1 = min(x1 + pad_x, resized_width)
+                y1 = min(y1 + pad_y, resized_height)
+                if x1 - x0 >= 40 and y1 - y0 >= 25:
+                    _append_focus_crop("focus", (x0, y0, x1, y1))
 
     variant_entries: List[Tuple[str, Image.Image, Tuple[int, int], Tuple[int, int]]] = []
     reference_size = (resized_width, resized_height)

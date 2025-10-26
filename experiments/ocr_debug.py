@@ -526,7 +526,8 @@ class OcrDebugWidget(QtWidgets.QWidget):
     def _run_paddle(self, image_path: Path, output_mode: str) -> List[str]:
         ocr = get_paddle_ocr(self._logger)
         if ocr is None:
-            return ["  PaddleOCR: unavailable (install paddlepaddle/paddleocr)" ]
+            return ["  PaddleOCR: unavailable (install paddlepaddle/paddleocr)"]
+
         try:
             result = _extract_microscope_diameters(
                 image_path,
@@ -535,10 +536,11 @@ class OcrDebugWidget(QtWidgets.QWidget):
             )
         except Exception as exc:  # pragma: no cover - defensive
             return [f"  PaddleOCR error: {exc}"]
+
         texts = list(getattr(result, "texts", []))
         values = list(getattr(result, "values", []))
         detections = list(getattr(result, "detections", []))
-        return self._format_output(
+        lines = self._format_output(
             "PaddleOCR",
             image_path,
             texts,
@@ -546,6 +548,67 @@ class OcrDebugWidget(QtWidgets.QWidget):
             detections,
             output_mode,
         )
+
+        if output_mode == "raw":
+            raw_map = self._collect_paddle_raw_texts(ocr, image_path)
+            if raw_map:
+                for variant, tokens in raw_map.items():
+                    display = ", ".join(tokens) if tokens else "(no text)"
+                    lines.append(f"    raw/{variant}: {display}")
+            else:
+                lines.append("    raw detections: (no text returned)")
+
+        return lines
+
+    def _collect_paddle_raw_texts(
+        self,
+        ocr,
+        image_path: Path,
+    ) -> Dict[str, List[str]]:
+        raw_texts: Dict[str, List[str]] = {}
+        try:
+            with Image.open(image_path) as raw:
+                base = raw.convert("RGB")
+        except Exception:
+            return raw_texts
+
+        selected = set(self._selected_variants())
+        variants = {"base": base}
+        variants.update(_variant_images(base, VARIANT_ORDER))
+
+        for name, image in variants.items():
+            if image is None:
+                continue
+            if name != "base" and name not in selected:
+                continue
+            array = np.array(image.convert("RGB"))
+            if array.ndim != 3 or array.shape[2] != 3:
+                continue
+            bgr = array[:, :, ::-1].copy()
+            try:
+                result = ocr.ocr(bgr, cls=True)
+            except Exception:
+                continue
+            tokens: List[str] = []
+            for entry in result or []:
+                if not entry:
+                    continue
+                for detection in entry:
+                    if not detection:
+                        continue
+                    try:
+                        data = detection[1]
+                    except (TypeError, IndexError):
+                        continue
+                    if not data:
+                        continue
+                    text = str(data[0] or "").strip()
+                    if text:
+                        tokens.append(text)
+            if tokens:
+                raw_texts[name] = tokens
+
+        return raw_texts
 
     def _run_tesseract(
         self,
