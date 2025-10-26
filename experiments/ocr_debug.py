@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from PIL import Image, ImageEnhance, ImageFilter, ImageOps
-from PyQt6 import QtCore, QtWidgets
+from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageQt
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 from plotting.utils import ensure_app_theme
 
@@ -177,6 +177,21 @@ class OcrDebugWidget(QtWidgets.QWidget):
         lists_row.addWidget(variant_widget, 1)
         layout.addLayout(lists_row)
 
+        self.preview_title = QtWidgets.QLabel("Preview: (select an image)")
+        self.preview_title.setWordWrap(True)
+        layout.addWidget(self.preview_title)
+
+        self.preview_area = QtWidgets.QScrollArea()
+        self.preview_area.setWidgetResizable(True)
+        self.preview_area.setMinimumHeight(220)
+        self.preview_widget = QtWidgets.QWidget()
+        self.preview_layout = QtWidgets.QGridLayout(self.preview_widget)
+        self.preview_layout.setContentsMargins(6, 6, 6, 6)
+        self.preview_layout.setHorizontalSpacing(16)
+        self.preview_layout.setVerticalSpacing(16)
+        self.preview_area.setWidget(self.preview_widget)
+        layout.addWidget(self.preview_area, 1)
+
         controls_row = QtWidgets.QHBoxLayout()
         controls_row.setSpacing(12)
 
@@ -210,6 +225,9 @@ class OcrDebugWidget(QtWidgets.QWidget):
         note.setWordWrap(True)
         layout.addWidget(note)
 
+        self.image_list.itemSelectionChanged.connect(self._update_previews)
+        self.variant_list.itemChanged.connect(self._handle_variant_change)
+
         self._refresh_image_list()
 
     # UI helpers -----------------------------------------------------------------
@@ -220,13 +238,20 @@ class OcrDebugWidget(QtWidgets.QWidget):
             self.directory_edit.setText(directory)
             self._refresh_image_list()
 
-    def _selected_variants(self) -> List[str]:
-        variants: List[str] = []
+    def _variant_states(self) -> Dict[str, bool]:
+        states: Dict[str, bool] = {}
         for index in range(self.variant_list.count()):
             item = self.variant_list.item(index)
-            if item.checkState() == QtCore.Qt.CheckState.Checked:
-                variants.append(item.text())
-        return variants or list(VARIANT_ORDER)
+            states[item.text()] = item.checkState() == QtCore.Qt.CheckState.Checked
+        return states
+
+    def _selected_variants(self) -> List[str]:
+        states = self._variant_states()
+        enabled = [name for name, active in states.items() if active]
+        return enabled or list(VARIANT_ORDER)
+
+    def _handle_variant_change(self, _: QtWidgets.QListWidgetItem) -> None:
+        self._update_previews()
 
     # OCR execution ---------------------------------------------------------------
     def run_analysis(self) -> None:
@@ -334,6 +359,7 @@ class OcrDebugWidget(QtWidgets.QWidget):
             self.image_list.item(0).setSelected(True)
 
         self._last_scanned_folder = folder
+        self._update_previews()
 
     def _selected_images(self, folder: Path) -> List[Path]:
         selected: List[Path] = []
@@ -358,6 +384,90 @@ class OcrDebugWidget(QtWidgets.QWidget):
             [path.resolve() for path in folder.iterdir() if path.suffix.lower() in IMAGE_SUFFIXES],
             key=lambda path: path.name.lower(),
         )
+
+    def _clear_preview_layout(self) -> None:
+        while self.preview_layout.count():
+            item = self.preview_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _update_previews(self) -> None:
+        folder = Path(self.directory_edit.text().strip() or ".")
+        images = self._selected_images(folder)
+        if not images:
+            self.preview_title.setText("Preview: (select an image)")
+            self._clear_preview_layout()
+            self._add_preview_message("Select one or more microscope images to view preprocessing variants.")
+            return
+
+        first = images[0]
+        self.preview_title.setText(f"Preview: {first.name}{' (+' + str(len(images) - 1) + ' more)' if len(images) > 1 else ''}")
+
+        try:
+            with Image.open(first) as raw:
+                pil_image = raw.convert("RGB")
+        except Exception as exc:  # pragma: no cover - defensive
+            self._clear_preview_layout()
+            self._add_preview_message(f"Failed to open {first.name}: {exc}")
+            return
+
+        variant_images = _variant_images(pil_image, VARIANT_ORDER)
+        states = self._variant_states()
+
+        self._clear_preview_layout()
+        columns = 3
+        row = 0
+        column = 0
+        for name in VARIANT_ORDER:
+            image = variant_images.get(name)
+            if image is None:
+                continue
+            label = self._build_preview_widget(name, image, states.get(name, False))
+            self.preview_layout.addWidget(label, row, column)
+            column += 1
+            if column >= columns:
+                column = 0
+                row += 1
+
+    def _add_preview_message(self, message: str) -> None:
+        label = QtWidgets.QLabel(message)
+        label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        label.setWordWrap(True)
+        self.preview_layout.addWidget(label, 0, 0)
+
+    def _build_preview_widget(self, name: str, image: Image.Image, enabled: bool) -> QtWidgets.QWidget:
+        container = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        status = "enabled" if enabled else "disabled"
+        header = QtWidgets.QLabel(f"{name} ({status})")
+        header.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        header.setWordWrap(True)
+        layout.addWidget(header)
+
+        try:
+            qimage = ImageQt.ImageQt(image)
+            pixmap = QtGui.QPixmap.fromImage(qimage)
+        except Exception:  # pragma: no cover - defensive
+            error_label = QtWidgets.QLabel("Unable to render preview")
+            error_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(error_label)
+            return container
+
+        preview = QtWidgets.QLabel()
+        preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        target_width = min(320, max(160, pixmap.width()))
+        if pixmap.width() > target_width:
+            pixmap = pixmap.scaledToWidth(
+                target_width,
+                QtCore.Qt.TransformationMode.SmoothTransformation,
+            )
+        preview.setPixmap(pixmap)
+        layout.addWidget(preview)
+        return container
 
     def _begin_progress(self, total: int) -> None:
         if total <= 0:

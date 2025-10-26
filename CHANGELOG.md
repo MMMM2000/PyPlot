@@ -1,5 +1,11 @@
 # Changelog
 
+## 2025-10-26 13:48 UTC
+
+- Added live image previews to the Microscope OCR Debug experiment so the
+  selected capture and every preprocessing variant render side by side,
+  making it easier to compare transforms before running OCR.
+
 ## 2025-10-26 12:15 UTC
 
 - Added an image picker and progress bar to the Microscope OCR Debug experiment
