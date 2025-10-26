@@ -251,13 +251,15 @@ class OcrDebugWidget(QtWidgets.QWidget):
         preview_layout.addWidget(self.preview_title)
         self.preview_area = QtWidgets.QScrollArea()
         self.preview_area.setWidgetResizable(True)
+        self.preview_area.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.preview_area.setMinimumWidth(360)
         self.preview_area.setMinimumHeight(240)
         self.preview_widget = QtWidgets.QWidget()
-        self.preview_layout = QtWidgets.QGridLayout(self.preview_widget)
+        self.preview_layout = QtWidgets.QVBoxLayout(self.preview_widget)
         self.preview_layout.setContentsMargins(6, 6, 6, 6)
-        self.preview_layout.setHorizontalSpacing(16)
-        self.preview_layout.setVerticalSpacing(16)
+        self.preview_layout.setSpacing(16)
         self.preview_area.setWidget(self.preview_widget)
         preview_layout.addWidget(self.preview_area, 1)
         splitter.addWidget(preview_widget)
@@ -274,8 +276,9 @@ class OcrDebugWidget(QtWidgets.QWidget):
         output_layout.addWidget(self.output_edit, 1)
         splitter.addWidget(output_widget)
         splitter.setStretchFactor(0, 0)
-        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(1, 2)
         splitter.setStretchFactor(2, 1)
+        splitter.setSizes([260, 540, 360])
 
         note = QtWidgets.QLabel(
             "PaddleOCR always runs with the microwire data builder pipeline and emits per-variant"
@@ -476,28 +479,29 @@ class OcrDebugWidget(QtWidgets.QWidget):
         states = self._variant_states()
 
         self._clear_preview_layout()
-        columns = 3
-        row = 0
-        column = 0
         for name in VARIANT_ORDER:
             image = variant_images.get(name)
             if image is None:
                 continue
             label = self._build_preview_widget(name, image, states.get(name, False))
-            self.preview_layout.addWidget(label, row, column)
-            column += 1
-            if column >= columns:
-                column = 0
-                row += 1
+            self.preview_layout.addWidget(label)
+        if not self.preview_layout.count():
+            self._add_preview_message("No preprocessing variants are available for preview.")
+        else:
+            self.preview_layout.addStretch(1)
 
     def _add_preview_message(self, message: str) -> None:
         label = QtWidgets.QLabel(message)
         label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         label.setWordWrap(True)
-        self.preview_layout.addWidget(label, 0, 0)
+        self.preview_layout.addWidget(label)
 
     def _build_preview_widget(self, name: str, image: Image.Image, enabled: bool) -> QtWidgets.QWidget:
         container = QtWidgets.QWidget()
+        container.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)

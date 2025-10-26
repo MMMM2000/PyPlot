@@ -1517,7 +1517,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
 
     def _resample(image):
         width, height = image.size
-        target = 3072
+        target = 4096
         longest = max(width, height)
         if longest <= 0:
             return image
@@ -1533,7 +1533,15 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return image.resize(new_size, resample_filter)
 
     base_resized = _resample(base)
-    base_width, base_height = original_width, original_height
+    resized_width, resized_height = base_resized.size
+    if resized_width <= 0 or resized_height <= 0:
+        resized_width, resized_height = original_width, original_height
+    scale_to_original_x = (
+        original_width / float(resized_width) if resized_width else 1.0
+    )
+    scale_to_original_y = (
+        original_height / float(resized_height) if resized_height else 1.0
+    )
 
     candidates: List[str] = []
     seen_candidates: Set[str] = set()
@@ -1592,6 +1600,72 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         ("binary_invert", ImageOps.invert(binary_gray)),
         ("fourier", _fourier_sharpen(resized)),
     ]
+
+    focus_variants: List[Tuple[str, Image.Image, Tuple[int, int]]] = []
+    try:  # pragma: no cover - optional dependency
+        import cv2  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - optional dependency
+        cv2 = None  # type: ignore[assignment]
+
+    if cv2 is not None:
+        try:
+            base_array = np.array(base_resized.convert("RGB"))
+        except Exception:
+            base_array = None
+        if base_array is not None and base_array.ndim == 3 and base_array.shape[2] == 3:
+            try:
+                gray = cv2.cvtColor(base_array[:, :, ::-1], cv2.COLOR_BGR2GRAY)
+            except Exception:
+                gray = None
+            if gray is not None:
+                blur = cv2.GaussianBlur(gray, (5, 5), 0)
+                _, mask = cv2.threshold(blur, 215, 255, cv2.THRESH_BINARY)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                contours_info = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                if len(contours_info) == 3:
+                    _, contours, _ = contours_info
+                else:
+                    contours, _ = contours_info
+                rois: List[Tuple[int, int, int, int]] = []
+                for contour in contours or []:
+                    try:
+                        x, y, w, h = cv2.boundingRect(contour)
+                    except Exception:
+                        continue
+                    if w <= 0 or h <= 0:
+                        continue
+                    aspect = w / float(h)
+                    area = w * h
+                    if w < 60 or h < 30 or aspect < 1.0 or aspect > 10.0 or area < 2000:
+                        continue
+                    pad_x = int(round(w * 0.3))
+                    pad_y = int(round(h * 0.4))
+                    x0 = max(x - pad_x, 0)
+                    y0 = max(y - pad_y, 0)
+                    x1 = min(x + w + pad_x, resized_width)
+                    y1 = min(y + h + pad_y, resized_height)
+                    if x1 - x0 < 40 or y1 - y0 < 25:
+                        continue
+                    rois.append((x0, y0, x1, y1))
+                rois.sort(key=lambda rect: (rect[0], rect[1]))
+                for idx, (x0, y0, x1, y1) in enumerate(rois[:4]):
+                    try:
+                        crop = base_resized.crop((x0, y0, x1, y1))
+                    except Exception:
+                        continue
+                    focus_variants.append((f"focus{idx + 1}", crop, (x0, y0)))
+
+    variant_entries: List[Tuple[str, Image.Image, Tuple[int, int], Tuple[int, int]]] = []
+    reference_size = (resized_width, resized_height)
+    for label, crop, offset in focus_variants:
+        variant_entries.append((label, crop, offset, reference_size))
+    for label, variant in variants:
+        if variant is None:
+            continue
+        variant_entries.append((label, variant, (0, 0), reference_size))
 
     @dataclass
     class _OCRWord:
@@ -1673,14 +1747,22 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
     seen_texts: Set[str] = set()
 
     def _extract_line_detections(
-        words: Sequence[_OCRWord], variant_size: Tuple[int, int]
+        words: Sequence[_OCRWord],
+        variant_size: Tuple[int, int],
+        *,
+        offset: Tuple[int, int] = (0, 0),
+        reference_size: Optional[Tuple[int, int]] = None,
     ) -> List[MicroscopeDetection]:
         detections: List[MicroscopeDetection] = []
         vw, vh = variant_size
         if vw <= 0 or vh <= 0:
             return detections
-        scale_x = base_width / float(vw)
-        scale_y = base_height / float(vh)
+        ref_w, ref_h = reference_size or variant_size
+        if ref_w <= 0 or ref_h <= 0:
+            return detections
+        scale_ref_x = ref_w / float(vw)
+        scale_ref_y = ref_h / float(vh)
+        offset_x, offset_y = offset
         normalised_words = [_normalise_microscope_text(word.text) for word in words]
         lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
         for idx, word in enumerate(words):
@@ -1750,10 +1832,18 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             top = min(entry.top for entry in tokens)
             right = max(entry.left + entry.width for entry in tokens)
             bottom = max(entry.top + entry.height for entry in tokens)
-            left_base = max(int(round(left * scale_x)), 0)
-            top_base = max(int(round(top * scale_y)), 0)
-            right_base = min(int(round(right * scale_x)), base_width)
-            bottom_base = min(int(round(bottom * scale_y)), base_height)
+            left_ref = (left * scale_ref_x) + offset_x
+            top_ref = (top * scale_ref_y) + offset_y
+            right_ref = (right * scale_ref_x) + offset_x
+            bottom_ref = (bottom * scale_ref_y) + offset_y
+            left_base = max(int(round(left_ref * scale_to_original_x)), 0)
+            top_base = max(int(round(top_ref * scale_to_original_y)), 0)
+            right_base = min(
+                int(round(right_ref * scale_to_original_x)), original_width
+            )
+            bottom_base = min(
+                int(round(bottom_ref * scale_to_original_y)), original_height
+            )
             if right_base <= left_base or bottom_base <= top_base:
                 continue
             confidences = [
@@ -1780,6 +1870,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         label: str,
         raw_result,
         variant_size: Tuple[int, int],
+        *,
+        offset: Tuple[int, int] = (0, 0),
+        reference_size: Optional[Tuple[int, int]] = None,
     ) -> bool:
         lines = _group_paddle_words(raw_result)
         if not lines:
@@ -1798,7 +1891,12 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                 result.texts.append(tagged)
                 seen_texts.add(tagged)
             combined_lines.append(line_text)
-            for detection in _extract_line_detections(line, variant_size):
+            for detection in _extract_line_detections(
+                line,
+                variant_size,
+                offset=offset,
+                reference_size=reference_size,
+            ):
                 bbox = detection.bbox or (0, 0, 0, 0)
                 key = (
                     round(detection.value, 2),
@@ -1828,7 +1926,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         if _consume_ocr_output("original", direct_result, (original_width, original_height)):
             processed_any_variant = True
 
-    for label, variant in variants:
+    for label, variant, offset, ref_size in variant_entries:
         if variant is None:
             continue
         variant_size = variant.size
@@ -1850,7 +1948,13 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                 exc_info=True,
             )
             continue
-        if _consume_ocr_output(label, ocr_result, variant_size):
+        if _consume_ocr_output(
+            label,
+            ocr_result,
+            variant_size,
+            offset=offset,
+            reference_size=ref_size,
+        ):
             processed_any_variant = True
 
         if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):

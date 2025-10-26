@@ -1,5 +1,18 @@
 # Changelog
 
+## 2025-10-26 17:28 UTC
+
+- Tuned PaddleOCR initialisation with higher-sensitivity detection defaults and
+  added focus-region crops so microscope captures with bracketed micrometer
+  overlays consistently yield d/D measurements.
+- Upscaled microscope preprocessing to 4K, mapped cropped detections back to
+  the source image, and added ROI extraction via OpenCV to reduce the number of
+  missed annotations in the fabrication workflow.
+- Reworked the Microscope OCR Debug tool’s preview area into a single
+  vertically scrolling column, widened the splitter layout, and removed
+  horizontal scrolling so it is easier to compare preprocessing variants and
+  inspect full-resolution images.
+
 ## 2025-10-26 15:32 UTC
 
 - Reworked the Microscope OCR Debug tool with a resizable splitter layout, a

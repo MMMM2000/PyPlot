@@ -11,35 +11,60 @@ DEFAULT_LOGGER = "microwire_data_builder"
 _MISSING_PADDLE_WARNED = False
 
 
+def _candidate_kwargs(signature: inspect.Signature | None) -> list[dict[str, object]]:
+    """Return a list of progressively simpler PaddleOCR kwargs."""
+
+    supported: set[str] = set(signature.parameters) if signature is not None else set()
+
+    tuned: dict[str, object] = {
+        "lang": "en",
+        "use_angle_cls": True,
+        "det_db_box_thresh": 0.18,
+        "det_db_unclip_ratio": 2.6,
+        "det_limit_side_len": 4096,
+        "drop_score": 0.1,
+        "max_text_length": 96,
+        "rec_algorithm": "SVTR_LCNet",
+    }
+    if "show_log" in supported:
+        tuned["show_log"] = False
+
+    baseline = {"lang": "en", "use_angle_cls": True}
+    if "show_log" in supported:
+        baseline["show_log"] = False
+
+    return [tuned, baseline, {"lang": "en"}]
+
+
 @lru_cache(maxsize=1)
 def _create_default_ocr() -> "PaddleOCR":
     """Return a cached :class:`~paddleocr.PaddleOCR` instance."""
 
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    base_kwargs = {"lang": "en", "use_angle_cls": True}
     try:
-        return PaddleOCR(**base_kwargs)
-    except Exception as primary_exc:  # pragma: no cover - defensive
-        fallback_exc: Optional[Exception] = None
-        try:
-            signature = inspect.signature(PaddleOCR.__init__)
-        except (TypeError, ValueError):  # pragma: no cover - CPython guard
-            signature = None
-        if signature is not None and "show_log" in signature.parameters:
-            with_flag = dict(base_kwargs)
-            with_flag["show_log"] = False
-            try:
-                return PaddleOCR(**with_flag)
-            except Exception as exc:  # pragma: no cover - defensive
-                if "show_log" in str(exc):
-                    fallback_exc = primary_exc
-                else:
-                    fallback_exc = exc
+        signature = inspect.signature(PaddleOCR.__init__)
+    except (TypeError, ValueError):  # pragma: no cover - CPython guard
+        signature = None
+
+    last_exc: Optional[Exception] = None
+    for candidate in _candidate_kwargs(signature):
+        if signature is not None:
+            filtered = {
+                key: value
+                for key, value in candidate.items()
+                if key in signature.parameters
+            }
         else:
-            fallback_exc = primary_exc
-        if fallback_exc is not None:
-            raise fallback_exc
+            filtered = candidate
+        try:
+            return PaddleOCR(**filtered)
+        except Exception as exc:  # pragma: no cover - defensive
+            last_exc = exc
+            continue
+
+    if last_exc is not None:
+        raise last_exc
     raise RuntimeError("Unable to initialise PaddleOCR")
 
 
