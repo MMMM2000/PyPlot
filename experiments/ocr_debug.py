@@ -12,6 +12,8 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps
 from PyQt6 import QtCore, QtWidgets
 
+from plotting.utils import ensure_app_theme
+
 from microwire_data_builder.core import _extract_microscope_diameters, _normalise_microscope_text, _parse_microscope_candidates
 from microwire_data_builder.ocr import get_paddle_ocr
 
@@ -276,7 +278,18 @@ class OcrDebugWidget(QtWidgets.QWidget):
 
 
 def main() -> Optional[QtWidgets.QWidget]:
-    return OcrDebugWidget()
+    app = QtWidgets.QApplication.instance()
+    created = False
+    if app is None:
+        app = QtWidgets.QApplication([])
+        created = True
+    ensure_app_theme(app)
+    widget = OcrDebugWidget()
+    widget.show()
+    if created:
+        app.exec()
+        return None
+    return widget
 
 
 if __name__ == "__main__":  # pragma: no cover - manual execution

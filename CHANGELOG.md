@@ -1,5 +1,16 @@
 # Changelog
 
+## 2025-10-26 11:32 UTC
+
+- Removed inline microscope thumbnails in the worksheet and promoted the side
+  previews to high-resolution, resizable panels so annotations remain legible
+  without crowding the table.
+- Hid the microscope image columns in the grid and upgraded the preview widgets
+  to preserve aspect ratio while scaling smoothly during resizes.
+- Updated the Microscope OCR Debug experiment to apply the application theme and
+  show its window when launched from the master launcher, restoring its
+  usability.
+
 ## 2025-10-26 10:08 UTC
 
 - Reworked the microscope worksheet to show a single microwire column with

@@ -4444,6 +4444,47 @@ class AnnealingSection(MiniDatabaseSection):
         )
 
 
+class _MicroscopePreviewLabel(QtWidgets.QLabel):
+    def __init__(self, placeholder: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(placeholder, parent)
+        self._placeholder = placeholder
+        self._pixmap: Optional[QtGui.QPixmap] = None
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setWordWrap(True)
+
+    def set_placeholder(self) -> None:
+        self._pixmap = None
+        super().setPixmap(QtGui.QPixmap())
+        super().setText(self._placeholder)
+
+    def set_preview(self, pixmap: Optional[QtGui.QPixmap]) -> None:
+        if pixmap is None or pixmap.isNull():
+            self.set_placeholder()
+            return
+        self._pixmap = QtGui.QPixmap(pixmap)
+        self._update_scaled_pixmap()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - Qt callback
+        super().resizeEvent(event)
+        if self._pixmap is not None:
+            self._update_scaled_pixmap()
+
+    def _update_scaled_pixmap(self) -> None:
+        if self._pixmap is None:
+            return
+        target_size = self.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+        scaled = self._pixmap.scaled(
+            target_size,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        super().setPixmap(scaled)
+        super().setText("")
+
+
 class MicroscopeSection(MiniDatabaseSection):
     section_key = "microscope"
     section_title = "Microscope OCR"
@@ -4460,8 +4501,6 @@ class MicroscopeSection(MiniDatabaseSection):
         self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         super().__init__(logger, log_callback, parent)
-        if isinstance(self.model, DataFrameModel):
-            self.model.set_decoration_provider(self._image_decoration)
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
             self._overrides = {
@@ -4486,11 +4525,9 @@ class MicroscopeSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         table.setSortingEnabled(True)
-        icon_size = QtCore.QSize(220, 220)
-        table.setIconSize(icon_size)
         header = table.verticalHeader()
         if header is not None:
-            default_height = icon_size.height() + 24
+            default_height = 40
             header.setDefaultSectionSize(default_height)
             header.setMinimumSectionSize(default_height)
         self.table_view = table
@@ -4503,18 +4540,19 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(6)
 
-        def _make_preview_panel(title: str) -> Tuple[QtWidgets.QVBoxLayout, QtWidgets.QLabel]:
+        def _make_preview_panel(title: str) -> Tuple[QtWidgets.QVBoxLayout, _MicroscopePreviewLabel]:
             column_layout = QtWidgets.QVBoxLayout()
             column_layout.setContentsMargins(0, 0, 0, 0)
             caption = QtWidgets.QLabel(title)
             caption.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             caption.setStyleSheet("font-weight: 600;")
             column_layout.addWidget(caption)
-            label = QtWidgets.QLabel("Select a row to preview.")
-            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-            label.setMinimumSize(icon_size.width(), icon_size.height())
-            label.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-            label.setWordWrap(True)
+            label = _MicroscopePreviewLabel("Select a row to preview.")
+            label.setMinimumSize(480, 360)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
             column_layout.addWidget(label, 1)
             return column_layout, label
 
@@ -4582,7 +4620,9 @@ class MicroscopeSection(MiniDatabaseSection):
         model = self.table_view.model()
         if model is None:
             return
-        for column_name in ("_key", "_images", "_core_image", "_glass_image"):
+        hidden_columns = ["_key", "_images", "_core_image", "_glass_image"]
+        hidden_columns.extend(MICROSCOPE_IMAGE_COLUMNS)
+        for column_name in hidden_columns:
             try:
                 column_index = list(model.frame().columns).index(column_name)  # type: ignore[arg-type]
             except Exception:
@@ -4661,8 +4701,7 @@ class MicroscopeSection(MiniDatabaseSection):
         if row is None:
             self._selected_key = None
             for label in (self.core_preview_label, self.glass_preview_label):
-                label.setPixmap(QtGui.QPixmap())
-                label.setText("Select a row to preview.")
+                label.set_placeholder()
             self.d_edit.clear()
             self.D_edit.clear()
             return
@@ -4687,16 +4726,9 @@ class MicroscopeSection(MiniDatabaseSection):
             if candidate and candidate.exists():
                 pixmap = QtGui.QPixmap(str(candidate))
                 if not pixmap.isNull():
-                    scaled = pixmap.scaled(
-                        label.size(),
-                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                        QtCore.Qt.TransformationMode.SmoothTransformation,
-                    )
-                    label.setPixmap(scaled)
-                    label.setText("")
+                    label.set_preview(pixmap)
                     continue
-            label.setPixmap(QtGui.QPixmap())
-            label.setText("No preview available.")
+            label.set_placeholder()
 
     def _apply_override(self) -> None:
         if not self._selected_key:
