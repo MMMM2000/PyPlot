@@ -4511,14 +4511,19 @@ class MicroscopeSection(MiniDatabaseSection):
         ]
         value_text = ", ".join(values) if values else "—"
         sample_texts: List[str] = []
+        for detection in result.detections:
+            raw = getattr(detection, "text", None)
+            if raw:
+                cleaned = str(raw).replace("\n", " ").strip()
+                if cleaned:
+                    sample_texts.append(cleaned)
         for text in result.texts:
             cleaned = str(text).replace("\n", " ").strip()
             if cleaned:
                 sample_texts.append(cleaned)
-        text_preview = " | ".join(sample_texts)
+        text_preview = " | ".join(sample_texts) if sample_texts else "—"
         message = f"OCR debug {Path(path).name}: values={value_text}"
-        if text_preview:
-            message += f"; text={text_preview}"
+        message += f"; text={text_preview}"
         self.log(message, level=logging.INFO)
 
     def _update_hidden_columns(self) -> None:
@@ -4691,6 +4696,30 @@ class MicroscopeSection(MiniDatabaseSection):
             progress_callback=_progress if progress is not None else None,
             debug_callback=debug_cb,
         )
+        expected_keys: Set[Tuple[str, int, int]] = set()
+        try:
+            annealing_records = MiniDatabaseStore("annealing").load_payload(
+                "annealing_records"
+            )
+        except Exception:
+            annealing_records = None
+        if isinstance(annealing_records, list):
+            for record in annealing_records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw = getattr(metadata, "draw_x", None)
+                piece = getattr(metadata, "piece_y", None)
+                if not composition or draw is None or piece is None:
+                    continue
+                try:
+                    key = (str(composition), int(draw), int(piece))
+                except (TypeError, ValueError):
+                    continue
+                expected_keys.add(key)
+        for key in expected_keys:
+            index.setdefault(key, MicroscopeMeasurements())
         self._check_cancelled()
         # Retain overrides only for existing keys
         filtered_overrides = {
@@ -4710,8 +4739,20 @@ class MicroscopeSection(MiniDatabaseSection):
             except OSError:
                 continue
         total_records = len(index)
-        total_core = sum(len(measurements.core) for measurements in index.values())
-        total_glass = sum(len(measurements.glass) for measurements in index.values())
+        def _count_measurements(entries: Sequence[MicroscopeDetection]) -> int:
+            count = 0
+            for entry in entries:
+                value = getattr(entry, "value", None)
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    numeric = math.nan
+                if math.isfinite(numeric) and numeric > 0:
+                    count += 1
+            return count
+
+        total_core = sum(_count_measurements(m.core) for m in index.values())
+        total_glass = sum(_count_measurements(m.glass) for m in index.values())
         if total_core or total_glass:
             self.log(
                 f"Microscope OCR detected {total_core} core and {total_glass} glass diameter(s) across {total_records} microwire(s).",

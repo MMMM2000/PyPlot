@@ -1,5 +1,14 @@
 # Changelog
 
+## 2025-10-26 09:40 UTC
+
+- Ensure the microscope worksheet lists every microwire from current
+  annealing, preserving image links via placeholders even when OCR cannot
+  extract a diameter so manual review is still possible.
+- Log every recognised text fragment in OCR debug mode and align the summary
+  counters to ignore placeholder entries, clarifying when PaddleOCR supplied
+  usable diameters.
+
 ## 2025-10-26 09:00 UTC
 
 - Combine multi-row fabrication headers (e.g., ``d`` on one row and ``(µm)`` on

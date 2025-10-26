@@ -582,6 +582,39 @@ class MicroscopeMeasurements:
             return self.glass
         return self.other
 
+    def add_placeholder(self, category: str, image_path: Path) -> None:
+        """Ensure at least one detection entry exists for the given image.
+
+        When OCR fails to extract a numeric value we still want the
+        microscope worksheet to list the image so the operator can review it
+        manually.  A placeholder detection keeps track of the originating
+        file without affecting downstream ratio calculations.
+        """
+
+        if not image_path:
+            return
+        target = self._target(category)
+        try:
+            image_path = Path(image_path)
+        except Exception:
+            return
+        for detection in target:
+            existing = getattr(detection, "image_path", None)
+            if existing is None:
+                continue
+            try:
+                if Path(existing) == image_path:
+                    return
+            except Exception:
+                continue
+        placeholder = MicroscopeDetection(
+            value=float("nan"),
+            image_path=image_path,
+            source="placeholder",
+        )
+        placeholder.category = category
+        target.append(placeholder)
+
     def extend(
         self,
         category: str,
@@ -1881,6 +1914,7 @@ def _group_microscope_measurements(
             _notify()
             continue
         category = _microscope_category(path)
+        record = grouped.setdefault(key, MicroscopeMeasurements())
         try:
             extracted = _extract_microscope_diameters(path, log)
         except BuildCancelledError:
@@ -1911,38 +1945,49 @@ def _group_microscope_measurements(
                 log.debug(
                     "Microscope OCR debug callback failed for %s", path, exc_info=True
                 )
-        if values or detections:
-            record = grouped.setdefault(key, MicroscopeMeasurements())
-            if detections:
-                grouped_detections: Dict[str, List[MicroscopeDetection]] = {}
-                for detection in detections:
-                    override_category = category
-                    if detection.marker == 1:
-                        override_category = "core"
-                    elif detection.marker == 2:
-                        override_category = "glass"
-                    grouped_detections.setdefault(override_category, []).append(detection)
-                used_keys: Set[float] = set()
-                for det_category, det_list in grouped_detections.items():
-                    numeric_values = [float(det.value) for det in det_list if isinstance(det.value, (int, float))]
-                    if not numeric_values:
-                        continue
-                    record.extend(det_category, numeric_values, det_list)
-                    for numeric in numeric_values:
-                        used_keys.add(round(float(numeric), 3))
-                residual_values: List[float] = []
-                for value in values:
-                    if not isinstance(value, (int, float)):
-                        continue
-                    numeric = float(value)
-                    rounded = round(numeric, 3)
-                    if rounded in used_keys:
-                        continue
-                    residual_values.append(numeric)
-                if residual_values:
-                    record.extend(category, residual_values, [])
-            else:
-                record.extend(category, values, detections)
+        if detections:
+            grouped_detections: Dict[str, List[MicroscopeDetection]] = {}
+            for detection in detections:
+                override_category = category
+                if detection.marker == 1:
+                    override_category = "core"
+                elif detection.marker == 2:
+                    override_category = "glass"
+                grouped_detections.setdefault(override_category, []).append(detection)
+            used_keys: Set[float] = set()
+            for det_category, det_list in grouped_detections.items():
+                numeric_values = [
+                    float(det.value)
+                    for det in det_list
+                    if isinstance(det.value, (int, float))
+                ]
+                if not numeric_values:
+                    for detection in det_list:
+                        fallback_path = getattr(detection, "image_path", None) or path
+                        record.add_placeholder(det_category, fallback_path)
+                    continue
+                record.extend(det_category, numeric_values, det_list)
+                for numeric in numeric_values:
+                    used_keys.add(round(float(numeric), 3))
+            residual_values: List[float] = []
+            for value in values:
+                if not isinstance(value, (int, float)):
+                    continue
+                numeric = float(value)
+                rounded = round(numeric, 3)
+                if rounded in used_keys:
+                    continue
+                residual_values.append(numeric)
+            if residual_values:
+                record.extend(category, residual_values, [])
+        elif values:
+            record.extend(category, values, detections)
+        else:
+            record.add_placeholder(category, path)
+            _notify()
+            continue
+        if not detections and values:
+            record.add_placeholder(category, path)
         _notify()
     missing_references: List[str] = []
     mismatched_references: List[str] = []
