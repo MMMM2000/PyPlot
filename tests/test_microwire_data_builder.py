@@ -120,6 +120,22 @@ def test_piece_header_backfill_extracts_diameters(tmp_path: Path) -> None:
     assert isinstance(display, list) and "7" in display[0]
 
 
+def test_merged_header_row_combines_unit_suffix() -> None:
+    df = pd.DataFrame(
+        [
+            ["Title", "d", "D", None],
+            ["P.Č", "(µm)", "(µm)", "d/D"],
+        ],
+        dtype=object,
+    )
+
+    header = _merged_header_row(df, 1)
+    normalised = [str(value).replace("μ", "µ") if value is not None else value for value in header]
+    assert normalised[1] == "d (µm)"
+    assert normalised[2] == "D (µm)"
+    assert normalised[3] == "d/D"
+
+
 def test_canonical_dimension_field_filters_non_diameter_columns() -> None:
     assert _canonical_dimension_field("glass_feed_mm_per_min") is None
     assert _canonical_dimension_field("core_diameter_um") == "d_um"
@@ -426,6 +442,35 @@ def test_microscope_ocr_extracts_bracketed_values(tmp_path: Path, monkeypatch: p
     measurements = grouped[key]
     assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
     assert measurements.best_glass() == pytest.approx(134.5, rel=1e-3)
+
+
+def test_microscope_ocr_fallback_without_units(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image as PILImage
+
+    image_path = tmp_path / "Ni55Fe18Ga27 4_1 core.jpg"
+    PILImage.new("RGB", (320, 180), color="white").save(image_path)
+
+    class BareOCR:
+        def ocr(self, image, cls: bool = True):  # pragma: no cover - simple stub
+            return [
+                [
+                    (
+                        [[0, 0], [160, 0], [160, 40], [0, 40]],
+                        ("[1]6.7", 0.92),
+                    ),
+                ]
+            ]
+
+    monkeypatch.setattr(core, "get_paddle_ocr", lambda logger=None: BareOCR())
+
+    result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
+    assert any(abs(value - 6.7) < 1e-3 for value in result.values)
+
+    grouped = core._group_microscope_measurements([image_path], logging.getLogger("test"))
+    key = core._microscope_key(image_path)
+    assert key in grouped
+    measurements = grouped[key]
+    assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
 
 
 def test_parse_microscope_candidates_prefers_primary_marker() -> None:

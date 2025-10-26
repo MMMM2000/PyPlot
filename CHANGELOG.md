@@ -1,5 +1,16 @@
 # Changelog
 
+## 2025-10-26 09:00 UTC
+
+- Combine multi-row fabrication headers (e.g., ``d`` on one row and ``(µm)`` on
+  the next) so every d, D, and d/D reading appears in the fabrication worksheet
+  regardless of merged Excel labels.
+- Fallback to parsing plain numeric PaddleOCR output when the unit token is
+  missing, allowing microscope images such as ``[1]6.7`` annotations to populate
+  core/glass diameters instead of reporting empty OCR results.
+- Added regression tests for the multi-row header handling and the new OCR
+  fallback to lock in the behaviour for future refactors.
+
 ## 2025-10-26 08:55 UTC
 
 - Backfilled multi-row fabrication headers so d/D/ratio columns and resistance

@@ -736,6 +736,25 @@ def _normalise_text(value: object) -> str:
     return text
 
 
+def _is_unit_suffix(text: str) -> bool:
+    """Return ``True`` when *text* only contains unit markers such as ``µm``."""
+
+    if not text:
+        return False
+    stripped = unicodedata.normalize("NFKC", text).strip()
+    if not stripped:
+        return False
+    ascii_text = unicodedata.normalize("NFKD", stripped)
+    ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch))
+    simplified = re.sub(r"\s+", "", ascii_text).lower()
+    if simplified in {"um", "µm", "μm", "(um)", "(µm)", "(μm)", "um)", "µm)", "μm)"}:
+        return True
+    unit_chars = set("uµμm()/.-[]{}")
+    if simplified and all(ch in unit_chars for ch in simplified):
+        return True
+    return False
+
+
 def _merged_header_row(
     df: pd.DataFrame, header_idx: int, *, lookback: int = 3
 ) -> List[object]:
@@ -754,10 +773,30 @@ def _merged_header_row(
 
     for col_idx in range(len(header)):
         value = header[col_idx]
-        if value is not None and not _is_nan(value):
-            text = _normalise_text(value)
-            if text:
+        text = _normalise_text(value) if value is not None and not _is_nan(value) else ""
+        if text and _is_unit_suffix(text):
+            prefix: Optional[str] = None
+            for offset in range(1, max_offset + 1):
+                prev_idx = header_idx - offset
+                if prev_idx < 0:
+                    break
+                try:
+                    candidate = df.iat[prev_idx, col_idx]
+                except (IndexError, ValueError):
+                    candidate = None
+                if candidate is None or _is_nan(candidate):
+                    continue
+                candidate_text = _normalise_text(candidate)
+                if not candidate_text or _is_unit_suffix(candidate_text):
+                    continue
+                prefix = candidate_text
+                break
+            if prefix:
+                combined = f"{prefix} {text}".strip()
+                header[col_idx] = combined
                 continue
+        if text:
+            continue
         for offset in range(1, max_offset + 1):
             try:
                 candidate = df.iat[header_idx - offset, col_idx]
@@ -767,7 +806,7 @@ def _merged_header_row(
                 continue
             candidate_text = _normalise_text(candidate)
             if candidate_text:
-                header[col_idx] = candidate
+                header[col_idx] = candidate_text
                 break
     return header
 
@@ -1749,6 +1788,39 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             key = round(detection.value, 2)
             seen_keys.setdefault(key, detection.value)
         result.values.extend(seen_keys.values())
+
+    if not result.values:
+        fallback_numbers: List[float] = []
+        seen_numbers: Set[float] = set()
+        pool: List[str] = []
+        if candidates:
+            pool.extend(candidates)
+        if result.texts:
+            pool.extend(result.texts)
+        for raw_text in pool:
+            if not raw_text:
+                continue
+            text = _normalise_microscope_text(raw_text)
+            for match in re.finditer(r"\d+(?:[.,]\d+)?", text):
+                start, end = match.start(), match.end()
+                prefix = text[start - 1] if start > 0 else ""
+                suffix = text[end] if end < len(text) else ""
+                if prefix in "[{(" and suffix in "]})":
+                    continue
+                number = match.group(0).replace(",", ".")
+                try:
+                    value = float(number)
+                except ValueError:
+                    continue
+                if not math.isfinite(value) or value <= 0 or value > 500:
+                    continue
+                key = round(value, 3)
+                if key in seen_numbers:
+                    continue
+                seen_numbers.add(key)
+                fallback_numbers.append(value)
+        for value in fallback_numbers:
+            result.append_value(value)
 
     if result.values:
         deduped: Dict[float, float] = {}
