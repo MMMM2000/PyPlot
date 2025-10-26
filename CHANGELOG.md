@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-10-26 23:15 UTC
+
+- Replaced the microscope Tesseract fallback with an HSV-guided ROI scanner
+  that upscales the cropped annotation, runs `image_to_data`, and maps the
+  result back to the full frame so bracketed `[1]` measurements are captured
+  reliably when PaddleOCR misses them.
+
 ## 2025-10-26 20:05 UTC
 
 - Added HSV-based red-text detection and a numpy fallback so microscope focus

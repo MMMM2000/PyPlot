@@ -1770,9 +1770,19 @@ def _extract_microscope_diameters(
     def _run_tesseract_fallback() -> bool:
         try:  # pragma: no cover - optional dependency
             import pytesseract  # type: ignore[import-not-found]
-            from pytesseract import TesseractNotFoundError  # type: ignore[import-not-found]
         except Exception:
             return False
+
+        try:  # pragma: no cover - optional dependency
+            from pytesseract import TesseractNotFoundError  # type: ignore[import-not-found]
+        except Exception:  # pragma: no cover - optional dependency
+            class TesseractNotFoundError(RuntimeError):  # type: ignore[override]
+                pass
+
+        try:  # pragma: no cover - optional dependency
+            from pytesseract import Output  # type: ignore[import-not-found]
+        except Exception:  # pragma: no cover - optional dependency
+            Output = None  # type: ignore[assignment]
 
         try:  # pragma: no cover - optional dependency
             pytesseract.get_tesseract_version()
@@ -1782,92 +1792,132 @@ def _extract_microscope_diameters(
             )
             return False
         except Exception:
-            # Other exceptions (for example, permission errors) should be logged but
-            # are not fatal for the main OCR run.
             log.debug("Tesseract version probe failed", exc_info=True)
-
-        tess_configs = [
-            "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789[].,umµ",
-            "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[].,umµ",
-            "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789[].,umµ",
-        ]
-
-        seen_variants: Set[str] = set()
-        marker_values: Dict[Tuple[int, float], float] = {}
-        appended = False
 
         resample_attr = getattr(Image, "Resampling", None)
         resample_filter = getattr(resample_attr, "LANCZOS", Image.BICUBIC)
 
-        def _prepare_variant(label: str, image: Image.Image) -> None:
-            nonlocal appended
-            if image is None:
-                return
-            if label in seen_variants:
-                return
-            seen_variants.add(label)
+        def _candidate_rois() -> List[Tuple[int, int, int, int]]:
+            width, height = base_resized.size
+            regions: List[Tuple[int, int, int, int]] = []
             try:
-                rgb_image = image.convert("RGB")
-            except Exception:
-                return
-            width, height = rgb_image.size
-            longest = max(width, height, 1)
-            target = 3600
-            if longest < target:
-                scale = target / float(longest)
-                new_size = (
-                    max(int(round(width * scale)), 1),
-                    max(int(round(height * scale)), 1),
-                )
-                rgb_image = rgb_image.resize(new_size, resample_filter)
-            gray = ImageOps.grayscale(rgb_image)
-            enhanced = ImageEnhance.Contrast(gray).enhance(2.8)
-            sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=200))
-            binary = sharpened.point(lambda p: 255 if p > 165 else 0, mode="1").convert("L")
-
-            regions: List[Tuple[str, Image.Image]] = [("base", sharpened), ("binary", binary)]
-            bottom_crop = gray.crop((0, int(gray.height * 0.45), gray.width, gray.height))
-            if bottom_crop.size[1] > 0:
-                regions.append(("bottom", bottom_crop))
-            centre_crop = gray.crop(
-                (
-                    int(gray.width * 0.15),
-                    int(gray.height * 0.35),
-                    int(gray.width * 0.85),
-                    gray.height,
-                )
-            )
-            if centre_crop.size[0] > 0 and centre_crop.size[1] > 0:
-                regions.append(("centre", centre_crop))
-
-            for suffix, variant in regions:
-                variant_label = f"{label}/{suffix}"
-                if variant_label in seen_variants:
-                    continue
-                seen_variants.add(variant_label)
-                for cfg_index, tess_config in enumerate(tess_configs):
-                    config_label = f"{variant_label}/cfg{cfg_index}"
-                    if config_label in seen_variants:
-                        continue
-                    seen_variants.add(config_label)
+                import cv2  # type: ignore[import-not-found]
+            except Exception:  # pragma: no cover - optional dependency
+                cv2 = None  # type: ignore[assignment]
+            if cv2 is not None:
+                try:
+                    array = np.array(base_resized.convert("RGB"))
+                except Exception:
+                    array = None
+                if array is not None and array.ndim == 3 and array.shape[2] == 3:
                     try:
-                        text = pytesseract.image_to_string(variant, config=tess_config)
-                    except Exception:
-                        log.debug(
-                            "Tesseract failed while processing %s (%s)",
-                            path,
-                            config_label,
-                            exc_info=True,
+                        bgr = array[:, :, ::-1]
+                        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+                        lower1 = np.array([0, 80, 70], dtype=np.uint8)
+                        upper1 = np.array([15, 255, 255], dtype=np.uint8)
+                        lower2 = np.array([160, 80, 70], dtype=np.uint8)
+                        upper2 = np.array([180, 255, 255], dtype=np.uint8)
+                        mask = cv2.inRange(hsv, lower1, upper1)
+                        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
+                        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                        mask = cv2.dilate(mask, kernel, iterations=1)
+                        contours, _ = cv2.findContours(
+                            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
                         )
+                    except Exception:
+                        contours = None
+                    if contours:
+                        for contour in contours:
+                            try:
+                                x, y, w, h = cv2.boundingRect(contour)
+                            except Exception:
+                                continue
+                            if w < 30 or h < 18:
+                                continue
+                            pad_x = max(int(round(w * 0.3)), 6)
+                            pad_y = max(int(round(h * 0.35)), 6)
+                            x0 = max(x - pad_x, 0)
+                            y0 = max(y - pad_y, 0)
+                            x1 = min(x + w + pad_x, width)
+                            y1 = min(y + h + pad_y, height)
+                            if x1 - x0 < 24 or y1 - y0 < 18:
+                                continue
+                            regions.append((x0, y0, x1, y1))
+            if not regions:
+                mid = max(int(height * 0.55), 0)
+                regions.append((0, mid, width, height))
+            deduped: List[Tuple[int, int, int, int]] = []
+            for box in sorted(regions, key=lambda item: (item[1], item[0])):
+                x0, y0, x1, y1 = box
+                keep = True
+                for existing in deduped:
+                    ex0, ey0, ex1, ey1 = existing
+                    inter_x0 = max(x0, ex0)
+                    inter_y0 = max(y0, ey0)
+                    inter_x1 = min(x1, ex1)
+                    inter_y1 = min(y1, ey1)
+                    if inter_x1 <= inter_x0 or inter_y1 <= inter_y0:
                         continue
-                    cleaned = _normalise_microscope_text(text or "")
-                    if not cleaned:
+                    inter_area = (inter_x1 - inter_x0) * (inter_y1 - inter_y0)
+                    area_a = (x1 - x0) * (y1 - y0)
+                    area_b = (ex1 - ex0) * (ey1 - ey0)
+                    union = area_a + area_b - inter_area
+                    if union <= 0:
                         continue
+                    if inter_area / float(union) > 0.6:
+                        keep = False
+                        break
+                if keep:
+                    deduped.append(box)
+                if len(deduped) >= 4:
+                    break
+            return deduped
+
+        def _prepare_for_tesseract(image: Image.Image) -> Image.Image:
+            rgb = np.array(image.convert("RGB"), dtype=np.float32)
+            if rgb.ndim != 3 or rgb.shape[2] != 3:
+                return image.convert("L")
+            emphasised = rgb[..., 0] * 1.35 - 0.25 * rgb[..., 1] - 0.25 * rgb[..., 2] + 60.0
+            emphasised = np.clip(emphasised, 0, 255).astype("uint8")
+            processed = Image.fromarray(emphasised, mode="L")
+            processed = ImageOps.autocontrast(processed)
+            return processed.filter(ImageFilter.UnsharpMask(radius=2, percent=200))
+
+        appended = False
+        for roi_index, roi in enumerate(_candidate_rois()):
+            x0, y0, x1, y1 = roi
+            if x1 <= x0 or y1 <= y0:
+                continue
+            crop = base_resized.crop(roi)
+            if crop.width < 6 or crop.height < 6:
+                continue
+            scale = max(2, min(6, int(round(1800 / max(crop.width, crop.height, 1)))))
+            scaled = crop.resize((crop.width * scale, crop.height * scale), resample_filter)
+            prepared = _prepare_for_tesseract(scaled)
+            to_data = getattr(pytesseract, "image_to_data", None)
+            if to_data is None:
+                try:
+                    fallback_text = pytesseract.image_to_string(
+                        prepared,
+                        config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[]().,umµ",
+                    )
+                except Exception:
+                    log.debug(
+                        "Tesseract failed while processing %s region %s",
+                        path,
+                        roi,
+                        exc_info=True,
+                    )
+                    continue
+                cleaned = _normalise_microscope_text(fallback_text or "")
+                if cleaned:
                     _append_candidate(cleaned)
-                    tagged = f"tesseract/{config_label}: {cleaned}"
+                    tagged = f"tesseract/roi{roi_index}: {cleaned}"
                     if tagged not in seen_texts:
                         result.texts.append(tagged)
                         seen_texts.add(tagged)
+                    matched_any = False
                     for match in re.finditer(
                         r"\[(?P<label>[12Il])\]\s*(?P<value>\d+(?:[.,]\d+)?)",
                         cleaned,
@@ -1876,26 +1926,110 @@ def _extract_microscope_diameters(
                         if label_token in {"I", "l"}:
                             label_token = "1"
                         try:
-                            label_idx = int(label_token)
                             numeric = float(match.group("value").replace(",", "."))
-                        except (TypeError, ValueError):
+                        except ValueError:
                             continue
                         if not math.isfinite(numeric) or numeric <= 0:
                             continue
-                        key = (label_idx, round(numeric, 3))
-                        if key in marker_values:
-                            continue
-                        marker_values[key] = numeric
                         result.append_value(numeric)
+                        matched_any = True
+                    if not matched_any:
+                        parsed = _parse_microscope_candidates([cleaned])
+                        for value in parsed:
+                            result.append_value(value)
+                        matched_any = bool(parsed)
+                    if matched_any:
                         appended = True
-                if appended:
-                    break
+                        break
+                continue
+            if Output is None:
+                to_data = None
+            if to_data is None:
+                continue
+            try:
+                data = to_data(
+                    prepared,
+                    output_type=Output.DICT if Output is not None else None,
+                    config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[]().,umµ",
+                )
+            except Exception:
+                log.debug(
+                    "Tesseract failed while processing %s region %s",
+                    path,
+                    roi,
+                    exc_info=True,
+                )
+                continue
+            words: List[_OCRWord] = []
+            count = len(data.get("text", []))
+            for idx in range(count):
+                token = (data["text"][idx] or "").strip()
+                if not token:
+                    continue
+                try:
+                    left = int(data["left"][idx])
+                    top = int(data["top"][idx])
+                    width = int(data["width"][idx])
+                    height = int(data["height"][idx])
+                except Exception:
+                    continue
+                conf_value = None
+                try:
+                    conf_raw = float(data.get("conf", [None])[idx])
+                except Exception:
+                    conf_raw = None
+                if conf_raw is not None and math.isfinite(conf_raw) and conf_raw >= 0:
+                    conf_value = conf_raw / 100.0
+                words.append(
+                    _OCRWord(
+                        text=token,
+                        left=left,
+                        top=top,
+                        width=width,
+                        height=height,
+                        conf=conf_value,
+                    )
+                )
+            if not words:
+                continue
+            grouped_lines: Dict[Tuple[int, int, int], List[_OCRWord]] = {}
+            for idx, word in enumerate(words):
+                block = int(data.get("block_num", [0])[idx])
+                paragraph = int(data.get("par_num", [0])[idx])
+                line_idx = int(data.get("line_num", [0])[idx])
+                grouped_lines.setdefault((block, paragraph, line_idx), []).append(word)
+            for line_words in grouped_lines.values():
+                line_words.sort(key=lambda w: w.left)
+                line_text = " ".join(entry.text for entry in line_words if entry.text)
+                if line_text:
+                    _append_candidate(line_text)
+                    tagged = f"tesseract/roi{roi_index}: {line_text}"
+                    if tagged not in seen_texts:
+                        result.texts.append(tagged)
+                        seen_texts.add(tagged)
+                for detection in _extract_line_detections(
+                    line_words,
+                    prepared.size,
+                    offset=(x0, y0),
+                    reference_size=base_resized.size,
+                ):
+                    bbox = detection.bbox or (0, 0, 0, 0)
+                    key = (
+                        round(detection.value, 2),
+                        bbox[0],
+                        bbox[1],
+                        bbox[2],
+                        bbox[3],
+                    )
+                    if key in seen_detections:
+                        continue
+                    detection.source = "tesseract"
+                    result.detections.append(detection)
+                    seen_detections.add(key)
+                    result.append_value(detection.value)
+                    appended = True
             if appended:
-                return
-
-        _prepare_variant("original", base)
-        for label, image, _offset, _ref in variant_entries:
-            _prepare_variant(label, image)
+                break
 
         if appended:
             parsed = _parse_microscope_candidates(candidates)
