@@ -451,6 +451,14 @@
 - Updated the Microscope OCR Debug experiment to preview the new red-focused
   variants, keeping its gallery in sync with the runtime pipeline.
 
+## 2025-10-26 14:45 UTC
+
+- Tuned the microscope fallback OCR to upsample annotations, scan multiple
+  cropped regions, and try several Tesseract configurations so `[1]` markers
+  reliably produce core and glass diameters when PaddleOCR misses the text.
+- Defaulted the Microscope OCR Debug tool to the `base` preprocessing variant
+  to simplify one-click experiments while keeping other filters opt-in.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch

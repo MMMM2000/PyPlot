@@ -314,7 +314,12 @@ class OcrDebugWidget(QtWidgets.QWidget):
         for variant in VARIANT_ORDER:
             item = QtWidgets.QListWidgetItem(variant)
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            default_state = (
+                QtCore.Qt.CheckState.Checked
+                if variant == "base"
+                else QtCore.Qt.CheckState.Unchecked
+            )
+            item.setCheckState(default_state)
             self.variant_list.addItem(item)
         self.variant_list.setMinimumHeight(160)
         left_layout.addWidget(self.variant_list)

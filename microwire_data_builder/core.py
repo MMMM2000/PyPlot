@@ -1786,14 +1786,18 @@ def _extract_microscope_diameters(
             # are not fatal for the main OCR run.
             log.debug("Tesseract version probe failed", exc_info=True)
 
-        tess_config = (
-            "--oem 3 --psm 6 "
-            "-c tessedit_char_whitelist=0123456789[].,umµ"
-        )
+        tess_configs = [
+            "--oem 3 --psm 6 -c tessedit_char_whitelist=0123456789[].,umµ",
+            "--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[].,umµ",
+            "--oem 3 --psm 11 -c tessedit_char_whitelist=0123456789[].,umµ",
+        ]
 
         seen_variants: Set[str] = set()
         marker_values: Dict[Tuple[int, float], float] = {}
         appended = False
+
+        resample_attr = getattr(Image, "Resampling", None)
+        resample_filter = getattr(resample_attr, "LANCZOS", Image.BICUBIC)
 
         def _prepare_variant(label: str, image: Image.Image) -> None:
             nonlocal appended
@@ -1803,59 +1807,91 @@ def _extract_microscope_diameters(
                 return
             seen_variants.add(label)
             try:
-                processed = image.convert("L")
+                rgb_image = image.convert("RGB")
             except Exception:
                 return
-            enhanced = ImageEnhance.Contrast(processed).enhance(2.5)
-            binary = processed.point(lambda p: 255 if p > 170 else 0, mode="1")
-            binary_gray = binary.convert("L")
-            for suffix, variant in (
-                ("base", processed),
-                ("contrast", enhanced),
-                ("binary", binary_gray),
-            ):
+            width, height = rgb_image.size
+            longest = max(width, height, 1)
+            target = 3600
+            if longest < target:
+                scale = target / float(longest)
+                new_size = (
+                    max(int(round(width * scale)), 1),
+                    max(int(round(height * scale)), 1),
+                )
+                rgb_image = rgb_image.resize(new_size, resample_filter)
+            gray = ImageOps.grayscale(rgb_image)
+            enhanced = ImageEnhance.Contrast(gray).enhance(2.8)
+            sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=200))
+            binary = sharpened.point(lambda p: 255 if p > 165 else 0, mode="1").convert("L")
+
+            regions: List[Tuple[str, Image.Image]] = [("base", sharpened), ("binary", binary)]
+            bottom_crop = gray.crop((0, int(gray.height * 0.45), gray.width, gray.height))
+            if bottom_crop.size[1] > 0:
+                regions.append(("bottom", bottom_crop))
+            centre_crop = gray.crop(
+                (
+                    int(gray.width * 0.15),
+                    int(gray.height * 0.35),
+                    int(gray.width * 0.85),
+                    gray.height,
+                )
+            )
+            if centre_crop.size[0] > 0 and centre_crop.size[1] > 0:
+                regions.append(("centre", centre_crop))
+
+            for suffix, variant in regions:
                 variant_label = f"{label}/{suffix}"
                 if variant_label in seen_variants:
                     continue
                 seen_variants.add(variant_label)
-                try:
-                    text = pytesseract.image_to_string(variant, config=tess_config)
-                except Exception:
-                    log.debug(
-                        "Tesseract failed while processing %s (%s)",
-                        path,
-                        variant_label,
-                        exc_info=True,
-                    )
-                    continue
-                cleaned = _normalise_microscope_text(text or "")
-                if not cleaned:
-                    continue
-                _append_candidate(cleaned)
-                tagged = f"tesseract/{variant_label}: {cleaned}"
-                if tagged not in seen_texts:
-                    result.texts.append(tagged)
-                    seen_texts.add(tagged)
-                for match in re.finditer(r"\[(?P<label>[12Il])\]\s*(?P<value>\d+(?:[.,]\d+)?)", cleaned):
-                    label = match.group("label")
-                    if label in {"I", "l"}:
-                        label = "1"
+                for cfg_index, tess_config in enumerate(tess_configs):
+                    config_label = f"{variant_label}/cfg{cfg_index}"
+                    if config_label in seen_variants:
+                        continue
+                    seen_variants.add(config_label)
                     try:
-                        numeric = float(match.group("value").replace(",", "."))
-                    except ValueError:
+                        text = pytesseract.image_to_string(variant, config=tess_config)
+                    except Exception:
+                        log.debug(
+                            "Tesseract failed while processing %s (%s)",
+                            path,
+                            config_label,
+                            exc_info=True,
+                        )
                         continue
-                    if not math.isfinite(numeric) or numeric <= 0:
+                    cleaned = _normalise_microscope_text(text or "")
+                    if not cleaned:
                         continue
-                    try:
-                        label_idx = int(label)
-                    except ValueError:
-                        continue
-                    key = (label_idx, round(numeric, 3))
-                    if key in marker_values:
-                        continue
-                    marker_values[key] = numeric
-                    result.append_value(numeric)
-                appended = True
+                    _append_candidate(cleaned)
+                    tagged = f"tesseract/{config_label}: {cleaned}"
+                    if tagged not in seen_texts:
+                        result.texts.append(tagged)
+                        seen_texts.add(tagged)
+                    for match in re.finditer(
+                        r"\[(?P<label>[12Il])\]\s*(?P<value>\d+(?:[.,]\d+)?)",
+                        cleaned,
+                    ):
+                        label_token = match.group("label")
+                        if label_token in {"I", "l"}:
+                            label_token = "1"
+                        try:
+                            label_idx = int(label_token)
+                            numeric = float(match.group("value").replace(",", "."))
+                        except (TypeError, ValueError):
+                            continue
+                        if not math.isfinite(numeric) or numeric <= 0:
+                            continue
+                        key = (label_idx, round(numeric, 3))
+                        if key in marker_values:
+                            continue
+                        marker_values[key] = numeric
+                        result.append_value(numeric)
+                        appended = True
+                if appended:
+                    break
+            if appended:
+                return
 
         _prepare_variant("original", base)
         for label, image, _offset, _ref in variant_entries:
