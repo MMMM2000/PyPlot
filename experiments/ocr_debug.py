@@ -39,6 +39,8 @@ VARIANT_ORDER: Tuple[str, ...] = (
     "invert",
     "binary",
     "binary_invert",
+    "red_mask",
+    "red_binary",
     "fourier",
 )
 
@@ -151,6 +153,27 @@ def _variant_images(image: Image.Image, variants: Sequence[str]) -> Dict[str, Im
     inverted = ImageOps.invert(grayscale)
     binary = grayscale.point(lambda p: 255 if p > 160 else 0, mode="1")
     binary_gray = ImageOps.autocontrast(binary.convert("L"))
+    def _red_enhance(image: Image.Image) -> Optional[Image.Image]:
+        try:
+            array = np.array(image.convert("RGB"), dtype=np.float32)
+        except Exception:
+            return None
+        if array.ndim != 3 or array.shape[2] != 3:
+            return None
+        red = array[..., 0]
+        green = array[..., 1]
+        blue = array[..., 2]
+        emphasised = red - 0.45 * green - 0.45 * blue + 80.0
+        emphasised = np.clip(emphasised, 0, 255)
+        emphasised = emphasised.astype("uint8")
+        enhanced_image = Image.fromarray(emphasised, mode="L")
+        return ImageOps.autocontrast(enhanced_image)
+
+    red_mask = _red_enhance(base)
+    red_binary = None
+    if red_mask is not None:
+        red_binary = red_mask.point(lambda p: 255 if p > 140 else 0, mode="1").convert("L")
+
     mapping = {
         "base": base,
         "grayscale": grayscale,
@@ -160,6 +183,8 @@ def _variant_images(image: Image.Image, variants: Sequence[str]) -> Dict[str, Im
         "invert": inverted,
         "binary": binary_gray,
         "binary_invert": ImageOps.invert(binary_gray),
+        "red_mask": red_mask,
+        "red_binary": red_binary,
         "fourier": _fourier_sharpen(grayscale),
     }
     result: Dict[str, Image.Image] = {}

@@ -1601,6 +1601,27 @@ def _extract_microscope_diameters(
         except Exception:
             return image
 
+    def _red_enhance(image: Image.Image) -> Optional[Image.Image]:
+        try:
+            array = np.array(image.convert("RGB"), dtype=np.float32)
+        except Exception:
+            return None
+        if array.ndim != 3 or array.shape[2] != 3:
+            return None
+        red = array[..., 0]
+        green = array[..., 1]
+        blue = array[..., 2]
+        emphasised = red - 0.45 * green - 0.45 * blue + 80.0
+        emphasised = np.clip(emphasised, 0, 255)
+        emphasised = emphasised.astype("uint8")
+        enhanced_image = Image.fromarray(emphasised, mode="L")
+        return ImageOps.autocontrast(enhanced_image)
+
+    red_mask = _red_enhance(base_resized)
+    red_binary = None
+    if red_mask is not None:
+        red_binary = red_mask.point(lambda p: 255 if p > 140 else 0, mode="1").convert("L")
+
     variants = [
         ("base", base_resized),
         ("grayscale", resized),
@@ -1610,6 +1631,8 @@ def _extract_microscope_diameters(
         ("invert", inverted),
         ("binary", binary_gray),
         ("binary_invert", ImageOps.invert(binary_gray)),
+        ("red_mask", red_mask),
+        ("red_binary", red_binary),
         ("fourier", _fourier_sharpen(resized)),
     ]
 
@@ -1892,6 +1915,7 @@ def _extract_microscope_diameters(
                 except (TypeError, ValueError):
                     marker = None
             candidate_segment = normalised[marker_offset:]
+            context_prefix = " ".join(normalised_words[max(0, idx - 3) : idx + 1])
             match = re.search(r"(\d+(?:[.,]\d+)?)", candidate_segment)
             if not match:
                 continue
@@ -1915,6 +1939,18 @@ def _extract_microscope_diameters(
                     if any(hint in probe_text for hint in MICROSCOPE_UNIT_HINTS):
                         unit_idx = probe_idx
                         break
+            if unit_idx is None and marker is not None:
+                unit_idx = idx
+            if marker is None:
+                context_normalised = context_prefix.replace("μ", MICRO_SIGN)
+                if any(hint in context_normalised for hint in ("[1", "1]", "[1]")):
+                    marker = 1
+                elif any(hint in context_normalised for hint in ("[2", "2]", "[2]")):
+                    marker = 2
+            if unit_idx is None:
+                lookahead = " ".join(lowered_words[idx : min(len(words), idx + 3)])
+                if any(hint in lookahead for hint in MICROSCOPE_UNIT_HINTS):
+                    unit_idx = idx
             if unit_idx is None:
                 continue
             start_idx = idx

@@ -433,6 +433,15 @@
   composition percentages do not add up to 100 %, while still allowing
   measurements to proceed.
 
+## 2025-10-22 16:45 UTC
+
+- Improved microscope OCR sensitivity by adding red-channel preprocessing for
+  PaddleOCR/Tesseract variants and loosening marker/unit heuristics so
+  bracketed annotations like `[1]6.7µm` register even when the unit glyph is
+  partially missed.
+- Updated the Microscope OCR Debug experiment to preview the new red-focused
+  variants, keeping its gallery in sync with the runtime pipeline.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
