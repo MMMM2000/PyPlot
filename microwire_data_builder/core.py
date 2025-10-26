@@ -736,6 +736,42 @@ def _normalise_text(value: object) -> str:
     return text
 
 
+def _merged_header_row(
+    df: pd.DataFrame, header_idx: int, *, lookback: int = 3
+) -> List[object]:
+    """Return a header row with empty cells backfilled from previous rows."""
+
+    if header_idx < 0 or header_idx >= len(df):
+        return []
+
+    header = list(df.iloc[header_idx])
+    if header_idx == 0:
+        return header
+
+    max_offset = min(max(header_idx, 0), max(0, lookback))
+    if max_offset <= 0:
+        return header
+
+    for col_idx in range(len(header)):
+        value = header[col_idx]
+        if value is not None and not _is_nan(value):
+            text = _normalise_text(value)
+            if text:
+                continue
+        for offset in range(1, max_offset + 1):
+            try:
+                candidate = df.iat[header_idx - offset, col_idx]
+            except (IndexError, ValueError):
+                candidate = None
+            if candidate is None or _is_nan(candidate):
+                continue
+            candidate_text = _normalise_text(candidate)
+            if candidate_text:
+                header[col_idx] = candidate
+                break
+    return header
+
+
 def _header_key(value: object) -> Optional[str]:
     text = _normalise_text(value)
     if not text:
@@ -1405,11 +1441,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return MicroscopeOCRResult()
 
     result = MicroscopeOCRResult()
-    base_width, base_height = base.size
-
     def _resample(image):
         width, height = image.size
-        target = 1600
+        target = 2048
         longest = max(width, height)
         if longest <= 0:
             return image
@@ -1424,6 +1458,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             resample_filter = getattr(Image, "LANCZOS", Image.BICUBIC)
         return image.resize(new_size, resample_filter)
 
+    base_resized = _resample(base)
+    base_width, base_height = base_resized.size
+
     candidates: List[str] = []
     seen_candidates: Set[str] = set()
 
@@ -1436,8 +1473,8 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         candidates.append(cleaned)
         seen_candidates.add(cleaned)
 
-    grayscale = ImageOps.grayscale(base)
-    resized = _resample(grayscale)
+    grayscale = ImageOps.grayscale(base_resized)
+    resized = grayscale
     enhanced = ImageEnhance.Contrast(resized).enhance(2.0)
     sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
     autocontrasted = ImageOps.autocontrast(resized)
@@ -1445,6 +1482,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
     binary = resized.point(lambda p: 255 if p > 160 else 0, mode="1")
     binary_gray = ImageOps.autocontrast(binary.convert("L"))
     variants = [
+        base_resized,
         resized,
         enhanced,
         sharpened,
@@ -1531,6 +1569,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return lines
 
     seen_detections: Set[Tuple[float, int, int, int, int]] = set()
+    seen_texts: Set[str] = set()
 
     def _extract_line_detections(
         words: Sequence[_OCRWord], variant_size: Tuple[int, int]
@@ -1663,9 +1702,13 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         for line in lines:
             if not line:
                 continue
-            line_text = " ".join(word.text for word in line)
+            line_text_raw = " ".join(word.text for word in line)
+            line_text = " ".join(line_text_raw.split())
             if line_text:
                 _append_candidate(line_text)
+                if line_text not in seen_texts:
+                    result.texts.append(line_text)
+                    seen_texts.add(line_text)
                 combined_lines.append(line_text)
                 for detection in _extract_line_detections(line, variant_size):
                     bbox = detection.bbox or (0, 0, 0, 0)
@@ -1678,10 +1721,11 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                     )
                     if key in seen_detections:
                         continue
+                    if detection.text:
+                        detection.text = " ".join(str(detection.text).split())
                     result.detections.append(detection)
                     seen_detections.add(key)
                     result.append_value(detection.value)
-                    result.texts.append(line_text)
         if combined_lines:
             _append_candidate("\n".join(combined_lines))
 
@@ -2061,8 +2105,8 @@ def _parse_composition_workbook(path: Path, index: FabricationIndex, logger: log
     if df.empty:
         logger.warning("%s is empty", path)
         return
-    header_row = df.iloc[0]
-    headers = [_header_key(value) for value in header_row]
+    header_values = _merged_header_row(df, 0)
+    headers = [_header_key(value) for value in header_values]
     data = df.iloc[1:].reset_index(drop=True)
     composition = _composition_from_path(path)
     _parse_draw_rows(data, headers, composition, index, logger, path)
@@ -2082,7 +2126,8 @@ def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.L
     if header_idx is None:
         logger.warning("%s: unable to locate header row", path)
         return
-    headers = [_header_key(value) for value in df.iloc[header_idx]]
+    header_values = _merged_header_row(df, header_idx)
+    headers = [_header_key(value) for value in header_values]
     data = df.iloc[header_idx + 1 :].reset_index(drop=True)
     stem = path.stem
     match = re.search(r"(?P<draw>\d+)[._](?P<comp>[A-Za-z0-9]+)", stem)

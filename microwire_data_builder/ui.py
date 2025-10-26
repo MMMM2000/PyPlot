@@ -4511,12 +4511,10 @@ class MicroscopeSection(MiniDatabaseSection):
         ]
         value_text = ", ".join(values) if values else "—"
         sample_texts: List[str] = []
-        for text in result.texts[:3]:
+        for text in result.texts:
             cleaned = str(text).replace("\n", " ").strip()
             if cleaned:
                 sample_texts.append(cleaned)
-        if len(result.texts) > 3:
-            sample_texts.append("…")
         text_preview = " | ".join(sample_texts)
         message = f"OCR debug {Path(path).name}: values={value_text}"
         if text_preview:

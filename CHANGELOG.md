@@ -1,5 +1,16 @@
 # Changelog
 
+## 2025-10-26 08:55 UTC
+
+- Backfilled multi-row fabrication headers so d/D/ratio columns and resistance
+  values populate consistently even when the labels span multiple rows in the
+  source spreadsheets.
+- Improved microscope OCR preprocessing (higher-resolution colour variants) and
+  debug logging so every recognised text line is reported when debugging and
+  PaddleOCR can pick up `[1]6.7µm` annotations from the sample captures.
+- Added regression coverage for the merged-header path to ensure future
+  refactors keep the fabrication diameter parsing intact.
+
 ## 2025-10-26 07:03 UTC
 
 - Recognised plain `d`/`D` fabrication headers (and other core/glass hints) so

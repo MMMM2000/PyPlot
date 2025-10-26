@@ -28,6 +28,9 @@ _metadata_from_path = core._metadata_from_path
 _resistance_sanity_check = core._resistance_sanity_check
 _safe_plot_stem = core._safe_plot_stem
 OriginArtifact = core.OriginArtifact
+FabricationIndex = core.FabricationIndex
+_merged_header_row = core._merged_header_row
+_parse_piece_rows = core._parse_piece_rows
 
 
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
@@ -75,6 +78,46 @@ def test_header_normaliser_variants() -> None:
     assert _header_key("D (µm)") == "D_um"
     assert _header_key("d/D") == "d_over_D"
     assert _header_key("Poznámka") == "notes"
+
+
+def test_piece_header_backfill_extracts_diameters(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        [
+            [
+                "1.Ni46Fe23Ga23Co8 13.03.2025 09:15",
+                None,
+                None,
+                "odpor",
+                "d",
+                "D",
+                "d/D",
+            ],
+            ["P.Č", "Dátum", "Dĺžka (m)", None, None, None, None],
+            ["1.", "45729", "6.4056", "2.15", "7", "25", "0.28"],
+        ],
+        dtype=object,
+    )
+
+    header_idx = 1
+    header_values = _merged_header_row(df, header_idx)
+    headers = [_header_key(value) for value in header_values]
+    index = FabricationIndex()
+    _parse_piece_rows(
+        df.iloc[header_idx + 1 :],
+        headers,
+        "Ni46Fe23Ga23Co8",
+        1,
+        index,
+        logging.getLogger("test"),
+        tmp_path / "piece.xlsx",
+    )
+    record = index.get_piece("Ni46Fe23Ga23Co8", 1, 1)
+    assert record["d_um"] == pytest.approx(7.0)
+    assert record["D_um"] == pytest.approx(25.0)
+    assert record["d_over_D"] == pytest.approx(0.28)
+    assert record["fabrication_resistance_ohm"] == pytest.approx(2.15)
+    display = record.get("d_um__display")
+    assert isinstance(display, list) and "7" in display[0]
 
 
 def test_canonical_dimension_field_filters_non_diameter_columns() -> None:
