@@ -1513,9 +1513,11 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return MicroscopeOCRResult()
 
     result = MicroscopeOCRResult()
+    original_width, original_height = base.size
+
     def _resample(image):
         width, height = image.size
-        target = 2048
+        target = 3072
         longest = max(width, height)
         if longest <= 0:
             return image
@@ -1531,7 +1533,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return image.resize(new_size, resample_filter)
 
     base_resized = _resample(base)
-    base_width, base_height = base_resized.size
+    base_width, base_height = original_width, original_height
 
     candidates: List[str] = []
     seen_candidates: Set[str] = set()
@@ -1774,6 +1776,58 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             detections.append(detection)
         return detections
 
+    def _consume_ocr_output(
+        label: str,
+        raw_result,
+        variant_size: Tuple[int, int],
+    ) -> bool:
+        lines = _group_paddle_words(raw_result)
+        if not lines:
+            return False
+        combined_lines: List[str] = []
+        for line in lines:
+            if not line:
+                continue
+            line_text_raw = " ".join(word.text for word in line)
+            line_text = " ".join(line_text_raw.split())
+            if not line_text:
+                continue
+            _append_candidate(line_text)
+            tagged = f"{label}: {line_text}"
+            if tagged not in seen_texts:
+                result.texts.append(tagged)
+                seen_texts.add(tagged)
+            combined_lines.append(line_text)
+            for detection in _extract_line_detections(line, variant_size):
+                bbox = detection.bbox or (0, 0, 0, 0)
+                key = (
+                    round(detection.value, 2),
+                    bbox[0],
+                    bbox[1],
+                    bbox[2],
+                    bbox[3],
+                )
+                if key in seen_detections:
+                    continue
+                if detection.text:
+                    detection.text = " ".join(str(detection.text).split())
+                result.detections.append(detection)
+                seen_detections.add(key)
+                result.append_value(detection.value)
+        if combined_lines:
+            _append_candidate("\n".join(combined_lines))
+            return True
+        return False
+
+    processed_any_variant = False
+    try:
+        direct_result = ocr.ocr(str(path), cls=True)
+    except Exception:
+        direct_result = None
+    if direct_result:
+        if _consume_ocr_output("original", direct_result, (original_width, original_height)):
+            processed_any_variant = True
+
     for label, variant in variants:
         if variant is None:
             continue
@@ -1796,40 +1850,8 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                 exc_info=True,
             )
             continue
-        lines = _group_paddle_words(ocr_result)
-        if not lines:
-            continue
-        combined_lines: List[str] = []
-        for line in lines:
-            if not line:
-                continue
-            line_text_raw = " ".join(word.text for word in line)
-            line_text = " ".join(line_text_raw.split())
-            if line_text:
-                _append_candidate(line_text)
-                tagged = f"{label}: {line_text}"
-                if tagged not in seen_texts:
-                    result.texts.append(tagged)
-                    seen_texts.add(tagged)
-                combined_lines.append(line_text)
-                for detection in _extract_line_detections(line, variant_size):
-                    bbox = detection.bbox or (0, 0, 0, 0)
-                    key = (
-                        round(detection.value, 2),
-                        bbox[0],
-                        bbox[1],
-                        bbox[2],
-                        bbox[3],
-                    )
-                    if key in seen_detections:
-                        continue
-                    if detection.text:
-                        detection.text = " ".join(str(detection.text).split())
-                    result.detections.append(detection)
-                    seen_detections.add(key)
-                    result.append_value(detection.value)
-        if combined_lines:
-            _append_candidate("\n".join(combined_lines))
+        if _consume_ocr_output(label, ocr_result, variant_size):
+            processed_any_variant = True
 
         if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
             values = _parse_microscope_candidates(candidates)
@@ -1839,6 +1861,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                 break
         if result.values:
             break
+
+    if not processed_any_variant:
+        log.debug("PaddleOCR produced no candidate text for %s", path)
 
     if not result.values:
         parsed = _parse_microscope_candidates(candidates)

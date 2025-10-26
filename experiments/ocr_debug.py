@@ -119,6 +119,46 @@ class EngineResult:
         return formatted
 
 
+class PreviewImageLabel(QtWidgets.QLabel):
+    """Clickable image preview that opens a full-resolution dialog."""
+
+    def __init__(self, title: str, image: Image.Image, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(parent)
+        self._title = title
+        self._image = image
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self.setToolTip("Double-click to open the full-resolution variant")
+
+    def mouseDoubleClickEvent(self, event: QtGui.QMouseEvent) -> None:  # pragma: no cover - interactive
+        if event.button() != QtCore.Qt.MouseButton.LeftButton:
+            super().mouseDoubleClickEvent(event)
+            return
+        try:
+            qimage = ImageQt.ImageQt(self._image)
+            pixmap = QtGui.QPixmap.fromImage(qimage)
+        except Exception:
+            return
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"{self._title} – full preview")
+        dialog_layout = QtWidgets.QVBoxLayout(dialog)
+        dialog_layout.setContentsMargins(0, 0, 0, 0)
+        scroll = QtWidgets.QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QtWidgets.QWidget()
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(12, 12, 12, 12)
+        image_label = QtWidgets.QLabel()
+        image_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        image_label.setPixmap(pixmap)
+        container_layout.addWidget(image_label)
+        scroll.setWidget(container)
+        dialog_layout.addWidget(scroll)
+        width = min(max(pixmap.width() + 32, 480), 1440)
+        height = min(max(pixmap.height() + 48, 360), 1024)
+        dialog.resize(width, height)
+        dialog.exec()
+
 class OcrDebugWidget(QtWidgets.QWidget):
     """Simple playground for microscope OCR preprocessing experiments."""
 
@@ -149,19 +189,26 @@ class OcrDebugWidget(QtWidgets.QWidget):
 
         self.directory_edit.editingFinished.connect(self._refresh_image_list)
 
-        lists_row = QtWidgets.QHBoxLayout()
-        lists_row.setSpacing(12)
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        splitter.setChildrenCollapsible(False)
+        layout.addWidget(splitter, 1)
 
-        image_container = QtWidgets.QVBoxLayout()
-        image_container.setSpacing(6)
-        image_container.addWidget(QtWidgets.QLabel("Images (select one or more):"))
+        left_widget = QtWidgets.QWidget()
+        left_layout = QtWidgets.QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(10)
+
+        images_label = QtWidgets.QLabel("Images (select one or more):")
+        left_layout.addWidget(images_label)
         self.image_list = QtWidgets.QListWidget()
         self.image_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         self.image_list.setUniformItemSizes(True)
-        self.image_list.setMinimumHeight(180)
-        image_container.addWidget(self.image_list)
-        lists_row.addLayout(image_container, 1)
+        self.image_list.setMinimumHeight(200)
+        self.image_list.setMinimumWidth(220)
+        left_layout.addWidget(self.image_list, 1)
 
+        variants_label = QtWidgets.QLabel("Preprocessing variants:")
+        left_layout.addWidget(variants_label)
         self.variant_list = QtWidgets.QListWidget()
         self.variant_list.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
         for variant in VARIANT_ORDER:
@@ -169,53 +216,66 @@ class OcrDebugWidget(QtWidgets.QWidget):
             item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(QtCore.Qt.CheckState.Checked)
             self.variant_list.addItem(item)
-        variant_container = QtWidgets.QVBoxLayout()
-        variant_container.addWidget(QtWidgets.QLabel("Tesseract variants:"))
-        variant_container.addWidget(self.variant_list)
-        variant_widget = QtWidgets.QWidget()
-        variant_widget.setLayout(variant_container)
-        lists_row.addWidget(variant_widget, 1)
-        layout.addLayout(lists_row)
+        self.variant_list.setMinimumHeight(160)
+        left_layout.addWidget(self.variant_list)
 
-        self.preview_title = QtWidgets.QLabel("Preview: (select an image)")
-        self.preview_title.setWordWrap(True)
-        layout.addWidget(self.preview_title)
-
-        self.preview_area = QtWidgets.QScrollArea()
-        self.preview_area.setWidgetResizable(True)
-        self.preview_area.setMinimumHeight(220)
-        self.preview_widget = QtWidgets.QWidget()
-        self.preview_layout = QtWidgets.QGridLayout(self.preview_widget)
-        self.preview_layout.setContentsMargins(6, 6, 6, 6)
-        self.preview_layout.setHorizontalSpacing(16)
-        self.preview_layout.setVerticalSpacing(16)
-        self.preview_area.setWidget(self.preview_widget)
-        layout.addWidget(self.preview_area, 1)
-
-        controls_row = QtWidgets.QHBoxLayout()
-        controls_row.setSpacing(12)
-
+        engine_row = QtWidgets.QHBoxLayout()
+        engine_row.setSpacing(6)
+        engine_label = QtWidgets.QLabel("Engine:")
         self.engine_combo = QtWidgets.QComboBox()
         self.engine_combo.addItems(["PaddleOCR", "Tesseract", "Both"])
-        controls_row.addWidget(QtWidgets.QLabel("Engine:"))
-        controls_row.addWidget(self.engine_combo)
+        engine_row.addWidget(engine_label)
+        engine_row.addWidget(self.engine_combo, 1)
+        left_layout.addLayout(engine_row)
 
         run_button = QtWidgets.QPushButton("Run OCR")
         run_button.clicked.connect(self.run_analysis)
-        controls_row.addWidget(run_button)
-        controls_row.addStretch(1)
-        layout.addLayout(controls_row)
+        left_layout.addWidget(run_button)
 
         self.progress_bar = QtWidgets.QProgressBar()
         self.progress_bar.setRange(0, 1)
         self.progress_bar.setValue(0)
         self.progress_bar.setTextVisible(False)
         self.progress_bar.hide()
-        layout.addWidget(self.progress_bar)
+        left_layout.addWidget(self.progress_bar)
+        left_layout.addStretch(1)
 
+        splitter.addWidget(left_widget)
+
+        preview_widget = QtWidgets.QWidget()
+        preview_layout = QtWidgets.QVBoxLayout(preview_widget)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(8)
+        self.preview_title = QtWidgets.QLabel("Preview: (select an image)")
+        self.preview_title.setWordWrap(True)
+        preview_layout.addWidget(self.preview_title)
+        self.preview_area = QtWidgets.QScrollArea()
+        self.preview_area.setWidgetResizable(True)
+        self.preview_area.setMinimumWidth(360)
+        self.preview_area.setMinimumHeight(240)
+        self.preview_widget = QtWidgets.QWidget()
+        self.preview_layout = QtWidgets.QGridLayout(self.preview_widget)
+        self.preview_layout.setContentsMargins(6, 6, 6, 6)
+        self.preview_layout.setHorizontalSpacing(16)
+        self.preview_layout.setVerticalSpacing(16)
+        self.preview_area.setWidget(self.preview_widget)
+        preview_layout.addWidget(self.preview_area, 1)
+        splitter.addWidget(preview_widget)
+
+        output_widget = QtWidgets.QWidget()
+        output_layout = QtWidgets.QVBoxLayout(output_widget)
+        output_layout.setContentsMargins(0, 0, 0, 0)
+        output_layout.setSpacing(8)
+        output_label = QtWidgets.QLabel("OCR output")
+        output_layout.addWidget(output_label)
         self.output_edit = QtWidgets.QPlainTextEdit()
         self.output_edit.setReadOnly(True)
-        layout.addWidget(self.output_edit, 1)
+        self.output_edit.setMinimumWidth(280)
+        output_layout.addWidget(self.output_edit, 1)
+        splitter.addWidget(output_widget)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setStretchFactor(2, 1)
 
         note = QtWidgets.QLabel(
             "PaddleOCR always runs with the microwire data builder pipeline and emits per-variant"
@@ -457,9 +517,8 @@ class OcrDebugWidget(QtWidgets.QWidget):
             layout.addWidget(error_label)
             return container
 
-        preview = QtWidgets.QLabel()
-        preview.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        target_width = min(320, max(160, pixmap.width()))
+        preview = PreviewImageLabel(name, image)
+        target_width = min(480, max(220, pixmap.width()))
         if pixmap.width() > target_width:
             pixmap = pixmap.scaledToWidth(
                 target_width,

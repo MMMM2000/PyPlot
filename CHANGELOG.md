@@ -1,5 +1,16 @@
 # Changelog
 
+## 2025-10-26 15:32 UTC
+
+- Reworked the Microscope OCR Debug tool with a resizable splitter layout, a
+  dedicated output pane, and double-clickable variant previews that open
+  full-resolution dialogs so it is easier to compare preprocessing results and
+  inspect the source image.
+- Tuned the microscope OCR pipeline to upscale captures more aggressively and
+  run PaddleOCR on the untouched image before processing variants, emitting a
+  debug trace when no text is returned so bracketed micrometer annotations are
+  less likely to be missed.
+
 ## 2025-10-26 13:48 UTC
 
 - Added live image previews to the Microscope OCR Debug experiment so the
