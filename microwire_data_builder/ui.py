@@ -45,6 +45,7 @@ from .core import (
     MicroscopeMeasurements,
     MicroscopeDetection,
     MicroscopeOCRResult,
+    MICROSCOPE_IMAGE_COLUMNS,
     MeasurementRecord,
     VideoMetricsSummary,
     FabricationIndex,
@@ -2853,15 +2854,28 @@ def _microscope_index_to_frame(
 ) -> pd.DataFrame:
     columns = [
         "Composition",
-        "Draw",
-        "Piece",
+        "Microwire",
         "d (µm)",
         "D (µm)",
         "d/D",
-        "Images",
+        MICROSCOPE_IMAGE_COLUMNS[0],
+        MICROSCOPE_IMAGE_COLUMNS[1],
         "_key",
+        "_core_image",
+        "_glass_image",
         "_images",
     ]
+
+    def _image_path(entries: Sequence[MicroscopeDetection]) -> Optional[str]:
+        for detection in entries:
+            crop = getattr(detection, "crop_path", None)
+            if crop:
+                return str(crop)
+            source = getattr(detection, "image_path", None)
+            if source:
+                return str(source)
+        return None
+
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), measurements in sorted(index.items()):
         key = f"{composition}|{draw}|{piece}"
@@ -2880,6 +2894,9 @@ def _microscope_index_to_frame(
                 ratio = None
         if isinstance(ratio, (int, float)):
             ratio = round(float(ratio), 3)
+
+        core_image = _image_path(measurements.core)
+        glass_image = _image_path(measurements.glass)
         image_paths: List[str] = []
         for bucket in (measurements.core, measurements.glass, measurements.other):
             for detection in bucket:
@@ -2888,16 +2905,19 @@ def _microscope_index_to_frame(
                     image_paths.append(str(path))
         if image_paths:
             image_paths = list(dict.fromkeys(image_paths))
+
         rows.append(
             {
                 "Composition": composition,
-                "Draw": draw,
-                "Piece": piece,
+                "Microwire": _microwire_label(draw, piece),
                 "d (µm)": d_value,
                 "D (µm)": D_value,
                 "d/D": ratio,
-                "Images": "; ".join(dict.fromkeys(image_paths)),
+                MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
+                "_core_image": core_image,
+                "_glass_image": glass_image,
                 "_images": image_paths,
             }
         )
@@ -3158,7 +3178,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 80
         for idx, column_name in enumerate(frame.columns):
             label = str(column_name)
-            if "Graph" not in label and "Figure" not in label:
+            if (
+                "Graph" not in label
+                and "Figure" not in label
+                and label not in MICROSCOPE_IMAGE_COLUMNS
+            ):
                 continue
             current = table.columnWidth(idx)
             target = graph_width if graph_width > current else current
@@ -4434,7 +4458,10 @@ class MicroscopeSection(MiniDatabaseSection):
         self._overrides: Dict[str, Dict[str, float]] = {}
         self._selected_key: str | None = None
         self._ocr_debug_enabled = False
+        self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         super().__init__(logger, log_callback, parent)
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._image_decoration)
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
             self._overrides = {
@@ -4459,6 +4486,13 @@ class MicroscopeSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         table.setSortingEnabled(True)
+        icon_size = QtCore.QSize(220, 220)
+        table.setIconSize(icon_size)
+        header = table.verticalHeader()
+        if header is not None:
+            default_height = icon_size.height() + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
         self.table_view = table
         selection_model = table.selectionModel()
         if selection_model is not None:
@@ -4469,11 +4503,27 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(6)
 
-        self.preview_label = QtWidgets.QLabel("Select a row to preview the image.")
-        self.preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumSize(220, 220)
-        self.preview_label.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        preview_layout.addWidget(self.preview_label, 1)
+        def _make_preview_panel(title: str) -> Tuple[QtWidgets.QVBoxLayout, QtWidgets.QLabel]:
+            column_layout = QtWidgets.QVBoxLayout()
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            caption = QtWidgets.QLabel(title)
+            caption.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            caption.setStyleSheet("font-weight: 600;")
+            column_layout.addWidget(caption)
+            label = QtWidgets.QLabel("Select a row to preview.")
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            label.setMinimumSize(icon_size.width(), icon_size.height())
+            label.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+            label.setWordWrap(True)
+            column_layout.addWidget(label, 1)
+            return column_layout, label
+
+        image_row = QtWidgets.QHBoxLayout()
+        core_panel, self.core_preview_label = _make_preview_panel("Core image")
+        glass_panel, self.glass_preview_label = _make_preview_panel("Glass image")
+        image_row.addLayout(core_panel)
+        image_row.addLayout(glass_panel)
+        preview_layout.addLayout(image_row)
 
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -4532,7 +4582,7 @@ class MicroscopeSection(MiniDatabaseSection):
         model = self.table_view.model()
         if model is None:
             return
-        for column_name in ("_key", "_images"):
+        for column_name in ("_key", "_images", "_core_image", "_glass_image"):
             try:
                 column_index = list(model.frame().columns).index(column_name)  # type: ignore[arg-type]
             except Exception:
@@ -4550,7 +4600,46 @@ class MicroscopeSection(MiniDatabaseSection):
                     sources.append(Path(entry))
                 except Exception:
                     continue
+        for column_name in ("_core_image", "_glass_image"):
+            path_value = row.get(column_name)
+            if not path_value:
+                continue
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                continue
+            if candidate not in sources:
+                sources.append(candidate)
         return sources
+
+    def _image_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column not in MICROSCOPE_IMAGE_COLUMNS:
+            return None
+        key = row.get("_key")
+        if not isinstance(key, str) or not key:
+            return None
+        cache_key = (key, column)
+        cached = self._pixmap_cache.get(cache_key)
+        if cached is not None or cache_key in self._pixmap_cache:
+            return cached
+        hidden = "_core_image" if column == MICROSCOPE_IMAGE_COLUMNS[0] else "_glass_image"
+        path_value = row.get(hidden)
+        pixmap: Optional[QtGui.QPixmap] = None
+        if path_value:
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                candidate = None
+            if candidate and candidate.exists():
+                loaded = QtGui.QPixmap(str(candidate))
+                if not loaded.isNull():
+                    pixmap = loaded
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
 
     def _selected_row(self) -> Optional[pd.Series]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -4571,7 +4660,9 @@ class MicroscopeSection(MiniDatabaseSection):
         row = self._selected_row()
         if row is None:
             self._selected_key = None
-            self.preview_label.setText("Select a row to preview the image.")
+            for label in (self.core_preview_label, self.glass_preview_label):
+                label.setPixmap(QtGui.QPixmap())
+                label.setText("Select a row to preview.")
             self.d_edit.clear()
             self.D_edit.clear()
             return
@@ -4581,21 +4672,31 @@ class MicroscopeSection(MiniDatabaseSection):
         D_value = row.get("D (µm)")
         self.d_edit.setText("" if d_value is None or (isinstance(d_value, float) and math.isnan(d_value)) else f"{float(d_value):.3f}")
         self.D_edit.setText("" if D_value is None or (isinstance(D_value, float) and math.isnan(D_value)) else f"{float(D_value):.3f}")
-        images = row.get("_images") if isinstance(row.get("_images"), list) else []
-        if images:
-            first = Path(images[0])
-            if first.exists():
-                pixmap = QtGui.QPixmap(str(first))
+        for column_name, label in (
+            ("_core_image", self.core_preview_label),
+            ("_glass_image", self.glass_preview_label),
+        ):
+            path_value = row.get(column_name)
+            if path_value:
+                try:
+                    candidate = Path(path_value)
+                except Exception:
+                    candidate = None
+            else:
+                candidate = None
+            if candidate and candidate.exists():
+                pixmap = QtGui.QPixmap(str(candidate))
                 if not pixmap.isNull():
                     scaled = pixmap.scaled(
-                        self.preview_label.size(),
+                        label.size(),
                         QtCore.Qt.AspectRatioMode.KeepAspectRatio,
                         QtCore.Qt.TransformationMode.SmoothTransformation,
                     )
-                    self.preview_label.setPixmap(scaled)
-                    return
-        self.preview_label.setPixmap(QtGui.QPixmap())
-        self.preview_label.setText("No preview available.")
+                    label.setPixmap(scaled)
+                    label.setText("")
+                    continue
+            label.setPixmap(QtGui.QPixmap())
+            label.setText("No preview available.")
 
     def _apply_override(self) -> None:
         if not self._selected_key:
@@ -4641,6 +4742,7 @@ class MicroscopeSection(MiniDatabaseSection):
         if frame.empty:
             self.model.set_frame(frame)
             return
+        self._pixmap_cache.clear()
         for index, row in frame.iterrows():
             key = str(row.get("_key"))
             override = self._overrides.get(key)

@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-26 10:08 UTC
+
+- Reworked the microscope worksheet to show a single microwire column with
+  inline core/glass previews and matching dual previews in the inspector so
+  each row surfaces both images alongside the detected diameters.
+- Expanded the PaddleOCR preprocessing set (including a Fourier sharpen pass)
+  and tagged every recognised text fragment with its variant for richer debug
+  output when microscope OCR struggles.
+- Added an "Microscope OCR Debug" experiment that batch-tests the sample
+  images across PaddleOCR and Tesseract variants, printing the raw text and
+  parsed diameters for each preprocessing strategy.
+
 ## 2025-10-26 09:40 UTC
 
 - Ensure the microscope worksheet lists every microwire from current

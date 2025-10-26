@@ -1553,15 +1553,42 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
     inverted = ImageOps.invert(resized)
     binary = resized.point(lambda p: 255 if p > 160 else 0, mode="1")
     binary_gray = ImageOps.autocontrast(binary.convert("L"))
+
+    def _fourier_sharpen(image: Image.Image) -> Image.Image:
+        array = np.array(image.convert("L"), dtype=np.float32)
+        if array.ndim != 2 or array.size == 0:
+            return image
+        rows, cols = array.shape
+        crow, ccol = rows // 2, cols // 2
+        if crow == 0 or ccol == 0:
+            return image
+        freq = np.fft.fft2(array)
+        shift = np.fft.fftshift(freq)
+        y = np.arange(rows, dtype=np.float32)[:, None]
+        x = np.arange(cols, dtype=np.float32)[None, :]
+        distance = np.sqrt((y - float(crow)) ** 2 + (x - float(ccol)) ** 2)
+        radius = max(min(rows, cols) * 0.08, 1.0)
+        mask = np.ones_like(shift, dtype=np.complex128)
+        mask[distance <= radius] = 0.1
+        filtered = shift * mask
+        inv_shift = np.fft.ifftshift(filtered)
+        sharpened = np.fft.ifft2(inv_shift).real
+        sharpened = np.clip(sharpened, 0, 255)
+        try:
+            return Image.fromarray(sharpened.astype("uint8"))
+        except Exception:
+            return image
+
     variants = [
-        base_resized,
-        resized,
-        enhanced,
-        sharpened,
-        autocontrasted,
-        inverted,
-        binary_gray,
-        ImageOps.invert(binary_gray),
+        ("base", base_resized),
+        ("grayscale", resized),
+        ("contrast", enhanced),
+        ("sharpen", sharpened),
+        ("autocontrast", autocontrasted),
+        ("invert", inverted),
+        ("binary", binary_gray),
+        ("binary_invert", ImageOps.invert(binary_gray)),
+        ("fourier", _fourier_sharpen(resized)),
     ]
 
     @dataclass
@@ -1747,7 +1774,9 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             detections.append(detection)
         return detections
 
-    for variant in variants:
+    for label, variant in variants:
+        if variant is None:
+            continue
         variant_size = variant.size
         variant_rgb = variant.convert("RGB")
         variant_array = np.array(variant_rgb)
@@ -1778,9 +1807,10 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             line_text = " ".join(line_text_raw.split())
             if line_text:
                 _append_candidate(line_text)
-                if line_text not in seen_texts:
-                    result.texts.append(line_text)
-                    seen_texts.add(line_text)
+                tagged = f"{label}: {line_text}"
+                if tagged not in seen_texts:
+                    result.texts.append(tagged)
+                    seen_texts.add(tagged)
                 combined_lines.append(line_text)
                 for detection in _extract_line_detections(line, variant_size):
                     bbox = detection.bbox or (0, 0, 0, 0)
