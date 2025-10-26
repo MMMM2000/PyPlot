@@ -188,12 +188,14 @@ HEADER_HINTS: Dict[str, str] = {
     "d(µm)": "d_um",
     "d(um)": "d_um",
     "d(μm)": "d_um",
+    "d": "d_um",
     "D (µm)": "D_um",
     "D (um)": "D_um",
     "D (μm)": "D_um",
     "D(µm)": "D_um",
     "D(um)": "D_um",
     "D(μm)": "D_um",
+    "D": "D_um",
     "d/D": "d_over_D",
     "d/d": "d_over_D",
     "Datum": "piece_date",
@@ -1018,6 +1020,8 @@ def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
     base = field[:-4] if field.endswith("_raw") else field
     simplified = base.replace("__", "_")
     lowered = simplified.lower()
+    cleaned = simplified.strip()
+    lowered_clean = cleaned.lower()
 
     if simplified in DIMENSION_FIELDS:
         return simplified
@@ -1029,9 +1033,32 @@ def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
     if "d_over_d" in lowered or "doverd" in lowered or "ratio_d" in lowered:
         return "d_over_D"
 
-    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
+    if lowered_clean in {"d", "d.", "d:"}:
+        return "d_um"
+    if cleaned in {"D", "D.", "D:"}:
+        return "D_um"
 
-    if not has_micron_hint:
+    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
+    context_hint = any(
+        token in lowered
+        for token in (
+            "core",
+            "jadro",
+            "jadra",
+            "jadier",
+            "glass",
+            "sklo",
+            "clad",
+            "cladding",
+            "sheath",
+            "outer",
+            "inner",
+        )
+    )
+    if context_hint and any(term in lowered for term in ("feed", "feeding", "speed")):
+        context_hint = False
+
+    if not (has_micron_hint or context_hint):
         return None
 
     if any(token in lowered for token in ("core", "jadro", "jadra", "jadier", "inner")):
@@ -1518,7 +1545,20 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
         for idx, word in enumerate(words):
             normalised = normalised_words[idx]
-            match = re.search(r"(\d+(?:[.,]\d+)?)", normalised)
+            marker_match = re.match(r"^\[\s*([12Il])\s*\]\s*", normalised)
+            marker_offset = 0
+            marker: Optional[int] = None
+            if marker_match:
+                marker_offset = marker_match.end()
+                digit = marker_match.group(1)
+                if digit in {"I", "l"}:
+                    digit = "1"
+                try:
+                    marker = int(digit)
+                except (TypeError, ValueError):
+                    marker = None
+            candidate_segment = normalised[marker_offset:]
+            match = re.search(r"(\d+(?:[.,]\d+)?)", candidate_segment)
             if not match:
                 continue
             raw_value = match.group(1).replace(",", ".")
@@ -1528,7 +1568,7 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                 continue
             if not math.isfinite(value) or value <= 0 or value > 1_000:
                 continue
-            suffix = normalised[match.end():].lower()
+            suffix = normalised[marker_offset + match.end():].lower()
             unit_idx: Optional[int] = None
             if any(hint in suffix for hint in MICROSCOPE_UNIT_HINTS):
                 unit_idx = idx
@@ -1543,9 +1583,8 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                         break
             if unit_idx is None:
                 continue
-            marker: Optional[int] = None
             start_idx = idx
-            prefix = normalised[: match.start()]
+            prefix = normalised[: marker_offset + match.start()]
             if any(hint in prefix for hint in ("[1", "1]", "[1]")) or "[1]" in normalised:
                 marker = 1
             elif any(hint in prefix for hint in ("[2", "2]", "[2]")) or "[2]" in normalised:
@@ -2161,8 +2200,8 @@ def _load_annealing(path: Path) -> pd.DataFrame:
     for column in ANNEALING_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["I_A", "R_ohm"]).reset_index(drop=True)
-    df.loc[:, "I_mA"] = df["I_A"].to_numpy(dtype=float)
-    df.loc[:, "I_A"] = df["I_mA"].to_numpy(dtype=float) / 1_000.0
+    df.loc[:, "I_A"] = df["I_A"].to_numpy(dtype=float)
+    df.loc[:, "I_mA"] = df["I_A"].to_numpy(dtype=float) * 1_000.0
 
     try:
         from plotting.current_annealing.burnthrough import trim_burnthrough_glitch
@@ -2729,6 +2768,7 @@ def _embed_plots_in_excel_openpyxl(
         inserted = False
         reset_df = dataframe.reset_index(drop=True)
         target_width_in, target_height_in = figure_size
+        target_width_px, target_height_px = _excel_pixel_limits(figure_size)
         row_height_pts = _excel_row_height(target_height_in)
         column_width_chars = _excel_column_width(target_width_in)
         for row_idx, row in reset_df.iterrows():
@@ -2747,18 +2787,6 @@ def _embed_plots_in_excel_openpyxl(
                     available[name] = candidate
                     image_path = candidate
                 width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
-                actual_width_in = width_px / dpi_x if dpi_x and width_px else 0.0
-                actual_height_in = height_px / dpi_y if dpi_y and height_px else 0.0
-                scale_x = (
-                    (target_width_in / actual_width_in)
-                    if actual_width_in > 0
-                    else 1.0
-                )
-                scale_y = (
-                    (target_height_in / actual_height_in)
-                    if actual_height_in > 0
-                    else 1.0
-                )
 
                 try:
                     image = XLImage(str(image_path))
@@ -2766,10 +2794,14 @@ def _embed_plots_in_excel_openpyxl(
                     log.exception("Failed to load plot image %s for Excel export", image_path)
                     continue
 
-                if width_px and not math.isclose(scale_x, 1.0, rel_tol=1e-3):
-                    image.width = int(round(width_px * scale_x))
-                if height_px and not math.isclose(scale_y, 1.0, rel_tol=1e-3):
-                    image.height = int(round(height_px * scale_y))
+                if width_px and target_width_px:
+                    desired_width_px = int(round(target_width_px))
+                    if not math.isclose(width_px, desired_width_px, rel_tol=1e-3):
+                        image.width = desired_width_px
+                if height_px and target_height_px:
+                    desired_height_px = int(round(target_height_px))
+                    if not math.isclose(height_px, desired_height_px, rel_tol=1e-3):
+                        image.height = desired_height_px
 
                 column_index = dataframe.columns.get_loc(column) + 1
                 row_number = row_idx + 2  # account for the header row
@@ -2967,16 +2999,14 @@ def _embed_assets_with_xlsxwriter(
             if image_path is None or not image_path.exists():
                 continue
             width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
-            actual_width_in = width_px / dpi_x if dpi_x and width_px else 0.0
-            actual_height_in = height_px / dpi_y if dpi_y and height_px else 0.0
             x_scale = (
-                (target_width_in / actual_width_in)
-                if actual_width_in > 0
+                (target_width_px / float(width_px))
+                if width_px
                 else 1.0
             )
             y_scale = (
-                (target_height_in / actual_height_in)
-                if actual_height_in > 0
+                (target_height_px / float(height_px))
+                if height_px
                 else 1.0
             )
             options: Dict[str, float] = {}

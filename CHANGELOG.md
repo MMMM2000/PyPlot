@@ -1,5 +1,17 @@
 # Changelog
 
+## 2025-10-26 07:03 UTC
+
+- Recognised plain `d`/`D` fabrication headers (and other core/glass hints) so
+  every spreadsheet diameter now appears in the fabrication grid with the
+  expected three-decimal formatting.
+- Fixed microscope OCR token parsing to ignore bracket markers like
+  `[1]6.7µm`, allowing PaddleOCR detections to feed both core and glass
+  measurements without reporting empty results.
+- Added regression coverage that drives the OCR pipeline with stubbed
+  PaddleOCR output to lock in the bracketed-diameter behaviour and ensure core
+  and glass readings propagate through `_group_microscope_measurements`.
+
 ## 2025-10-25 19:34 UTC
 
 - Prevent glass feed and other non-diameter spreadsheet columns from being

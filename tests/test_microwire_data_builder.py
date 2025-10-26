@@ -48,7 +48,10 @@ def test_annealing_loader_and_sanity_check(tmp_path: Path) -> None:
     path = tmp_path / "anneal.txt"
     path.write_text(content)
     df = _load_annealing(path)
-    assert list(df.columns) == ["I_A", "V_V", "R_ohm"]
+    assert list(df.columns) == ["I_A", "V_V", "R_ohm", "I_mA"]
+    expected_A = [0.1, 0.2, 0.3]
+    assert df["I_A"].tolist() == pytest.approx(expected_A)
+    assert df["I_mA"].tolist() == pytest.approx([value * 1_000.0 for value in expected_A])
     ok, error = _resistance_sanity_check(df)
     assert ok is True
     assert error is not None
@@ -61,6 +64,7 @@ def test_annealing_loader_trims_burnthrough_spike(tmp_path: Path) -> None:
     df = _load_annealing(path)
     assert len(df) == 2
     assert df["I_A"].tolist() == pytest.approx([0.05, 0.06])
+    assert df["I_mA"].tolist() == pytest.approx([50.0, 60.0])
     assert df["R_ohm"].tolist() == pytest.approx([2.0, 2.0])
 
 
@@ -288,8 +292,11 @@ def test_excel_export_respects_high_dpi_images(tmp_path: Path, monkeypatch: pyte
         drawing_xml = archive.read("xl/drawings/drawing1.xml")
 
     tree = ET.fromstring(drawing_xml)
-    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-    ext = tree.find(".//a:ext", namespaces=ns)
+    ns_main = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    ns_sheet = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+    ext = tree.find(f".//{{{ns_main}}}ext")
+    if ext is None:
+        ext = tree.find(f".//{{{ns_sheet}}}ext")
     assert ext is not None, "Expected drawing metadata for embedded figure"
     width_emu = int(ext.get("cx"))
     height_emu = int(ext.get("cy"))
@@ -341,6 +348,41 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
     assert float(row[D_col]) == pytest.approx(212.4)
     expected_ratio = round(16.7 / 212.4, 3)
     assert float(row[ratio_col]) == pytest.approx(expected_ratio)
+
+
+def test_microscope_ocr_extracts_bracketed_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image as PILImage
+
+    image_path = tmp_path / "Ni55Fe18Ga27 4_1 core.jpg"
+    PILImage.new("RGB", (320, 180), color="white").save(image_path)
+
+    class FakeOCR:
+        def ocr(self, image, cls: bool = True):  # pragma: no cover - simple stub
+            return [
+                [
+                    (
+                        [[0, 0], [160, 0], [160, 40], [0, 40]],
+                        ("[1]6.7um", 0.95),
+                    ),
+                    (
+                        [[0, 60], [220, 60], [220, 110], [0, 110]],
+                        ("[2]134.5um", 0.94),
+                    ),
+                ]
+            ]
+
+    monkeypatch.setattr(core, "get_paddle_ocr", lambda logger=None: FakeOCR())
+
+    result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
+    assert any(abs(value - 6.7) < 1e-3 for value in result.values)
+    assert any(abs(value - 134.5) < 1e-3 for value in result.values)
+
+    grouped = core._group_microscope_measurements([image_path], logging.getLogger("test"))
+    key = core._microscope_key(image_path)
+    assert key in grouped
+    measurements = grouped[key]
+    assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
+    assert measurements.best_glass() == pytest.approx(134.5, rel=1e-3)
 
 
 def test_parse_microscope_candidates_prefers_primary_marker() -> None:
