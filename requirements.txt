@@ -143,6 +143,8 @@ pyqtgraph==0.13.7
     # via python-plot (pyproject.toml)
 pyserial==3.5
     # via python-plot (pyproject.toml)
+pytesseract==0.3.13
+    # via python-plot (pyproject.toml)
 pyyaml==6.0.2
     # via paddleocr
 python-bidi==0.6.7

@@ -466,6 +466,17 @@
 - Defaulted the Microscope OCR Debug tool to the `base` preprocessing variant
   to simplify one-click experiments while keeping other filters opt-in.
 
+## 2025-10-27 07:58 UTC
+
+- Redirected PaddleOCR’s cache into an ASCII-safe temp directory and purge/retry
+  when corrupted downloads are detected so Windows accounts with accented names
+  no longer break model initialisation.
+- Added `pytesseract` to the core dependency set and synced `requirements.txt`
+  so non-experiment tools install without extra manual steps.
+- Documented the two-step installation flow (`pip install -r requirements.txt`
+  then optional `pip install .[test]`) in the README to clarify how to enable
+  experiments and the test suite.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
