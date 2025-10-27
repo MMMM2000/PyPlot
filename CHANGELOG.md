@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-10-27 09:45 UTC
+
+- Override Paddle cache environment variables even when they are already set
+  so Windows installs with diacritic user profiles stop reusing broken
+  `%USERPROFILE%` paths and successfully download PaddleOCR/PaddleX models into
+  the ASCII-only cache.
+
 ## 2025-10-27 09:30 UTC
 
 - Forced PaddleOCR and PaddleX to download models into an ASCII-only cache

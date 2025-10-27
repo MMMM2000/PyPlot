@@ -53,7 +53,7 @@ def _prepare_paddle_cache() -> Path:
     for env_var, subdir in _CACHE_ENV_VARS.items():
         target = cache_root / subdir
         target.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault(env_var, str(target))
+        os.environ[env_var] = str(target)
 
     return cache_root
 
@@ -80,7 +80,7 @@ def _purge_corrupted_cache(cache_root: Path, extra_path: Path | None = None) -> 
     for env_var, subdir in _CACHE_ENV_VARS.items():
         target = cache_root / subdir
         target.mkdir(parents=True, exist_ok=True)
-        os.environ.setdefault(env_var, str(target))
+        os.environ[env_var] = str(target)
 
     if extra_path is not None:
         _purge(extra_path)
