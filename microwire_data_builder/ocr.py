@@ -1,217 +1,231 @@
-"""Shared OCR utilities for the microwire data builder."""
+"""Shared PaddleOCR utilities for the microwire data builder."""
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
+import re
 import shutil
-import sys
+import tempfile
 from functools import lru_cache
 from pathlib import Path
-from typing import Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
+    from paddleocr import PaddleOCR
 
 DEFAULT_LOGGER = "microwire_data_builder"
-_MISSING_TESSERACT_WARNED = False
+_MISSING_PADDLE_WARNED = False
+
+# Environment variables that influence PaddleOCR/PaddleX cache locations. We map
+# each one to a known ASCII-only directory so Windows accounts with diacritics
+# do not break lazy model downloads.
+_CACHE_ENV_VARS: dict[str, str] = {
+    "PADDLE_HOME": "paddle_home",
+    "PADDLE_MODEL_HOME": "paddle_models",
+    "PADDLEX_HOME": "paddlex",
+    "PADDLEX_OFFICIAL_MODEL_HOME": "paddlex_official_models",
+    "PADDLEOCR_HOME": "paddleocr",
+    "PPOCR_MODEL_CACHE_DIR": "ppocr_models",
+}
 
 
-def _candidate_from_path(candidate: Path) -> Iterator[Path]:
-    exe_names = ("tesseract.exe", "tesseract")
+def _prepare_paddle_cache() -> Path:
+    """Return a filesystem location that is ASCII-safe for PaddleOCR caches."""
+
+    temp_root = Path(tempfile.gettempdir())
     try:
-        if candidate.is_file():
-            yield candidate
-            return
-    except OSError:
-        return
-    if candidate.is_dir():
-        for name in exe_names:
-            exe_path = candidate / name
+        str(temp_root).encode("ascii")
+    except UnicodeEncodeError:
+        if os.name == "nt":
+            drive = temp_root.drive or Path.cwd().drive or "C:"
+            drive_path = Path(drive + os.sep)
+            base = drive_path / "microwire_paddle_cache"
+        else:
+            base = Path("/tmp") / "microwire_paddle_cache"
+    else:
+        base = temp_root / "microwire_paddle_cache"
+
+    cache_root = base.resolve()
+    cache_root.mkdir(parents=True, exist_ok=True)
+
+    def _ensure_ascii_env(var: str, target: Path) -> None:
+        existing = os.environ.get(var)
+        if existing:
             try:
-                if exe_path.is_file():
-                    yield exe_path
-            except OSError:
-                continue
+                existing.encode("ascii")
+            except UnicodeEncodeError:
+                os.environ[var] = str(target)
+            else:
+                return
+        else:
+            os.environ[var] = str(target)
+
+    for env_var, subdir in _CACHE_ENV_VARS.items():
+        target = cache_root / subdir
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ[env_var] = str(target)
+
+    ascii_home = cache_root / "home"
+    ascii_home.mkdir(parents=True, exist_ok=True)
+    _ensure_ascii_env("HOME", ascii_home)
+    if os.name == "nt":
+        _ensure_ascii_env("USERPROFILE", ascii_home)
+        # Windows resolves HOMEPATH relative to HOMEDRIVE; ensure both are ASCII.
+        os.environ.setdefault("HOMEDRIVE", Path(ascii_home).drive or "C:")
+        os.environ["HOMEPATH"] = os.path.splitdrive(str(ascii_home))[1]
+
+    return cache_root
 
 
-def _iter_candidate_paths() -> Iterable[Path]:
-    """Yield common locations of the Tesseract executable."""
+_CACHE_ROOT = _prepare_paddle_cache()
+_PADDLE_HOME = _CACHE_ROOT / "paddleocr_home"
+_PADDLE_HOME.mkdir(parents=True, exist_ok=True)
 
-    env_keys = ("TESSERACT_CMD", "TESSERACT_PATH", "TESSDATA_PREFIX")
-    for key in env_keys:
-        value = os.environ.get(key)
-        if not value:
-            continue
-        for resolved in _candidate_from_path(Path(value)):
-            yield resolved
 
-    hinted = os.environ.get("LOCALAPPDATA")
-    if hinted:
-        hinted_path = Path(hinted)
-        for resolved in _candidate_from_path(
-            hinted_path / "Programs" / "Tesseract-OCR"
-        ):
-            yield resolved
-        for resolved in _candidate_from_path(hinted_path / "Tesseract-OCR"):
-            yield resolved
-    home = Path.home()
-    for resolved in _candidate_from_path(
-        home / "AppData" / "Local" / "Programs" / "Tesseract-OCR"
-    ):
-        yield resolved
+def _purge_corrupted_cache(cache_root: Path, extra_path: Path | None = None) -> None:
+    """Remove cache artefacts that might have been partially downloaded."""
 
-    program_dirs = [
-        os.environ.get("ProgramFiles"),
-        os.environ.get("ProgramFiles(x86)"),
-    ]
-    for root in program_dirs:
-        if not root:
-            continue
-        for resolved in _candidate_from_path(Path(root) / "Tesseract-OCR"):
-            yield resolved
-    for programdata in (os.environ.get("ProgramData"),):
-        if not programdata:
-            continue
-        for resolved in _candidate_from_path(Path(programdata) / "chocolatey" / "lib" / "tesseract" / "tools"):
-            yield resolved
+    def _purge(path: Path) -> None:
+        if not path.exists():
+            return
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:  # pragma: no cover - race condition guard
+                return
 
-    unix_hints = (
-        Path("/usr/bin"),
-        Path("/usr/local/bin"),
-        Path("/usr/local/opt/tesseract/bin"),
-        Path("/opt/homebrew/bin"),
-        Path("/opt/homebrew/opt/tesseract/bin"),
-        Path.home() / "opt" / "homebrew" / "bin",
-        Path.home() / "opt" / "homebrew" / "opt" / "tesseract" / "bin",
-        Path("/opt/local/bin"),
-        Path.home() / ".local" / "bin",
-    )
-    for root in unix_hints:
-        for resolved in _candidate_from_path(root):
-            yield resolved
+    _purge(cache_root)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    for env_var, subdir in _CACHE_ENV_VARS.items():
+        target = cache_root / subdir
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ[env_var] = str(target)
 
-    mac_bundle_hints = (
-        Path("/Applications/Tesseract-OCR.app/Contents/MacOS"),
-        Path("/Applications/Tesseract.app/Contents/MacOS"),
-        home / "Applications" / "Tesseract-OCR.app" / "Contents" / "MacOS",
-        home / "Applications" / "Tesseract.app" / "Contents" / "MacOS",
-        home
-        / "Library"
-        / "Frameworks"
-        / "Tesseract.framework"
-        / "Versions"
-        / "Current"
-        / "Resources"
-        / "bin",
-    )
-    for root in mac_bundle_hints:
-        for resolved in _candidate_from_path(root):
-            yield resolved
+    if extra_path is not None:
+        _purge(extra_path)
 
-    cellar_roots = (
-        Path("/opt/homebrew/Cellar/tesseract"),
-        Path("/usr/local/Cellar/tesseract"),
-    )
-    for cellar in cellar_roots:
+
+_CORRUPTED_MODEL_RE = re.compile(r"Cannot open file ([^,]+)")
+
+
+def _looks_like_corrupted_model(exc: Exception) -> tuple[bool, Path | None]:
+    message = str(exc)
+    if "Cannot open file" in message and "inference.json" in message:
+        match = _CORRUPTED_MODEL_RE.search(message)
+        if match:
+            candidate = match.group(1).strip().strip("`\"")
+            try:
+                return True, Path(candidate).resolve()
+            except OSError:  # pragma: no cover - Windows path edge cases
+                return True, None
+        return True, None
+    return False, None
+
+
+def _initialise_paddle(
+    paddle_ctor: type["PaddleOCR"], signature: inspect.Signature | None
+) -> "PaddleOCR":
+    last_exc: Optional[Exception] = None
+    for candidate in _candidate_kwargs(signature):
+        if signature is not None:
+            filtered = {
+                key: value
+                for key, value in candidate.items()
+                if key in signature.parameters
+            }
+        else:
+            filtered = candidate
         try:
-            if not cellar.exists():
-                continue
-        except OSError:
+            return paddle_ctor(**filtered)
+        except Exception as exc:  # pragma: no cover - defensive
+            last_exc = exc
             continue
-        try:
-            version_dirs = list(sorted(cellar.iterdir()))
-        except OSError:
-            continue
-        for version_dir in version_dirs:
-            for resolved in _candidate_from_path(version_dir / "bin"):
-                yield resolved
+
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("Unable to initialise PaddleOCR")
+
+
+def _candidate_kwargs(signature: inspect.Signature | None) -> list[dict[str, object]]:
+    """Return a list of progressively simpler PaddleOCR kwargs."""
+
+    supported: set[str] = set(signature.parameters) if signature is not None else set()
+
+    tuned: dict[str, object] = {
+        "lang": "en",
+        "use_angle_cls": True,
+        "det_db_box_thresh": 0.18,
+        "det_db_unclip_ratio": 2.6,
+        "det_limit_side_len": 4096,
+        "drop_score": 0.1,
+        "max_text_length": 96,
+        "rec_algorithm": "SVTR_LCNet",
+    }
+    if "show_log" in supported:
+        tuned["show_log"] = False
+    if "home_path" in supported:
+        tuned["home_path"] = str(_PADDLE_HOME)
+
+    baseline = {"lang": "en", "use_angle_cls": True}
+    if "show_log" in supported:
+        baseline["show_log"] = False
+    if "home_path" in supported:
+        baseline["home_path"] = str(_PADDLE_HOME)
+
+    minimal: dict[str, object] = {"lang": "en"}
+    if "home_path" in supported:
+        minimal["home_path"] = str(_PADDLE_HOME)
+
+    return [tuned, baseline, minimal]
 
 
 @lru_cache(maxsize=1)
-def _resolve_tesseract_candidates() -> tuple[Path, ...]:
-    candidates: list[Path] = []
-    seen: set[Path] = set()
-    which = shutil.which("tesseract")
-    if which:
-        path = Path(which)
-        try:
-            resolved = path.resolve()
-        except OSError:
-            resolved = path
-        if path.is_file() and resolved not in seen:
-            candidates.append(path)
-            seen.add(resolved)
-    for candidate in _iter_candidate_paths():
-        try:
-            resolved = candidate.resolve()
-        except OSError:
-            resolved = candidate
-        if resolved in seen:
-            continue
-        try:
-            is_file = candidate.is_file()
-        except OSError:
-            continue
-        if not is_file:
-            continue
-        candidates.append(candidate)
-        seen.add(resolved)
-    return tuple(candidates)
+def _create_default_ocr() -> "PaddleOCR":
+    """Return a cached :class:`~paddleocr.PaddleOCR` instance."""
+
+    from paddleocr import PaddleOCR  # type: ignore[import-not-found]
+
+    try:
+        signature = inspect.signature(PaddleOCR.__init__)
+    except (TypeError, ValueError):  # pragma: no cover - CPython guard
+        signature = None
+
+    try:
+        return _initialise_paddle(PaddleOCR, signature)
+    except Exception as exc:
+        corrupted, path = _looks_like_corrupted_model(exc)
+        if corrupted:
+            extra = path.parent if path is not None else None
+            _purge_corrupted_cache(_CACHE_ROOT, extra_path=extra)
+            return _initialise_paddle(PaddleOCR, signature)
+        raise
 
 
-def ensure_tesseract_available(
-    pytesseract_module, logger: Optional[logging.Logger] = None
-) -> bool:
-    """Ensure *pytesseract_module* can reach a Tesseract executable.
-
-    Returns True when the module reports a working Tesseract binary. When
-    resolution fails, False is returned and a warning is emitted (once per
-    interpreter session).
-    """
+def get_paddle_ocr(logger: Optional[logging.Logger] = None):
+    """Return a configured PaddleOCR instance or ``None`` when unavailable."""
 
     log = logger or logging.getLogger(DEFAULT_LOGGER)
-    getter = getattr(pytesseract_module, "get_tesseract_version", None)
-    if getter is None:
-        log.warning(
-            "pytesseract is installed but does not expose get_tesseract_version()"
-        )
-        return False
-
-    tesseract_not_found = getattr(
-        pytesseract_module, "TesseractNotFoundError", RuntimeError
-    )
     try:
-        getter()
-        return True
-    except tesseract_not_found:
-        pass
-
-    module_root = getattr(pytesseract_module, "pytesseract", pytesseract_module)
-    for candidate in _resolve_tesseract_candidates():
-        try:
-            module_root.tesseract_cmd = str(candidate)
-        except Exception:
-            continue
-        try:
-            pytesseract_module.tesseract_cmd = str(candidate)
-        except Exception:
-            pass
-        try:
-            getter()
-            return True
-        except tesseract_not_found:
-            continue
-        except Exception:
-            continue
-
-    global _MISSING_TESSERACT_WARNED
-    if not _MISSING_TESSERACT_WARNED:
-        hint = (
-            "Tesseract OCR executable is not available. Install it and ensure it is on PATH."
+        return _create_default_ocr()
+    except ImportError:
+        global _MISSING_PADDLE_WARNED
+        if not _MISSING_PADDLE_WARNED:
+            log.error(
+                "paddleocr is not installed; OCR-dependent features are disabled."
+                " Install the pinned PaddlePaddle/PaddleOCR packages from requirements.txt."
+            )
+            _MISSING_PADDLE_WARNED = True
+    except Exception as exc:  # pragma: no cover - defensive
+        log.error(
+            "Failed to initialise PaddleOCR: %s. Ensure the PaddlePaddle/PaddleOCR"
+            " wheels listed in requirements.txt are installed.",
+            exc,
         )
-        if sys.platform == "darwin":
-            hint += " (e.g. `brew install tesseract`)"
-        log.warning(hint)
-        _MISSING_TESSERACT_WARNED = True
-    return False
+    return None
 
 
-__all__ = ["ensure_tesseract_available"]
+__all__ = ["get_paddle_ocr"]

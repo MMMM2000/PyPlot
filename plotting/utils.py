@@ -1952,6 +1952,7 @@ class _DeveloperOptions(QtCore.QObject):
 
     keep_files_changed = QtCore.pyqtSignal(bool)
     experiments_visibility_changed = QtCore.pyqtSignal(bool)
+    ocr_debug_changed = QtCore.pyqtSignal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1960,8 +1961,10 @@ class _DeveloperOptions(QtCore.QObject):
         self._show_experiments = self._read_bool(
             "developer_show_experiments", default=False
         )
+        self._ocr_debug = self._read_bool("developer_ocr_debug", default=False)
         self._keep_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
         self._experiment_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+        self._ocr_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
 
     # ------------------------------------------------------------------ helpers
     def _read_bool(self, key: str, *, default: bool) -> bool:
@@ -1994,6 +1997,9 @@ class _DeveloperOptions(QtCore.QObject):
     def show_experiments(self) -> bool:
         return self._show_experiments
 
+    def ocr_debug(self) -> bool:
+        return self._ocr_debug
+
     def set_keep_files(self, enabled: bool) -> None:
         enabled = bool(enabled)
         if enabled == self._keep_files:
@@ -2011,6 +2017,15 @@ class _DeveloperOptions(QtCore.QObject):
         self._settings.setValue("developer_show_experiments", enabled)
         self._sync(self._experiment_actions, enabled)
         self.experiments_visibility_changed.emit(enabled)
+
+    def set_ocr_debug(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._ocr_debug:
+            return
+        self._ocr_debug = enabled
+        self._settings.setValue("developer_ocr_debug", enabled)
+        self._sync(self._ocr_actions, enabled)
+        self.ocr_debug_changed.emit(enabled)
 
     def create_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
         menu = QtWidgets.QMenu("&Develop", parent)
@@ -2030,6 +2045,14 @@ class _DeveloperOptions(QtCore.QObject):
             exp_action.setChecked(self._show_experiments)
             exp_action.toggled.connect(self.set_show_experiments)
             self._experiment_actions.append(weakref.ref(exp_action))
+
+        ocr_action = menu.addAction("Microscope &OCR debug mode")
+        if ocr_action is not None:
+            ocr_action.setObjectName("mw_ocr_debug")
+            ocr_action.setCheckable(True)
+            ocr_action.setChecked(self._ocr_debug)
+            ocr_action.toggled.connect(self.set_ocr_debug)
+            self._ocr_actions.append(weakref.ref(ocr_action))
 
         return menu
 

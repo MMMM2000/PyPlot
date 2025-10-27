@@ -9,9 +9,17 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 1. Create a virtual environment: `python3 -m venv .venv`
 2. Activate it (`source .venv/bin/activate` on macOS/Linux or
    `.venv\Scripts\activate` on Windows)
-3. Upgrade pip and install dependencies: `python -m pip install --upgrade pip`
-   then `pip install -r requirements.txt`
-4. Launch the hub: `python -m launcher`
+3. Upgrade pip: `python -m pip install --upgrade pip`
+4. Install the runtime stack for every non-experiment tool:
+   `pip install -r requirements.txt`
+5. (Optional) Install experiment helpers and test tooling:
+   `pip install .[test]`
+6. Launch the hub: `python -m launcher`
+
+> **Tip:** The `pip install -r requirements.txt` command pulls in every
+> dependency required to run the launcher and builder tools. Run `pip install
+> .[test]` afterwards if you also plan to execute the bundled tests or
+> experiment scripts.
 
 OriginPro users should also install `originpro`, `numpy`, `pandas`,
 `python-dateutil`, `pytz`, `six`, and `tzdata` inside Origin’s embedded Python

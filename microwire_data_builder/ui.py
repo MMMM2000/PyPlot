@@ -8,15 +8,30 @@ import math
 import re
 import sys
 import time
+import os
 from datetime import datetime
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from tempfile import TemporaryDirectory
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 import pandas as pd
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-from plotting.utils import ensure_app_theme, install_standard_menu
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+import matplotlib.pyplot as plt
+
+from plotting.current_annealing.core import plot_one as plot_annealing_curve
+from plotting.pyplot import _DockSwitcherWidget
+from plotting.utils import (
+    ensure_app_theme,
+    install_standard_menu,
+    format_annealing_title,
+    developer_options,
+)
+from origin_clone.app import PythonConsoleWidget
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
 
@@ -29,11 +44,14 @@ from .core import (
     BuildCancelledError,
     MicroscopeMeasurements,
     MicroscopeDetection,
+    MicroscopeOCRResult,
+    MICROSCOPE_IMAGE_COLUMNS,
     MeasurementRecord,
     VideoMetricsSummary,
     FabricationIndex,
     StrainRecord,
     build_database,
+    build_fabrication_index,
     _normalise_output_name,
     _metadata_from_path,
     _microscope_key,
@@ -45,11 +63,25 @@ from .core import (
     _microwire_label,
     _microwire_tuple_from_label,
     _parse_strain_float,
+    _plot_measurement_matplotlib,
+    _select_high_measurement,
+    _select_low_measurement,
+    _value_for_output,
+    _compose_notes,
+    _format_dimension_display,
+    _clean_str,
 )
 
 
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
+
+
+ANNEALING_GRAPH_WIDTH = 420
+ANNEALING_GRAPH_HEIGHT = 200
+ANNEALING_TITLE_FONT_SIZE = 8
+ANNEALING_AXIS_FONT_SIZE = 6
+ANNEALING_TICK_FONT_SIZE = 6
 
 
 _STAGE_LABELS = {
@@ -387,16 +419,33 @@ def collect_support_files(
     return fabrication, auto_micro, videos
 
 
+def _format_duration(seconds: float) -> str:
+    if not math.isfinite(seconds):
+        return "--"
+    total_seconds = max(int(round(seconds)), 0)
+    minutes, sec = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}h {minutes:02d}m {sec:02d}s"
+    if minutes:
+        return f"{minutes:d}m {sec:02d}s"
+    return f"{sec:d}s"
+
+
 class QtLogHandler(logging.Handler):
     """Logging handler that forwards records to a Qt slot."""
 
-    def __init__(self, emit: Callable[[str], None]) -> None:
+    def __init__(self, emit: Callable[[int, str], None]) -> None:
         super().__init__()
         self._emit = emit
 
     def emit(self, record: logging.LogRecord) -> None:  # pragma: no cover - thin wrapper
         message = self.format(record)
-        self._emit(message)
+        try:
+            self._emit(record.levelno, message)
+        except TypeError:
+            # Fallback for legacy callbacks that only accept a message.
+            self._emit(message)  # type: ignore[misc]
 
 
 class _ProgressTracker:
@@ -707,7 +756,7 @@ class BuildWorker(QtCore.QObject):
 class LegacyBuilderWindow(QtWidgets.QMainWindow):
     """Main window that orchestrates the microwire database build."""
 
-    log_message = QtCore.pyqtSignal(str)
+    log_message = QtCore.pyqtSignal(int, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -2062,7 +2111,8 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             self._thread = None
 
     # ------------------------------------------------------------------ Qt hooks
-    def _append_log(self, message: str) -> None:
+    def _append_log(self, level: int, message: str) -> None:
+        _ = level
         self.log_view.appendPlainText(message)
         scrollbar = self.log_view.verticalScrollBar()
         if scrollbar is not None:
@@ -2097,11 +2147,24 @@ class DataFrameModel(QtCore.QAbstractTableModel):
     def __init__(self, frame: pd.DataFrame | None = None, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
         self._frame = frame.copy() if frame is not None else pd.DataFrame()
+        self._decoration_provider: Optional[
+            Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]
+        ] = None
 
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
         self._frame = frame.copy() if frame is not None else pd.DataFrame()
         self.endResetModel()
+
+    def set_decoration_provider(
+        self,
+        provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]],
+    ) -> None:
+        self._decoration_provider = provider
+        try:
+            self.layoutChanged.emit()
+        except Exception:
+            pass
 
     def frame(self) -> pd.DataFrame:
         return self._frame
@@ -2116,20 +2179,56 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return 0
         return len(self._frame.columns)
 
+    @staticmethod
+    def _sort_value(value: Any) -> Any:
+        if isinstance(value, (QtGui.QPixmap, QtGui.QImage)):
+            return ""
+        if isinstance(value, (pd.Timestamp, datetime)):
+            return value
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join(str(item) for item in value)
+        return value
+
     def data(
         self,
         index: QtCore.QModelIndex,
         role: int = QtCore.Qt.ItemDataRole.DisplayRole,
     ) -> Any:  # type: ignore[override]
-        if (
-            not index.isValid()
-            or role not in (QtCore.Qt.ItemDataRole.DisplayRole, QtCore.Qt.ItemDataRole.EditRole)
-        ):
+        if not index.isValid():
             return None
         try:
             value = self._frame.iat[index.row(), index.column()]
         except Exception:
             return None
+        if role == QtCore.Qt.ItemDataRole.DecorationRole:
+            provider = getattr(self, "_decoration_provider", None)
+            if provider is not None:
+                try:
+                    column_label = str(self._frame.columns[index.column()])
+                    row_series = self._frame.iloc[index.row()]
+                except Exception:
+                    pass
+                else:
+                    try:
+                        decoration = provider(row_series, column_label)
+                    except Exception:
+                        decoration = None
+                    if isinstance(decoration, (QtGui.QPixmap, QtGui.QImage)):
+                        if isinstance(decoration, QtGui.QImage):
+                            return QtGui.QPixmap.fromImage(decoration)
+                        return decoration
+            if isinstance(value, QtGui.QPixmap):
+                return value
+            if isinstance(value, QtGui.QImage):
+                return QtGui.QPixmap.fromImage(value)
+            return None
+        if role not in (
+            QtCore.Qt.ItemDataRole.DisplayRole,
+            QtCore.Qt.ItemDataRole.EditRole,
+        ):
+            return None
+        if isinstance(value, (QtGui.QPixmap, QtGui.QImage)):
+            return ""
         if isinstance(value, float):
             if math.isnan(value):
                 return ""
@@ -2155,6 +2254,55 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             return str(section + 1)
         return str(label)
 
+    def sort(self, column: int, order: QtCore.Qt.SortOrder = QtCore.Qt.SortOrder.AscendingOrder) -> None:  # type: ignore[override]
+        if self._frame.empty:
+            return
+        try:
+            column_label = self._frame.columns[column]
+        except Exception:
+            return
+        ascending = order != QtCore.Qt.SortOrder.DescendingOrder
+        try:
+            sorted_frame = self._frame.sort_values(
+                by=column_label,
+                ascending=ascending,
+                kind="mergesort",
+                key=lambda col: col.map(self._sort_value) if hasattr(col, "map") else col,
+            )
+        except Exception:
+            return
+        self.beginResetModel()
+        self._frame = sorted_frame.reset_index(drop=True)
+        self.endResetModel()
+
+
+def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        bucket = record.get(f"{field}__display")
+        if isinstance(bucket, (list, tuple)):
+            for entry in bucket:
+                text = _clean_str(entry)
+                if not text or text in seen:
+                    continue
+                values.append(text)
+                seen.add(text)
+        fallback = _value_for_output(record, field)
+        if fallback is None:
+            continue
+        display = _format_dimension_display(field, fallback)
+        if not display:
+            continue
+        if display not in seen:
+            values.append(display)
+            seen.add(display)
+    if not values:
+        return None
+    return "\n".join(values)
+
 
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     columns = [
@@ -2162,64 +2310,543 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Draw",
         "Piece",
         "Length (m)",
+        "Piece date",
+        "d (µm)",
+        "D (µm)",
+        "d/D",
         "Resistance (Ω)",
         "Temperature (°C)",
         "Mass (g)",
+        "Winding speed (m/min)",
+        "Glass feeding (mm/min)",
+        "Underpressure",
+        "Notes",
         "Production datetime",
+        "_source_paths",
     ]
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), piece_record in sorted(index.piece_level.items()):
         draw_record = index.get_draw(composition, draw)
-        row: Dict[str, Any] = {
-            "Composition": composition,
-            "Draw": draw,
-            "Piece": piece,
-            "Length (m)": piece_record.get("length_m"),
-            "Resistance (Ω)": draw_record.get("fabrication_resistance_ohm"),
-            "Temperature (°C)": draw_record.get("fabrication_temperature_c"),
-            "Mass (g)": draw_record.get("mass_g"),
-            "Production datetime": draw_record.get("production_datetime"),
-        }
+        row: Dict[str, Any] = {column: None for column in columns}
+        row["Composition"] = composition
+        row["Draw"] = draw
+        row["Piece"] = piece
+        row["Length (m)"] = _value_for_output(piece_record, "length_m")
+        row["Piece date"] = _value_for_output(piece_record, "piece_date")
+        row["d (µm)"] = _dimension_display("d_um", piece_record, draw_record)
+        row["D (µm)"] = _dimension_display("D_um", piece_record, draw_record)
+        row["d/D"] = _dimension_display("d_over_D", piece_record, draw_record)
+        piece_resistance = _value_for_output(piece_record, "fabrication_resistance_ohm")
+        draw_resistance = _value_for_output(draw_record, "fabrication_resistance_ohm")
+        row["Resistance (Ω)"] = piece_resistance if piece_resistance is not None else draw_resistance
+        row["Temperature (°C)"] = _value_for_output(draw_record, "fabrication_temperature_c")
+        row["Mass (g)"] = _value_for_output(draw_record, "mass_g")
+        row["Winding speed (m/min)"] = _value_for_output(draw_record, "winding_speed_m_per_min")
+        row["Glass feeding (mm/min)"] = _value_for_output(draw_record, "glass_feed_mm_per_min")
+        row["Underpressure"] = _value_for_output(draw_record, "underpressure")
+        row["Notes"] = _compose_notes(draw_record, piece_record)
+        row["Production datetime"] = _value_for_output(draw_record, "production_datetime")
+        sources: List[str] = []
+        for record in (piece_record, draw_record):
+            path_value = record.get("_source_path") if isinstance(record, dict) else None
+            if not path_value:
+                continue
+            try:
+                resolved = str(Path(path_value))
+            except Exception:
+                resolved = str(path_value)
+            if resolved and resolved not in sources:
+                sources.append(resolved)
+        row["_source_paths"] = sources
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=columns)
     return pd.DataFrame(rows, columns=columns)
 
 
-def _annealing_records_to_frame(records: List[MeasurementRecord]) -> pd.DataFrame:
-    columns = [
-        "File",
-        "Composition",
-        "Draw",
-        "Piece",
-        "Setpoint (mA)",
-        "Samples",
-        "Updated",
-    ]
-    rows: List[Dict[str, Any]] = []
-    for record in records:
-        metadata = record.metadata
-        path = record.path if isinstance(record.path, Path) else Path(str(record.path))
+def _render_measurement_pixmap(
+    record: Optional[MeasurementRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int = ANNEALING_GRAPH_WIDTH,
+    height_px: int = ANNEALING_GRAPH_HEIGHT,
+) -> Optional[QtGui.QPixmap]:
+    if record is None:
+        return None
+    frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        return None
+    if "I_mA" in frame.columns and "R_ohm" in frame.columns:
+        plot_df = pd.DataFrame(
+            {
+                "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+            }
+        ).dropna()
+    elif "I_A" in frame.columns and "R_ohm" in frame.columns:
+        plot_df = pd.DataFrame(
+            {
+                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+            }
+        ).dropna()
+    elif "I_mA" in frame.columns and "R_Ohm" in frame.columns:
+        plot_df = pd.DataFrame(
+            {
+                "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                "R_Ohm": pd.to_numeric(frame["R_Ohm"], errors="coerce"),
+            }
+        ).dropna()
+    else:
+        columns = [str(column) for column in frame.columns]
+        logger.debug(
+            "Annealing preview missing expected columns: %s",
+            ", ".join(columns),
+        )
+        return None
+    if plot_df.empty:
+        return None
+
+    metadata = getattr(record, "metadata", None)
+    title = ""
+    if metadata is not None:
         try:
-            mtime = path.stat().st_mtime
-            updated = datetime.fromtimestamp(mtime).isoformat(timespec="seconds")
+            title = format_annealing_title(metadata)
         except Exception:
-            updated = ""
+            title = ""
+    figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    canvas_agg: FigureCanvasAgg | None = None
+    figure = None
+    rc_overrides = {
+        "axes.titlesize": ANNEALING_TITLE_FONT_SIZE,
+        "axes.labelsize": ANNEALING_AXIS_FONT_SIZE,
+        "xtick.labelsize": ANNEALING_TICK_FONT_SIZE,
+        "ytick.labelsize": ANNEALING_TICK_FONT_SIZE,
+        "lines.linewidth": 1.0,
+        "lines.markersize": 3.0,
+    }
+    try:
+        with plt.rc_context(rc_overrides):
+            figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
+        if figure is not None:
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
+            for ax in figure.axes:
+                try:
+                    ax.tick_params(labelsize=ANNEALING_TICK_FONT_SIZE)
+                except Exception:
+                    pass
+                try:
+                    ax.xaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
+                    ax.yaxis.label.set_fontsize(ANNEALING_AXIS_FONT_SIZE)
+                except Exception:
+                    pass
+                if ax.get_title():
+                    try:
+                        ax.set_title(ax.get_title(), fontsize=ANNEALING_TITLE_FONT_SIZE)
+                    except Exception:
+                        pass
+                legend = ax.get_legend()
+                if legend is not None:
+                    try:
+                        legend.remove()
+                    except Exception:
+                        legend.set_visible(False)
+        canvas_agg = FigureCanvasAgg(figure)
+        canvas_agg.draw()
+        width, height = canvas_agg.get_width_height()
+        buffer = canvas_agg.buffer_rgba()
+        # PyQt6 exposes formats via the QtGui.QImage.Format enum; older builds fall
+        # back to module-level constants. Attempt the modern attribute first and
+        # gracefully degrade through sensible alternatives so we never raise an
+        # AttributeError (which previously prevented any thumbnails from
+        # rendering).
+        format_candidates: list[QtGui.QImage.Format | int] = []
+        for attr in ("Format_RGBA8888", "Format_RGBA8888_Premultiplied", "Format_ARGB32"):
+            candidate = None
+            try:
+                candidate = getattr(QtGui.QImage.Format, attr)
+            except AttributeError:
+                candidate = getattr(QtGui.QImage, attr, None)
+            if candidate is not None:
+                format_candidates.append(candidate)
+        if not format_candidates:
+            try:
+                fallback = QtGui.QImage.Format.Format_ARGB32
+            except AttributeError:
+                fallback = getattr(QtGui.QImage, "Format_ARGB32", None)
+            if fallback is None:
+                fallback = QtGui.QImage.Format_ARGB32  # type: ignore[attr-defined]
+            format_candidates.append(fallback)
+
+        image: QtGui.QImage | None = None
+        for fmt in format_candidates:
+            try:
+                candidate = QtGui.QImage(buffer, width, height, 4 * width, fmt)
+            except TypeError:
+                continue
+            if not candidate.isNull():
+                image = candidate
+                break
+        if image is None:
+            try:
+                fallback = QtGui.QImage.Format.Format_ARGB32
+            except AttributeError:
+                fallback = getattr(QtGui.QImage, "Format_ARGB32", None)
+            if fallback is None:
+                fallback = QtGui.QImage.Format_ARGB32  # type: ignore[attr-defined]
+            image = QtGui.QImage(buffer, width, height, 4 * width, fallback)
+        return QtGui.QPixmap.fromImage(image.copy())
+    except Exception:
+        logger.exception(
+            "Failed to render annealing preview for %s",
+            getattr(record, "path", "<unknown>"),
+        )
+        return None
+    finally:
+        if figure is not None:
+            plt.close(figure)
+
+
+def _annealing_records_to_frame(
+    records: List[MeasurementRecord],
+    logger: logging.Logger,
+) -> pd.DataFrame:
+    columns = [
+        "Composition",
+        "Microwire",
+        "Graph — 1000 mA",
+        "Graph — low mA",
+        "Low current setpoint",
+        "Updated",
+        "_group_key",
+        "_sources",
+    ]
+    grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+    for record in records:
+        metadata = getattr(record, "metadata", None)
+        if metadata is None:
+            continue
+        composition = getattr(metadata, "composition_token", None)
+        draw = getattr(metadata, "draw_x", None)
+        piece = getattr(metadata, "piece_y", None)
+        if composition is None or draw is None or piece is None:
+            continue
+        try:
+            key = (str(composition), int(draw), int(piece))
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault(key, []).append(record)
+
+    rows: List[Dict[str, Any]] = []
+    for (composition, draw, piece), group in sorted(grouped.items()):
+        high_record, low_record = _select_high_low_pair(group)
+        try:
+            microwire = _microwire_label(draw, piece)
+        except Exception:
+            microwire = f"{draw}/{piece}"
+
+        def _mtime(entry: MeasurementRecord) -> Optional[float]:
+            path = getattr(entry, "path", None)
+            if not path:
+                return None
+            try:
+                return Path(path).stat().st_mtime
+            except Exception:
+                return None
+
+        timestamps = [value for record in group if (value := _mtime(record)) is not None]
+        updated = (
+            datetime.fromtimestamp(max(timestamps)).isoformat(timespec="seconds")
+            if timestamps
+            else ""
+        )
+
+        low_setpoint = _format_setpoint(_extract_setpoint(low_record))
+
+        group_key = f"{composition}|{draw}|{piece}"
+        source_paths: List[str] = []
+        for entry in (high_record, low_record):
+            path = getattr(entry, "path", None)
+            if path:
+                source_paths.append(str(Path(path)))
+        if source_paths:
+            source_paths = list(dict.fromkeys(source_paths))
         rows.append(
             {
-                "File": path.name,
-                "Composition": metadata.composition_token,
-                "Draw": metadata.draw_x,
-                "Piece": metadata.piece_y,
-                "Setpoint (mA)": metadata.setpoint_mA,
-                "Samples": len(record.dataframe.index),
+                "Composition": composition,
+                "Microwire": microwire,
+                "Graph — 1000 mA": None,
+                "Graph — low mA": None,
+                "Low current setpoint": low_setpoint,
                 "Updated": updated,
+                "_group_key": group_key,
+                "_sources": source_paths,
             }
         )
+
     if not rows:
         return pd.DataFrame(columns=columns)
     return pd.DataFrame(rows, columns=columns)
 
+
+def _extract_setpoint(record: Optional[MeasurementRecord]) -> Optional[float]:
+    if record is None:
+        return None
+    value = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
+
+
+def _format_setpoint(value: Optional[float]) -> str:
+    if value is None or not math.isfinite(value):
+        return ""
+    rounded = int(round(value))
+    if abs(value - rounded) < 1e-6:
+        return f"{rounded}"
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _select_high_low_pair(
+    records: List[MeasurementRecord],
+) -> Tuple[Optional[MeasurementRecord], Optional[MeasurementRecord]]:
+    high_record = _select_high_measurement(records)
+    low_record = _select_low_measurement(records)
+    if (
+        high_record
+        and low_record
+        and _extract_setpoint(high_record) == _extract_setpoint(low_record)
+    ):
+        setpoints = {
+            _extract_setpoint(record)
+            for record in records
+            if _extract_setpoint(record) is not None
+        }
+        if len(setpoints) <= 1:
+            low_record = None
+    return high_record, low_record
+
+
+class _AnnealingPlotDisplay(QtWidgets.QWidget):
+    """Render a single annealing plot with contextual details."""
+
+    def __init__(
+        self,
+        title: str,
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._base_title = title
+        self._logger = logger
+        self._canvas: FigureCanvasQTAgg | None = None
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        self.title_label = QtWidgets.QLabel(title)
+        self.title_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addWidget(self.title_label)
+
+        self.subtitle_label = QtWidgets.QLabel("")
+        self.subtitle_label.setObjectName("annealingPlotSubtitle")
+        self.subtitle_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.subtitle_label.setStyleSheet("color: palette(mid); font-size: 11px;")
+        layout.addWidget(self.subtitle_label)
+
+        self._stack = QtWidgets.QStackedLayout()
+        self._stack.setContentsMargins(0, 0, 0, 0)
+        layout.addLayout(self._stack, 1)
+
+        self._placeholder = QtWidgets.QLabel(
+            "Select a row to preview the annealing measurement."
+        )
+        self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self._placeholder.setWordWrap(True)
+        self._stack.addWidget(self._placeholder)
+
+    def set_record(
+        self,
+        record: Optional[MeasurementRecord],
+        *,
+        setpoint: Optional[float],
+        description: str,
+    ) -> None:
+        if record is None:
+            self._show_placeholder(description)
+            self.title_label.setText(self._base_title)
+            return
+
+        try:
+            figure = self._build_figure(record)
+        except Exception:
+            self._logger.exception("Failed to render annealing preview for %s", getattr(record, "path", "?"))
+            self._show_placeholder("Failed to render plot for the selected measurement.")
+            self.title_label.setText(self._base_title)
+            return
+
+        display_title = self._base_title
+        formatted_setpoint = _format_setpoint(setpoint)
+        if formatted_setpoint:
+            display_title = f"{self._base_title} ({formatted_setpoint} mA)"
+        self.title_label.setText(display_title)
+
+        details: List[str] = []
+        if formatted_setpoint:
+            details.append(f"{formatted_setpoint} mA")
+        try:
+            sample_count = len(record.dataframe.index)
+        except Exception:
+            sample_count = None
+        if sample_count is not None:
+            details.append(f"{sample_count} sample(s)")
+        file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
+        if not file_name:
+            path = getattr(record, "path", None)
+            if path:
+                try:
+                    file_name = Path(path).name
+                except Exception:
+                    file_name = ""
+        if file_name:
+            details.append(str(file_name))
+        self.subtitle_label.setText(" · ".join(details))
+
+        canvas = FigureCanvasQTAgg(figure)
+        if self._canvas is not None:
+            self._stack.removeWidget(self._canvas)
+            self._canvas.setParent(None)
+            self._canvas.deleteLater()
+        self._stack.insertWidget(0, canvas)
+        self._stack.setCurrentWidget(canvas)
+        self._canvas = canvas
+
+    def clear(self, message: str) -> None:
+        self._show_placeholder(message)
+        self.title_label.setText(self._base_title)
+
+    def _show_placeholder(self, message: str) -> None:
+        if self._canvas is not None:
+            self._stack.removeWidget(self._canvas)
+            self._canvas.setParent(None)
+            self._canvas.deleteLater()
+            self._canvas = None
+        self.subtitle_label.setText("")
+        self._placeholder.setText(message)
+        self._stack.setCurrentWidget(self._placeholder)
+
+    def _build_figure(self, record: MeasurementRecord):
+        frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            raise ValueError("No data to plot")
+        if "I_mA" in frame.columns and "R_ohm" in frame.columns:
+            plot_df = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                    "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+                }
+            ).dropna()
+        elif "I_A" in frame.columns and "R_ohm" in frame.columns:
+            plot_df = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                    "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
+                }
+            ).dropna()
+        elif "I_mA" in frame.columns and "R_Ohm" in frame.columns:
+            plot_df = pd.DataFrame(
+                {
+                    "I_mA": pd.to_numeric(frame["I_mA"], errors="coerce"),
+                    "R_Ohm": pd.to_numeric(frame["R_Ohm"], errors="coerce"),
+                }
+            ).dropna()
+        else:
+            raise ValueError("Current annealing dataframe missing expected columns")
+        if plot_df.empty:
+            raise ValueError("No valid samples to plot")
+        path = getattr(record, "path", None)
+        stem = None
+        if path:
+            try:
+                stem = Path(path).stem
+            except Exception:
+                stem = None
+        if not stem:
+            stem = getattr(getattr(record, "metadata", object()), "file_name", "")
+        title = format_annealing_title(str(stem or "Current annealing"))
+        figure, _ = plot_annealing_curve(plot_df, title, figsize=DEFAULT_FIGSIZE)
+        return figure
+
+
+class AnnealingPlotPanel(QtWidgets.QWidget):
+    """Display paired annealing plots for the selected microwire."""
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        self.header_label = QtWidgets.QLabel("Select a row to preview annealing plots.")
+        self.header_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        layout.addWidget(self.header_label)
+
+        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
+        self._high_display = _AnnealingPlotDisplay("Graph — 1000 mA", logger, splitter)
+        self._low_display = _AnnealingPlotDisplay("Graph — low mA", logger, splitter)
+        splitter.addWidget(self._high_display)
+        splitter.addWidget(self._low_display)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        layout.addWidget(splitter, 1)
+
+    def update_selection(
+        self,
+        key: Optional[Tuple[str, int, int]],
+        high: Optional[MeasurementRecord],
+        low: Optional[MeasurementRecord],
+    ) -> None:
+        if key is None:
+            self.header_label.setText("Select a row to preview annealing plots.")
+            self._high_display.clear("Select a row to view the 1000 mA measurement.")
+            self._low_display.clear("Select a row to view the low-current measurement.")
+            return
+
+        composition, draw, piece = key
+        try:
+            microwire = _microwire_label(draw, piece)
+        except Exception:
+            microwire = f"{draw}/{piece}"
+        self.header_label.setText(f"{composition} — {microwire}")
+
+        self._high_display.set_record(
+            high,
+            setpoint=_extract_setpoint(high),
+            description="No 1000 mA measurement available for this microwire.",
+        )
+        self._low_display.set_record(
+            low,
+            setpoint=_extract_setpoint(low),
+            description="No lower-current measurement available for this microwire.",
+        )
 
 def _microscope_index_to_frame(
     index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
@@ -2227,15 +2854,28 @@ def _microscope_index_to_frame(
 ) -> pd.DataFrame:
     columns = [
         "Composition",
-        "Draw",
-        "Piece",
+        "Microwire",
         "d (µm)",
         "D (µm)",
         "d/D",
-        "Images",
+        MICROSCOPE_IMAGE_COLUMNS[0],
+        MICROSCOPE_IMAGE_COLUMNS[1],
         "_key",
+        "_core_image",
+        "_glass_image",
         "_images",
     ]
+
+    def _image_path(entries: Sequence[MicroscopeDetection]) -> Optional[str]:
+        for detection in entries:
+            crop = getattr(detection, "crop_path", None)
+            if crop:
+                return str(crop)
+            source = getattr(detection, "image_path", None)
+            if source:
+                return str(source)
+        return None
+
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), measurements in sorted(index.items()):
         key = f"{composition}|{draw}|{piece}"
@@ -2252,22 +2892,32 @@ def _microscope_index_to_frame(
                 ratio = float(d_value) / float(D_value)
             except ZeroDivisionError:
                 ratio = None
+        if isinstance(ratio, (int, float)):
+            ratio = round(float(ratio), 3)
+
+        core_image = _image_path(measurements.core)
+        glass_image = _image_path(measurements.glass)
         image_paths: List[str] = []
         for bucket in (measurements.core, measurements.glass, measurements.other):
             for detection in bucket:
                 path = getattr(detection, "image_path", None)
                 if path:
                     image_paths.append(str(path))
+        if image_paths:
+            image_paths = list(dict.fromkeys(image_paths))
+
         rows.append(
             {
                 "Composition": composition,
-                "Draw": draw,
-                "Piece": piece,
+                "Microwire": _microwire_label(draw, piece),
                 "d (µm)": d_value,
                 "D (µm)": D_value,
                 "d/D": ratio,
-                "Images": "; ".join(dict.fromkeys(image_paths)),
+                MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
+                "_core_image": core_image,
+                "_glass_image": glass_image,
                 "_images": image_paths,
             }
         )
@@ -2287,6 +2937,7 @@ def _video_index_to_frame(
         "Underpressure",
         "Winding speed (m/min)",
         "Glass feeding (mm/min)",
+        "_sources",
     ]
     rows: List[Dict[str, Any]] = []
     for (composition, draw, piece), summary in sorted(index.items()):
@@ -2299,6 +2950,7 @@ def _video_index_to_frame(
                 "Underpressure": summary.underpressure(),
                 "Winding speed (m/min)": summary.winding_speed(),
                 "Glass feeding (mm/min)": summary.glass_feed(),
+                "_sources": sorted(str(path) for path in getattr(summary, "sources", set())),
             }
         )
     if not rows:
@@ -2376,10 +3028,16 @@ class MiniDatabaseSection(QtWidgets.QWidget):
     supported_suffixes: tuple[str, ...] = ()
     recursive_search = True
 
+    status_changed = QtCore.pyqtSignal(str)
+    sources_changed = QtCore.pyqtSignal(list)
+    _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
+    _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
+    _SCROLL_SINGLE_STEP = 12
+
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -2389,19 +3047,23 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data = self.store.load()
         self.model = DataFrameModel(self.data.table)
         self.table_view: QtWidgets.QTableView | None = None
+        self._cancel_requested = False
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
+        self.main_layout = layout
 
         controls = QtWidgets.QHBoxLayout()
-        self.add_button = QtWidgets.QPushButton("Connect folder…")
-        self.add_button.clicked.connect(self._add_source)
-        controls.addWidget(self.add_button)
+        self.source_button = QtWidgets.QPushButton()
+        self.source_button.setText("Connect folder…")
+        self.source_button.clicked.connect(self._toggle_source)
+        controls.addWidget(self.source_button)
 
-        self.remove_button = QtWidgets.QPushButton("Remove")
-        self.remove_button.clicked.connect(self._remove_selected_source)
-        controls.addWidget(self.remove_button)
+        self.open_sources_button = QtWidgets.QPushButton("Open source file(s)")
+        self.open_sources_button.setEnabled(False)
+        self.open_sources_button.clicked.connect(self._open_selected_sources)
+        controls.addWidget(self.open_sources_button)
 
         controls.addStretch(1)
 
@@ -2409,25 +3071,46 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.refresh_button.clicked.connect(self.refresh)
         controls.addWidget(self.refresh_button)
 
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._request_cancel)
+        controls.addWidget(self.stop_button)
+
         layout.addLayout(controls)
+        self.controls_layout = controls
 
         self.status_label = QtWidgets.QLabel()
         layout.addWidget(self.status_label)
 
-        splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
-        self.sources_list = QtWidgets.QListWidget()
-        self.sources_list.itemSelectionChanged.connect(self._update_remove_enabled)
-        splitter.addWidget(self.sources_list)
-        splitter.setStretchFactor(0, 0)
+        progress_row = QtWidgets.QHBoxLayout()
+        self.progress_bar = QtWidgets.QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        progress_row.addWidget(self.progress_bar, 1)
+        self.progress_label = QtWidgets.QLabel("Idle")
+        progress_row.addWidget(self.progress_label)
+        self.progress_eta_label = QtWidgets.QLabel("")
+        self.progress_eta_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignRight | QtCore.Qt.AlignmentFlag.AlignVCenter)
+        progress_row.addWidget(self.progress_eta_label)
+        layout.addLayout(progress_row)
+        self._progress_total: int = 0
+        self._progress_current: int = 0
+        self._progress_start: float | None = None
 
-        right_panel = self.create_right_panel(splitter)
-        splitter.addWidget(right_panel)
-        splitter.setStretchFactor(1, 1)
-        layout.addWidget(splitter, 1)
+        self.sources_list = QtWidgets.QListWidget(self)
+        self.sources_list.hide()
+
+        right_panel = self.create_right_panel(self)
+        layout.addWidget(right_panel, 1)
+        self._configure_table_view()
 
         self._populate_sources_list()
         self.model.set_frame(self.data.table)
+        self._auto_fit_columns()
         self._update_status()
+        self._reset_progress_ui()
+        self._hook_table_selection()
+        self._update_open_sources_enabled()
 
     # ------------------------------------------------------------------ UI helpers
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -2435,6 +3118,13 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         table.setModel(self.model)
         table.horizontalHeader().setStretchLastSection(True)
         table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
         self.table_view = table
         container = QtWidgets.QWidget(parent)
         layout = QtWidgets.QVBoxLayout(container)
@@ -2442,15 +3132,342 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         layout.addWidget(table, 1)
         return container
 
+    def _configure_table_view(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        try:
+            table.setIconSize(
+                QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
+            )
+        except Exception:
+            pass
+        table.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        vertical_bar = table.verticalScrollBar()
+        if vertical_bar is not None:
+            vertical_bar.setSingleStep(self._SCROLL_SINGLE_STEP)
+
+    def _auto_fit_columns(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        try:
+            table.resizeColumnsToContents()
+        except Exception:
+            return
+        model = getattr(table, "model", lambda: None)()
+        frame: Optional[pd.DataFrame] = None
+        if hasattr(model, "frame"):
+            try:
+                frame = model.frame()
+            except Exception:
+                frame = None
+        if frame is None or getattr(frame, "empty", False):
+            return
+        try:
+            icon_width = table.iconSize().width()
+        except Exception:
+            icon_width = 0
+        if icon_width <= 0:
+            icon_width = ANNEALING_GRAPH_WIDTH
+        graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 80
+        for idx, column_name in enumerate(frame.columns):
+            label = str(column_name)
+            if (
+                "Graph" not in label
+                and "Figure" not in label
+                and label not in MICROSCOPE_IMAGE_COLUMNS
+            ):
+                continue
+            current = table.columnWidth(idx)
+            target = graph_width if graph_width > current else current
+            if target > 0:
+                table.setColumnWidth(idx, target)
+
+    def _update_source_button(self) -> None:
+        has_sources = self.sources_list.count() > 0
+        text = "Remove folder…" if has_sources else "Connect folder…"
+        self.source_button.setText(text)
+        if has_sources:
+            self.source_button.setToolTip("Disconnect the currently linked folder.")
+        else:
+            self.source_button.setToolTip("Select a folder to analyse.")
+
     def _populate_sources_list(self) -> None:
         self.sources_list.clear()
         for source in self.data.sources:
             self.sources_list.addItem(source)
-        self._update_remove_enabled()
+        self._update_source_button()
 
-    def _update_remove_enabled(self) -> None:
-        has_selection = bool(self.sources_list.selectedItems())
-        self.remove_button.setEnabled(has_selection)
+    def _reset_progress_ui(self) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Idle")
+        self.progress_eta_label.clear()
+        self._progress_total = 0
+        self._progress_current = 0
+        self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
+
+    def _hide_columns(self, names: Sequence[str]) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = getattr(self.table_view, "model", lambda: None)()
+        frame: Optional[pd.DataFrame] = None
+        if hasattr(model, "frame"):
+            try:
+                frame = model.frame()
+            except Exception:
+                frame = None
+        if frame is None:
+            return
+        columns = list(frame.columns)
+        for name in names:
+            if name not in columns:
+                continue
+            index = columns.index(name)
+            try:
+                self.table_view.setColumnHidden(index, True)
+            except Exception:
+                continue
+
+    def _hook_table_selection(self) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        selection_model = self.table_view.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(
+                lambda *_: self._update_open_sources_enabled()
+            )
+        model = self.table_view.model()
+        if isinstance(model, QtCore.QAbstractItemModel):
+            model.modelReset.connect(self._update_open_sources_enabled)
+            model.dataChanged.connect(lambda *_: self._update_open_sources_enabled())
+
+    def _selected_rows(self) -> List[int]:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return []
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return []
+        rows = {index.row() for index in selection.selectedRows()}
+        return sorted(rows)
+
+    def _row_series(self, row: int) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        if row < 0 or row >= len(frame.index):
+            return None
+        try:
+            return frame.iloc[row]
+        except Exception:
+            return None
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        _ = row
+        return []
+
+    def _update_open_sources_enabled(self) -> None:
+        if not hasattr(self, "open_sources_button"):
+            return
+        rows = self._selected_rows()
+        enabled = False
+        if rows:
+            for row_index in rows:
+                series = self._row_series(row_index)
+                if series is None:
+                    continue
+                if self._row_sources(series):
+                    enabled = True
+                    break
+        self.open_sources_button.setEnabled(enabled)
+
+    def _open_file(self, path: Path) -> bool:
+        resolved = path.expanduser()
+        if not resolved.exists():
+            self.log(
+                f"{self.section_title}: source file missing — {resolved}",
+                level=logging.WARNING,
+            )
+            return False
+        url = QtCore.QUrl.fromLocalFile(str(resolved))
+        opened = QtGui.QDesktopServices.openUrl(url)
+        if not opened:
+            self.log(
+                f"{self.section_title}: could not open {resolved}",
+                level=logging.WARNING,
+            )
+        return opened
+
+    def _open_selected_sources(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their source files.",
+            )
+            return
+        opened_any = False
+        missing: List[Path] = []
+        seen: set[Path] = set()
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            for path in self._row_sources(series):
+                if path in seen:
+                    continue
+                seen.add(path)
+                if self._open_file(path):
+                    opened_any = True
+                else:
+                    missing.append(path)
+        if not opened_any and missing:
+            details = "\n".join(str(p) for p in missing[:5])
+            if len(missing) > 5:
+                details += "\n…"
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                f"None of the selected rows have available source files.\n\n{details}",
+            )
+    def _start_progress(self, total: int) -> None:
+        self._progress_total = max(int(total), 0)
+        self._progress_current = 0
+        self._progress_start = time.monotonic()
+        if self._progress_total <= 0:
+            self.progress_bar.setRange(0, 0)
+            self.progress_bar.setValue(0)
+            self.progress_label.setText("Scanning…")
+            self.progress_eta_label.clear()
+            return
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText(f"Processing 0/{self._progress_total}")
+        self.progress_eta_label.setText("Estimating…")
+
+    def _update_progress(self, current: int, total: Optional[int], message: Optional[str]) -> None:
+        if total is not None:
+            self._progress_total = max(int(total), 0)
+        self._progress_current = max(int(current), 0)
+        total_units = self._progress_total
+        if total_units <= 0:
+            self.progress_bar.setRange(0, 0)
+        else:
+            self.progress_bar.setRange(0, 100)
+            percent = int(round(min(self._progress_current / total_units, 1.0) * 100)) if total_units else 0
+            self.progress_bar.setValue(max(0, min(100, percent)))
+        parts: list[str] = []
+        if message:
+            parts.append(message)
+        if total_units > 0:
+            parts.append(f"{self._progress_current}/{total_units}")
+        else:
+            parts.append(f"{self._progress_current} processed")
+        self.progress_label.setText(" — ".join(parts))
+        start = self._progress_start
+        eta_text = ""
+        if (
+            start is not None
+            and self._progress_current > 0
+            and total_units > 0
+            and self._progress_current < total_units
+        ):
+            elapsed = time.monotonic() - start
+            rate = elapsed / self._progress_current if self._progress_current else None
+            if rate and math.isfinite(rate):
+                eta = rate * (total_units - self._progress_current)
+                eta_text = f"ETA {_format_duration(eta)}"
+        elif start is not None and self._progress_current and (
+            total_units == 0 or self._progress_current >= total_units
+        ):
+            elapsed = time.monotonic() - start
+            eta_text = f"Elapsed {_format_duration(elapsed)}"
+        self.progress_eta_label.setText(eta_text)
+        QtWidgets.QApplication.processEvents(
+            QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+        )
+
+    def _request_cancel(self) -> None:
+        if self._cancel_requested:
+            return
+        self._cancel_requested = True
+        self.stop_button.setEnabled(False)
+        self.progress_label.setText("Cancelling…")
+        self.progress_bar.setRange(0, 0)
+        QtWidgets.QApplication.processEvents(
+            QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+        )
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_requested
+
+    def _check_cancelled(self) -> None:
+        if self._cancel_requested:
+            raise BuildCancelledError()
+
+    def _finish_progress(self) -> None:
+        if self._progress_total > 0:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(100)
+            self.progress_label.setText(
+                f"Complete — {self._progress_total} file(s)"
+            )
+        else:
+            self.progress_bar.setRange(0, 100)
+            self.progress_bar.setValue(100)
+            self.progress_label.setText("Complete")
+        start = self._progress_start
+        if start is not None:
+            elapsed = time.monotonic() - start
+            self.progress_eta_label.setText(f"Elapsed {_format_duration(elapsed)}")
+        else:
+            self.progress_eta_label.clear()
+        self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
+        self._release_processing()
+
+    def _fail_progress(self) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Failed")
+        self.progress_eta_label.clear()
+        self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
+        self._release_processing()
+
+    def _cancel_progress(self) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("Cancelled")
+        self.progress_eta_label.clear()
+        self._progress_start = None
+        self._cancel_requested = False
+        self.stop_button.setEnabled(False)
+        self._release_processing()
+
+    def _release_processing(self) -> None:
+        if MiniDatabaseSection._processing_owner is self:
+            MiniDatabaseSection._processing_owner = None
+            if MiniDatabaseSection._refresh_queue:
+                next_section = MiniDatabaseSection._refresh_queue.pop(0)
+                if isinstance(next_section, MiniDatabaseSection):
+                    QtCore.QTimer.singleShot(0, next_section.refresh)
+
+    def _progress_callback(
+        self, current: int, total: int, message: Optional[str] = None
+    ) -> None:
+        if self._progress_start is None:
+            self._start_progress(total)
+        self._update_progress(current, total, message)
 
     def _sync_sources(self) -> None:
         sources: list[str] = []
@@ -2460,7 +3477,31 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 sources.append(item.text())
         self.data.sources = sources
         self.store.save(self.data)
+        try:
+            self.sources_changed.emit(list(sources))
+        except Exception:
+            pass
         self._update_status()
+        self._update_source_button()
+
+    def set_sources(self, sources: Iterable[str]) -> None:
+        unique = []
+        seen: Set[str] = set()
+        for source in sources:
+            normalised = str(Path(source).expanduser())
+            if normalised not in seen:
+                seen.add(normalised)
+                unique.append(normalised)
+        self.sources_list.clear()
+        for path in unique:
+            self.sources_list.addItem(path)
+        self._sync_sources()
+
+    def _toggle_source(self) -> None:
+        if self.sources_list.count() == 0:
+            self._add_source()
+        else:
+            self._prompt_remove_source()
 
     def _add_source(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
@@ -2472,10 +3513,37 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.sources_list.addItem(normalised)
             self._sync_sources()
 
-    def _remove_selected_source(self) -> None:
-        for item in self.sources_list.selectedItems():
-            row = self.sources_list.row(item)
-            self.sources_list.takeItem(row)
+    def _prompt_remove_source(self) -> None:
+        sources = [self.sources_list.item(idx).text() for idx in range(self.sources_list.count())]
+        if not sources:
+            return
+        target = sources[0]
+        if len(sources) > 1:
+            selection, ok = QtWidgets.QInputDialog.getItem(
+                self,
+                self.section_title,
+                "Select a folder to disconnect:",
+                sources,
+                0,
+                False,
+            )
+            if not ok or not selection:
+                return
+            target = selection
+        message = QtWidgets.QMessageBox(self)
+        message.setWindowTitle(self.section_title)
+        message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        message.setText("Remove the connected folder?")
+        message.setInformativeText(target)
+        remove_btn = message.addButton("Remove folder", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        message.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        message.exec()
+        if message.clickedButton() is not remove_btn:
+            return
+        for idx in range(self.sources_list.count() - 1, -1, -1):
+            item = self.sources_list.item(idx)
+            if item is not None and item.text() == target:
+                self.sources_list.takeItem(idx)
         self._sync_sources()
 
     # ------------------------------------------------------------------ data handling
@@ -2519,26 +3587,27 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         sources_count = len(self.data.sources)
         pending = self._pending_paths() if sources_count else []
         if sources_count == 0:
-            self.status_label.setText("Connect one or more folders to begin.")
+            message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
-            return
-        self.refresh_button.setEnabled(True)
-        if pending:
-            self.status_label.setText(
-                f"⚠️ {len(pending)} new or updated file(s) pending processing."
-            )
-        elif not self.data.table.empty:
-            self.status_label.setText(
-                f"Up to date ({len(self.data.table)} record(s))."
-            )
         else:
-            self.status_label.setText("No processed data available yet.")
-
-    def log(self, message: str) -> None:
+            self.refresh_button.setEnabled(True)
+            if pending:
+                message = f"⚠️ {len(pending)} new or updated file(s) pending processing."
+            elif not self.data.table.empty:
+                message = f"Up to date ({len(self.data.table)} record(s))."
+            else:
+                message = "No processed data available yet."
+        self.status_label.setText(message)
         try:
-            self._log_callback(message)
+            self.status_changed.emit(message)
         except Exception:
-            self.logger.info(message)
+            pass
+
+    def log(self, message: str, level: int = logging.INFO) -> None:
+        try:
+            self._log_callback(level, message)
+        except Exception:
+            self.logger.log(level, message)
 
     def refresh(self) -> None:
         candidates = self._collect_candidates()
@@ -2548,18 +3617,53 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.data.table = pd.DataFrame()
             self.store.save(self.data)
             self.model.set_frame(self.data.table)
+            self._auto_fit_columns()
             self._update_status()
+            self._reset_progress_ui()
             return
+        self._cancel_requested = False
+        self.stop_button.setEnabled(True)
+        owner = MiniDatabaseSection._processing_owner
+        if owner is not None and owner is not self:
+            other_title = getattr(owner, "section_title", "Another section")
+            if self not in MiniDatabaseSection._refresh_queue:
+                MiniDatabaseSection._refresh_queue.append(self)
+            status_message = f"Queued — waiting for {other_title}"
+            self.status_label.setText(status_message)
+            try:
+                self.status_changed.emit(status_message)
+            except Exception:
+                pass
+            self.log(
+                f"{self.section_title}: queued refresh while {other_title} completes."
+            )
+            self._reset_progress_ui()
+            self.stop_button.setEnabled(False)
+            return
+        MiniDatabaseSection._processing_owner = self
+        status_message = f"Processing {len(candidates)} file(s)…"
+        self.status_label.setText(status_message)
         try:
-            result = self.process(candidates)
+            self.status_changed.emit(status_message)
+        except Exception:
+            pass
+        self._start_progress(len(candidates))
+        try:
+            result = self.process(candidates, progress=self._progress_callback)
+        except BuildCancelledError:
+            self.log(f"{self.section_title}: processing cancelled by user.")
+            self._cancel_progress()
+            return
         except Exception as exc:  # pragma: no cover - defensive UI guard
             self.logger.exception("%s processing failed", self.section_title)
+            self._fail_progress()
             QtWidgets.QMessageBox.critical(
                 self,
                 self.section_title,
                 f"Failed to process data:\n{exc}",
             )
             return
+        self._finish_progress()
 
         existing_payloads = set(self.data.extra.get("payloads", {}).keys())
         new_payloads = set(result.payloads.keys())
@@ -2578,19 +3682,114 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data.table = result.table
         self.store.save(self.data)
         self.model.set_frame(result.table)
+        self._auto_fit_columns()
         self._update_status()
         self.log(
             f"{self.section_title}: processed {len(candidates)} file(s)."
         )
+        self._update_open_sources_enabled()
+        try:
+            self.sources_changed.emit(list(self.data.sources))
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ hooks for subclasses
-    def process(self, paths: List[Path]) -> SectionProcessResult:
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
         raise NotImplementedError
 
 class FabricationSection(MiniDatabaseSection):
     section_key = "fabrication"
     section_title = "Fabrication data"
     supported_suffixes = (".xlsx", ".xls", ".xlsm")
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(logger, log_callback, parent)
+        self._hide_columns(["_source_paths", "_source_path"])
+
+    def _collect_candidates(self) -> List[Path]:
+        _, relevant_compositions = self._load_relevant_map()
+        tokens = {
+            self._normalise_token(comp)
+            for comp in relevant_compositions
+            if self._normalise_token(comp)
+        }
+        if not tokens:
+            return super()._collect_candidates()
+
+        candidates: Dict[str, Path] = {}
+
+        def _should_consider(path: Path, root: Path) -> bool:
+            try:
+                relative = path.relative_to(root)
+                text = self._normalise_token(str(relative))
+            except Exception:
+                text = self._normalise_token(path.name)
+            if not text:
+                return False
+            return any(token in text for token in tokens)
+
+        for source in self.data.sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            try:
+                resolved_root = root.resolve()
+            except Exception:
+                resolved_root = root
+            if self.recursive_search:
+                stack: List[Tuple[Path, bool]] = [(resolved_root, False)]
+                while stack:
+                    current, matched = stack.pop()
+                    try:
+                        entries = list(current.iterdir())
+                    except Exception:
+                        continue
+                    for entry in entries:
+                        if entry.is_dir():
+                            next_matched = matched or _should_consider(entry, resolved_root)
+                            if current is resolved_root or next_matched:
+                                stack.append((entry, next_matched))
+                            continue
+                        if not entry.is_file():
+                            continue
+                        if self.supported_suffixes and entry.suffix.lower() not in self.supported_suffixes:
+                            continue
+                        if not (matched or _should_consider(entry, resolved_root)):
+                            continue
+                        try:
+                            resolved = str(entry.resolve())
+                        except Exception:
+                            resolved = str(entry)
+                        candidates.setdefault(resolved, entry)
+            else:
+                try:
+                    entries = list(resolved_root.iterdir())
+                except Exception:
+                    entries = []
+                for entry in entries:
+                    if not entry.is_file():
+                        continue
+                    if self.supported_suffixes and entry.suffix.lower() not in self.supported_suffixes:
+                        continue
+                    if not _should_consider(entry, resolved_root):
+                        continue
+                    try:
+                        resolved = str(entry.resolve())
+                    except Exception:
+                        resolved = str(entry)
+                    candidates.setdefault(resolved, entry)
+        if not candidates:
+            return super()._collect_candidates()
+        return sorted(candidates.values())
 
     @staticmethod
     def _normalise_int(value: object) -> Optional[int]:
@@ -2697,9 +3896,100 @@ class FabricationSection(MiniDatabaseSection):
             filtered.set_piece(comp_key, draw_int, piece_int, dict(piece_data))
         return filtered
 
-    def process(self, paths: List[Path]) -> SectionProcessResult:
-        index = build_fabrication_index(paths, self.logger)
+    @staticmethod
+    def _normalise_token(text: str) -> str:
+        return re.sub(r"[^a-z0-9]", "", str(text).lower())
+
+    def _filter_candidates_for_relevance(
+        self,
+        candidates: List[Path],
+        relevant_map: Dict[str, Dict[Optional[int], Set[Optional[int]]]],
+        relevant_compositions: Set[str],
+    ) -> Tuple[List[Path], int, bool]:
+        if not relevant_compositions:
+            return candidates, 0, False
+        composition_tokens = {
+            comp: self._normalise_token(comp)
+            for comp in relevant_compositions
+            if self._normalise_token(comp)
+        }
+        if not composition_tokens:
+            return candidates, 0, False
+        draw_tokens: Dict[str, Set[str]] = {}
+        for comp, draw_map in relevant_map.items():
+            comp_key = self._normalise_token(comp)
+            if not comp_key:
+                continue
+            bucket = draw_tokens.setdefault(comp_key, set())
+            for draw, pieces in draw_map.items():
+                if draw is not None:
+                    bucket.add(self._normalise_token(draw))
+                for piece in pieces:
+                    if piece is not None:
+                        bucket.add(self._normalise_token(f"{draw}{piece}"))
+        filtered: List[Path] = []
+        skipped = 0
+        for path in candidates:
+            text = self._normalise_token(path)
+            if not text:
+                filtered.append(path)
+                continue
+            matched = False
+            for _, token in composition_tokens.items():
+                if token and token in text:
+                    matched = True
+                    break
+                draw_set = draw_tokens.get(token)
+                if draw_set and any(draw_token in text for draw_token in draw_set if draw_token):
+                    matched = True
+                    break
+            if matched:
+                filtered.append(path)
+            else:
+                skipped += 1
+        if not filtered:
+            return candidates, 0, True
+        return filtered, skipped, False
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        unique_paths = list(dict.fromkeys(Path(p) for p in paths))
+
         relevant_map, relevant_compositions = self._load_relevant_map()
+        filtered_paths, skipped, reverted = self._filter_candidates_for_relevance(
+            unique_paths, relevant_map, relevant_compositions
+        )
+        if reverted:
+            self.log(
+                "Fabrication data: relevance filter could not match any files; falling back to full file list."
+            )
+        elif skipped:
+            self.log(
+                f"Fabrication data: skipped {skipped} file(s) without matching current annealing composition."
+            )
+
+        def _progress(idx: int, total: int) -> None:
+            self._check_cancelled()
+            if progress is None:
+                return
+            message: Optional[str] = None
+            if 0 < idx <= len(filtered_paths):
+                message = f"Parsing {filtered_paths[idx - 1].name}"
+            try:
+                progress(idx, total, message)
+            except Exception:
+                pass
+
+        index = build_fabrication_index(
+            filtered_paths,
+            self.logger,
+            progress_callback=_progress,
+            cancel_callback=self.is_cancelled,
+        )
+        self._check_cancelled()
         if relevant_compositions:
             original_draws = len(index.draw_level)
             original_pieces = len(index.piece_level)
@@ -2713,7 +4003,7 @@ class FabricationSection(MiniDatabaseSection):
                 )
         table = _fabrication_index_to_frame(index)
         processed: Dict[str, float] = {}
-        for path in paths:
+        for path in filtered_paths:
             try:
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
@@ -2724,25 +4014,99 @@ class FabricationSection(MiniDatabaseSection):
             payloads={"fabrication_index": index},
         )
 
+    def refresh(self) -> None:
+        super().refresh()
+        self._hide_columns(["_source_paths", "_source_path"])
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw_paths: List[str] = []
+        path_values = row.get("_source_paths")
+        if isinstance(path_values, (list, tuple, set)):
+            raw_paths.extend(str(value) for value in path_values if value)
+        fallback = row.get("_source_path")
+        if fallback:
+            raw_paths.append(str(fallback))
+        for entry in dict.fromkeys(raw_paths):
+            try:
+                sources.append(Path(entry))
+            except Exception:
+                continue
+        return sources
+
 
 class AnnealingSection(MiniDatabaseSection):
     section_key = "annealing"
     section_title = "Current annealing"
     supported_suffixes = (".txt", ".csv", ".tsv")
 
-    def process(self, paths: List[Path]) -> SectionProcessResult:
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(logger, log_callback, parent)
+        self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
+        self._sanitize_graph_columns()
+        self._record_groups: Dict[str, List[MeasurementRecord]] = {}
+        self.export_button = QtWidgets.QPushButton("Export worksheet…")
+        self.export_button.clicked.connect(self._export_worksheet)
+        self.controls_layout.addWidget(self.export_button)
+        self._update_export_enabled()
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
+        table.setIconSize(
+            QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
+        )
+        header = table.verticalHeader()
+        if header is not None:
+            default_height = ANNEALING_GRAPH_HEIGHT + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
+        self.table_view = table
+        return table
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
         records: List[MeasurementRecord] = []
         processed: Dict[str, float] = {}
-        for path in paths:
+        total = len(paths)
+        sanity_failures: List[Tuple[Path, Optional[float]]] = []
+        for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
             try:
                 df = _load_annealing(path)
             except Exception:
                 self.logger.exception("Failed to parse %s", path)
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Failed: {path.name}")
+                    except Exception:
+                        pass
                 continue
             metadata = _metadata_from_path(path)
             ok, mean_error = _resistance_sanity_check(df)
             if not ok:
-                self.logger.warning("R≈V/I sanity check failed for %s", path)
+                sanity_failures.append((path, mean_error))
             record = MeasurementRecord(
                 path=path,
                 metadata=metadata,
@@ -2755,12 +4119,370 @@ class AnnealingSection(MiniDatabaseSection):
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
                 processed[str(path)] = 0.0
-        table = _annealing_records_to_frame(records)
+            if progress is not None:
+                try:
+                    progress(idx, total, f"Parsed {path.name}")
+                except Exception:
+                    pass
+        table = _annealing_records_to_frame(records, self.logger)
+        if sanity_failures:
+            preview = ", ".join(p.name for p, _ in sanity_failures[:5])
+            if len(sanity_failures) > 5:
+                preview += ", …"
+            errors = [err for _, err in sanity_failures if isinstance(err, (int, float))]
+            worst = f" (worst error {max(errors) * 100:.1f}%)" if errors else ""
+            summary = (
+                f"{self.section_title}: R≈V/I sanity check failed for {len(sanity_failures)} file(s){worst}"
+            )
+            if preview:
+                summary += f": {preview}"
+            self.log(summary, level=logging.WARNING)
+            self.logger.warning(summary)
         return SectionProcessResult(
             table=table,
             processed=processed,
             payloads={"annealing_records": records},
         )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._sanitize_graph_columns()
+        self._hide_columns(["_group_key", "_sources"])
+        self._refresh_record_groups()
+        self._update_export_enabled()
+
+    def _update_export_enabled(self) -> None:
+        if hasattr(self, "export_button"):
+            self.export_button.setEnabled(not self.data.table.empty)
+
+    def _refresh_record_groups(self) -> None:
+        grouped: Dict[str, List[MeasurementRecord]] = {}
+        try:
+            payload = self.store.load_payload("annealing_records")
+        except Exception:
+            payload = None
+        if isinstance(payload, list):
+            for record in payload:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw = getattr(metadata, "draw_x", None)
+                piece = getattr(metadata, "piece_y", None)
+                if composition is None or draw is None or piece is None:
+                    continue
+                try:
+                    key = f"{composition}|{int(draw)}|{int(piece)}"
+                except (TypeError, ValueError):
+                    continue
+                grouped.setdefault(key, []).append(record)
+        self._record_groups = grouped
+        self._invalidate_previews()
+
+    def _sanitize_graph_columns(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            return
+        changed = False
+        for column in ("Graph — 1000 mA", "Graph — low mA"):
+            if column not in frame.columns:
+                continue
+            series = frame[column]
+            if not hasattr(series, "apply"):
+                continue
+            cleaned = series.apply(
+                lambda value: None
+                if isinstance(value, (QtGui.QPixmap, QtGui.QImage))
+                else value
+            )
+            if not cleaned.equals(series):
+                frame[column] = cleaned
+                changed = True
+        desired_order = [
+            "Composition",
+            "Microwire",
+            "Graph — 1000 mA",
+            "Graph — low mA",
+            "Low current setpoint",
+            "Updated",
+            "_group_key",
+            "_sources",
+        ]
+        current_columns = list(frame.columns)
+        preferred = [col for col in desired_order if col in frame.columns]
+        remainder = [col for col in current_columns if col not in desired_order]
+        new_order = preferred + remainder
+        if new_order != current_columns and new_order:
+            frame = frame.loc[:, new_order]
+            changed = True
+        if changed:
+            self.data.table = frame
+            if isinstance(self.model, DataFrameModel):
+                self.model.set_frame(frame)
+                self._auto_fit_columns()
+            try:
+                self.store.save(self.data)
+            except Exception:
+                pass
+        self._invalidate_previews()
+
+    def _invalidate_previews(self) -> None:
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column not in {"Graph — 1000 mA", "Graph — low mA"}:
+            return None
+        key = row.get("_group_key")
+        if not isinstance(key, str) or not key:
+            return None
+        cache_key = (key, column)
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(key)
+        if not records:
+            self._pixmap_cache[cache_key] = None
+            return None
+        high_record, low_record = _select_high_low_pair(records)
+        target = high_record if column == "Graph — 1000 mA" else low_record
+        pixmap = _render_measurement_pixmap(target, self.logger)
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw_sources = row.get("_sources")
+        if isinstance(raw_sources, (list, tuple)):
+            for entry in raw_sources:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        key = row.get("_group_key")
+        if isinstance(key, str):
+            for record in self._record_groups.get(key, []):
+                path = getattr(record, "path", None)
+                if path:
+                    try:
+                        candidate = Path(path)
+                    except Exception:
+                        continue
+                    if candidate not in sources:
+                        sources.append(candidate)
+        return sources
+
+    def _export_worksheet(self) -> None:
+        records = self.store.load_payload("annealing_records")
+        if not isinstance(records, list) or not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Process current annealing files before exporting.",
+            )
+            return
+
+        path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save annealing worksheet",
+            str(Path.cwd() / "annealing_summary.xlsx"),
+            "Excel files (*.xlsx)",
+        )
+        if not path_str:
+            return
+        output_path = Path(path_str)
+        if output_path.suffix.lower() != ".xlsx":
+            output_path = output_path.with_suffix(".xlsx")
+
+        try:
+            import xlsxwriter  # type: ignore[import-not-found]
+        except ImportError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "xlsxwriter is required to export worksheets.",
+            )
+            return
+
+        grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+        for record in records:
+            metadata = getattr(record, "metadata", None)
+            if metadata is None:
+                continue
+            draw_x = getattr(metadata, "draw_x", None)
+            piece_y = getattr(metadata, "piece_y", None)
+            composition = getattr(metadata, "composition_token", None)
+            if composition is None or draw_x is None or piece_y is None:
+                continue
+            grouped.setdefault((str(composition), int(draw_x), int(piece_y)), []).append(record)
+
+        if not grouped:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "No complete microwire records available for export.",
+            )
+            return
+
+        try:
+            with TemporaryDirectory() as tmpdir:
+                workbook = xlsxwriter.Workbook(str(output_path))
+                try:
+                    worksheet = workbook.add_worksheet("Summary")
+                    header_format = workbook.add_format({"bold": True})
+                    headers = [
+                        "Composition",
+                        "Microwire",
+                        "1000 mA file",
+                        "Low mA (mA)",
+                        "Low mA file",
+                        "Graph — 1000 mA",
+                        "Graph — low mA",
+                    ]
+                    worksheet.write_row(0, 0, headers, header_format)
+                    worksheet.set_column(0, 1, 18)
+                    worksheet.set_column(2, 4, 22)
+                    worksheet.set_column(5, 6, 42)
+
+                    plot_dir = Path(tmpdir)
+                    row_idx = 1
+                    for (composition, draw_x, piece_y), recs in sorted(grouped.items()):
+                        high_record, low_record = _select_high_low_pair(recs)
+
+                        microwire_label = _microwire_label(draw_x, piece_y)
+                        low_setpoint = (
+                            low_record.metadata.setpoint_mA if low_record else None
+                        )
+                        high_file = (
+                            high_record.metadata.file_name if high_record else ""
+                        )
+                        low_file = (
+                            low_record.metadata.file_name if low_record else ""
+                        )
+                        formatted_low = _format_setpoint(low_setpoint)
+
+                        worksheet.write_row(
+                            row_idx,
+                            0,
+                            [
+                                composition,
+                                microwire_label,
+                                high_file,
+                                formatted_low,
+                                low_file,
+                                "",
+                                "",
+                            ],
+                        )
+
+                        worksheet.set_row(row_idx, 160)
+
+                        def _plot(record: MeasurementRecord) -> Optional[Path]:
+                            if record is None:
+                                return None
+                            try:
+                                plot_path = _plot_measurement_matplotlib(
+                                    record.dataframe,
+                                    Path(record.path),
+                                    plot_dir,
+                                    DEFAULT_FIGSIZE,
+                                )
+                            except Exception:
+                                self.logger.exception(
+                                    "Failed to render plot for %s", record.path
+                                )
+                                return None
+                            return plot_path
+
+                        high_plot = _plot(high_record) if high_record else None
+                        low_plot = _plot(low_record) if low_record else None
+                        image_options = {"x_scale": 0.6, "y_scale": 0.6}
+                        if high_plot is not None:
+                            worksheet.insert_image(
+                                row_idx,
+                                5,
+                                str(high_plot),
+                                image_options,
+                            )
+                        if low_plot is not None:
+                            worksheet.insert_image(
+                                row_idx,
+                                6,
+                                str(low_plot),
+                                image_options,
+                            )
+                        row_idx += 1
+                finally:
+                    workbook.close()
+        except Exception as exc:
+            try:
+                if output_path.exists():
+                    output_path.unlink()
+            except OSError:
+                pass
+            QtWidgets.QMessageBox.critical(
+                self,
+                self.section_title,
+                f"Failed to export worksheet:\n{exc}",
+            )
+            return
+
+        self.log(f"Current annealing worksheet saved to {output_path}")
+        QtWidgets.QMessageBox.information(
+            self,
+            self.section_title,
+            f"Worksheet saved to {output_path}",
+        )
+
+
+class _MicroscopePreviewLabel(QtWidgets.QLabel):
+    def __init__(self, placeholder: str, parent: Optional[QtWidgets.QWidget] = None) -> None:
+        super().__init__(placeholder, parent)
+        self._placeholder = placeholder
+        self._pixmap: Optional[QtGui.QPixmap] = None
+        self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        self.setWordWrap(True)
+
+    def set_placeholder(self) -> None:
+        self._pixmap = None
+        super().setPixmap(QtGui.QPixmap())
+        super().setText(self._placeholder)
+
+    def set_preview(self, pixmap: Optional[QtGui.QPixmap]) -> None:
+        if pixmap is None or pixmap.isNull():
+            self.set_placeholder()
+            return
+        self._pixmap = QtGui.QPixmap(pixmap)
+        self._update_scaled_pixmap()
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - Qt callback
+        super().resizeEvent(event)
+        if self._pixmap is not None:
+            self._update_scaled_pixmap()
+
+    def _update_scaled_pixmap(self) -> None:
+        if self._pixmap is None:
+            return
+        target_size = self.size()
+        if target_size.width() <= 0 or target_size.height() <= 0:
+            return
+        scaled = self._pixmap.scaled(
+            target_size,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+        super().setPixmap(scaled)
+        super().setText("")
 
 
 class MicroscopeSection(MiniDatabaseSection):
@@ -2771,11 +4493,13 @@ class MicroscopeSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, float]] = {}
         self._selected_key: str | None = None
+        self._ocr_debug_enabled = False
+        self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         super().__init__(logger, log_callback, parent)
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
@@ -2794,6 +4518,18 @@ class MicroscopeSection(MiniDatabaseSection):
         table.setModel(self.model)
         table.horizontalHeader().setStretchLastSection(True)
         table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
+        header = table.verticalHeader()
+        if header is not None:
+            default_height = 40
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
         self.table_view = table
         selection_model = table.selectionModel()
         if selection_model is not None:
@@ -2804,11 +4540,28 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(6)
 
-        self.preview_label = QtWidgets.QLabel("Select a row to preview the image.")
-        self.preview_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-        self.preview_label.setMinimumSize(220, 220)
-        self.preview_label.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
-        preview_layout.addWidget(self.preview_label, 1)
+        def _make_preview_panel(title: str) -> Tuple[QtWidgets.QVBoxLayout, _MicroscopePreviewLabel]:
+            column_layout = QtWidgets.QVBoxLayout()
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            caption = QtWidgets.QLabel(title)
+            caption.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            caption.setStyleSheet("font-weight: 600;")
+            column_layout.addWidget(caption)
+            label = _MicroscopePreviewLabel("Select a row to preview.")
+            label.setMinimumSize(480, 360)
+            label.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+            column_layout.addWidget(label, 1)
+            return column_layout, label
+
+        image_row = QtWidgets.QHBoxLayout()
+        core_panel, self.core_preview_label = _make_preview_panel("Core image")
+        glass_panel, self.glass_preview_label = _make_preview_panel("Glass image")
+        image_row.addLayout(core_panel)
+        image_row.addLayout(glass_panel)
+        preview_layout.addLayout(image_row)
 
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -2833,18 +4586,100 @@ class MicroscopeSection(MiniDatabaseSection):
 
         return splitter
 
+    def set_ocr_debug_enabled(self, enabled: bool) -> None:
+        self._ocr_debug_enabled = bool(enabled)
+
+    def _ocr_debug_callback(self, path: Path, result: MicroscopeOCRResult) -> None:
+        if not self._ocr_debug_enabled:
+            return
+        values = [
+            f"{float(value):.3f}"
+            for value in result.values
+            if isinstance(value, (int, float)) and math.isfinite(float(value))
+        ]
+        value_text = ", ".join(values) if values else "—"
+        sample_texts: List[str] = []
+        for detection in result.detections:
+            raw = getattr(detection, "text", None)
+            if raw:
+                cleaned = str(raw).replace("\n", " ").strip()
+                if cleaned:
+                    sample_texts.append(cleaned)
+        for text in result.texts:
+            cleaned = str(text).replace("\n", " ").strip()
+            if cleaned:
+                sample_texts.append(cleaned)
+        text_preview = " | ".join(sample_texts) if sample_texts else "—"
+        message = f"OCR debug {Path(path).name}: values={value_text}"
+        message += f"; text={text_preview}"
+        self.log(message, level=logging.INFO)
+
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
         model = self.table_view.model()
         if model is None:
             return
-        for column_name in ("_key", "_images"):
+        hidden_columns = ["_key", "_images", "_core_image", "_glass_image"]
+        hidden_columns.extend(MICROSCOPE_IMAGE_COLUMNS)
+        for column_name in hidden_columns:
             try:
                 column_index = list(model.frame().columns).index(column_name)  # type: ignore[arg-type]
             except Exception:
                 continue
             self.table_view.setColumnHidden(column_index, True)
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        images = row.get("_images")
+        if isinstance(images, (list, tuple, set)):
+            for entry in images:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        for column_name in ("_core_image", "_glass_image"):
+            path_value = row.get(column_name)
+            if not path_value:
+                continue
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                continue
+            if candidate not in sources:
+                sources.append(candidate)
+        return sources
+
+    def _image_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column not in MICROSCOPE_IMAGE_COLUMNS:
+            return None
+        key = row.get("_key")
+        if not isinstance(key, str) or not key:
+            return None
+        cache_key = (key, column)
+        cached = self._pixmap_cache.get(cache_key)
+        if cached is not None or cache_key in self._pixmap_cache:
+            return cached
+        hidden = "_core_image" if column == MICROSCOPE_IMAGE_COLUMNS[0] else "_glass_image"
+        path_value = row.get(hidden)
+        pixmap: Optional[QtGui.QPixmap] = None
+        if path_value:
+            try:
+                candidate = Path(path_value)
+            except Exception:
+                candidate = None
+            if candidate and candidate.exists():
+                loaded = QtGui.QPixmap(str(candidate))
+                if not loaded.isNull():
+                    pixmap = loaded
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
 
     def _selected_row(self) -> Optional[pd.Series]:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -2865,7 +4700,8 @@ class MicroscopeSection(MiniDatabaseSection):
         row = self._selected_row()
         if row is None:
             self._selected_key = None
-            self.preview_label.setText("Select a row to preview the image.")
+            for label in (self.core_preview_label, self.glass_preview_label):
+                label.set_placeholder()
             self.d_edit.clear()
             self.D_edit.clear()
             return
@@ -2875,21 +4711,24 @@ class MicroscopeSection(MiniDatabaseSection):
         D_value = row.get("D (µm)")
         self.d_edit.setText("" if d_value is None or (isinstance(d_value, float) and math.isnan(d_value)) else f"{float(d_value):.3f}")
         self.D_edit.setText("" if D_value is None or (isinstance(D_value, float) and math.isnan(D_value)) else f"{float(D_value):.3f}")
-        images = row.get("_images") if isinstance(row.get("_images"), list) else []
-        if images:
-            first = Path(images[0])
-            if first.exists():
-                pixmap = QtGui.QPixmap(str(first))
+        for column_name, label in (
+            ("_core_image", self.core_preview_label),
+            ("_glass_image", self.glass_preview_label),
+        ):
+            path_value = row.get(column_name)
+            if path_value:
+                try:
+                    candidate = Path(path_value)
+                except Exception:
+                    candidate = None
+            else:
+                candidate = None
+            if candidate and candidate.exists():
+                pixmap = QtGui.QPixmap(str(candidate))
                 if not pixmap.isNull():
-                    scaled = pixmap.scaled(
-                        self.preview_label.size(),
-                        QtCore.Qt.AspectRatioMode.KeepAspectRatio,
-                        QtCore.Qt.TransformationMode.SmoothTransformation,
-                    )
-                    self.preview_label.setPixmap(scaled)
-                    return
-        self.preview_label.setPixmap(QtGui.QPixmap())
-        self.preview_label.setText("No preview available.")
+                    label.set_preview(pixmap)
+                    continue
+            label.set_placeholder()
 
     def _apply_override(self) -> None:
         if not self._selected_key:
@@ -2935,6 +4774,7 @@ class MicroscopeSection(MiniDatabaseSection):
         if frame.empty:
             self.model.set_frame(frame)
             return
+        self._pixmap_cache.clear()
         for index, row in frame.iterrows():
             key = str(row.get("_key"))
             override = self._overrides.get(key)
@@ -2953,17 +4793,68 @@ class MicroscopeSection(MiniDatabaseSection):
                     ratio = None
             frame.at[index, "d (µm)"] = d_value
             frame.at[index, "D (µm)"] = D_value
-            frame.at[index, "d/D"] = ratio
+            frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
         self.data.table = frame
         self.model.set_frame(frame)
+        self._auto_fit_columns()
 
     def refresh(self) -> None:
         super().refresh()
         self._apply_overrides_to_table()
         self._update_hidden_columns()
 
-    def process(self, paths: List[Path]) -> SectionProcessResult:
-        index = _group_microscope_measurements(paths, self.logger)
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        def _progress(idx: int, total: int) -> None:
+            self._check_cancelled()
+            if progress is None:
+                return
+            message = None
+            if 0 < idx <= len(paths):
+                try:
+                    message = f"Grouping {Path(paths[idx - 1]).name}"
+                except Exception:
+                    message = None
+            try:
+                progress(idx, total, message)
+            except Exception:
+                pass
+
+        debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
+        index = _group_microscope_measurements(
+            paths,
+            self.logger,
+            progress_callback=_progress if progress is not None else None,
+            debug_callback=debug_cb,
+        )
+        expected_keys: Set[Tuple[str, int, int]] = set()
+        try:
+            annealing_records = MiniDatabaseStore("annealing").load_payload(
+                "annealing_records"
+            )
+        except Exception:
+            annealing_records = None
+        if isinstance(annealing_records, list):
+            for record in annealing_records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw = getattr(metadata, "draw_x", None)
+                piece = getattr(metadata, "piece_y", None)
+                if not composition or draw is None or piece is None:
+                    continue
+                try:
+                    key = (str(composition), int(draw), int(piece))
+                except (TypeError, ValueError):
+                    continue
+                expected_keys.add(key)
+        for key in expected_keys:
+            index.setdefault(key, MicroscopeMeasurements())
+        self._check_cancelled()
         # Retain overrides only for existing keys
         filtered_overrides = {
             key: value
@@ -2981,6 +4872,31 @@ class MicroscopeSection(MiniDatabaseSection):
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
                 continue
+        total_records = len(index)
+        def _count_measurements(entries: Sequence[MicroscopeDetection]) -> int:
+            count = 0
+            for entry in entries:
+                value = getattr(entry, "value", None)
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    numeric = math.nan
+                if math.isfinite(numeric) and numeric > 0:
+                    count += 1
+            return count
+
+        total_core = sum(_count_measurements(m.core) for m in index.values())
+        total_glass = sum(_count_measurements(m.glass) for m in index.values())
+        if total_core or total_glass:
+            self.log(
+                f"Microscope OCR detected {total_core} core and {total_glass} glass diameter(s) across {total_records} microwire(s).",
+                level=logging.INFO,
+            )
+        else:
+            self.log(
+                "Microscope OCR completed but no diameters were detected. Ensure the PaddleOCR models are installed and the microscope captures contain visible annotations.",
+                level=logging.WARNING,
+            )
         return SectionProcessResult(
             table=table,
             processed=processed,
@@ -2998,11 +4914,45 @@ class VideoSection(MiniDatabaseSection):
     section_title = "Fabrication videos"
     supported_suffixes = VIDEO_EXTENSIONS
 
-    def process(self, paths: List[Path]) -> SectionProcessResult:
-        index = _collect_video_metrics(paths, self.logger)
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(logger, log_callback, parent)
+        self.source_button.hide()
+        self.refresh_button.setText("Start video OCR")
+        self._hide_columns(["_sources"])
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        unique_paths = list(dict.fromkeys(Path(p) for p in paths))
+
+        def _progress(idx: int, total: int) -> None:
+            self._check_cancelled()
+            if progress is None:
+                return
+            message: Optional[str] = None
+            if 0 < idx <= len(unique_paths):
+                message = f"Analysing {unique_paths[idx - 1].name}"
+            try:
+                progress(idx, total, message)
+            except Exception:
+                pass
+
+        index = _collect_video_metrics(
+            unique_paths,
+            self.logger,
+            progress_callback=_progress if progress is not None else None,
+        )
+        self._check_cancelled()
         table = _video_index_to_frame(index)
         processed: Dict[str, float] = {}
-        for path in paths:
+        for path in unique_paths:
             try:
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
@@ -3012,6 +4962,23 @@ class VideoSection(MiniDatabaseSection):
             processed=processed,
             payloads={"video_index": index},
         )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._hide_columns(["_sources"])
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw = row.get("_sources")
+        if isinstance(raw, (list, tuple, set)):
+            for entry in raw:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
 
 
 
@@ -3048,7 +5015,7 @@ class StrainSection(MiniDatabaseSection):
     def __init__(
         self,
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._wire_choices: Dict[str, Dict[str, tuple[int, int]]] = {}
@@ -3059,9 +5026,10 @@ class StrainSection(MiniDatabaseSection):
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
         self._strain_offset: float = 7.0
         super().__init__(logger, log_callback, parent)
-        self.add_button.hide()
-        self.remove_button.hide()
+        self.source_button.hide()
         self.refresh_button.hide()
+        if hasattr(self, "open_sources_button"):
+            self.open_sources_button.hide()
         self.sources_list.hide()
         self.sources_list.setMaximumWidth(0)
         self.status_label.setWordWrap(True)
@@ -3094,9 +5062,22 @@ class StrainSection(MiniDatabaseSection):
         layout.setSpacing(6)
 
         form_container = QtWidgets.QWidget(container)
-        form_layout = QtWidgets.QFormLayout(form_container)
+        form_layout = QtWidgets.QHBoxLayout(form_container)
         form_layout.setContentsMargins(0, 0, 0, 0)
-        form_layout.setSpacing(6)
+        form_layout.setSpacing(12)
+
+        def _add_field(label_text: str, widget: QtWidgets.QWidget) -> None:
+            field_box = QtWidgets.QWidget(form_container)
+            column = QtWidgets.QVBoxLayout(field_box)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(4)
+            label = QtWidgets.QLabel(label_text, field_box)
+            label.setAlignment(
+                QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+            )
+            column.addWidget(label)
+            column.addWidget(widget)
+            form_layout.addWidget(field_box)
 
         self.composition_combo = QtWidgets.QComboBox(form_container)
         self.composition_combo.setEditable(True)
@@ -3108,30 +5089,30 @@ class StrainSection(MiniDatabaseSection):
         if line_edit is not None:
             line_edit.textEdited.connect(self._composition_text_edited)
         self.composition_combo.currentTextChanged.connect(self._composition_changed)
-        form_layout.addRow("Composition", self.composition_combo)
+        _add_field("Composition", self.composition_combo)
 
         self.microwire_combo = QtWidgets.QComboBox(form_container)
         self.microwire_combo.currentIndexChanged.connect(self._microwire_changed)
-        form_layout.addRow("Microwire", self.microwire_combo)
+        _add_field("Microwire", self.microwire_combo)
 
         self.d_edit = QtWidgets.QLineEdit(form_container)
         self.d_edit.setPlaceholderText("auto")
         self.d_edit.textChanged.connect(self._update_mass_display)
-        form_layout.addRow(self.COLUMN_D, self.d_edit)
+        _add_field(self.COLUMN_D, self.d_edit)
 
         self.mass_display = QtWidgets.QLineEdit(form_container)
         self.mass_display.setReadOnly(True)
-        form_layout.addRow(self.COLUMN_MASS, self.mass_display)
+        _add_field(self.COLUMN_MASS, self.mass_display)
 
         self.M_length_edit = QtWidgets.QLineEdit(form_container)
         self.M_length_edit.setPlaceholderText("mm")
         self.M_length_edit.textChanged.connect(self._update_strain_display)
-        form_layout.addRow(self.COLUMN_M_LENGTH, self.M_length_edit)
+        _add_field(self.COLUMN_M_LENGTH, self.M_length_edit)
 
         self.A_length_edit = QtWidgets.QLineEdit(form_container)
         self.A_length_edit.setPlaceholderText("mm or '-' if broke")
         self.A_length_edit.textChanged.connect(self._update_strain_display)
-        form_layout.addRow(self.COLUMN_A_LENGTH, self.A_length_edit)
+        _add_field(self.COLUMN_A_LENGTH, self.A_length_edit)
 
         self.strain_offset_spin = QtWidgets.QDoubleSpinBox(form_container)
         self.strain_offset_spin.setDecimals(6)
@@ -3139,11 +5120,13 @@ class StrainSection(MiniDatabaseSection):
         self.strain_offset_spin.setSingleStep(0.1)
         self.strain_offset_spin.setValue(self._strain_offset)
         self.strain_offset_spin.valueChanged.connect(self._strain_offset_changed)
-        form_layout.addRow("C offset", self.strain_offset_spin)
+        _add_field("C offset", self.strain_offset_spin)
 
         self.strain_display = QtWidgets.QLineEdit(form_container)
         self.strain_display.setReadOnly(True)
-        form_layout.addRow(f"{self.COLUMN_STRAIN} (%)", self.strain_display)
+        _add_field(f"{self.COLUMN_STRAIN} (%)", self.strain_display)
+
+        form_layout.addStretch(1)
 
         layout.addWidget(form_container)
 
@@ -3182,8 +5165,9 @@ class StrainSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.table_view.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        self.table_view.setSortingEnabled(True)
         selection_model = self.table_view.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_table_selection)
@@ -3585,7 +5569,7 @@ class StrainSection(MiniDatabaseSection):
         self.model.set_frame(self.data.table)
         if isinstance(self.table_view, QtWidgets.QTableView):
             self._update_hidden_columns()
-            self.table_view.resizeColumnsToContents()
+        self._auto_fit_columns()
 
     def _update_hidden_columns(self) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
@@ -3894,13 +5878,18 @@ class AssemblySection(QtWidgets.QWidget):
         self,
         sections: Dict[str, MiniDatabaseSection],
         logger: logging.Logger,
-        log_callback: Callable[[str], None],
+        log_callback: Callable[[int, str], None],
+        console_callback: Optional[Callable[[pd.DataFrame], None]] = None,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.sections = sections
         self.logger = logger
         self._log_callback = log_callback
+        self._console_callback = console_callback
+
+    def set_console_callback(self, callback: Callable[[pd.DataFrame], None]) -> None:
+        self._console_callback = callback
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -3938,18 +5927,58 @@ class AssemblySection(QtWidgets.QWidget):
         options_layout.addStretch(1)
         layout.addLayout(options_layout)
 
+        section_box = QtWidgets.QGroupBox("Include sections")
+        section_layout = QtWidgets.QHBoxLayout(section_box)
+        self.section_checkboxes: Dict[str, QtWidgets.QCheckBox] = {}
+        for key, label in (
+            ("fabrication", "Fabrication"),
+            ("annealing", "Current annealing"),
+            ("microscope", "Microscope"),
+            ("videos", "Videos"),
+            ("strain", "Strain"),
+        ):
+            checkbox = QtWidgets.QCheckBox(label)
+            checkbox.setChecked(True)
+            section_layout.addWidget(checkbox)
+            self.section_checkboxes[key] = checkbox
+        section_layout.addStretch(1)
+        layout.addWidget(section_box)
+
         self.status_label = QtWidgets.QLabel("Ready to assemble once all sections are processed.")
         layout.addWidget(self.status_label)
 
+        self.preview_model = DataFrameModel()
+        self.preview_table = QtWidgets.QTableView()
+        self.preview_table.setModel(self.preview_model)
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.preview_table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        preview_bar = self.preview_table.verticalScrollBar()
+        if preview_bar is not None:
+            preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
+        layout.addWidget(self.preview_table, 1)
+        self.preview_table.show()
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        self.preview_button = QtWidgets.QPushButton("Preview database")
+        self.preview_button.clicked.connect(self._preview)
+        button_row.addWidget(self.preview_button)
         self.combine_button = QtWidgets.QPushButton("Combine database")
         self.combine_button.clicked.connect(self._combine)
-        layout.addWidget(self.combine_button, alignment=QtCore.Qt.AlignmentFlag.AlignRight)
+        button_row.addWidget(self.combine_button)
+        layout.addLayout(button_row)
 
-    def log(self, message: str) -> None:
+    def log(self, message: str, level: int = logging.INFO) -> None:
         try:
-            self._log_callback(message)
+            self._log_callback(level, message)
         except Exception:
-            self.logger.info(message)
+            self.logger.log(level, message)
 
     def _choose_output_dir(self) -> None:
         directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory")
@@ -3962,37 +5991,135 @@ class AssemblySection(QtWidgets.QWidget):
             return None
         return section.store.load_payload(name)
 
-    def _combine(self) -> None:
-        fabrication_index = self._load_payload("fabrication", "fabrication_index")
-        annealing_records = self._load_payload("annealing", "annealing_records")
-        microscope_index = self._load_payload("microscope", "microscope_index")
-        video_index = self._load_payload("videos", "video_index")
-        strain_records = self._load_payload("strain", "strain_records")
+    def _selected_sections(self) -> set[str]:
+        return {
+            key
+            for key, checkbox in self.section_checkboxes.items()
+            if checkbox.isChecked()
+        }
 
-        missing = []
-        if fabrication_index is None:
-            missing.append("fabrication")
-        if not annealing_records:
+    def _prepare_builder_inputs(
+        self,
+        selected: set[str],
+        *,
+        require_payloads: bool = True,
+    ) -> Optional[
+        tuple[
+            FabricationIndex,
+            List[MeasurementRecord],
+            Dict[Tuple[str, int, int], MicroscopeMeasurements],
+            Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
+            Dict[Tuple[str, int, int], StrainRecord],
+            Dict[str, Dict[str, float]],
+        ]
+    ]:
+        if "annealing" not in selected:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Current annealing data must be included to assemble a database.",
+            )
+            return None
+
+        missing: list[str] = []
+
+        fabrication_index = FabricationIndex()
+        if "fabrication" in selected:
+            payload = self._load_payload("fabrication", "fabrication_index")
+            if isinstance(payload, FabricationIndex):
+                fabrication_index = payload
+            elif require_payloads:
+                missing.append("fabrication")
+
+        annealing_records_payload = self._load_payload("annealing", "annealing_records")
+        annealing_records: List[MeasurementRecord] = []
+        if isinstance(annealing_records_payload, list):
+            annealing_records = list(annealing_records_payload)
+        if require_payloads and not annealing_records:
             missing.append("annealing")
-        if microscope_index is None:
-            missing.append("microscope")
-        if video_index is None:
-            missing.append("videos")
-        if strain_records is None:
-            missing.append("strain")
+
+        microscope_index: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+        overrides: Dict[str, Dict[str, float]] = {}
+        if "microscope" in selected:
+            payload = self._load_payload("microscope", "microscope_index")
+            if isinstance(payload, dict):
+                microscope_index = payload
+            elif require_payloads:
+                missing.append("microscope")
+            microscope_section = self.sections.get("microscope")
+            if isinstance(microscope_section, MicroscopeSection):
+                overrides = microscope_section.overrides
+
+        video_index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
+        if "videos" in selected:
+            payload = self._load_payload("videos", "video_index")
+            if isinstance(payload, dict):
+                video_index = payload
+            elif require_payloads:
+                missing.append("videos")
+
+        strain_records: Dict[Tuple[str, int, int], StrainRecord] = {}
+        if "strain" in selected:
+            payload = self._load_payload("strain", "strain_records")
+            if isinstance(payload, dict):
+                strain_records = payload
+            elif require_payloads:
+                missing.append("strain")
+
         if missing:
             QtWidgets.QMessageBox.warning(
                 self,
                 "Microwire Data Builder",
                 "Process the following sections first: " + ", ".join(sorted(missing)),
             )
+            return None
+
+        return (
+            fabrication_index,
+            annealing_records,
+            microscope_index,
+            video_index,
+            strain_records,
+            overrides,
+        )
+
+    def _update_preview(self, frame: pd.DataFrame) -> None:
+        self.preview_model.set_frame(frame)
+        self.preview_table.setVisible(True)
+        try:
+            self.preview_table.resizeColumnsToContents()
+        except Exception:
+            pass
+        if self._console_callback is not None and isinstance(frame, pd.DataFrame):
+            try:
+                self._console_callback(frame.copy())
+            except Exception:
+                self.logger.exception("Failed to publish preview dataframe to console")
+        row_count = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
+        if row_count:
+            self.status_label.setText(f"Preview ready — {row_count} row(s).")
+        else:
+            self.status_label.setText("Preview is empty.")
+
+    def _combine(self) -> None:
+        selected = self._selected_sections()
+        inputs = self._prepare_builder_inputs(selected)
+        if inputs is None:
             return
 
-        overrides = {}
-        microscope_section = self.sections.get("microscope")
-        if isinstance(microscope_section, MicroscopeSection):
-            overrides = microscope_section.overrides
+        (
+            fabrication_index,
+            annealing_records,
+            microscope_index,
+            video_index,
+            strain_records,
+            overrides,
+        ) = inputs
+
+        if "microscope" in selected and overrides:
             microscope_index = _apply_microscope_overrides(microscope_index, overrides)
+        else:
+            microscope_index = {} if "microscope" not in selected else microscope_index
 
         output_dir = Path(self.output_dir_edit.text().strip() or Path.cwd())
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -4028,9 +6155,9 @@ class AssemblySection(QtWidgets.QWidget):
                 logger=self.logger,
                 fabrication_index=fabrication_index,
                 measurement_records=annealing_records,
-                microscope_index=microscope_index,
-                video_index=video_index,
-                strain_records=strain_records,
+                microscope_index=microscope_index if "microscope" in selected else {},
+                video_index=video_index if "videos" in selected else {},
+                strain_records=strain_records if "strain" in selected else {},
             )
         except Exception as exc:
             self.logger.exception("Assembly failed")
@@ -4050,6 +6177,67 @@ class AssemblySection(QtWidgets.QWidget):
             f"Database assembled successfully.\n{exports_text}",
         )
         self.log("Database combined successfully.")
+        self._update_preview(result.dataframe)
+
+    def _preview(self) -> None:
+        selected = self._selected_sections()
+        inputs = self._prepare_builder_inputs(selected)
+        if inputs is None:
+            return
+
+        (
+            fabrication_index,
+            annealing_records,
+            microscope_index,
+            video_index,
+            strain_records,
+            overrides,
+        ) = inputs
+
+        if "microscope" in selected and overrides:
+            microscope_index = _apply_microscope_overrides(microscope_index, overrides)
+        else:
+            microscope_index = {} if "microscope" not in selected else microscope_index
+
+        output_dir = Path(self.output_dir_edit.text().strip() or Path.cwd())
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_name = _normalise_output_name(self.output_name_edit.text() or DEFAULT_OUTPUT_NAME)
+
+        config = BuilderConfig(
+            annealing_files=[],
+            fabrication_files=[],
+            output_dir=output_dir,
+            microscope_files=[],
+            video_files=[],
+            strain_files=[],
+            make_plots=False,
+            export_formats=(),
+            plot_backends=(),
+            output_name=output_name,
+        )
+
+        try:
+            result = build_database(
+                config,
+                logger=self.logger,
+                fabrication_index=fabrication_index,
+                measurement_records=annealing_records,
+                microscope_index=microscope_index if "microscope" in selected else {},
+                video_index=video_index if "videos" in selected else {},
+                strain_records=strain_records if "strain" in selected else {},
+                skip_exports=True,
+            )
+        except Exception as exc:
+            self.logger.exception("Preview failed")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Microwire Data Builder",
+                f"Failed to preview database:\n{exc}",
+            )
+            return
+
+        self._update_preview(result.dataframe)
+        self.log("Preview updated.")
 
 
 class BuilderWindow(QtWidgets.QMainWindow):
@@ -4063,26 +6251,44 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         self.tab_widget = QtWidgets.QTabWidget(central)
         layout.addWidget(self.tab_widget, 1)
 
-        self.log_view = QtWidgets.QPlainTextEdit(central)
-        self.log_view.setReadOnly(True)
-        self.log_view.setMaximumBlockCount(2000)
-        layout.addWidget(self.log_view, 0)
-
         self.setCentralWidget(central)
 
-        self.sections: Dict[str, MiniDatabaseSection] = {}
+        self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._retabbing_docks = False
+        self._retabify_pending = False
 
-        def _append_log(message: str) -> None:
+        self.log_view = QtWidgets.QPlainTextEdit(self)
+        self.log_view.setReadOnly(True)
+        self.log_view.setMaximumBlockCount(2000)
+        self.log_view.setObjectName("builderMessageLogView")
+
+        self.sections: Dict[str, MiniDatabaseSection] = {}
+        self._log_has_unread_errors = False
+        self._log_highlight_active = False
+
+        def _append_log(level: int, message: str) -> None:
             self.log_view.appendPlainText(message)
             scrollbar = self.log_view.verticalScrollBar()
             if scrollbar is not None:
                 scrollbar.setValue(scrollbar.maximum())
+            if level >= logging.ERROR:
+                dock = getattr(self, "log_dock", None)
+                if isinstance(dock, QtWidgets.QDockWidget) and dock.isVisible() and self.isActiveWindow():
+                    self._log_has_unread_errors = False
+                else:
+                    self._log_has_unread_errors = True
+            self._update_log_highlight()
+
+        self._log_handler = QtLogHandler(_append_log)
+        self._log_handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        if self._log_handler not in self.logger.handlers:
+            self.logger.addHandler(self._log_handler)
 
         self.annealing_section = AnnealingSection(self.logger, _append_log)
         self.tab_widget.addTab(self.annealing_section, "Current annealing")
@@ -4100,14 +6306,313 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.tab_widget.addTab(self.video_section, "Videos")
         self.sections["videos"] = self.video_section
 
+        self._developer_options = developer_options()
+        try:
+            self._developer_options.ocr_debug_changed.connect(
+                self._handle_ocr_debug_changed
+            )
+        except Exception:
+            pass
+        self._handle_ocr_debug_changed(self._developer_options.ocr_debug())
+
         self.strain_section = StrainSection(self.logger, _append_log)
         self.tab_widget.addTab(self.strain_section, "Strain")
         self.sections["strain"] = self.strain_section
 
-        assembly = AssemblySection(self.sections, self.logger, _append_log)
+        assembly = AssemblySection(
+            self.sections,
+            self.logger,
+            _append_log,
+            console_callback=self._display_dataframe_in_console,
+        )
+        self.assembly_section = assembly
         self.tab_widget.addTab(assembly, "Assemble")
 
+        self.fabrication_section.sources_changed.connect(
+            self._handle_fabrication_sources_changed
+        )
+        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+
+        self.project_tree = QtWidgets.QTreeWidget()
+        self.project_tree.setHeaderLabels(["Section", "Status / Source"])
+        self.project_tree.header().setStretchLastSection(True)
+        self._project_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        for key, section in self.sections.items():
+            status_text = section.status_label.text() if hasattr(section, "status_label") else ""
+            item = QtWidgets.QTreeWidgetItem([section.section_title, status_text])
+            self.project_tree.addTopLevelItem(item)
+            self._project_items[key] = item
+            section.status_changed.connect(partial(self._handle_section_status_changed, key))
+            section.sources_changed.connect(partial(self._handle_section_sources_changed, key))
+            self._handle_section_sources_changed(key, section.data.sources)
+
+        self.project_dock = QtWidgets.QDockWidget("Project Explorer", self)
+        self.project_dock.setObjectName("builderProjectExplorerDock")
+        self.project_dock.setWidget(self.project_tree)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.project_dock)
+
+        self.log_dock = QtWidgets.QDockWidget("Message Log", self)
+        self.log_dock.setObjectName("builderMessageLogDock")
+        self.log_dock.setWidget(self.log_view)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.log_dock)
+        self.log_dock.visibilityChanged.connect(self._handle_log_visibility)
+        self.log_dock.hide()
+        self._update_log_highlight()
+
+        for dock in (self.project_dock, self.log_dock):
+            if dock is None:
+                continue
+            dock.setAllowedAreas(QtCore.Qt.DockWidgetArea.AllDockWidgetAreas)
+            dock.setFeatures(
+                QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetClosable
+                | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
+                | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            )
+            dock.hide()
+
+        self.console_widget = PythonConsoleWidget(self)
+        self.console_widget.set_environment({"window": self, "pd": pd})
+        self.console_dock = QtWidgets.QDockWidget("Python Console", self)
+        self.console_dock.setObjectName("builderPythonConsoleDock")
+        self.console_dock.setWidget(self.console_widget)
+        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.console_dock)
+        self.console_dock.hide()
+
+        self._dock_switcher_panels: List[QtWidgets.QDockWidget | None] = []
+        if self._dock_switcher_supported():
+            self._dock_switcher_panels.append(
+                self._create_dock_switcher(
+                    [self.project_dock, self.log_dock],
+                    side="left",
+                    initial_visible=(),
+                )
+            )
+        else:
+            self._dock_switcher_panels.append(None)
+
+        for dock in (self.project_dock, self.log_dock):
+            if dock is None:
+                continue
+            try:
+                dock.dockLocationChanged.connect(
+                    lambda area, d=dock: self._handle_primary_dock_location_change(d, area)
+                )
+            except Exception:
+                pass
+            try:
+                dock.visibilityChanged.connect(
+                    lambda _visible, d=dock: self._handle_primary_dock_visibility_changed(d)
+                )
+            except Exception:
+                pass
+
         install_standard_menu(self, help_topic="builder_database", console=self.log_view)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
+        self._retabify_primary_docks()
+
+    def _dock_switcher_supported(self) -> bool:
+        override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
+        return override.strip().lower() not in {"1", "true", "yes", "on"}
+
+    def _create_dock_switcher(
+        self,
+        docks: Sequence[QtWidgets.QDockWidget],
+        *,
+        side: str,
+        initial_visible: Iterable[int] | None = None,
+    ) -> QtWidgets.QDockWidget | None:
+        if not docks:
+            return None
+        panel = QtWidgets.QDockWidget("", self)
+        panel.setObjectName(f"builder_{side}_dock_switcher")
+        panel.setAllowedAreas(
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+            if side == "left"
+            else QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        panel.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
+        panel.setTitleBarWidget(QtWidgets.QWidget(panel))
+
+        switcher = _DockSwitcherWidget(docks, side=side, parent=panel)
+        if initial_visible is not None:
+            try:
+                switcher.set_initial_visible(tuple(initial_visible))
+            except Exception:
+                pass
+        panel.setWidget(switcher)
+        width = switcher.sizeHint().width()
+        panel.setMinimumWidth(width)
+        panel.setMaximumWidth(width)
+
+        area = (
+            QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
+            if side == "left"
+            else QtCore.Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.addDockWidget(area, panel)
+        reference = docks[0]
+        try:
+            self.splitDockWidget(panel, reference, QtCore.Qt.Orientation.Horizontal)
+        except Exception:
+            pass
+        return panel
+
+    def _handle_log_visibility(self, visible: bool) -> None:
+        if visible and getattr(self, "_log_has_unread_errors", False):
+            self._log_has_unread_errors = False
+            self._update_log_highlight()
+
+    def _update_log_highlight(self) -> None:
+        dock = getattr(self, "log_dock", None)
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return
+        highlight = bool(getattr(self, "_log_has_unread_errors", False))
+        if getattr(self, "_log_highlight_active", False) == highlight:
+            return
+        self._log_highlight_active = highlight
+        if highlight:
+            dock.setStyleSheet(
+                "QDockWidget#builderMessageLogDock { border: 1px solid #c62828; }"
+            )
+            self.log_view.setStyleSheet("background-color: #ffebee;")
+        else:
+            dock.setStyleSheet("")
+            self.log_view.setStyleSheet("")
+
+    def _handle_fabrication_sources_changed(self, sources: Iterable[str]) -> None:
+        video = getattr(self, "video_section", None)
+        if isinstance(video, MiniDatabaseSection):
+            video.set_sources(sources)
+
+    def _collect_primary_docks(self) -> List[QtWidgets.QDockWidget]:
+        docks: List[QtWidgets.QDockWidget] = []
+        for candidate in (getattr(self, "project_dock", None), getattr(self, "log_dock", None)):
+            if isinstance(candidate, QtWidgets.QDockWidget):
+                docks.append(candidate)
+        return docks
+
+    def _handle_primary_dock_location_change(
+        self,
+        dock: QtWidgets.QDockWidget,
+        area: QtCore.Qt.DockWidgetArea,
+    ) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        if area == QtCore.Qt.DockWidgetArea.LeftDockWidgetArea:
+            self._queue_retabify_primary_docks()
+
+    def _handle_primary_dock_visibility_changed(self, dock: QtWidgets.QDockWidget) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        _ = dock
+        self._queue_retabify_primary_docks()
+
+    def _queue_retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabify_pending", False):
+            return
+        self._retabify_pending = True
+        QtCore.QTimer.singleShot(0, self._run_queued_retabify)
+
+    def _run_queued_retabify(self) -> None:
+        self._retabify_pending = False
+        self._retabify_primary_docks()
+
+    def _retabify_primary_docks(self) -> None:
+        if getattr(self, "_retabbing_docks", False):
+            return
+        self._retabbing_docks = True
+        try:
+            docks = [dock for dock in self._collect_primary_docks() if not dock.isFloating()]
+            if not docks:
+                return
+            primary = docks[0]
+            for dock in docks[1:]:
+                try:
+                    self.tabifyDockWidget(primary, dock)
+                except Exception:
+                    continue
+            for dock in docks:
+                width = max(dock.width(), self._primary_dock_widths.get(dock, 240))
+                self._apply_dock_width(dock, width)
+        finally:
+            self._retabbing_docks = False
+
+    def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
+        if dock.isFloating() or width <= 0:
+            return
+        try:
+            dock.resize(width, dock.height())
+            self._primary_dock_widths[dock] = width
+        except Exception:
+            pass
+
+    def _handle_ocr_debug_changed(self, enabled: bool) -> None:
+        section = getattr(self, "microscope_section", None)
+        if isinstance(section, MicroscopeSection):
+            try:
+                section.set_ocr_debug_enabled(bool(enabled))
+            except Exception:
+                pass
+
+    def _handle_section_status_changed(self, key: str, status: str) -> None:
+        item = self._project_items.get(key)
+        if item is not None:
+            item.setText(1, status)
+
+    def _handle_section_sources_changed(self, key: str, sources: Iterable[str]) -> None:
+        item = self._project_items.get(key)
+        if item is None:
+            return
+        item.takeChildren()
+        section = self.sections.get(key)
+        processed: Dict[str, float] = {}
+        if isinstance(section, MiniDatabaseSection):
+            processed = dict(getattr(section.data, "processed", {}))
+        for source in sources:
+            source_text = str(source)
+            child = QtWidgets.QTreeWidgetItem(["", source_text])
+            child.setToolTip(1, source_text)
+            source_path = Path(source_text)
+            related_files: List[str] = []
+            for path_text in sorted(processed.keys()):
+                try:
+                    path_obj = Path(path_text)
+                except Exception:
+                    continue
+                try:
+                    rel = path_obj.relative_to(source_path)
+                    related_files.append(str(rel))
+                except Exception:
+                    if path_text.startswith(source_text):
+                        related_files.append(path_text[len(source_text) :].lstrip(os.sep))
+            related_files = list(dict.fromkeys(related_files))
+            for rel_path in related_files:
+                if not rel_path:
+                    continue
+                leaf = QtWidgets.QTreeWidgetItem(["", rel_path])
+                leaf.setToolTip(1, rel_path)
+                child.addChild(leaf)
+            item.addChild(child)
+        if sources:
+            item.setExpanded(False)
+
+    def _display_dataframe_in_console(self, frame: pd.DataFrame) -> None:
+        if not isinstance(frame, pd.DataFrame):
+            return
+        try:
+            self.console_widget.set_environment({"database": frame})
+            rows = len(frame.index)
+            cols = len(frame.columns)
+            summary = f"database -> DataFrame with {rows} row(s) × {cols} column(s)"
+            self.console_widget.output.appendPlainText(summary)
+        except Exception:
+            self.logger.exception("Failed to stream dataframe to console")
+            return
+        self.console_dock.show()
+        try:
+            self.console_dock.raise_()
+        except Exception:
+            pass
 
 def run_app() -> None:
     main()

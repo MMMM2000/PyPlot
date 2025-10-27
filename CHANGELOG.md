@@ -1,4 +1,334 @@
 # Changelog
+## 2025-10-27 10:20 UTC
+
+- Passed an ASCII-only `home_path` to PaddleOCR so Windows accounts with
+  diacritic user names download models into the temporary cache prepared by the
+  builder instead of failing to open `inference.json` from `%USERPROFILE%`.
+- Added a regression test that asserts the PaddleOCR initialisation kwargs use
+  the cache directory and remain ASCII-safe.
+
+## 2025-10-27 09:45 UTC
+
+- Override Paddle cache environment variables even when they are already set
+  so Windows installs with diacritic user profiles stop reusing broken
+  `%USERPROFILE%` paths and successfully download PaddleOCR/PaddleX models into
+  the ASCII-only cache.
+
+## 2025-10-27 09:30 UTC
+
+- Forced PaddleOCR and PaddleX to download models into an ASCII-only cache
+  before the library is imported, purging any previous downloads from diacritic
+  Windows paths and retrying so the OCR backends initialise cleanly on laptops
+  like “Martin Eliáš”.
+- Refreshed the README installation guidance to highlight the
+  `pip install -r requirements.txt` runtime setup and the follow-up
+  `pip install .[test]` extras command so no manual dependency steps are needed
+  outside experiments.
+
+## 2025-10-26 23:15 UTC
+
+- Replaced the microscope Tesseract fallback with an HSV-guided ROI scanner
+  that upscales the cropped annotation, runs `image_to_data`, and maps the
+  result back to the full frame so bracketed `[1]` measurements are captured
+  reliably when PaddleOCR misses them.
+
+## 2025-10-26 20:05 UTC
+
+- Added HSV-based red-text detection and a numpy fallback so microscope focus
+  crops capture bracketed annotations even when grayscale thresholds miss them,
+  improving PaddleOCR hit rates on the sample captures.
+- Surfaced PaddleOCR’s raw detection strings per preprocessing variant inside
+  the Microscope OCR Debug tool so you can inspect exactly what the engine
+  returns before heuristics filter the values.
+
+## 2025-10-26 17:28 UTC
+
+- Tuned PaddleOCR initialisation with higher-sensitivity detection defaults and
+  added focus-region crops so microscope captures with bracketed micrometer
+  overlays consistently yield d/D measurements.
+- Upscaled microscope preprocessing to 4K, mapped cropped detections back to
+  the source image, and added ROI extraction via OpenCV to reduce the number of
+  missed annotations in the fabrication workflow.
+- Reworked the Microscope OCR Debug tool’s preview area into a single
+  vertically scrolling column, widened the splitter layout, and removed
+  horizontal scrolling so it is easier to compare preprocessing variants and
+  inspect full-resolution images.
+
+## 2025-10-26 15:32 UTC
+
+- Reworked the Microscope OCR Debug tool with a resizable splitter layout, a
+  dedicated output pane, and double-clickable variant previews that open
+  full-resolution dialogs so it is easier to compare preprocessing results and
+  inspect the source image.
+- Tuned the microscope OCR pipeline to upscale captures more aggressively and
+  run PaddleOCR on the untouched image before processing variants, emitting a
+  debug trace when no text is returned so bracketed micrometer annotations are
+  less likely to be missed.
+
+## 2025-10-26 13:48 UTC
+
+- Added live image previews to the Microscope OCR Debug experiment so the
+  selected capture and every preprocessing variant render side by side,
+  making it easier to compare transforms before running OCR.
+
+## 2025-10-26 12:15 UTC
+
+- Added an image picker and progress bar to the Microscope OCR Debug experiment
+  so batches can target specific photos while showing live completion status.
+
+## 2025-10-26 11:32 UTC
+
+- Removed inline microscope thumbnails in the worksheet and promoted the side
+  previews to high-resolution, resizable panels so annotations remain legible
+  without crowding the table.
+- Hid the microscope image columns in the grid and upgraded the preview widgets
+  to preserve aspect ratio while scaling smoothly during resizes.
+- Updated the Microscope OCR Debug experiment to apply the application theme and
+  show its window when launched from the master launcher, restoring its
+  usability.
+
+## 2025-10-26 10:08 UTC
+
+- Reworked the microscope worksheet to show a single microwire column with
+  inline core/glass previews and matching dual previews in the inspector so
+  each row surfaces both images alongside the detected diameters.
+- Expanded the PaddleOCR preprocessing set (including a Fourier sharpen pass)
+  and tagged every recognised text fragment with its variant for richer debug
+  output when microscope OCR struggles.
+- Added an "Microscope OCR Debug" experiment that batch-tests the sample
+  images across PaddleOCR and Tesseract variants, printing the raw text and
+  parsed diameters for each preprocessing strategy.
+
+## 2025-10-26 09:40 UTC
+
+- Ensure the microscope worksheet lists every microwire from current
+  annealing, preserving image links via placeholders even when OCR cannot
+  extract a diameter so manual review is still possible.
+- Log every recognised text fragment in OCR debug mode and align the summary
+  counters to ignore placeholder entries, clarifying when PaddleOCR supplied
+  usable diameters.
+
+## 2025-10-26 09:00 UTC
+
+- Combine multi-row fabrication headers (e.g., ``d`` on one row and ``(µm)`` on
+  the next) so every d, D, and d/D reading appears in the fabrication worksheet
+  regardless of merged Excel labels.
+- Fallback to parsing plain numeric PaddleOCR output when the unit token is
+  missing, allowing microscope images such as ``[1]6.7`` annotations to populate
+  core/glass diameters instead of reporting empty OCR results.
+- Added regression tests for the multi-row header handling and the new OCR
+  fallback to lock in the behaviour for future refactors.
+
+## 2025-10-26 08:55 UTC
+
+- Backfilled multi-row fabrication headers so d/D/ratio columns and resistance
+  values populate consistently even when the labels span multiple rows in the
+  source spreadsheets.
+- Improved microscope OCR preprocessing (higher-resolution colour variants) and
+  debug logging so every recognised text line is reported when debugging and
+  PaddleOCR can pick up `[1]6.7µm` annotations from the sample captures.
+- Added regression coverage for the merged-header path to ensure future
+  refactors keep the fabrication diameter parsing intact.
+
+## 2025-10-26 07:03 UTC
+
+- Recognised plain `d`/`D` fabrication headers (and other core/glass hints) so
+  every spreadsheet diameter now appears in the fabrication grid with the
+  expected three-decimal formatting.
+- Fixed microscope OCR token parsing to ignore bracket markers like
+  `[1]6.7µm`, allowing PaddleOCR detections to feed both core and glass
+  measurements without reporting empty results.
+- Added regression coverage that drives the OCR pipeline with stubbed
+  PaddleOCR output to lock in the bracketed-diameter behaviour and ensure core
+  and glass readings propagate through `_group_microscope_measurements`.
+
+## 2025-10-25 19:34 UTC
+
+- Prevent glass feed and other non-diameter spreadsheet columns from being
+  misclassified as d/D readings, ensuring fabrication rows show the true core
+  and glass diameters alongside rounded ratios.
+- Added regression coverage for the refined diameter mapping so future header
+  tweaks keep ignoring non-µm fields and still recognise core/glass dimensions.
+
+## 2025-10-25 19:16 UTC
+
+- Populate the fabrication worksheet with every d, D, d/D, and resistance value
+  from the source spreadsheets, round ratios to three decimals, and surface both
+  draw and piece workbook paths so "Open source file(s)" launches the paired
+  Excel files together.
+- Add a Develop → Microscope OCR debug mode that logs PaddleOCR results for
+  each microscope image and wire the toggle into the microscope section so
+  troubleshooting noisy annotations is easier.
+- Widen inline annealing graph columns by using the pixmap size for icon layout
+  and stretching the cells, ensuring the embedded plots are fully visible in the
+  worksheet tables.
+
+## 2025-10-27 20:30 UTC
+
+- Broadened fabrication diameter parsing to recognise additional core/glass
+  headings, normalise string fallbacks, and keep d/D ratios capped at three
+  decimals so every measurement from the spreadsheets appears without ellipses.
+- Reworked microscope OCR token handling to capture bracketed annotations like
+  "[1]6.7µm", attach detections to core/glass markers, and reuse the measured
+  values even when PaddleOCR splits number/unit tokens.
+- Returned the Project Explorer and Message Log to docked side panes by default
+  while retaining hover-driven toggling, so they no longer pop out as separate
+  windows unless the user chooses to float them.
+
+## 2025-10-27 19:45 UTC
+
+- Capture every fabrication diameter variant by recognising additional header
+  patterns, aggregating duplicate readings, and rounding d/D ratios to three
+  decimals so the worksheet reflects the full source data.
+- Wire the builder logger into the in-app message log and have microscope OCR
+  report both successful detections and missing annotations, giving immediate
+  feedback when PaddleOCR is unavailable or yields no results.
+- Start the Project Explorer and Message Log as hover overlays that list full
+  source paths and processed files, keeping the workspace maximised until the
+  panels are explicitly pinned.
+
+## 2025-10-26 17:30 UTC
+
+- Fixed PaddleOCR initialisation on macOS/Windows by avoiding the deprecated
+  ``show_log`` flag and reporting setup failures through the in-app message log.
+- Treated current annealing inputs as milliamperes end-to-end, widened the
+  inline worksheet graphs with smaller typography, and removed redundant
+  setpoint/sample columns from the export workbook.
+- Surfaced every d, D, and d/D value captured in fabrication spreadsheets and
+  simplified the Connect Folder control into a single confirmable toggle.
+
+## 2025-10-27
+
+- Simplified the annealing worksheet layout by leading with the composition/
+  microwire identifiers, widening the graph columns to the full inline plot,
+  and slimming the plot typography so the data area fills each cell without
+  oversized labels.
+- Removed redundant 1000 mA setpoint/sample columns, kept low-current details,
+  and stopped re-scaling currents that already arrive in milliamps to keep the
+  worksheet aligned with the raw measurements.
+- Collected every available d, D, and d/D value (falling back to draw-level
+  records when necessary) while trimming the obsolete bistable column so the
+  fabrication sheet shows only the context still used downstream.
+- Retried PaddleOCR initialisation without the deprecated `show_log` keyword to
+  unblock microscope/video OCR on macOS/Windows builds that ship without it.
+
+## 2025-10-26
+
+- Auto-fit every microwire worksheet to its contents, expand the annealing
+  previews so each graph column matches the rendered plot width, and shrink the
+  inline chart typography (with legends removed) so the visual data dominates
+  the row instead of oversized labels.
+- Highlight the Message Log dock in red until unread errors are viewed and route
+  all section issues through the log handler, making failures impossible to miss
+  outside the VS Code terminal.
+- Allow PaddleOCR to initialise on builds without the `show_log` flag, warn when
+  OCR or Pillow is unavailable, and surface setup guidance directly in the log
+  so microscope/video OCR explains what the environment still needs.
+- Surface the full fabrication metadata—including winding speed, glass feed,
+  underpressure, bistable status, piece turns and combined notes—directly in the
+  fabrication worksheet so no spreadsheet context is lost when reviewing rows.
+
+## 2025-10-25 02:45 UTC
+
+- Prevented current-annealing refresh failures by keeping preview pixmaps in
+  memory, sanitising legacy tables, and wiring the worksheet grid to render
+  cached plots per row instead of pickling Qt objects.
+- Fixed PaddleOCR initialisation so macOS installs without the optional
+  ``show_log`` flag load successfully and the microscope/video OCR tabs run
+  again.
+- Tightened fabrication workbook discovery to scan top-level composition
+  folders first before descending, reducing needless traversal on large shared
+  drives.
+
+## 2025-10-25 01:10 UTC
+
+- Hardened the annealing thumbnail renderer to fall back across all Qt image
+  formats so inline graphs render even on builds that omit
+  `Format_RGBA8888`.
+- Added an “Open source file(s)” action to the mini-database tables, wiring in
+  multi-row selection, column sorting, and hidden metadata so users can jump
+  from summaries to the original TXT/XLSX assets in one click.
+- Pruned fabrication discovery to descend only into composition-matched
+  folders before parsing, dramatically reducing the time spent scanning large
+  directory trees.
+- Surfaced raw video and microscope artefacts through the new source action,
+  and embedded video paths in the worksheet so OCR jobs expose their inputs.
+- Reworked the strain data form into a single horizontal row of inputs to keep
+  the layout consistent with the other tabs.
+
+## 2025-10-24 23:10 UTC
+
+- Added a Stop control to every mini-database section and wired the refresh
+  loops to honour cancellation so long-running OCR or spreadsheet scans can be
+  halted without closing the builder.
+- Fixed the current-annealing thumbnail renderer to use the Qt 6 image format
+  APIs, restoring the inline graphs on platforms that previously raised
+  `Format_RGBA8888` errors.
+- Narrowed fabrication parsing to the compositions found in the current
+  annealing dataset, skipping unrelated workbooks (with a message-log note) and
+  falling back gracefully when nothing matches.
+- Made the assembly preview table visible by default so combined data appears
+  in the UI as soon as a preview is generated.
+
+## 2025-10-24 22:15 UTC
+
+- Restored the annealing thumbnails by converting raw measurements to mA before
+  plotting and rendering them with the Agg backend so the Message Log hover no
+  longer crashes the app and each row shows its paired graphs again.
+- Hardened fabrication imports to fall back to explicit Excel engines and skip
+  unknown workbooks instead of aborting the refresh when a sheet uses an
+  ambiguous format.
+
+## 2025-10-24 19:45 UTC
+
+- Embedded the 1000 mA and low-current plots directly into the current
+  annealing worksheet rows so each microwire now previews its measurements in
+  the grid instead of a separate pane.
+- Let mini-database refreshes queue behind the active section without blocking
+  other tabs, keeping the UI responsive while still processing files in order.
+- Streamlined section layouts by removing the inline folder list (the Project
+  Explorer now owns source management) and maximising the worksheet surface.
+- Synced fabrication folders to the videos tab automatically and exposed a
+  manual “Start video OCR” trigger so heavy OCR runs only when requested.
+- Restored PyPlot-style hover docks for the Project Explorer and Message Log,
+  preventing the crash on hover and keeping the console available for
+  worksheet previews.
+
+## 2025-10-24 17:30 UTC
+
+- Let Microwire Data Builder sections keep running while the rest of the UI
+  stays responsive, queuing additional refreshes until the active one
+  completes and logging a clear notice instead of flooding the terminal with
+  per-file resistance warnings.
+- Added live current-annealing previews with side-by-side 1000 mA and
+  low-current Matplotlib plots inside the tab so measurements can be reviewed
+  without leaving the app.
+- Reworked the builder workspace to match PyPlot’s docked layout: the tabbed
+  worksheet area now fills the window, a hover-to-open Project Explorer lists
+  connected folders and status per section, the Message Log moved into its own
+  dock, and the Assemble tab streams its preview dataframe into a Python
+  console before export.
+
+## 2025-10-24 15:05 UTC
+
+- Added progress bars with live time estimates to every Microwire Data Builder
+  section so long-running refreshes surface their status instead of appearing to
+  hang.
+- Let the current annealing tab export a summary worksheet that groups
+  microwires, lists the associated setpoints, and embeds 1000 mA / low-current
+  plots directly in Excel.
+- Taught the Assemble tab to preview the combined database in-app, select which
+  sections to include, and build partial exports without forcing unused data.
+- Fixed the fabrication tab crash caused by the missing `build_fabrication_index`
+  import so spreadsheets can be processed again after the OCR refactor.
+
+## 2025-10-24 13:45 UTC
+
+- Replaced the microwire OCR pipeline with PaddleOCR for both video frame and
+  microscope image analysis, retiring the Tesseract dependency while preserving
+  diameter detection metadata.
+- Added PaddleOCR/PaddlePaddle runtime requirements and bumped the NumPy pin to
+  2.3.4 so the new OCR backend installs cleanly on Windows/macOS laptops.
 
 ## 2025-10-24 12:15 UTC
 
@@ -143,6 +473,57 @@
 - Warn the stress/temperature data logger and current annealing logger when
   composition percentages do not add up to 100 %, while still allowing
   measurements to proceed.
+
+## 2025-10-22 16:45 UTC
+
+- Improved microscope OCR sensitivity by adding red-channel preprocessing for
+  PaddleOCR/Tesseract variants and loosening marker/unit heuristics so
+  bracketed annotations like `[1]6.7µm` register even when the unit glyph is
+  partially missed.
+- Updated the Microscope OCR Debug experiment to preview the new red-focused
+  variants, keeping its gallery in sync with the runtime pipeline.
+
+## 2025-10-26 14:45 UTC
+
+- Tuned the microscope fallback OCR to upsample annotations, scan multiple
+  cropped regions, and try several Tesseract configurations so `[1]` markers
+  reliably produce core and glass diameters when PaddleOCR misses the text.
+- Defaulted the Microscope OCR Debug tool to the `base` preprocessing variant
+  to simplify one-click experiments while keeping other filters opt-in.
+
+## 2025-10-27 07:58 UTC
+
+- Redirected PaddleOCR’s cache into an ASCII-safe temp directory and purge/retry
+  when corrupted downloads are detected so Windows accounts with accented names
+  no longer break model initialisation.
+- Added `pytesseract` to the core dependency set and synced `requirements.txt`
+  so non-experiment tools install without extra manual steps.
+- Documented the two-step installation flow (`pip install -r requirements.txt`
+  then optional `pip install .[test]`) in the README to clarify how to enable
+  experiments and the test suite.
+
+## 2025-10-27 09:45 UTC
+
+- Forced PaddleOCR caches to use ASCII-only home directories (overriding HOME/
+  USERPROFILE when necessary) so Windows accounts with diacritics no longer
+  trigger repeated `inference.json` load failures during model downloads.
+
+## 2025-10-22 11:00 UTC
+
+- Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
+  between raw strings and `[1]`-tagged d/D values, with previews and summaries
+  filtered to the selected preprocessing variants.
+- Disabled the automatic Tesseract fallback during debug runs and exposed the
+  new `allow_tesseract_fallback` flag on `_extract_microscope_diameters` to keep
+  PaddleOCR-only experiments focused on the chosen engine.
+
+## 2025-10-21 15:30 UTC
+
+- Added a Tesseract-backed microscope OCR fallback so bracketed micrometer
+  annotations (e.g. `[1]6.7 µm`) populate the builder even when PaddleOCR returns
+  no text, and surfaced the captured strings in debug logs.
+- Added regression coverage that stubs pytesseract to ensure the fallback keeps
+  recording both core and glass diameters in the database worksheet.
 
 ## 2025-10-19
 

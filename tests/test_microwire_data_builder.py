@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import importlib.util
 import logging
 import sys
+import types
 
 import pandas as pd
 import pytest
@@ -21,12 +23,43 @@ spec.loader.exec_module(core)
 
 BuilderConfig = core.BuilderConfig
 build_database = core.build_database
+_canonical_dimension_field = core._canonical_dimension_field
 _header_key = core._header_key
 _load_annealing = core._load_annealing
 _metadata_from_path = core._metadata_from_path
 _resistance_sanity_check = core._resistance_sanity_check
 _safe_plot_stem = core._safe_plot_stem
 OriginArtifact = core.OriginArtifact
+FabricationIndex = core.FabricationIndex
+_merged_header_row = core._merged_header_row
+_parse_piece_rows = core._parse_piece_rows
+_extract_microscope_diameters = core._extract_microscope_diameters
+
+
+def test_paddle_candidate_kwargs_include_ascii_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from microwire_data_builder import ocr
+
+    monkeypatch.setattr(ocr, "_CACHE_ROOT", tmp_path)
+    home_dir = tmp_path / "paddleocr_home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ocr, "_PADDLE_HOME", home_dir, raising=False)
+
+    params = [
+        inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+        inspect.Parameter("lang", inspect.Parameter.KEYWORD_ONLY, default="en"),
+        inspect.Parameter("home_path", inspect.Parameter.KEYWORD_ONLY, default=None),
+        inspect.Parameter("use_angle_cls", inspect.Parameter.KEYWORD_ONLY, default=True),
+    ]
+    signature = inspect.Signature(parameters=params)
+
+    combos = ocr._candidate_kwargs(signature)
+    assert combos, "expected candidate kwargs to be generated"
+
+    for combo in combos:
+        if "home_path" in combo:
+            value = combo["home_path"]
+            assert value == str(home_dir)
+            value.encode("ascii")
 
 
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:
@@ -47,7 +80,10 @@ def test_annealing_loader_and_sanity_check(tmp_path: Path) -> None:
     path = tmp_path / "anneal.txt"
     path.write_text(content)
     df = _load_annealing(path)
-    assert list(df.columns) == ["I_A", "V_V", "R_ohm"]
+    assert list(df.columns) == ["I_A", "V_V", "R_ohm", "I_mA"]
+    expected_A = [0.1, 0.2, 0.3]
+    assert df["I_A"].tolist() == pytest.approx(expected_A)
+    assert df["I_mA"].tolist() == pytest.approx([value * 1_000.0 for value in expected_A])
     ok, error = _resistance_sanity_check(df)
     assert ok is True
     assert error is not None
@@ -60,6 +96,7 @@ def test_annealing_loader_trims_burnthrough_spike(tmp_path: Path) -> None:
     df = _load_annealing(path)
     assert len(df) == 2
     assert df["I_A"].tolist() == pytest.approx([0.05, 0.06])
+    assert df["I_mA"].tolist() == pytest.approx([50.0, 60.0])
     assert df["R_ohm"].tolist() == pytest.approx([2.0, 2.0])
 
 
@@ -70,6 +107,106 @@ def test_header_normaliser_variants() -> None:
     assert _header_key("D (µm)") == "D_um"
     assert _header_key("d/D") == "d_over_D"
     assert _header_key("Poznámka") == "notes"
+
+
+def test_piece_header_backfill_extracts_diameters(tmp_path: Path) -> None:
+    df = pd.DataFrame(
+        [
+            [
+                "1.Ni46Fe23Ga23Co8 13.03.2025 09:15",
+                None,
+                None,
+                "odpor",
+                "d",
+                "D",
+                "d/D",
+            ],
+            ["P.Č", "Dátum", "Dĺžka (m)", None, None, None, None],
+            ["1.", "45729", "6.4056", "2.15", "7", "25", "0.28"],
+        ],
+        dtype=object,
+    )
+
+    header_idx = 1
+    header_values = _merged_header_row(df, header_idx)
+    headers = [_header_key(value) for value in header_values]
+    index = FabricationIndex()
+    _parse_piece_rows(
+        df.iloc[header_idx + 1 :],
+        headers,
+        "Ni46Fe23Ga23Co8",
+        1,
+        index,
+        logging.getLogger("test"),
+        tmp_path / "piece.xlsx",
+    )
+    record = index.get_piece("Ni46Fe23Ga23Co8", 1, 1)
+    assert record["d_um"] == pytest.approx(7.0)
+    assert record["D_um"] == pytest.approx(25.0)
+    assert record["d_over_D"] == pytest.approx(0.28)
+    assert record["fabrication_resistance_ohm"] == pytest.approx(2.15)
+    display = record.get("d_um__display")
+    assert isinstance(display, list) and "7" in display[0]
+
+
+def test_microscope_tesseract_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    sample = Path("sample_data/database_builder/microscope/Ni46Fe23Ga23Co8 1_1 core.jpg")
+    if not sample.exists():
+        pytest.skip("sample microscope image missing")
+
+    stub = types.ModuleType("pytesseract")
+
+    class _StubError(Exception):
+        pass
+
+    stub.TesseractNotFoundError = _StubError  # type: ignore[attr-defined]
+    stub.get_tesseract_version = lambda: "stub"
+
+    captured: list[str] = []
+
+    def _fake_image_to_string(_image, config=None):  # pragma: no cover - trivial
+        captured.append(config or "")
+        return "[1]6.7um [2]13.2um"
+
+    stub.image_to_string = _fake_image_to_string  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "pytesseract", stub)
+
+    monkeypatch.setitem(sys.modules, "paddleocr", types.ModuleType("paddleocr"))
+
+    def _no_paddle(_logger=None):  # pragma: no cover - stub
+        return None
+
+    monkeypatch.setattr(core, "get_paddle_ocr", _no_paddle)
+
+    result = _extract_microscope_diameters(sample, logging.getLogger("test"))
+    assert result.values
+    assert any(pytest.approx(value, rel=1e-3) == 6.7 for value in result.values)
+    assert any(pytest.approx(value, rel=1e-3) == 13.2 for value in result.values)
+    assert captured, "expected pytesseract fallback to be invoked"
+
+
+def test_merged_header_row_combines_unit_suffix() -> None:
+    df = pd.DataFrame(
+        [
+            ["Title", "d", "D", None],
+            ["P.Č", "(µm)", "(µm)", "d/D"],
+        ],
+        dtype=object,
+    )
+
+    header = _merged_header_row(df, 1)
+    normalised = [str(value).replace("μ", "µ") if value is not None else value for value in header]
+    assert normalised[1] == "d (µm)"
+    assert normalised[2] == "D (µm)"
+    assert normalised[3] == "d/D"
+
+
+def test_canonical_dimension_field_filters_non_diameter_columns() -> None:
+    assert _canonical_dimension_field("glass_feed_mm_per_min") is None
+    assert _canonical_dimension_field("core_diameter_um") == "d_um"
+    assert _canonical_dimension_field("glass_diameter_um_raw") == "D_um"
+    assert _canonical_dimension_field("ratio_d_core_to_D_glass") == "d_over_D"
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:
@@ -280,8 +417,11 @@ def test_excel_export_respects_high_dpi_images(tmp_path: Path, monkeypatch: pyte
         drawing_xml = archive.read("xl/drawings/drawing1.xml")
 
     tree = ET.fromstring(drawing_xml)
-    ns = {"a": "http://schemas.openxmlformats.org/drawingml/2006/main"}
-    ext = tree.find(".//a:ext", namespaces=ns)
+    ns_main = "http://schemas.openxmlformats.org/drawingml/2006/main"
+    ns_sheet = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+    ext = tree.find(f".//{{{ns_main}}}ext")
+    if ext is None:
+        ext = tree.find(f".//{{{ns_sheet}}}ext")
     assert ext is not None, "Expected drawing metadata for embedded figure"
     width_emu = int(ext.get("cx"))
     height_emu = int(ext.get("cy"))
@@ -333,6 +473,70 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
     assert float(row[D_col]) == pytest.approx(212.4)
     expected_ratio = round(16.7 / 212.4, 3)
     assert float(row[ratio_col]) == pytest.approx(expected_ratio)
+
+
+def test_microscope_ocr_extracts_bracketed_values(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image as PILImage
+
+    image_path = tmp_path / "Ni55Fe18Ga27 4_1 core.jpg"
+    PILImage.new("RGB", (320, 180), color="white").save(image_path)
+
+    class FakeOCR:
+        def ocr(self, image, cls: bool = True):  # pragma: no cover - simple stub
+            return [
+                [
+                    (
+                        [[0, 0], [160, 0], [160, 40], [0, 40]],
+                        ("[1]6.7um", 0.95),
+                    ),
+                    (
+                        [[0, 60], [220, 60], [220, 110], [0, 110]],
+                        ("[2]134.5um", 0.94),
+                    ),
+                ]
+            ]
+
+    monkeypatch.setattr(core, "get_paddle_ocr", lambda logger=None: FakeOCR())
+
+    result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
+    assert any(abs(value - 6.7) < 1e-3 for value in result.values)
+    assert any(abs(value - 134.5) < 1e-3 for value in result.values)
+
+    grouped = core._group_microscope_measurements([image_path], logging.getLogger("test"))
+    key = core._microscope_key(image_path)
+    assert key in grouped
+    measurements = grouped[key]
+    assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
+    assert measurements.best_glass() == pytest.approx(134.5, rel=1e-3)
+
+
+def test_microscope_ocr_fallback_without_units(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from PIL import Image as PILImage
+
+    image_path = tmp_path / "Ni55Fe18Ga27 4_1 core.jpg"
+    PILImage.new("RGB", (320, 180), color="white").save(image_path)
+
+    class BareOCR:
+        def ocr(self, image, cls: bool = True):  # pragma: no cover - simple stub
+            return [
+                [
+                    (
+                        [[0, 0], [160, 0], [160, 40], [0, 40]],
+                        ("[1]6.7", 0.92),
+                    ),
+                ]
+            ]
+
+    monkeypatch.setattr(core, "get_paddle_ocr", lambda logger=None: BareOCR())
+
+    result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
+    assert any(abs(value - 6.7) < 1e-3 for value in result.values)
+
+    grouped = core._group_microscope_measurements([image_path], logging.getLogger("test"))
+    key = core._microscope_key(image_path)
+    assert key in grouped
+    measurements = grouped[key]
+    assert measurements.best_core() == pytest.approx(6.7, rel=1e-3)
 
 
 def test_parse_microscope_candidates_prefers_primary_marker() -> None:

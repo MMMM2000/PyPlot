@@ -432,9 +432,10 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             ### Troubleshooting
             * If microscope images are not detected automatically, add their parent folder under
               **Microscope images**; the builder merges manual and discovered files before OCR.
-            * When Tesseract is not available the builder falls back to the lab’s verified
+            * When PaddleOCR is not available the builder falls back to the lab’s verified
               diameter table for reference microwires so the spreadsheet keeps `d`/`D` values,
-              but installing Tesseract is still recommended for full coverage.
+              but installing PaddleOCR (and its PaddlePaddle runtime) is still recommended for
+              full coverage.
             * Use **Clear** in any section to reset the list before loading a different batch, and
               revisit **Help → View Help** at any time for this guide.
             """

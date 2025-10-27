@@ -186,11 +186,21 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             return
         if self._expanded_index == index and self._docks[index].isVisible():
             return
-        overlay = self._pinned_index is not None and index != self._pinned_index
         self._syncing = True
         self._collapse_all(exclude=index)
         dock = self._docks[index]
-        if not self._is_persistent(index) and dock.isFloating():
+        prefer_overlay = bool(dock.property("mwOverlayPreferred"))
+        persistent = self._is_persistent(index)
+        if prefer_overlay:
+            try:
+                if persistent and self._pinned_index == index:
+                    if dock.isFloating():
+                        dock.setFloating(False)
+                elif not persistent and not dock.isFloating():
+                    dock.setFloating(True)
+            except Exception:
+                pass
+        elif not persistent and dock.isFloating():
             try:
                 dock.setFloating(False)
             except Exception:
@@ -200,6 +210,22 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             dock.raise_()
         except Exception:
             pass
+        if prefer_overlay and not persistent and dock.isFloating():
+            try:
+                main_window = self._main_window()
+                if isinstance(main_window, QtWidgets.QMainWindow):
+                    origin = main_window.mapToGlobal(QtCore.QPoint(0, 0))
+                    dock_width = dock.width() or dock.sizeHint().width()
+                    stored_width = self._dock_widths.get(dock, dock_width)
+                    if stored_width:
+                        dock_width = stored_width
+                    dock_height = dock.height() or dock.sizeHint().height()
+                    target_x = origin.x()
+                    target_y = origin.y()
+                    dock.resize(dock_width, dock_height)
+                    dock.move(target_x, target_y)
+            except Exception:
+                pass
         if not dock.isFloating():
             self._ensure_tabbed(dock)
             width = self._dock_widths.get(dock, 0)

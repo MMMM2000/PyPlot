@@ -49,7 +49,7 @@ except ImportError:
         raise
 
 try:
-    from .ocr import ensure_tesseract_available
+    from .ocr import get_paddle_ocr
 except ImportError:
     module_name = "microwire_data_builder.ocr"
     module_path = Path(__file__).with_name("ocr.py")
@@ -58,7 +58,7 @@ except ImportError:
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
-        ensure_tesseract_available = module.ensure_tesseract_available
+        get_paddle_ocr = module.get_paddle_ocr
     else:
         raise
 
@@ -139,6 +139,7 @@ PIECE_NUMERIC_FIELDS = {
     "D_um",
     "d_over_D",
 }
+DIMENSION_FIELDS = {"d_um", "D_um", "d_over_D"}
 DATETIME_FIELDS = {"production_datetime"}
 DATE_FIELDS = {"piece_date"}
 RAW_VALUE_FIELDS = (
@@ -187,12 +188,14 @@ HEADER_HINTS: Dict[str, str] = {
     "d(µm)": "d_um",
     "d(um)": "d_um",
     "d(μm)": "d_um",
+    "d": "d_um",
     "D (µm)": "D_um",
     "D (um)": "D_um",
     "D (μm)": "D_um",
     "D(µm)": "D_um",
     "D(um)": "D_um",
     "D(μm)": "D_um",
+    "D": "D_um",
     "d/D": "d_over_D",
     "d/d": "d_over_D",
     "Datum": "piece_date",
@@ -227,11 +230,6 @@ MICROSCOPE_VALUE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 MICROSCOPE_SECONDARY_PREFIX = re.compile(r"\[2]\s*$", re.IGNORECASE)
-MICROSCOPE_OCR_CONFIG = (
-    "--oem 1 --psm 6 "
-    "-c tessedit_char_whitelist=0123456789[](){}Il" f"{MICRO_SIGN}umUM.,/ "
-    "-c classify_bln_numeric_mode=1"
-)
 MICROSCOPE_NUMBER_TOKEN = re.compile(r"^\d+(?:[.,]\d+)?$")
 MICROSCOPE_UNIT_HINTS = ("µm", "um", "μm")
 
@@ -442,13 +440,33 @@ class FabricationIndex:
     def set_draw(self, composition: str, draw_x: int, data: Dict[str, object]) -> None:
         key = (composition, draw_x)
         existing = self.draw_level.get(key, {})
-        existing.update(data)
+        for field, value in data.items():
+            if field.endswith("__display") and isinstance(value, (list, tuple)):
+                merged: List[object] = []
+                for source in (existing.get(field), value):
+                    if isinstance(source, (list, tuple)):
+                        for item in source:
+                            if item not in merged:
+                                merged.append(item)
+                existing[field] = merged
+            else:
+                existing[field] = value
         self.draw_level[key] = existing
 
     def set_piece(self, composition: str, draw_x: int, piece_y: int, data: Dict[str, object]) -> None:
         key = (composition, draw_x, piece_y)
         existing = self.piece_level.get(key, {})
-        existing.update(data)
+        for field, value in data.items():
+            if field.endswith("__display") and isinstance(value, (list, tuple)):
+                merged: List[object] = []
+                for source in (existing.get(field), value):
+                    if isinstance(source, (list, tuple)):
+                        for item in source:
+                            if item not in merged:
+                                merged.append(item)
+                existing[field] = merged
+            else:
+                existing[field] = value
         self.piece_level[key] = existing
 
     def get_draw(self, composition: str, draw_x: Optional[int]) -> Dict[str, object]:
@@ -564,6 +582,39 @@ class MicroscopeMeasurements:
             return self.glass
         return self.other
 
+    def add_placeholder(self, category: str, image_path: Path) -> None:
+        """Ensure at least one detection entry exists for the given image.
+
+        When OCR fails to extract a numeric value we still want the
+        microscope worksheet to list the image so the operator can review it
+        manually.  A placeholder detection keeps track of the originating
+        file without affecting downstream ratio calculations.
+        """
+
+        if not image_path:
+            return
+        target = self._target(category)
+        try:
+            image_path = Path(image_path)
+        except Exception:
+            return
+        for detection in target:
+            existing = getattr(detection, "image_path", None)
+            if existing is None:
+                continue
+            try:
+                if Path(existing) == image_path:
+                    return
+            except Exception:
+                continue
+        placeholder = MicroscopeDetection(
+            value=float("nan"),
+            image_path=image_path,
+            source="placeholder",
+        )
+        placeholder.category = category
+        target.append(placeholder)
+
     def extend(
         self,
         category: str,
@@ -652,8 +703,9 @@ class VideoMetricsSummary:
     underpressures: List[float] = field(default_factory=list)
     winding_speeds: List[float] = field(default_factory=list)
     glass_feeds: List[float] = field(default_factory=list)
+    sources: set[Path] = field(default_factory=set)
 
-    def record(self, result) -> None:
+    def record(self, result, *, source: Optional[Path] = None) -> None:
         temp = getattr(result, "median_temperature", None)
         if callable(temp):
             value = temp()
@@ -682,6 +734,11 @@ class VideoMetricsSummary:
             feed_value = None
         if feed_value is not None and isinstance(feed_value, (int, float)) and math.isfinite(float(feed_value)):
             self.glass_feeds.append(float(feed_value))
+        if source is not None:
+            try:
+                self.sources.add(Path(source))
+            except Exception:
+                pass
 
     def temperature(self) -> Optional[float]:
         return _select_microscope_value(self.temperatures, "median", allow_negative=True)
@@ -710,6 +767,81 @@ def _normalise_text(value: object) -> str:
         return ""
     text = unicodedata.normalize("NFKC", text)
     return text
+
+
+def _is_unit_suffix(text: str) -> bool:
+    """Return ``True`` when *text* only contains unit markers such as ``µm``."""
+
+    if not text:
+        return False
+    stripped = unicodedata.normalize("NFKC", text).strip()
+    if not stripped:
+        return False
+    ascii_text = unicodedata.normalize("NFKD", stripped)
+    ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch))
+    simplified = re.sub(r"\s+", "", ascii_text).lower()
+    if simplified in {"um", "µm", "μm", "(um)", "(µm)", "(μm)", "um)", "µm)", "μm)"}:
+        return True
+    unit_chars = set("uµμm()/.-[]{}")
+    if simplified and all(ch in unit_chars for ch in simplified):
+        return True
+    return False
+
+
+def _merged_header_row(
+    df: pd.DataFrame, header_idx: int, *, lookback: int = 3
+) -> List[object]:
+    """Return a header row with empty cells backfilled from previous rows."""
+
+    if header_idx < 0 or header_idx >= len(df):
+        return []
+
+    header = list(df.iloc[header_idx])
+    if header_idx == 0:
+        return header
+
+    max_offset = min(max(header_idx, 0), max(0, lookback))
+    if max_offset <= 0:
+        return header
+
+    for col_idx in range(len(header)):
+        value = header[col_idx]
+        text = _normalise_text(value) if value is not None and not _is_nan(value) else ""
+        if text and _is_unit_suffix(text):
+            prefix: Optional[str] = None
+            for offset in range(1, max_offset + 1):
+                prev_idx = header_idx - offset
+                if prev_idx < 0:
+                    break
+                try:
+                    candidate = df.iat[prev_idx, col_idx]
+                except (IndexError, ValueError):
+                    candidate = None
+                if candidate is None or _is_nan(candidate):
+                    continue
+                candidate_text = _normalise_text(candidate)
+                if not candidate_text or _is_unit_suffix(candidate_text):
+                    continue
+                prefix = candidate_text
+                break
+            if prefix:
+                combined = f"{prefix} {text}".strip()
+                header[col_idx] = combined
+                continue
+        if text:
+            continue
+        for offset in range(1, max_offset + 1):
+            try:
+                candidate = df.iat[header_idx - offset, col_idx]
+            except (IndexError, ValueError):
+                candidate = None
+            if candidate is None or _is_nan(candidate):
+                continue
+            candidate_text = _normalise_text(candidate)
+            if candidate_text:
+                header[col_idx] = candidate_text
+                break
+    return header
 
 
 def _header_key(value: object) -> Optional[str]:
@@ -749,6 +881,19 @@ def _header_key(value: object) -> Optional[str]:
         return "piece_turns"
     if "dlzk" in lowered or "dlžk" in lowered:
         return "length_m"
+    micron_hint = any(token in lowered for token in ("µm", "um", "μm", "mikro", "micro"))
+    ascii_simple = ascii_text.replace("\u00a0", " ")
+    if micron_hint:
+        if re.search(r"\bD\d*\b", ascii_text):
+            return "D_um"
+        if re.search(r"\bd\d*\b", ascii_text):
+            return "d_um"
+        if "glass" in lowered or "sklo" in lowered:
+            return "D_um"
+        if any(token in lowered for token in ("jadro", "jadra", "jadier", "core")):
+            return "d_um"
+        if re.search(r"\bd\s*/\s*D\b", ascii_simple, re.IGNORECASE):
+            return "d_over_D"
     if lowered.strip().startswith("d") and "µm" in lowered:
         first = ascii_text.strip()[:1]
         if first == "D":
@@ -759,8 +904,14 @@ def _header_key(value: object) -> Optional[str]:
         if first == "D":
             return "D_um"
         return "d_um"
+    if micron_hint and "d" in lowered and "d" in ascii_simple and "D" in ascii_simple:
+        return "d_over_D"
     if "d/d" in lowered or simple_compact == "dd":
         return "d_over_D"
+    if any(token in lowered for token in ("jadro", "jadra", "jadier", "core")) and re.search(r"\bd\d*\b", ascii_text):
+        return "d_um"
+    if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")) and re.search(r"\bD\d*\b", ascii_text):
+        return "D_um"
     if ("datum" in lowered or "dátum" in lowered) and "cas" not in lowered:
         return "piece_date"
     return None
@@ -945,6 +1096,111 @@ def _extract_field_value(field: str, value: object) -> Tuple[Optional[object], O
     if value is None or _is_nan(value):
         return None, raw
     return _normalise_text(value), raw
+
+
+def _format_dimension_display(field: str, value: object) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)) and not _is_nan(value):
+        numeric = float(value)
+        if not math.isfinite(numeric):
+            return None
+        precision = 3
+        formatted = f"{numeric:.{precision}f}".rstrip("0").rstrip(".")
+        return formatted or f"{numeric:.{precision}f}"
+    if isinstance(value, str):
+        numeric = _parse_numeric(value)
+        if numeric is not None:
+            precision = 3
+            formatted = f"{numeric:.{precision}f}".rstrip("0").rstrip(".")
+            return formatted or f"{numeric:.{precision}f}"
+    text = _clean_str(value)
+    return text or None
+
+
+def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
+    """Map parsed spreadsheet headers to canonical diameter buckets."""
+
+    if not field:
+        return None
+    if field in DIMENSION_FIELDS:
+        return field
+    base = field[:-4] if field.endswith("_raw") else field
+    simplified = base.replace("__", "_")
+    lowered = simplified.lower()
+    cleaned = simplified.strip()
+    lowered_clean = cleaned.lower()
+
+    if simplified in DIMENSION_FIELDS:
+        return simplified
+    lowered_map = {name.lower(): name for name in DIMENSION_FIELDS}
+    matched = lowered_map.get(lowered)
+    if matched is not None:
+        return matched
+
+    if "d_over_d" in lowered or "doverd" in lowered or "ratio_d" in lowered:
+        return "d_over_D"
+
+    if lowered_clean in {"d", "d.", "d:"}:
+        return "d_um"
+    if cleaned in {"D", "D.", "D:"}:
+        return "D_um"
+
+    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
+    context_hint = any(
+        token in lowered
+        for token in (
+            "core",
+            "jadro",
+            "jadra",
+            "jadier",
+            "glass",
+            "sklo",
+            "clad",
+            "cladding",
+            "sheath",
+            "outer",
+            "inner",
+        )
+    )
+    if context_hint and any(term in lowered for term in ("feed", "feeding", "speed")):
+        context_hint = False
+
+    if not (has_micron_hint or context_hint):
+        return None
+
+    if any(token in lowered for token in ("core", "jadro", "jadra", "jadier", "inner")):
+        return "d_um"
+    if any(token in lowered for token in ("glass", "sklo", "clad", "cladding", "sheath", "outer")):
+        return "D_um"
+    first = simplified[:1]
+    if first == "d":
+        return "d_um"
+    if first == "D":
+        return "D_um"
+    return None
+
+
+def _append_dimension_display(
+    record: Dict[str, object],
+    field: str,
+    parsed: Optional[object],
+    raw: Optional[str],
+) -> None:
+    canonical = _canonical_dimension_field(field)
+    if canonical not in DIMENSION_FIELDS:
+        return
+    key = f"{canonical}__display"
+    bucket = record.get(key)
+    if not isinstance(bucket, list):
+        bucket = [] if bucket is None else list(bucket if isinstance(bucket, (list, tuple)) else [bucket])
+    for candidate in (parsed, raw):
+        text = _format_dimension_display(canonical, candidate)
+        if not text:
+            continue
+        if text not in bucket:
+            bucket.append(text)
+    record[key] = bucket
 
 
 def _composition_from_path(path: Path) -> str:
@@ -1234,24 +1490,31 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
     return [float(v) for v in selected.values()]
 
 
-def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> MicroscopeOCRResult:
+def _extract_microscope_diameters(
+    path: Path,
+    logger: logging.Logger,
+    *,
+    allow_tesseract_fallback: bool = True,
+) -> MicroscopeOCRResult:
     """Attempt to OCR diameter annotations from a microscope capture."""
 
     log = logger or logging.getLogger(LOGGER_NAME)
-    try:
-        import pytesseract  # type: ignore[import-not-found]
-    except ImportError:
-        log.debug("pytesseract is not installed; skipping microscope OCR for %s", path)
-        return MicroscopeOCRResult()
-
-    if not ensure_tesseract_available(pytesseract, log):
-        log.debug("Tesseract executable unavailable; skipping microscope OCR for %s", path)
-        return MicroscopeOCRResult()
+    ocr = get_paddle_ocr(log)
+    if ocr is None:
+        if allow_tesseract_fallback:
+            log.warning(
+                "PaddleOCR is not available; falling back to Tesseract for %s", path
+            )
+        else:
+            log.warning(
+                "PaddleOCR is not available; skipping microscope OCR fallback for %s",
+                path,
+            )
 
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
     except ImportError:
-        log.debug("Pillow is not installed; skipping microscope OCR for %s", path)
+        log.warning("Pillow is not installed; skipping microscope OCR for %s", path)
         return MicroscopeOCRResult()
 
     try:
@@ -1262,11 +1525,11 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         return MicroscopeOCRResult()
 
     result = MicroscopeOCRResult()
-    base_width, base_height = base.size
+    original_width, original_height = base.size
 
     def _resample(image):
         width, height = image.size
-        target = 1600
+        target = 4096
         longest = max(width, height)
         if longest <= 0:
             return image
@@ -1281,6 +1544,17 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             resample_filter = getattr(Image, "LANCZOS", Image.BICUBIC)
         return image.resize(new_size, resample_filter)
 
+    base_resized = _resample(base)
+    resized_width, resized_height = base_resized.size
+    if resized_width <= 0 or resized_height <= 0:
+        resized_width, resized_height = original_width, original_height
+    scale_to_original_x = (
+        original_width / float(resized_width) if resized_width else 1.0
+    )
+    scale_to_original_y = (
+        original_height / float(resized_height) if resized_height else 1.0
+    )
+
     candidates: List[str] = []
     seen_candidates: Set[str] = set()
 
@@ -1293,30 +1567,475 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         candidates.append(cleaned)
         seen_candidates.add(cleaned)
 
-    grayscale = ImageOps.grayscale(base)
-    resized = _resample(grayscale)
+    grayscale = ImageOps.grayscale(base_resized)
+    resized = grayscale
     enhanced = ImageEnhance.Contrast(resized).enhance(2.0)
     sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
     autocontrasted = ImageOps.autocontrast(resized)
     inverted = ImageOps.invert(resized)
     binary = resized.point(lambda p: 255 if p > 160 else 0, mode="1")
     binary_gray = ImageOps.autocontrast(binary.convert("L"))
+
+    def _fourier_sharpen(image: Image.Image) -> Image.Image:
+        array = np.array(image.convert("L"), dtype=np.float32)
+        if array.ndim != 2 or array.size == 0:
+            return image
+        rows, cols = array.shape
+        crow, ccol = rows // 2, cols // 2
+        if crow == 0 or ccol == 0:
+            return image
+        freq = np.fft.fft2(array)
+        shift = np.fft.fftshift(freq)
+        y = np.arange(rows, dtype=np.float32)[:, None]
+        x = np.arange(cols, dtype=np.float32)[None, :]
+        distance = np.sqrt((y - float(crow)) ** 2 + (x - float(ccol)) ** 2)
+        radius = max(min(rows, cols) * 0.08, 1.0)
+        mask = np.ones_like(shift, dtype=np.complex128)
+        mask[distance <= radius] = 0.1
+        filtered = shift * mask
+        inv_shift = np.fft.ifftshift(filtered)
+        sharpened = np.fft.ifft2(inv_shift).real
+        sharpened = np.clip(sharpened, 0, 255)
+        try:
+            return Image.fromarray(sharpened.astype("uint8"))
+        except Exception:
+            return image
+
+    def _red_enhance(image: Image.Image) -> Optional[Image.Image]:
+        try:
+            array = np.array(image.convert("RGB"), dtype=np.float32)
+        except Exception:
+            return None
+        if array.ndim != 3 or array.shape[2] != 3:
+            return None
+        red = array[..., 0]
+        green = array[..., 1]
+        blue = array[..., 2]
+        emphasised = red - 0.45 * green - 0.45 * blue + 80.0
+        emphasised = np.clip(emphasised, 0, 255)
+        emphasised = emphasised.astype("uint8")
+        enhanced_image = Image.fromarray(emphasised, mode="L")
+        return ImageOps.autocontrast(enhanced_image)
+
+    red_mask = _red_enhance(base_resized)
+    red_binary = None
+    if red_mask is not None:
+        red_binary = red_mask.point(lambda p: 255 if p > 140 else 0, mode="1").convert("L")
+
     variants = [
-        resized,
-        enhanced,
-        sharpened,
-        autocontrasted,
-        inverted,
-        binary_gray,
-        ImageOps.invert(binary_gray),
+        ("base", base_resized),
+        ("grayscale", resized),
+        ("contrast", enhanced),
+        ("sharpen", sharpened),
+        ("autocontrast", autocontrasted),
+        ("invert", inverted),
+        ("binary", binary_gray),
+        ("binary_invert", ImageOps.invert(binary_gray)),
+        ("red_mask", red_mask),
+        ("red_binary", red_binary),
+        ("fourier", _fourier_sharpen(resized)),
     ]
 
-    configs: List[str] = []
-    for psm in (6, 7, 8, 11):
-        configs.append(MICROSCOPE_OCR_CONFIG.replace("--psm 6", f"--psm {psm}", 1))
+    focus_variants: List[Tuple[str, Image.Image, Tuple[int, int]]] = []
+    try:  # pragma: no cover - optional dependency
+        import cv2  # type: ignore[import-not-found]
+    except Exception:  # pragma: no cover - optional dependency
+        cv2 = None  # type: ignore[assignment]
 
-    tesseract_not_found = getattr(pytesseract, "TesseractNotFoundError", RuntimeError)
-    output_enum = getattr(pytesseract, "Output", None)
+    def _append_focus_crop(label: str, rect: Tuple[int, int, int, int]) -> None:
+        x0, y0, x1, y1 = rect
+        width = max(x1 - x0, 0)
+        height = max(y1 - y0, 0)
+        if width < 40 or height < 25:
+            return
+        try:
+            crop = base_resized.crop((x0, y0, x1, y1))
+        except Exception:
+            return
+        focus_variants.append((label, crop, (x0, y0)))
+
+    if cv2 is not None:
+        try:
+            base_array = np.array(base_resized.convert("RGB"))
+        except Exception:
+            base_array = None
+        if base_array is not None and base_array.ndim == 3 and base_array.shape[2] == 3:
+            try:
+                bgr = base_array[:, :, ::-1]
+                gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+            except Exception:
+                gray = None
+                bgr = None
+            if gray is not None:
+                blur = cv2.GaussianBlur(gray, (5, 5), 0)
+                _, mask = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)
+                kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                mask = cv2.dilate(mask, kernel, iterations=1)
+
+                def _collect_rois(mask_array: np.ndarray, prefix: str) -> None:
+                    try:
+                        contours_info = cv2.findContours(
+                            mask_array, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                        )
+                    except Exception:
+                        return
+                    if len(contours_info) == 3:
+                        _, contours, _ = contours_info
+                    else:
+                        contours, _ = contours_info
+                    rois: List[Tuple[int, int, int, int]] = []
+                    for contour in contours or []:
+                        try:
+                            x, y, w, h = cv2.boundingRect(contour)
+                        except Exception:
+                            continue
+                        if w <= 0 or h <= 0:
+                            continue
+                        aspect = w / float(h)
+                        area = w * h
+                        if w < 50 or h < 24 or aspect < 0.9 or aspect > 11.0 or area < 1500:
+                            continue
+                        pad_x = int(round(max(w, 60) * 0.35))
+                        pad_y = int(round(max(h, 40) * 0.45))
+                        x0 = max(x - pad_x, 0)
+                        y0 = max(y - pad_y, 0)
+                        x1 = min(x + w + pad_x, resized_width)
+                        y1 = min(y + h + pad_y, resized_height)
+                        if x1 - x0 < 40 or y1 - y0 < 25:
+                            continue
+                        rois.append((x0, y0, x1, y1))
+                    rois.sort(key=lambda rect: (rect[0], rect[1]))
+                    for idx, rect in enumerate(rois[:6]):
+                        _append_focus_crop(f"focus{prefix}{idx + 1}", rect)
+
+                _collect_rois(mask, "")
+
+                if bgr is not None:
+                    try:
+                        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+                    except Exception:
+                        hsv = None
+                    if hsv is not None:
+                        lower_red1 = np.array([0, 90, 110], dtype=np.uint8)
+                        upper_red1 = np.array([12, 255, 255], dtype=np.uint8)
+                        lower_red2 = np.array([160, 90, 110], dtype=np.uint8)
+                        upper_red2 = np.array([180, 255, 255], dtype=np.uint8)
+                        mask1 = cv2.inRange(hsv, lower_red1, upper_red1)
+                        mask2 = cv2.inRange(hsv, lower_red2, upper_red2)
+                        red_mask_cv = cv2.bitwise_or(mask1, mask2)
+                        if red_mask_cv is not None:
+                            red_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+                            red_mask_cv = cv2.morphologyEx(
+                                red_mask_cv, cv2.MORPH_CLOSE, red_kernel, iterations=2
+                            )
+                            red_mask_cv = cv2.dilate(red_mask_cv, red_kernel, iterations=1)
+                            _collect_rois(red_mask_cv, "r")
+
+    if not focus_variants:
+        try:
+            base_array = np.array(base_resized.convert("RGB"))
+        except Exception:
+            base_array = None
+        if base_array is not None and base_array.ndim == 3:
+            red = base_array[:, :, 0].astype(np.float32)
+            green = base_array[:, :, 1].astype(np.float32)
+            blue = base_array[:, :, 2].astype(np.float32)
+            emphasised = red - 0.6 * green - 0.4 * blue
+            mask = emphasised > 50.0
+            coords = np.argwhere(mask)
+            if coords.size:
+                y0 = int(coords[:, 0].min())
+                y1 = int(coords[:, 0].max()) + 1
+                x0 = int(coords[:, 1].min())
+                x1 = int(coords[:, 1].max()) + 1
+                pad_x = int(round((x1 - x0) * 0.35))
+                pad_y = int(round((y1 - y0) * 0.45))
+                x0 = max(x0 - pad_x, 0)
+                y0 = max(y0 - pad_y, 0)
+                x1 = min(x1 + pad_x, resized_width)
+                y1 = min(y1 + pad_y, resized_height)
+                if x1 - x0 >= 40 and y1 - y0 >= 25:
+                    _append_focus_crop("focus", (x0, y0, x1, y1))
+
+    variant_entries: List[Tuple[str, Image.Image, Tuple[int, int], Tuple[int, int]]] = []
+    reference_size = (resized_width, resized_height)
+    for label, crop, offset in focus_variants:
+        variant_entries.append((label, crop, offset, reference_size))
+    for label, variant in variants:
+        if variant is None:
+            continue
+        variant_entries.append((label, variant, (0, 0), reference_size))
+
+    def _run_tesseract_fallback() -> bool:
+        try:  # pragma: no cover - optional dependency
+            import pytesseract  # type: ignore[import-not-found]
+        except Exception:
+            return False
+
+        try:  # pragma: no cover - optional dependency
+            from pytesseract import TesseractNotFoundError  # type: ignore[import-not-found]
+        except Exception:  # pragma: no cover - optional dependency
+            class TesseractNotFoundError(RuntimeError):  # type: ignore[override]
+                pass
+
+        try:  # pragma: no cover - optional dependency
+            from pytesseract import Output  # type: ignore[import-not-found]
+        except Exception:  # pragma: no cover - optional dependency
+            Output = None  # type: ignore[assignment]
+
+        try:  # pragma: no cover - optional dependency
+            pytesseract.get_tesseract_version()
+        except TesseractNotFoundError:
+            log.debug(
+                "Tesseract binary not found; skipping fallback OCR for %s", path
+            )
+            return False
+        except Exception:
+            log.debug("Tesseract version probe failed", exc_info=True)
+
+        resample_attr = getattr(Image, "Resampling", None)
+        resample_filter = getattr(resample_attr, "LANCZOS", Image.BICUBIC)
+
+        def _candidate_rois() -> List[Tuple[int, int, int, int]]:
+            width, height = base_resized.size
+            regions: List[Tuple[int, int, int, int]] = []
+            try:
+                import cv2  # type: ignore[import-not-found]
+            except Exception:  # pragma: no cover - optional dependency
+                cv2 = None  # type: ignore[assignment]
+            if cv2 is not None:
+                try:
+                    array = np.array(base_resized.convert("RGB"))
+                except Exception:
+                    array = None
+                if array is not None and array.ndim == 3 and array.shape[2] == 3:
+                    try:
+                        bgr = array[:, :, ::-1]
+                        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+                        lower1 = np.array([0, 80, 70], dtype=np.uint8)
+                        upper1 = np.array([15, 255, 255], dtype=np.uint8)
+                        lower2 = np.array([160, 80, 70], dtype=np.uint8)
+                        upper2 = np.array([180, 255, 255], dtype=np.uint8)
+                        mask = cv2.inRange(hsv, lower1, upper1)
+                        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
+                        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+                        mask = cv2.dilate(mask, kernel, iterations=1)
+                        contours, _ = cv2.findContours(
+                            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                        )
+                    except Exception:
+                        contours = None
+                    if contours:
+                        for contour in contours:
+                            try:
+                                x, y, w, h = cv2.boundingRect(contour)
+                            except Exception:
+                                continue
+                            if w < 30 or h < 18:
+                                continue
+                            pad_x = max(int(round(w * 0.3)), 6)
+                            pad_y = max(int(round(h * 0.35)), 6)
+                            x0 = max(x - pad_x, 0)
+                            y0 = max(y - pad_y, 0)
+                            x1 = min(x + w + pad_x, width)
+                            y1 = min(y + h + pad_y, height)
+                            if x1 - x0 < 24 or y1 - y0 < 18:
+                                continue
+                            regions.append((x0, y0, x1, y1))
+            if not regions:
+                mid = max(int(height * 0.55), 0)
+                regions.append((0, mid, width, height))
+            deduped: List[Tuple[int, int, int, int]] = []
+            for box in sorted(regions, key=lambda item: (item[1], item[0])):
+                x0, y0, x1, y1 = box
+                keep = True
+                for existing in deduped:
+                    ex0, ey0, ex1, ey1 = existing
+                    inter_x0 = max(x0, ex0)
+                    inter_y0 = max(y0, ey0)
+                    inter_x1 = min(x1, ex1)
+                    inter_y1 = min(y1, ey1)
+                    if inter_x1 <= inter_x0 or inter_y1 <= inter_y0:
+                        continue
+                    inter_area = (inter_x1 - inter_x0) * (inter_y1 - inter_y0)
+                    area_a = (x1 - x0) * (y1 - y0)
+                    area_b = (ex1 - ex0) * (ey1 - ey0)
+                    union = area_a + area_b - inter_area
+                    if union <= 0:
+                        continue
+                    if inter_area / float(union) > 0.6:
+                        keep = False
+                        break
+                if keep:
+                    deduped.append(box)
+                if len(deduped) >= 4:
+                    break
+            return deduped
+
+        def _prepare_for_tesseract(image: Image.Image) -> Image.Image:
+            rgb = np.array(image.convert("RGB"), dtype=np.float32)
+            if rgb.ndim != 3 or rgb.shape[2] != 3:
+                return image.convert("L")
+            emphasised = rgb[..., 0] * 1.35 - 0.25 * rgb[..., 1] - 0.25 * rgb[..., 2] + 60.0
+            emphasised = np.clip(emphasised, 0, 255).astype("uint8")
+            processed = Image.fromarray(emphasised, mode="L")
+            processed = ImageOps.autocontrast(processed)
+            return processed.filter(ImageFilter.UnsharpMask(radius=2, percent=200))
+
+        appended = False
+        for roi_index, roi in enumerate(_candidate_rois()):
+            x0, y0, x1, y1 = roi
+            if x1 <= x0 or y1 <= y0:
+                continue
+            crop = base_resized.crop(roi)
+            if crop.width < 6 or crop.height < 6:
+                continue
+            scale = max(2, min(6, int(round(1800 / max(crop.width, crop.height, 1)))))
+            scaled = crop.resize((crop.width * scale, crop.height * scale), resample_filter)
+            prepared = _prepare_for_tesseract(scaled)
+            to_data = getattr(pytesseract, "image_to_data", None)
+            if to_data is None:
+                try:
+                    fallback_text = pytesseract.image_to_string(
+                        prepared,
+                        config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[]().,umµ",
+                    )
+                except Exception:
+                    log.debug(
+                        "Tesseract failed while processing %s region %s",
+                        path,
+                        roi,
+                        exc_info=True,
+                    )
+                    continue
+                cleaned = _normalise_microscope_text(fallback_text or "")
+                if cleaned:
+                    _append_candidate(cleaned)
+                    tagged = f"tesseract/roi{roi_index}: {cleaned}"
+                    if tagged not in seen_texts:
+                        result.texts.append(tagged)
+                        seen_texts.add(tagged)
+                    matched_any = False
+                    for match in re.finditer(
+                        r"\[(?P<label>[12Il])\]\s*(?P<value>\d+(?:[.,]\d+)?)",
+                        cleaned,
+                    ):
+                        label_token = match.group("label")
+                        if label_token in {"I", "l"}:
+                            label_token = "1"
+                        try:
+                            numeric = float(match.group("value").replace(",", "."))
+                        except ValueError:
+                            continue
+                        if not math.isfinite(numeric) or numeric <= 0:
+                            continue
+                        result.append_value(numeric)
+                        matched_any = True
+                    if not matched_any:
+                        parsed = _parse_microscope_candidates([cleaned])
+                        for value in parsed:
+                            result.append_value(value)
+                        matched_any = bool(parsed)
+                    if matched_any:
+                        appended = True
+                        break
+                continue
+            if Output is None:
+                to_data = None
+            if to_data is None:
+                continue
+            try:
+                data = to_data(
+                    prepared,
+                    output_type=Output.DICT if Output is not None else None,
+                    config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[]().,umµ",
+                )
+            except Exception:
+                log.debug(
+                    "Tesseract failed while processing %s region %s",
+                    path,
+                    roi,
+                    exc_info=True,
+                )
+                continue
+            words: List[_OCRWord] = []
+            count = len(data.get("text", []))
+            for idx in range(count):
+                token = (data["text"][idx] or "").strip()
+                if not token:
+                    continue
+                try:
+                    left = int(data["left"][idx])
+                    top = int(data["top"][idx])
+                    width = int(data["width"][idx])
+                    height = int(data["height"][idx])
+                except Exception:
+                    continue
+                conf_value = None
+                try:
+                    conf_raw = float(data.get("conf", [None])[idx])
+                except Exception:
+                    conf_raw = None
+                if conf_raw is not None and math.isfinite(conf_raw) and conf_raw >= 0:
+                    conf_value = conf_raw / 100.0
+                words.append(
+                    _OCRWord(
+                        text=token,
+                        left=left,
+                        top=top,
+                        width=width,
+                        height=height,
+                        conf=conf_value,
+                    )
+                )
+            if not words:
+                continue
+            grouped_lines: Dict[Tuple[int, int, int], List[_OCRWord]] = {}
+            for idx, word in enumerate(words):
+                block = int(data.get("block_num", [0])[idx])
+                paragraph = int(data.get("par_num", [0])[idx])
+                line_idx = int(data.get("line_num", [0])[idx])
+                grouped_lines.setdefault((block, paragraph, line_idx), []).append(word)
+            for line_words in grouped_lines.values():
+                line_words.sort(key=lambda w: w.left)
+                line_text = " ".join(entry.text for entry in line_words if entry.text)
+                if line_text:
+                    _append_candidate(line_text)
+                    tagged = f"tesseract/roi{roi_index}: {line_text}"
+                    if tagged not in seen_texts:
+                        result.texts.append(tagged)
+                        seen_texts.add(tagged)
+                for detection in _extract_line_detections(
+                    line_words,
+                    prepared.size,
+                    offset=(x0, y0),
+                    reference_size=base_resized.size,
+                ):
+                    bbox = detection.bbox or (0, 0, 0, 0)
+                    key = (
+                        round(detection.value, 2),
+                        bbox[0],
+                        bbox[1],
+                        bbox[2],
+                        bbox[3],
+                    )
+                    if key in seen_detections:
+                        continue
+                    detection.source = "tesseract"
+                    result.detections.append(detection)
+                    seen_detections.add(key)
+                    result.append_value(detection.value)
+                    appended = True
+            if appended:
+                break
+
+        if appended:
+            parsed = _parse_microscope_candidates(candidates)
+            for value in parsed:
+                result.append_value(value)
+        return appended
 
     @dataclass
     class _OCRWord:
@@ -1327,125 +2046,187 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
         height: int
         conf: Optional[float]
 
-    def _group_words(data_dict: dict) -> List[List[_OCRWord]]:
-        words: Dict[Tuple[int, int, int, int], List[_OCRWord]] = {}
-        texts = data_dict.get("text", [])
-        lefts = data_dict.get("left", [])
-        tops = data_dict.get("top", [])
-        widths = data_dict.get("width", [])
-        heights = data_dict.get("height", [])
-        confs = data_dict.get("conf", [])
-        page_nums = data_dict.get("page_num", [])
-        block_nums = data_dict.get("block_num", [])
-        par_nums = data_dict.get("par_num", [])
-        line_nums = data_dict.get("line_num", [])
-
-        def _item(seq: Sequence[object], index: int, default: int = 0) -> int:
-            try:
-                value = seq[index]
-            except Exception:
-                return default
-            try:
-                return int(value)
-            except Exception:
-                return default
-
-        def _float_item(seq: Sequence[object], index: int) -> Optional[float]:
-            try:
-                value = seq[index]
-            except Exception:
-                return None
-            try:
-                numeric = float(value)
-            except Exception:
-                return None
-            if not math.isfinite(numeric):
-                return None
-            return numeric
-
-        for idx, raw in enumerate(texts):
-            token = (raw or "").strip()
-            if not token:
+    def _group_paddle_words(raw_result) -> List[List[_OCRWord]]:
+        words: List[_OCRWord] = []
+        for entry in raw_result or []:
+            if not entry:
                 continue
-            key = (
-                _item(page_nums, idx),
-                _item(block_nums, idx),
-                _item(par_nums, idx),
-                _item(line_nums, idx),
-            )
-            word = _OCRWord(
-                text=token,
-                left=_item(lefts, idx),
-                top=_item(tops, idx),
-                width=max(_item(widths, idx), 0),
-                height=max(_item(heights, idx), 0),
-                conf=_float_item(confs, idx),
-            )
-            words.setdefault(key, []).append(word)
-
-        lines = []
-        for entries in words.values():
-            entries.sort(key=lambda w: w.left)
-            lines.append(entries)
+            for detection in entry:
+                if not detection:
+                    continue
+                try:
+                    points, data = detection
+                except (TypeError, ValueError):
+                    continue
+                if not data:
+                    continue
+                token = (data[0] or "").strip()
+                if not token:
+                    continue
+                score = None
+                if len(data) > 1:
+                    try:
+                        score = float(data[1])
+                    except (TypeError, ValueError):
+                        score = None
+                xs = [float(pt[0]) for pt in (points or []) if pt]
+                ys = [float(pt[1]) for pt in (points or []) if pt]
+                if not xs or not ys:
+                    continue
+                left = min(xs)
+                top = min(ys)
+                right = max(xs)
+                bottom = max(ys)
+                width = max(int(round(right - left)), 0)
+                height = max(int(round(bottom - top)), 0)
+                conf = None
+                if score is not None and math.isfinite(score):
+                    conf = float(score)
+                words.append(
+                    _OCRWord(
+                        text=token,
+                        left=int(round(left)),
+                        top=int(round(top)),
+                        width=width,
+                        height=height,
+                        conf=conf,
+                    )
+                )
+        if not words:
+            return []
+        words.sort(key=lambda w: (w.top, w.left))
+        lines: List[List[_OCRWord]] = []
+        for word in words:
+            placed = False
+            for line in lines:
+                baseline = line[0]
+                baseline_center = baseline.top + baseline.height / 2.0
+                word_center = word.top + word.height / 2.0
+                threshold = max(baseline.height, word.height, 1) * 0.6
+                if abs(word_center - baseline_center) <= threshold:
+                    line.append(word)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([word])
+        for line in lines:
+            line.sort(key=lambda w: w.left)
         return lines
 
     seen_detections: Set[Tuple[float, int, int, int, int]] = set()
+    seen_texts: Set[str] = set()
 
     def _extract_line_detections(
-        words: Sequence[_OCRWord], variant_size: Tuple[int, int]
+        words: Sequence[_OCRWord],
+        variant_size: Tuple[int, int],
+        *,
+        offset: Tuple[int, int] = (0, 0),
+        reference_size: Optional[Tuple[int, int]] = None,
     ) -> List[MicroscopeDetection]:
         detections: List[MicroscopeDetection] = []
         vw, vh = variant_size
         if vw <= 0 or vh <= 0:
             return detections
-        scale_x = base_width / float(vw)
-        scale_y = base_height / float(vh)
+        ref_w, ref_h = reference_size or variant_size
+        if ref_w <= 0 or ref_h <= 0:
+            return detections
+        scale_ref_x = ref_w / float(vw)
+        scale_ref_y = ref_h / float(vh)
+        offset_x, offset_y = offset
+        normalised_words = [_normalise_microscope_text(word.text) for word in words]
+        lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
         for idx, word in enumerate(words):
-            token = word.text
-            if not MICROSCOPE_NUMBER_TOKEN.match(token):
+            normalised = normalised_words[idx]
+            marker_match = re.match(r"^\[\s*([12Il])\s*\]\s*", normalised)
+            marker_offset = 0
+            marker: Optional[int] = None
+            if marker_match:
+                marker_offset = marker_match.end()
+                digit = marker_match.group(1)
+                if digit in {"I", "l"}:
+                    digit = "1"
+                try:
+                    marker = int(digit)
+                except (TypeError, ValueError):
+                    marker = None
+            candidate_segment = normalised[marker_offset:]
+            context_prefix = " ".join(normalised_words[max(0, idx - 3) : idx + 1])
+            match = re.search(r"(\d+(?:[.,]\d+)?)", candidate_segment)
+            if not match:
                 continue
-            raw_value = token.replace(",", ".")
+            raw_value = match.group(1).replace(",", ".")
             try:
                 value = float(raw_value)
             except ValueError:
                 continue
-            if not math.isfinite(value) or value <= 0:
+            if not math.isfinite(value) or value <= 0 or value > 1_000:
                 continue
+            suffix = normalised[marker_offset + match.end():].lower()
             unit_idx: Optional[int] = None
-            for offset in range(1, 4):
-                probe_idx = idx + offset
-                if probe_idx >= len(words):
-                    break
-                probe_text = words[probe_idx].text.lower().replace("μ", "µ")
-                if any(hint in probe_text for hint in MICROSCOPE_UNIT_HINTS):
-                    unit_idx = probe_idx
-                    break
+            if any(hint in suffix for hint in MICROSCOPE_UNIT_HINTS):
+                unit_idx = idx
+            else:
+                for offset in range(1, 4):
+                    probe_idx = idx + offset
+                    if probe_idx >= len(words):
+                        break
+                    probe_text = lowered_words[probe_idx]
+                    if any(hint in probe_text for hint in MICROSCOPE_UNIT_HINTS):
+                        unit_idx = probe_idx
+                        break
+            if unit_idx is None and marker is not None:
+                unit_idx = idx
+            if marker is None:
+                context_normalised = context_prefix.replace("μ", MICRO_SIGN)
+                if any(hint in context_normalised for hint in ("[1", "1]", "[1]")):
+                    marker = 1
+                elif any(hint in context_normalised for hint in ("[2", "2]", "[2]")):
+                    marker = 2
+            if unit_idx is None:
+                lookahead = " ".join(lowered_words[idx : min(len(words), idx + 3)])
+                if any(hint in lookahead for hint in MICROSCOPE_UNIT_HINTS):
+                    unit_idx = idx
             if unit_idx is None:
                 continue
-            marker: Optional[int] = None
             start_idx = idx
-            for offset in range(1, 3):
-                prev_idx = idx - offset
-                if prev_idx < 0:
-                    break
-                prev_text = words[prev_idx].text.strip().replace("μ", MICRO_SIGN)
-                if any(hint in prev_text for hint in ("[1", "1]", "[1]", "1", "[1")):
-                    marker = 1
-                    start_idx = min(start_idx, prev_idx)
-                    break
-                if any(hint in prev_text for hint in ("[2", "2]", "[2]", "2", "[2")):
-                    marker = 2
-                    start_idx = min(start_idx, prev_idx)
-                    break
+            prefix = normalised[: marker_offset + match.start()]
+            if any(hint in prefix for hint in ("[1", "1]", "[1]")) or "[1]" in normalised:
+                marker = 1
+            elif any(hint in prefix for hint in ("[2", "2]", "[2]")) or "[2]" in normalised:
+                marker = 2
+            if marker is None:
+                for offset in range(1, 3):
+                    prev_idx = idx - offset
+                    if prev_idx < 0:
+                        break
+                    prev_text = normalised_words[prev_idx]
+                    if any(hint in prev_text for hint in ("[1", "1]", "[1]")):
+                        marker = 1
+                        start_idx = min(start_idx, prev_idx)
+                        break
+                    if any(hint in prev_text for hint in ("[2", "2]", "[2]")):
+                        marker = 2
+                        start_idx = min(start_idx, prev_idx)
+                        break
             tokens = words[start_idx : unit_idx + 1]
+            if not tokens:
+                continue
             left = min(entry.left for entry in tokens)
             top = min(entry.top for entry in tokens)
             right = max(entry.left + entry.width for entry in tokens)
             bottom = max(entry.top + entry.height for entry in tokens)
-            left_base = max(int(round(left * scale_x)), 0)
-            top_base = max(int(round(top * scale_y)), 0)
-            right_base = min(int(round(right * scale_x)), base_width)
-            bottom_base = min(int(round(bottom * scale_y)), base_height)
+            left_ref = (left * scale_ref_x) + offset_x
+            top_ref = (top * scale_ref_y) + offset_y
+            right_ref = (right * scale_ref_x) + offset_x
+            bottom_ref = (bottom * scale_ref_y) + offset_y
+            left_base = max(int(round(left_ref * scale_to_original_x)), 0)
+            top_base = max(int(round(top_ref * scale_to_original_y)), 0)
+            right_base = min(
+                int(round(right_ref * scale_to_original_x)), original_width
+            )
+            bottom_base = min(
+                int(round(bottom_ref * scale_to_original_y)), original_height
+            )
             if right_base <= left_base or bottom_base <= top_base:
                 continue
             confidences = [
@@ -1468,56 +2249,98 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             detections.append(detection)
         return detections
 
-    for variant in variants:
-        variant_size = variant.size
-        for config in configs:
-            try:
-                text = pytesseract.image_to_string(variant, config=config)
-            except tesseract_not_found:
-                log.warning(
-                    "Tesseract executable vanished while processing %s; aborting microscope OCR",
-                    path,
-                )
-                return result
-            except Exception:
+    def _consume_ocr_output(
+        label: str,
+        raw_result,
+        variant_size: Tuple[int, int],
+        *,
+        offset: Tuple[int, int] = (0, 0),
+        reference_size: Optional[Tuple[int, int]] = None,
+    ) -> bool:
+        lines = _group_paddle_words(raw_result)
+        if not lines:
+            return False
+        combined_lines: List[str] = []
+        for line in lines:
+            if not line:
                 continue
-            _append_candidate(text)
+            line_text_raw = " ".join(word.text for word in line)
+            line_text = " ".join(line_text_raw.split())
+            if not line_text:
+                continue
+            _append_candidate(line_text)
+            tagged = f"{label}: {line_text}"
+            if tagged not in seen_texts:
+                result.texts.append(tagged)
+                seen_texts.add(tagged)
+            combined_lines.append(line_text)
+            for detection in _extract_line_detections(
+                line,
+                variant_size,
+                offset=offset,
+                reference_size=reference_size,
+            ):
+                bbox = detection.bbox or (0, 0, 0, 0)
+                key = (
+                    round(detection.value, 2),
+                    bbox[0],
+                    bbox[1],
+                    bbox[2],
+                    bbox[3],
+                )
+                if key in seen_detections:
+                    continue
+                if detection.text:
+                    detection.text = " ".join(str(detection.text).split())
+                result.detections.append(detection)
+                seen_detections.add(key)
+                result.append_value(detection.value)
+        if combined_lines:
+            _append_candidate("\n".join(combined_lines))
+            return True
+        return False
 
-            if output_enum is not None:
-                try:
-                    data = pytesseract.image_to_data(
-                        variant,
-                        config=config,
-                        output_type=output_enum.DICT,
-                    )
-                except tesseract_not_found:
-                    log.warning(
-                        "Tesseract executable vanished while processing %s; aborting microscope OCR",
-                        path,
-                    )
-                    return result
-                except Exception:
-                    data = None
-                if isinstance(data, dict) and data.get("text"):
-                    for line in _group_words(data):
-                        if not line:
-                            continue
-                        line_text = " ".join(word.text for word in line)
-                        _append_candidate(line_text)
-                        for detection in _extract_line_detections(line, variant_size):
-                            bbox = detection.bbox or (0, 0, 0, 0)
-                            key = (
-                                round(detection.value, 2),
-                                bbox[0],
-                                bbox[1],
-                                bbox[2],
-                                bbox[3],
-                            )
-                            if key in seen_detections:
-                                continue
-                            result.detections.append(detection)
-                            seen_detections.add(key)
-                            result.texts.append(line_text)
+    processed_any_variant = False
+    if ocr is not None:
+        try:
+            direct_result = ocr.ocr(str(path), cls=True)
+        except Exception:
+            direct_result = None
+        if direct_result:
+            if _consume_ocr_output("original", direct_result, (original_width, original_height)):
+                processed_any_variant = True
+
+        for label, variant, offset, ref_size in variant_entries:
+            if variant is None:
+                continue
+            variant_size = variant.size
+            variant_rgb = variant.convert("RGB")
+            variant_array = np.array(variant_rgb)
+            if variant_array.ndim == 2:
+                variant_array = np.stack([variant_array] * 3, axis=-1)
+            elif variant_array.ndim == 3 and variant_array.shape[2] == 4:
+                variant_array = variant_array[:, :, :3]
+            if variant_array.ndim != 3 or variant_array.shape[2] != 3:
+                continue
+            variant_array = variant_array.astype("uint8", copy=False)
+            bgr_image = variant_array[:, :, ::-1].copy()
+            try:
+                ocr_result = ocr.ocr(bgr_image, cls=True)
+            except Exception:
+                log.debug(
+                    "PaddleOCR failed while processing %s; skipping this variant",
+                    path,
+                    exc_info=True,
+                )
+                continue
+            if _consume_ocr_output(
+                label,
+                ocr_result,
+                variant_size,
+                offset=offset,
+                reference_size=ref_size,
+            ):
+                processed_any_variant = True
 
             if candidates and any("[1" in candidate or "1]" in candidate for candidate in candidates):
                 values = _parse_microscope_candidates(candidates)
@@ -1525,8 +2348,14 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
                     for value in values:
                         result.append_value(value)
                     break
-        if result.values:
-            break
+            if result.values:
+                break
+
+    if allow_tesseract_fallback and not result.values and _run_tesseract_fallback():
+        processed_any_variant = True
+
+    if not processed_any_variant:
+        log.debug("PaddleOCR produced no candidate text for %s", path)
 
     if not result.values:
         parsed = _parse_microscope_candidates(candidates)
@@ -1539,6 +2368,39 @@ def _extract_microscope_diameters(path: Path, logger: logging.Logger) -> Microsc
             key = round(detection.value, 2)
             seen_keys.setdefault(key, detection.value)
         result.values.extend(seen_keys.values())
+
+    if not result.values:
+        fallback_numbers: List[float] = []
+        seen_numbers: Set[float] = set()
+        pool: List[str] = []
+        if candidates:
+            pool.extend(candidates)
+        if result.texts:
+            pool.extend(result.texts)
+        for raw_text in pool:
+            if not raw_text:
+                continue
+            text = _normalise_microscope_text(raw_text)
+            for match in re.finditer(r"\d+(?:[.,]\d+)?", text):
+                start, end = match.start(), match.end()
+                prefix = text[start - 1] if start > 0 else ""
+                suffix = text[end] if end < len(text) else ""
+                if prefix in "[{(" and suffix in "]})":
+                    continue
+                number = match.group(0).replace(",", ".")
+                try:
+                    value = float(number)
+                except ValueError:
+                    continue
+                if not math.isfinite(value) or value <= 0 or value > 500:
+                    continue
+                key = round(value, 3)
+                if key in seen_numbers:
+                    continue
+                seen_numbers.add(key)
+                fallback_numbers.append(value)
+        for value in fallback_numbers:
+            result.append_value(value)
 
     if result.values:
         deduped: Dict[float, float] = {}
@@ -1554,6 +2416,7 @@ def _group_microscope_measurements(
     microscope_files: Sequence[Path],
     logger: Optional[logging.Logger],
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    debug_callback: Optional[Callable[[Path, MicroscopeOCRResult], None]] = None,
 ) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
     log = _logger(logger)
     combined: List[Path] = []
@@ -1598,15 +2461,20 @@ def _group_microscope_measurements(
             _notify()
             continue
         category = _microscope_category(path)
+        record = grouped.setdefault(key, MicroscopeMeasurements())
         try:
             extracted = _extract_microscope_diameters(path, log)
+        except BuildCancelledError:
+            raise
         except Exception:
             log.exception("Microscope OCR failed for %s", path)
             _notify()
             continue
+        debug_texts: List[str] = []
         if isinstance(extracted, MicroscopeOCRResult):
             values = list(extracted.values)
             detections = list(extracted.detections)
+            debug_texts = list(extracted.texts)
         else:
             values = [
                 float(v)
@@ -1614,9 +2482,59 @@ def _group_microscope_measurements(
                 if isinstance(v, (int, float)) and math.isfinite(float(v)) and float(v) > 0
             ]
             detections = []
-        if values or detections:
-            record = grouped.setdefault(key, MicroscopeMeasurements())
+        if debug_callback is not None:
+            debug_payload = MicroscopeOCRResult(
+                values=list(values), detections=list(detections), texts=list(debug_texts)
+            )
+            try:
+                debug_callback(path, debug_payload)
+            except Exception:
+                log.debug(
+                    "Microscope OCR debug callback failed for %s", path, exc_info=True
+                )
+        if detections:
+            grouped_detections: Dict[str, List[MicroscopeDetection]] = {}
+            for detection in detections:
+                override_category = category
+                if detection.marker == 1:
+                    override_category = "core"
+                elif detection.marker == 2:
+                    override_category = "glass"
+                grouped_detections.setdefault(override_category, []).append(detection)
+            used_keys: Set[float] = set()
+            for det_category, det_list in grouped_detections.items():
+                numeric_values = [
+                    float(det.value)
+                    for det in det_list
+                    if isinstance(det.value, (int, float))
+                ]
+                if not numeric_values:
+                    for detection in det_list:
+                        fallback_path = getattr(detection, "image_path", None) or path
+                        record.add_placeholder(det_category, fallback_path)
+                    continue
+                record.extend(det_category, numeric_values, det_list)
+                for numeric in numeric_values:
+                    used_keys.add(round(float(numeric), 3))
+            residual_values: List[float] = []
+            for value in values:
+                if not isinstance(value, (int, float)):
+                    continue
+                numeric = float(value)
+                rounded = round(numeric, 3)
+                if rounded in used_keys:
+                    continue
+                residual_values.append(numeric)
+            if residual_values:
+                record.extend(category, residual_values, [])
+        elif values:
             record.extend(category, values, detections)
+        else:
+            record.add_placeholder(category, path)
+            _notify()
+            continue
+        if not detections and values:
+            record.add_placeholder(category, path)
         _notify()
     missing_references: List[str] = []
     mismatched_references: List[str] = []
@@ -1730,7 +2648,7 @@ def _collect_video_metrics(
             _notify()
             continue
         summary = aggregated.setdefault((composition, draw_x, piece_y), VideoMetricsSummary())
-        summary.record(result)
+        summary.record(result, source=path)
         _notify()
     return aggregated
 
@@ -1741,6 +2659,7 @@ def _parse_draw_rows(
     composition: str,
     index: FabricationIndex,
     logger: logging.Logger,
+    source_path: Path,
 ) -> None:
     seen_draws: set[int] = set()
     for _, row in df.iterrows():
@@ -1761,7 +2680,7 @@ def _parse_draw_rows(
         if draw_x in seen_draws:
             logger.debug("Duplicate draw %s in %s", draw_x, composition)
         seen_draws.add(draw_x)
-        record: Dict[str, object] = {}
+        record: Dict[str, object] = {"_source_path": str(source_path)}
         for col_idx, field in enumerate(headers):
             if col_idx == 0 or not field:
                 continue
@@ -1770,6 +2689,7 @@ def _parse_draw_rows(
             record[field] = parsed
             if field in RAW_VALUE_FIELDS:
                 record[f"{field}_raw"] = raw
+            _append_dimension_display(record, field, parsed, raw)
         index.set_draw(composition, draw_x, record)
 
 
@@ -1780,6 +2700,7 @@ def _parse_piece_rows(
     draw_x: Optional[int],
     index: FabricationIndex,
     logger: logging.Logger,
+    source_path: Path,
 ) -> None:
     if draw_x is None:
         logger.warning("Could not determine draw number for piece workbook %s", composition)
@@ -1795,7 +2716,7 @@ def _parse_piece_rows(
         if not m:
             continue
         piece_y = int(m.group("piece"))
-        record: Dict[str, object] = {}
+        record: Dict[str, object] = {"_source_path": str(source_path)}
         for col_idx, field in enumerate(headers):
             if col_idx == 0 or not field:
                 continue
@@ -1804,33 +2725,59 @@ def _parse_piece_rows(
             record[field] = parsed
             if field in RAW_VALUE_FIELDS:
                 record[f"{field}_raw"] = raw
+            _append_dimension_display(record, field, parsed, raw)
         index.set_piece(composition, draw_x, piece_y, record)
 
 
-def _read_excel(path: Path) -> pd.DataFrame:
+def _read_excel(path: Path, logger: Optional[logging.Logger] = None) -> pd.DataFrame:
     try:
-        df = pd.read_excel(path, header=None, dtype=object)
-    except ImportError as exc:  # pragma: no cover - pandas provides helpful message
+        return pd.read_excel(path, header=None, dtype=object)
+    except ImportError:
         raise
     except ValueError as exc:
-        raise
-    return df
+        engines: List[str] = []
+        suffix = path.suffix.lower()
+        if suffix in {".xlsx", ".xlsm"}:
+            engines.append("openpyxl")
+        if suffix in {".xls", ".xlsb"}:
+            engines.append("xlrd")
+        engines.extend(["openpyxl", "xlrd", "odf"])
+        for engine in engines:
+            try:
+                return pd.read_excel(path, header=None, dtype=object, engine=engine)
+            except ImportError:
+                continue
+            except ValueError:
+                continue
+            except Exception:
+                continue
+        if logger is not None:
+            logger.warning(
+                "%s: unable to determine Excel format (%s); skipping",
+                path,
+                exc,
+            )
+        return pd.DataFrame()
+    except Exception as exc:
+        if logger is not None:
+            logger.exception("Failed to read %s", path)
+        return pd.DataFrame()
 
 
 def _parse_composition_workbook(path: Path, index: FabricationIndex, logger: logging.Logger) -> None:
-    df = _read_excel(path)
+    df = _read_excel(path, logger)
     if df.empty:
         logger.warning("%s is empty", path)
         return
-    header_row = df.iloc[0]
-    headers = [_header_key(value) for value in header_row]
+    header_values = _merged_header_row(df, 0)
+    headers = [_header_key(value) for value in header_values]
     data = df.iloc[1:].reset_index(drop=True)
     composition = _composition_from_path(path)
-    _parse_draw_rows(data, headers, composition, index, logger)
+    _parse_draw_rows(data, headers, composition, index, logger, path)
 
 
 def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.Logger) -> None:
-    df = _read_excel(path)
+    df = _read_excel(path, logger)
     if df.empty:
         logger.warning("%s is empty", path)
         return
@@ -1843,7 +2790,8 @@ def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.L
     if header_idx is None:
         logger.warning("%s: unable to locate header row", path)
         return
-    headers = [_header_key(value) for value in df.iloc[header_idx]]
+    header_values = _merged_header_row(df, header_idx)
+    headers = [_header_key(value) for value in header_values]
     data = df.iloc[header_idx + 1 :].reset_index(drop=True)
     stem = path.stem
     match = re.search(r"(?P<draw>\d+)[._](?P<comp>[A-Za-z0-9]+)", stem)
@@ -1852,18 +2800,29 @@ def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.L
     if match:
         draw_x = int(match.group("draw"))
         composition = match.group("comp")
-    _parse_piece_rows(data, headers, composition, draw_x, index, logger)
+    _parse_piece_rows(data, headers, composition, draw_x, index, logger, path)
 
 
 def build_fabrication_index(
     fabrication_files: Sequence[Path],
     logger: Optional[logging.Logger] = None,
+    progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> FabricationIndex:
     log = _logger(logger)
     index = FabricationIndex()
-    for path in fabrication_files:
+    unique_files = list(dict.fromkeys(Path(p) for p in fabrication_files))
+    total = len(unique_files)
+    for idx, path in enumerate(unique_files, start=1):
+        if cancel_callback is not None and cancel_callback():
+            raise BuildCancelledError()
         if path.suffix.lower() != ".xlsx":
             log.debug("Skipping non-Excel file %s", path)
+            if progress_callback is not None:
+                try:
+                    progress_callback(idx, total)
+                except Exception:
+                    pass
             continue
         stem = path.stem
         parent_stem = path.parent.name
@@ -1871,6 +2830,11 @@ def build_fabrication_index(
             _parse_piece_workbook(path, index, log)
         else:
             _parse_composition_workbook(path, index, log)
+        if progress_callback is not None:
+            try:
+                progress_callback(idx, total)
+            except Exception:
+                pass
     return index
 
 
@@ -1945,18 +2909,24 @@ def _load_annealing(path: Path) -> pd.DataFrame:
     for column in ANNEALING_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["I_A", "R_ohm"]).reset_index(drop=True)
+    df.loc[:, "I_A"] = df["I_A"].to_numpy(dtype=float)
+    df.loc[:, "I_mA"] = df["I_A"].to_numpy(dtype=float) * 1_000.0
 
     try:
         from plotting.current_annealing.burnthrough import trim_burnthrough_glitch
     except ImportError:
         return df
 
-    currents_mA = df["I_A"].to_numpy(dtype=float) * 1e3
+    currents_source = "I_mA" if "I_mA" in df.columns else "I_A"
+    currents_mA = df[currents_source].to_numpy(dtype=float)
+    if currents_source == "I_A":
+        currents_mA = currents_mA * 1e3
     resistances = df["R_ohm"].to_numpy(dtype=float)
     trimmed_currents, trimmed_resistances = trim_burnthrough_glitch(currents_mA, resistances)
     trimmed_count = int(trimmed_currents.shape[0])
     if trimmed_count < currents_mA.shape[0]:
         df = df.iloc[:trimmed_count].copy()
+        df.loc[:, "I_mA"] = trimmed_currents
         df.loc[:, "I_A"] = trimmed_currents / 1e3
         df.loc[:, "R_ohm"] = trimmed_resistances
         df = df.reset_index(drop=True)
@@ -2172,7 +3142,11 @@ def _plot_measurement_matplotlib(
 
     plot_dir.mkdir(parents=True, exist_ok=True)
     title = format_annealing_title(source.stem)
-    plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
+    if "I_mA" in df.columns:
+        currents = df["I_mA"]
+    else:
+        currents = df["I_A"] * 1e3
+    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": df["R_ohm"]})
     fig, fname = plot_one(plot_df, title, figsize=figsize)
     safe_stem = _safe_plot_stem(fname)
     plot_path = plot_dir / f"{safe_stem}.png"
@@ -2316,7 +3290,11 @@ def _plot_measurement_origin(
     except ImportError as exc:  # pragma: no cover - depends on optional module
         raise RuntimeError("originpro is not available") from exc
 
-    plot_df = pd.DataFrame({"I_mA": df["I_A"] * 1e3, "R_Ohm": df["R_ohm"]})
+    if "I_mA" in df.columns:
+        currents = df["I_mA"]
+    else:
+        currents = df["I_A"] * 1e3
+    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": df["R_ohm"]})
     title = format_annealing_title(source.stem)
     handles = plot_one_origin(
         plot_df,
@@ -2499,6 +3477,7 @@ def _embed_plots_in_excel_openpyxl(
         inserted = False
         reset_df = dataframe.reset_index(drop=True)
         target_width_in, target_height_in = figure_size
+        target_width_px, target_height_px = _excel_pixel_limits(figure_size)
         row_height_pts = _excel_row_height(target_height_in)
         column_width_chars = _excel_column_width(target_width_in)
         for row_idx, row in reset_df.iterrows():
@@ -2517,18 +3496,6 @@ def _embed_plots_in_excel_openpyxl(
                     available[name] = candidate
                     image_path = candidate
                 width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
-                actual_width_in = width_px / dpi_x if dpi_x and width_px else 0.0
-                actual_height_in = height_px / dpi_y if dpi_y and height_px else 0.0
-                scale_x = (
-                    (target_width_in / actual_width_in)
-                    if actual_width_in > 0
-                    else 1.0
-                )
-                scale_y = (
-                    (target_height_in / actual_height_in)
-                    if actual_height_in > 0
-                    else 1.0
-                )
 
                 try:
                     image = XLImage(str(image_path))
@@ -2536,10 +3503,14 @@ def _embed_plots_in_excel_openpyxl(
                     log.exception("Failed to load plot image %s for Excel export", image_path)
                     continue
 
-                if width_px and not math.isclose(scale_x, 1.0, rel_tol=1e-3):
-                    image.width = int(round(width_px * scale_x))
-                if height_px and not math.isclose(scale_y, 1.0, rel_tol=1e-3):
-                    image.height = int(round(height_px * scale_y))
+                if width_px and target_width_px:
+                    desired_width_px = int(round(target_width_px))
+                    if not math.isclose(width_px, desired_width_px, rel_tol=1e-3):
+                        image.width = desired_width_px
+                if height_px and target_height_px:
+                    desired_height_px = int(round(target_height_px))
+                    if not math.isclose(height_px, desired_height_px, rel_tol=1e-3):
+                        image.height = desired_height_px
 
                 column_index = dataframe.columns.get_loc(column) + 1
                 row_number = row_idx + 2  # account for the header row
@@ -2737,16 +3708,14 @@ def _embed_assets_with_xlsxwriter(
             if image_path is None or not image_path.exists():
                 continue
             width_px, height_px, dpi_x, dpi_y = _image_metrics(image_path)
-            actual_width_in = width_px / dpi_x if dpi_x and width_px else 0.0
-            actual_height_in = height_px / dpi_y if dpi_y and height_px else 0.0
             x_scale = (
-                (target_width_in / actual_width_in)
-                if actual_width_in > 0
+                (target_width_px / float(width_px))
+                if width_px
                 else 1.0
             )
             y_scale = (
-                (target_height_in / actual_height_in)
-                if actual_height_in > 0
+                (target_height_px / float(height_px))
+                if height_px
                 else 1.0
             )
             options: Dict[str, float] = {}
@@ -2908,6 +3877,7 @@ def build_database(
     analysis_progress_callback: Optional[Callable[[int, int], None]] = None,
     analysis_total: Optional[int] = None,
     root_for_relpaths: Optional[Path] = None,
+    skip_exports: bool = False,
     *,
     fabrication_index: FabricationIndex | None = None,
     measurement_records: Optional[Iterable[MeasurementRecord]] = None,
@@ -3359,7 +4329,14 @@ def build_database(
     else:
         df_out = pd.DataFrame(columns=output_columns)
     exports: Dict[str, Path] = {}
-    requested_formats = tuple(dict.fromkeys(config.export_formats)) if config.export_formats else ("csv",)
+    if skip_exports:
+        requested_formats: Tuple[str, ...] = ()
+    else:
+        requested_formats = (
+            tuple(dict.fromkeys(config.export_formats))
+            if config.export_formats
+            else ("csv",)
+        )
     behaviours = {
         (key.lower() if isinstance(key, str) else ""): str(value).lower()
         for key, value in (config.export_behaviour or {}).items()
