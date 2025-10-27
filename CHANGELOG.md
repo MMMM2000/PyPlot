@@ -495,6 +495,12 @@
   then optional `pip install .[test]`) in the README to clarify how to enable
   experiments and the test suite.
 
+## 2025-10-27 09:45 UTC
+
+- Forced PaddleOCR caches to use ASCII-only home directories (overriding HOME/
+  USERPROFILE when necessary) so Windows accounts with diacritics no longer
+  trigger repeated `inference.json` load failures during model downloads.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch

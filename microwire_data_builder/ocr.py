@@ -50,10 +50,31 @@ def _prepare_paddle_cache() -> Path:
     cache_root = base.resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
 
+    def _ensure_ascii_env(var: str, target: Path) -> None:
+        existing = os.environ.get(var)
+        if existing:
+            try:
+                existing.encode("ascii")
+            except UnicodeEncodeError:
+                os.environ[var] = str(target)
+            else:
+                return
+        else:
+            os.environ[var] = str(target)
+
     for env_var, subdir in _CACHE_ENV_VARS.items():
         target = cache_root / subdir
         target.mkdir(parents=True, exist_ok=True)
         os.environ[env_var] = str(target)
+
+    ascii_home = cache_root / "home"
+    ascii_home.mkdir(parents=True, exist_ok=True)
+    _ensure_ascii_env("HOME", ascii_home)
+    if os.name == "nt":
+        _ensure_ascii_env("USERPROFILE", ascii_home)
+        # Windows resolves HOMEPATH relative to HOMEDRIVE; ensure both are ASCII.
+        os.environ.setdefault("HOMEDRIVE", Path(ascii_home).drive or "C:")
+        os.environ["HOMEPATH"] = os.path.splitdrive(str(ascii_home))[1]
 
     return cache_root
 
