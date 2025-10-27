@@ -1,4 +1,4 @@
-"""Interactive microscope OCR playground for PaddleOCR and Tesseract."""
+"""Interactive microscope OCR playground for PaddleOCR."""
 
 from __future__ import annotations
 
@@ -18,13 +18,6 @@ from plotting.utils import ensure_app_theme
 
 from microwire_data_builder.core import _extract_microscope_diameters, _normalise_microscope_text, _parse_microscope_candidates
 from microwire_data_builder.ocr import get_paddle_ocr
-
-try:  # pragma: no cover - optional dependency
-    import pytesseract  # type: ignore[import-not-found]
-    from pytesseract import TesseractNotFoundError  # type: ignore[import-not-found]
-except Exception:  # pragma: no cover - optional dependency
-    pytesseract = None
-    TesseractNotFoundError = RuntimeError
 
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -328,7 +321,8 @@ class OcrDebugWidget(QtWidgets.QWidget):
         engine_row.setSpacing(6)
         engine_label = QtWidgets.QLabel("Engine:")
         self.engine_combo = QtWidgets.QComboBox()
-        self.engine_combo.addItems(["PaddleOCR", "Tesseract", "Both"])
+        self.engine_combo.addItems(["PaddleOCR"])
+        self.engine_combo.setEnabled(False)
         engine_row.addWidget(engine_label)
         engine_row.addWidget(self.engine_combo, 1)
         left_layout.addLayout(engine_row)
@@ -397,9 +391,7 @@ class OcrDebugWidget(QtWidgets.QWidget):
 
         note = QtWidgets.QLabel(
             "PaddleOCR runs through the microwire data builder pipeline without the automatic"
-            " Tesseract fallback, while the Output selector controls whether raw strings or"
-            " bracketed d/D values are shown. Tesseract executes only the preprocessing"
-            " variants you enable above."
+            " fallback. The Output selector controls whether raw strings or bracketed d/D values are shown."
         )
         note.setWordWrap(True)
         layout.addWidget(note)
@@ -508,9 +500,7 @@ class OcrDebugWidget(QtWidgets.QWidget):
             return
 
         engine_choice = self.engine_combo.currentText()
-        run_paddle = engine_choice in {"PaddleOCR", "Both"}
-        run_tesseract = engine_choice in {"Tesseract", "Both"}
-        selected_variants = self._selected_variants()
+        run_paddle = engine_choice == "PaddleOCR"
         output_mode = self.output_mode_combo.currentData() or "raw"
 
         output_lines: List[str] = []
@@ -520,9 +510,6 @@ class OcrDebugWidget(QtWidgets.QWidget):
             if run_paddle:
                 paddle_lines = self._run_paddle(image_path, output_mode)
                 output_lines.extend(paddle_lines)
-            if run_tesseract:
-                tesseract_lines = self._run_tesseract(image_path, selected_variants, output_mode)
-                output_lines.extend(tesseract_lines)
             output_lines.append("")
             self._advance_progress()
         self.output_edit.setPlainText("\n".join(output_lines).rstrip())
@@ -533,20 +520,21 @@ class OcrDebugWidget(QtWidgets.QWidget):
         if ocr is None:
             return ["  PaddleOCR: unavailable (install paddlepaddle/paddleocr)"]
 
+        engine_name = getattr(ocr, "_microwire_backend", "PaddleOCR")
+
         try:
             result = _extract_microscope_diameters(
                 image_path,
-                self._logger,
-                allow_tesseract_fallback=False,
+                self._logger
             )
         except Exception as exc:  # pragma: no cover - defensive
-            return [f"  PaddleOCR error: {exc}"]
+            return [f"  {engine_name} error: {exc}"]
 
         texts = list(getattr(result, "texts", []))
         values = list(getattr(result, "values", []))
         detections = list(getattr(result, "detections", []))
         lines = self._format_output(
-            "PaddleOCR",
+            engine_name,
             image_path,
             texts,
             values,
@@ -591,12 +579,18 @@ class OcrDebugWidget(QtWidgets.QWidget):
                 continue
             bgr = array[:, :, ::-1].copy()
             try:
-                result = ocr.ocr(bgr, cls=True)
+                result = ocr.ocr(bgr)
             except Exception:
                 continue
             tokens: List[str] = []
             for entry in result or []:
                 if not entry:
+                    continue
+                if isinstance(entry, dict):
+                    for text in entry.get("rec_texts") or []:
+                        text = str(text or "").strip()
+                        if text:
+                            tokens.append(text)
                     continue
                 for detection in entry:
                     if not detection:
@@ -614,50 +608,6 @@ class OcrDebugWidget(QtWidgets.QWidget):
                 raw_texts[name] = tokens
 
         return raw_texts
-
-    def _run_tesseract(
-        self,
-        image_path: Path,
-        variants: Sequence[str],
-        output_mode: str,
-    ) -> List[str]:
-        if pytesseract is None:  # pragma: no cover - optional dependency
-            return ["  Tesseract: pytesseract is not installed"]
-        try:
-            pytesseract.get_tesseract_version()
-        except TesseractNotFoundError:
-            return ["  Tesseract: tesseract binary not found"]
-        except Exception as exc:  # pragma: no cover - defensive
-            return [f"  Tesseract error: {exc}"]
-
-        try:
-            with Image.open(image_path) as raw:
-                raw = raw.convert("RGB")
-                variant_images = _variant_images(raw, variants)
-        except Exception as exc:  # pragma: no cover - defensive
-            return [f"  Tesseract failed to open image: {exc}"]
-
-        lines: List[str] = []
-        for name, variant in variant_images.items():
-            try:
-                text = pytesseract.image_to_string(variant, config="--psm 6")
-            except Exception as exc:  # pragma: no cover - defensive
-                lines.append(f"  Tesseract/{name}: error {exc}")
-                continue
-            cleaned = _normalise_microscope_text(text or "")
-            values = _parse_microscope_candidates([cleaned])
-            texts = [cleaned] if cleaned else []
-            lines.extend(
-                self._format_output(
-                    f"Tesseract/{name}",
-                    image_path,
-                    texts,
-                    values,
-                    [],
-                    output_mode,
-                )
-            )
-        return lines
 
     def _refresh_image_list(self) -> None:
         folder = Path(self.directory_edit.text().strip() or ".")

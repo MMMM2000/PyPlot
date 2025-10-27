@@ -1,4 +1,42 @@
 # Changelog
+## 2025-10-27 14:55 UTC
+
+- Redirected file pickers to the original user home and forced Paddle temp directories into ASCII-safe caches so Windows no longer shows "Location not available" when connecting data folders.
+- Moved microscope OCR refresh work onto a background thread so the builder stays responsive and honours cancel requests while images are analysed.
+- Added "Save Project" support with `.pydpj` exports that capture section worksheets and manual overrides without embedding device-specific folder paths; wired save and save-as actions into the menu.
+- Prevented microscope preprocessing from upscaling images beyond 4000px and ignored `[2]`-prefixed diameters in glass captures to avoid unsupported Paddle scaling.
+- Added `experiments/paddleocr_vl_pdf.py` for PaddleOCR-VL powered PDF-to-text conversion and pinned the required `pypdfium2`/`reportlab` dependencies.
+
+## 2025-10-27 12:10 UTC
+
+- Restored the project’s PaddleOCR/PaddlePaddle dependency pins and removed the
+  RapidOCR fallback so environments can continue using the upstream Paddle
+  models without relying on Tesseract or ONNX binaries.
+- Refreshed the PaddleOCR parsing pipeline to consume the new dictionary-based
+  results from paddleocr 3.3 and removed the legacy Tesseract code paths from
+  both the data builder and the OCR debug tool.
+- Forced Paddle’s cache directory on Windows to a root-level ASCII path
+  (`C:\microwire_paddle_cache`) so iconv failures from non-ASCII user profiles
+  no longer break model downloads; continue purging and rebuilding caches when
+  inference files are missing.
+- Reverted the debug tool messaging to reference PaddleOCR only.
+- Regenerated dependency guidance below to reflect the Paddle-focused stack.
+
+## 2025-10-27 11:20 UTC
+
+- Replaced the PaddleOCR/PaddlePaddle dependency chain with a RapidOCR (ONNX
+  runtime) backend that auto-initialises when Paddle is unavailable so Windows
+  installs no longer fail on long path extractions; updated the debug tool and
+  builder logs to surface the active engine.
+- Extended the Tesseract fallback to reuse the RapidOCR ROI flow when the
+  binary is missing, keeping microscope diameter extraction functional without
+  an external Tesseract install.
+- Regenerated `requirements.txt` to drop Paddle-specific pins and add
+  `rapidocr-onnxruntime`, ensuring the dependency lock matches the new
+  pyproject specification.
+- Surfaced detailed OCR initialisation errors so the debug tool and runtime
+  logs explain which dependency is missing or failing.
+
 ## 2025-10-27 10:20 UTC
 
 - Passed an ASCII-only `home_path` to PaddleOCR so Windows accounts with

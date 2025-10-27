@@ -138,7 +138,7 @@ def extract_video_metrics(
             enhanced = cv2.equalizeHist(gray)
             bgr_image = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
             try:
-                ocr_result = ocr.ocr(bgr_image, cls=True)
+                ocr_result = ocr.ocr(bgr_image)
             except Exception:
                 log.warning(
                     "PaddleOCR failed while analysing %s; aborting video extraction",

@@ -2,19 +2,26 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import math
+import os
+import pickle
 import re
 import sys
 import time
-import os
 from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+
+try:
+    from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
+except Exception:
+    OCR_ORIGINAL_HOME = None
 
 import pandas as pd
 
@@ -76,6 +83,22 @@ from .core import (
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 VIDEO_EXTENSIONS = (".mkv", ".mp4", ".avi", ".mov")
 
+MICROSCOPE_D_COLUMN = "d (\u00b5m)"
+MICROSCOPE_CAP_D_COLUMN = "D (\u00b5m)"
+MICROSCOPE_TABLE_COLUMNS = [
+    "Composition",
+    "Microwire",
+    MICROSCOPE_D_COLUMN,
+    MICROSCOPE_CAP_D_COLUMN,
+    "d/D",
+    MICROSCOPE_IMAGE_COLUMNS[0],
+    MICROSCOPE_IMAGE_COLUMNS[1],
+    "_key",
+    "_core_image",
+    "_glass_image",
+    "_images",
+]
+
 
 ANNEALING_GRAPH_WIDTH = 420
 ANNEALING_GRAPH_HEIGHT = 200
@@ -90,6 +113,83 @@ _STAGE_LABELS = {
     "build": "Building database rows",
     "final": "Finalising exports",
 }
+
+
+def _dialog_start_directory(preferred: Path | str | None = None) -> Path:
+    candidates: List[Path] = []
+    if preferred:
+        try:
+            candidates.append(Path(preferred).expanduser())
+        except Exception:
+            pass
+    if OCR_ORIGINAL_HOME:
+        candidates.append(Path(OCR_ORIGINAL_HOME))
+    env_home = os.environ.get("MICROWIRE_ORIGINAL_HOME")
+    if env_home:
+        try:
+            candidates.append(Path(env_home))
+        except Exception:
+            pass
+    user_profile = os.environ.get("USERPROFILE")
+    if user_profile:
+        try:
+            candidates.append(Path(user_profile))
+        except Exception:
+            pass
+    try:
+        candidates.append(Path.home())
+    except Exception:
+        pass
+    candidates.append(Path.cwd())
+    for candidate in candidates:
+        try:
+            resolved = candidate.expanduser()
+        except Exception:
+            resolved = candidate
+        try:
+            resolved = resolved.resolve()
+        except Exception:
+            pass
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+    return Path.cwd()
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+    if value is pd.NA:  # type: ignore[attr-defined]
+        return None
+    if getattr(pd, "isna", None):
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            pass
+    nat = getattr(pd, "NaT", None)
+    if nat is not None and value is nat:
+        return None
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        return float(value)
+    if isinstance(value, (int, str, bool)):
+        return value
+    if isinstance(value, (datetime, pd.Timestamp)):
+        return value.isoformat()
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(item) for item in value]
+    item_method = getattr(value, "item", None)
+    if callable(item_method):
+        try:
+            return _json_safe(item_method())
+        except Exception:
+            pass
+    return str(value)
 
 
 @dataclass
@@ -756,6 +856,9 @@ class BuildWorker(QtCore.QObject):
 class LegacyBuilderWindow(QtWidgets.QMainWindow):
     """Main window that orchestrates the microwire database build."""
 
+    PROJECT_EXTENSION = ".pydpj"
+    PROJECT_VERSION = 1
+    PROJECT_KIND = "MicrowireDataBuilder"
     log_message = QtCore.pyqtSignal(int, str)
 
     def __init__(self) -> None:
@@ -799,19 +902,24 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
         self._last_output_dir = str(self._default_output_dir)
         self._last_strain_dir = str(cwd)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+        self._project_path: Optional[Path] = None
+        self._save_project_action: QtGui.QAction | None = None
+        self._save_project_as_action: QtGui.QAction | None = None
 
         self.log_message.connect(self._append_log)
 
         self._build_ui()
         self._configure_logging()
         self._load_settings()
-        install_standard_menu(
+        menu_bar = install_standard_menu(
             self,
             help_topic="builder_database",
             console=self.log_group,
             open_file=self._add_microscope_files,
             open_folder=self._add_data_root,
         )
+        self._setup_project_actions(menu_bar)
+        self._update_project_actions()
 
     # ------------------------------------------------------------------ setup
     def _init_stage_tracking(self) -> None:
@@ -2311,8 +2419,8 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Piece",
         "Length (m)",
         "Piece date",
-        "d (µm)",
-        "D (µm)",
+        MICROSCOPE_D_COLUMN,
+        MICROSCOPE_CAP_D_COLUMN,
         "d/D",
         "Resistance (Ω)",
         "Temperature (°C)",
@@ -2333,8 +2441,8 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row["Piece"] = piece
         row["Length (m)"] = _value_for_output(piece_record, "length_m")
         row["Piece date"] = _value_for_output(piece_record, "piece_date")
-        row["d (µm)"] = _dimension_display("d_um", piece_record, draw_record)
-        row["D (µm)"] = _dimension_display("D_um", piece_record, draw_record)
+        row[MICROSCOPE_D_COLUMN] = _dimension_display("d_um", piece_record, draw_record)
+        row[MICROSCOPE_CAP_D_COLUMN] = _dimension_display("D_um", piece_record, draw_record)
         row["d/D"] = _dimension_display("d_over_D", piece_record, draw_record)
         piece_resistance = _value_for_output(piece_record, "fabrication_resistance_ohm")
         draw_resistance = _value_for_output(draw_record, "fabrication_resistance_ohm")
@@ -2848,23 +2956,53 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
             description="No lower-current measurement available for this microwire.",
         )
 
+class _SectionWorker(QtCore.QObject):
+    progress = QtCore.pyqtSignal(int, int, object)
+    finished = QtCore.pyqtSignal(object)
+    failed = QtCore.pyqtSignal(object)
+    cancelled = QtCore.pyqtSignal()
+
+    def __init__(self, section: "MiniDatabaseSection", paths: Iterable[Path]) -> None:
+        super().__init__()
+        self._section = section
+        self._paths = [Path(p) for p in paths]
+
+    def _emit_progress(self, current: int, total: int, message: Optional[str]) -> None:
+        try:
+            payload = str(message) if message is not None else None
+        except Exception:
+            payload = None
+        try:
+            self.progress.emit(int(current), int(total), payload)
+        except Exception:
+            pass
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - runs in worker thread
+        try:
+            result = self._section.process(self._paths, progress=self._emit_progress)
+        except BuildCancelledError:
+            try:
+                self.cancelled.emit()
+            except Exception:
+                pass
+        except Exception as exc:  # pragma: no cover - defensive
+            try:
+                self.failed.emit(exc)
+            except Exception:
+                pass
+        else:
+            try:
+                self.finished.emit(result)
+            except Exception:
+                pass
+
+
 def _microscope_index_to_frame(
     index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
     overrides: Dict[str, Dict[str, float]],
 ) -> pd.DataFrame:
-    columns = [
-        "Composition",
-        "Microwire",
-        "d (µm)",
-        "D (µm)",
-        "d/D",
-        MICROSCOPE_IMAGE_COLUMNS[0],
-        MICROSCOPE_IMAGE_COLUMNS[1],
-        "_key",
-        "_core_image",
-        "_glass_image",
-        "_images",
-    ]
+    columns = MICROSCOPE_TABLE_COLUMNS.copy()
 
     def _image_path(entries: Sequence[MicroscopeDetection]) -> Optional[str]:
         for detection in entries:
@@ -2910,8 +3048,8 @@ def _microscope_index_to_frame(
             {
                 "Composition": composition,
                 "Microwire": _microwire_label(draw, piece),
-                "d (µm)": d_value,
-                "D (µm)": D_value,
+                MICROSCOPE_D_COLUMN: d_value,
+                MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
@@ -3030,6 +3168,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
 
     status_changed = QtCore.pyqtSignal(str)
     sources_changed = QtCore.pyqtSignal(list)
+    data_updated = QtCore.pyqtSignal()
+    log_emitted = QtCore.pyqtSignal(int, str)
     _processing_owner: ClassVar[Optional["MiniDatabaseSection"]] = None
     _refresh_queue: ClassVar[List["MiniDatabaseSection"]] = []
     _SCROLL_SINGLE_STEP = 12
@@ -3048,6 +3188,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.model = DataFrameModel(self.data.table)
         self.table_view: QtWidgets.QTableView | None = None
         self._cancel_requested = False
+        self.log_emitted.connect(self._dispatch_log)
+        self._worker_thread: QtCore.QThread | None = None
+        self._worker: Optional["_SectionWorker"] = None
+        self._active_candidates: List[Path] = []
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -3197,6 +3341,31 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.source_button.setToolTip("Disconnect the currently linked folder.")
         else:
             self.source_button.setToolTip("Select a folder to analyse.")
+
+    def has_project_data(self) -> bool:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        return bool(self.data.sources) or bool(self.data.processed) or bool(self.data.extra) or not frame.empty
+
+    def apply_data(self, data: MiniDatabaseData) -> None:
+        self.data = data
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
+        self.model.set_frame(self.data.table)
+        self._populate_sources_list()
+        self._auto_fit_columns()
+        self._update_status()
+        self._reset_progress_ui()
+        self._update_open_sources_enabled()
+        try:
+            self.sources_changed.emit(list(self.data.sources))
+        except Exception:
+            pass
+        try:
+            self.status_changed.emit(self.status_label.text())
+        except Exception:
+            pass
 
     def _populate_sources_list(self) -> None:
         self.sources_list.clear()
@@ -3504,7 +3673,12 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self._prompt_remove_source()
 
     def _add_source(self) -> None:
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, self.section_title)
+        start_dir = _dialog_start_directory()
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            self.section_title,
+            str(start_dir),
+        )
         if not directory:
             return
         normalised = str(Path(directory).expanduser())
@@ -3603,11 +3777,50 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
 
-    def log(self, message: str, level: int = logging.INFO) -> None:
+    def _dispatch_log(self, level: int, message: str) -> None:
         try:
             self._log_callback(level, message)
         except Exception:
             self.logger.log(level, message)
+
+    def log(self, message: str, level: int = logging.INFO) -> None:
+        text = str(message)
+        try:
+            self.log_emitted.emit(int(level), text)
+        except Exception:
+            self._dispatch_log(level, text)
+
+    def export_project_payload(self) -> Dict[str, Any]:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        columns = [str(col) for col in getattr(frame, "columns", [])]
+        rows: List[Dict[str, Any]] = []
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for record in frame.to_dict(orient="records"):
+                payload: Dict[str, Any] = {}
+                for column in columns:
+                    payload[column] = _json_safe(record.get(column))
+                rows.append(payload)
+        index_payload: List[Any] = []
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            for entry in frame.index.tolist():
+                index_payload.append(_json_safe(entry))
+        extra_payload = _json_safe(self.data.extra)
+        if not isinstance(extra_payload, (dict, list, tuple, str, int, float, bool)) and extra_payload is not None:
+            extra_payload = str(extra_payload)
+        return {
+            "section": self.section_key,
+            "title": self.section_title,
+            "columns": columns,
+            "rows": rows,
+            "index": index_payload,
+            "extra": extra_payload,
+        }
+
+    def has_project_data(self) -> bool:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            return True
+        return bool(self.data.extra)
 
     def refresh(self) -> None:
         candidates = self._collect_candidates()
@@ -3620,6 +3833,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self._auto_fit_columns()
             self._update_status()
             self._reset_progress_ui()
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
             return
         self._cancel_requested = False
         self.stop_button.setEnabled(True)
@@ -3628,7 +3845,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             other_title = getattr(owner, "section_title", "Another section")
             if self not in MiniDatabaseSection._refresh_queue:
                 MiniDatabaseSection._refresh_queue.append(self)
-            status_message = f"Queued — waiting for {other_title}"
+            status_message = f"Queued - waiting for {other_title}"
             self.status_label.setText(status_message)
             try:
                 self.status_changed.emit(status_message)
@@ -3641,30 +3858,62 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.stop_button.setEnabled(False)
             return
         MiniDatabaseSection._processing_owner = self
-        status_message = f"Processing {len(candidates)} file(s)…"
+        status_message = f"Processing {len(candidates)} file(s)."
         self.status_label.setText(status_message)
         try:
             self.status_changed.emit(status_message)
         except Exception:
             pass
         self._start_progress(len(candidates))
-        try:
-            result = self.process(candidates, progress=self._progress_callback)
-        except BuildCancelledError:
-            self.log(f"{self.section_title}: processing cancelled by user.")
-            self._cancel_progress()
-            return
-        except Exception as exc:  # pragma: no cover - defensive UI guard
-            self.logger.exception("%s processing failed", self.section_title)
-            self._fail_progress()
-            QtWidgets.QMessageBox.critical(
-                self,
-                self.section_title,
-                f"Failed to process data:\n{exc}",
-            )
-            return
-        self._finish_progress()
+        self._start_section_worker(candidates)
 
+    def _start_section_worker(self, candidates: List[Path]) -> None:
+        self._active_candidates = list(candidates)
+        if self._worker_thread is not None and self._worker_thread.isRunning():
+            try:
+                self._worker_thread.quit()
+                self._worker_thread.wait(100)
+            except Exception:
+                pass
+        self._cleanup_worker_thread()
+        thread = QtCore.QThread(self)
+        worker = _SectionWorker(self, candidates)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(self._handle_worker_progress)
+        worker.finished.connect(self._handle_worker_finished)
+        worker.failed.connect(self._handle_worker_failed)
+        worker.cancelled.connect(self._handle_worker_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.finished.connect(self._cleanup_worker_thread)
+        self._worker_thread = thread
+        self._worker = worker
+        thread.start()
+
+    def _cleanup_worker_thread(self) -> None:
+        if self._worker is not None:
+            try:
+                self._worker.deleteLater()
+            except Exception:
+                pass
+            self._worker = None
+        if self._worker_thread is not None:
+            try:
+                self._worker_thread.deleteLater()
+            except Exception:
+                pass
+            self._worker_thread = None
+
+    def _handle_worker_progress(self, current: int, total: int, message: object) -> None:
+        text: Optional[str] = None
+        if isinstance(message, str) and message:
+            text = message
+        self._progress_callback(int(current), int(total), text)
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        self._finish_progress()
         existing_payloads = set(self.data.extra.get("payloads", {}).keys())
         new_payloads = set(result.payloads.keys())
         for name in existing_payloads - new_payloads:
@@ -3684,14 +3933,40 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.model.set_frame(result.table)
         self._auto_fit_columns()
         self._update_status()
+        processed_count = len(self._active_candidates)
         self.log(
-            f"{self.section_title}: processed {len(candidates)} file(s)."
+            f"{self.section_title}: processed {processed_count} file(s)."
         )
+        self._active_candidates = []
         self._update_open_sources_enabled()
         try:
             self.sources_changed.emit(list(self.data.sources))
         except Exception:
             pass
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
+    def _handle_worker_failed(self, exc: object) -> None:
+        self._active_candidates = []
+        self._fail_progress()
+        if isinstance(exc, Exception):
+            self.logger.exception("%s processing failed", self.section_title, exc_info=exc)
+            detail = str(exc) if str(exc) else exc.__class__.__name__
+        else:
+            self.logger.error("%s processing failed: %s", self.section_title, exc)
+            detail = str(exc)
+        QtWidgets.QMessageBox.critical(
+            self,
+            self.section_title,
+            f"Failed to process data:\\n{detail}",
+        )
+
+    def _handle_worker_cancelled(self) -> None:
+        self._active_candidates = []
+        self.log(f"{self.section_title}: processing cancelled by user.")
+        self._cancel_progress()
 
     # ------------------------------------------------------------------ hooks for subclasses
     def process(
@@ -4224,6 +4499,10 @@ class AnnealingSection(MiniDatabaseSection):
                 self.store.save(self.data)
             except Exception:
                 pass
+            try:
+                self.data_updated.emit()
+            except Exception:
+                pass
         self._invalidate_previews()
 
     def _invalidate_previews(self) -> None:
@@ -4489,6 +4768,7 @@ class MicroscopeSection(MiniDatabaseSection):
     section_key = "microscope"
     section_title = "Microscope OCR"
     supported_suffixes = MICROSCOPE_EXTENSIONS
+    partial_row_ready = QtCore.pyqtSignal(dict)
 
     def __init__(
         self,
@@ -4500,6 +4780,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._selected_key: str | None = None
         self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
+        self._expected_keys_current: Set[Tuple[str, int, int]] = set()
         super().__init__(logger, log_callback, parent)
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
@@ -4511,6 +4792,20 @@ class MicroscopeSection(MiniDatabaseSection):
         if not self.data.table.empty:
             self._apply_overrides_to_table()
         self._update_hidden_columns()
+        self._update_missing_summary()
+        self.partial_row_ready.connect(self._apply_partial_row)
+
+        self._missing_summary_label = QtWidgets.QLabel("", self)
+        self._missing_summary_label.setObjectName("microscopeMissingSummaryLabel")
+        self._missing_summary_label.setStyleSheet("font-weight: 500;")
+        self._missing_summary_label.hide()
+        self.main_layout.insertWidget(2, self._missing_summary_label)
+
+        self._missing_list = QtWidgets.QListWidget(self)
+        self._missing_list.setObjectName("microscopeMissingList")
+        self._missing_list.setVisible(False)
+        self._missing_list.itemActivated.connect(self._handle_missing_item_activated)
+        self.main_layout.insertWidget(3, self._missing_list)
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
@@ -4571,8 +4866,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self.d_edit.setPlaceholderText("auto")
         self.D_edit = QtWidgets.QLineEdit()
         self.D_edit.setPlaceholderText("auto")
-        form.addRow("d (µm)", self.d_edit)
-        form.addRow("D (µm)", self.D_edit)
+        form.addRow(MICROSCOPE_D_COLUMN, self.d_edit)
+        form.addRow(MICROSCOPE_CAP_D_COLUMN, self.D_edit)
         preview_layout.addLayout(form)
 
         button_row = QtWidgets.QHBoxLayout()
@@ -4585,6 +4880,225 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.addLayout(button_row)
 
         return splitter
+
+    def _expected_microwire_keys(self) -> Set[Tuple[str, int, int]]:
+        keys: Set[Tuple[str, int, int]] = set()
+        try:
+            annealing_records = MiniDatabaseStore("annealing").load_payload(
+                "annealing_records"
+            )
+        except Exception:
+            annealing_records = None
+        if not isinstance(annealing_records, list):
+            return keys
+        for record in annealing_records:
+            metadata = getattr(record, "metadata", None)
+            if metadata is None:
+                continue
+            composition = getattr(metadata, "composition_token", None)
+            draw = getattr(metadata, "draw_x", None)
+            piece = getattr(metadata, "piece_y", None)
+            if not composition or draw is None or piece is None:
+                continue
+            try:
+                keys.add((str(composition), int(draw), int(piece)))
+            except (TypeError, ValueError):
+                continue
+        return keys
+
+    def _prepare_initial_table(self, expected_keys: Set[Tuple[str, int, int]]) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            frame = pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
+        else:
+            frame = frame.copy()
+        for column in MICROSCOPE_TABLE_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = pd.Series([None] * len(frame))
+        existing_keys = set(str(key) for key in frame.get("_key", []))
+        new_rows: List[Dict[str, object]] = []
+        for composition, draw, piece in sorted(expected_keys):
+            key_str = f"{composition}|{draw}|{piece}"
+            if key_str in existing_keys:
+                continue
+            new_rows.append(
+                {
+                    "Composition": composition,
+                    "Microwire": _microwire_label(draw, piece),
+                    MICROSCOPE_D_COLUMN: None,
+                    MICROSCOPE_CAP_D_COLUMN: None,
+                    "d/D": None,
+                    MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                    MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                    "_key": key_str,
+                    "_core_image": None,
+                    "_glass_image": None,
+                    "_images": [],
+                }
+            )
+        if new_rows:
+            frame = pd.concat([frame, pd.DataFrame(new_rows)], ignore_index=True, sort=False)
+        frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
+        self.data.table = frame
+        self.model.set_frame(frame)
+        self._auto_fit_columns()
+        self._update_missing_summary()
+
+    @staticmethod
+    def _is_valid_diameter(value: object) -> bool:
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return False
+        return math.isfinite(numeric) and numeric > 0
+
+    def _record_to_row(
+        self,
+        key: Tuple[str, int, int],
+        measurement: MicroscopeMeasurements,
+    ) -> Dict[str, object]:
+        composition, draw, piece = key
+        key_str = f"{composition}|{draw}|{piece}"
+        override = self._overrides.get(key_str, {})
+
+        d_value = override.get("d")
+        if d_value is None:
+            core_best = measurement.best_core()
+            d_value = float(core_best) if isinstance(core_best, (int, float)) else None
+
+        D_value = override.get("D")
+        if D_value is None:
+            glass_best = measurement.best_glass()
+            D_value = float(glass_best) if isinstance(glass_best, (int, float)) else None
+
+        ratio = None
+        if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
+            try:
+                ratio = round(float(d_value) / float(D_value), 3)
+            except ZeroDivisionError:
+                ratio = None
+
+        def _first_image(entries: Sequence[MicroscopeDetection]) -> Optional[str]:
+            for detection in entries:
+                crop = getattr(detection, "crop_path", None)
+                if crop:
+                    return str(crop)
+                source = getattr(detection, "image_path", None)
+                if source:
+                    return str(source)
+            return None
+
+        core_image = _first_image(measurement.core)
+        glass_image = _first_image(measurement.glass)
+        image_paths: List[str] = []
+        for bucket in (measurement.core, measurement.glass, measurement.other):
+            for detection in bucket:
+                path = getattr(detection, "image_path", None)
+                if path:
+                    image_paths.append(str(path))
+        if image_paths:
+            image_paths = list(dict.fromkeys(image_paths))
+
+        return {
+            "Composition": composition,
+            "Microwire": _microwire_label(draw, piece),
+            MICROSCOPE_D_COLUMN: d_value,
+            MICROSCOPE_CAP_D_COLUMN: D_value,
+            "d/D": ratio,
+            MICROSCOPE_IMAGE_COLUMNS[0]: None,
+            MICROSCOPE_IMAGE_COLUMNS[1]: None,
+            "_key": key_str,
+            "_core_image": core_image,
+            "_glass_image": glass_image,
+            "_images": image_paths,
+        }
+
+    def _apply_partial_row(self, row: dict) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            frame = pd.DataFrame(columns=row.keys())
+        else:
+            frame = frame.copy()
+        key = str(row.get("_key", ""))
+        if "_key" not in frame.columns:
+            frame["_key"] = pd.Series([None] * len(frame))
+        existing_idx = frame.index[frame["_key"] == key].tolist()
+        if existing_idx:
+            idx = existing_idx[0]
+            for column, value in row.items():
+                if column not in frame.columns:
+                    frame[column] = pd.Series([None] * len(frame))
+                frame.at[idx, column] = value
+        else:
+            frame = pd.concat([frame, pd.DataFrame([row])], ignore_index=True, sort=False)
+        for column in MICROSCOPE_TABLE_COLUMNS:
+            if column not in frame.columns:
+                frame[column] = pd.Series([None] * len(frame))
+        frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
+        self.data.table = frame
+        self.model.set_frame(frame)
+        self._auto_fit_columns()
+        self._update_missing_summary()
+
+    def _update_missing_summary(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        missing_entries: List[Tuple[str, str]] = []
+        missing_d = 0
+        missing_D = 0
+        if not frame.empty and "_key" in frame.columns:
+            for _, row in frame.iterrows():
+                key = str(row.get("_key", ""))
+                composition = str(row.get("Composition", "") or "")
+                microwire = str(row.get("Microwire", "") or "")
+                needs: List[str] = []
+                d_value = row.get(MICROSCOPE_D_COLUMN)
+                D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
+                if not self._is_valid_diameter(d_value):
+                    missing_d += 1
+                    needs.append("d")
+                if not self._is_valid_diameter(D_value):
+                    missing_D += 1
+                    needs.append("D")
+                if needs:
+                    label = f"{composition} {microwire} (missing {', '.join(needs)})".strip()
+                    missing_entries.append((key, label))
+        summary_parts = []
+        summary_parts.append(f"Missing d: {missing_d}")
+        summary_parts.append(f"Missing D: {missing_D}")
+        summary_text = " | ".join(summary_parts)
+        self._missing_summary_label.setText(summary_text)
+        self._missing_summary_label.setVisible(True)
+
+        self._missing_list.clear()
+        if missing_entries:
+            for key, label in missing_entries:
+                item = QtWidgets.QListWidgetItem(label)
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, key)
+                self._missing_list.addItem(item)
+            self._missing_list.setVisible(True)
+        else:
+            self._missing_list.setVisible(False)
+
+    def _handle_missing_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
+        key = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        if isinstance(key, str):
+            self._select_row_for_key(key)
+
+    def _select_row_for_key(self, key: str) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty or "_key" not in frame.columns:
+            return
+        matches = frame.index[frame["_key"] == key].tolist()
+        if not matches:
+            return
+        row_idx = matches[0]
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            self.table_view.selectRow(row_idx)
+            self.table_view.scrollTo(
+                self.table_view.model().index(row_idx, 0),
+                QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
 
     def set_ocr_debug_enabled(self, enabled: bool) -> None:
         self._ocr_debug_enabled = bool(enabled)
@@ -4677,6 +5191,7 @@ class MicroscopeSection(MiniDatabaseSection):
             if candidate and candidate.exists():
                 loaded = QtGui.QPixmap(str(candidate))
                 if not loaded.isNull():
+
                     pixmap = loaded
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
@@ -4707,8 +5222,8 @@ class MicroscopeSection(MiniDatabaseSection):
             return
         key = row.get("_key")
         self._selected_key = str(key) if key is not None else None
-        d_value = row.get("d (µm)")
-        D_value = row.get("D (µm)")
+        d_value = row.get(MICROSCOPE_D_COLUMN)
+        D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
         self.d_edit.setText("" if d_value is None or (isinstance(d_value, float) and math.isnan(d_value)) else f"{float(d_value):.3f}")
         self.D_edit.setText("" if D_value is None or (isinstance(D_value, float) and math.isnan(D_value)) else f"{float(D_value):.3f}")
         for column_name, label in (
@@ -4768,6 +5283,11 @@ class MicroscopeSection(MiniDatabaseSection):
         self.store.save(self.data)
         self._apply_overrides_to_table()
         self._update_hidden_columns()
+        self._update_missing_summary()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
 
     def _apply_overrides_to_table(self) -> None:
         frame = self.data.table.copy()
@@ -4778,8 +5298,8 @@ class MicroscopeSection(MiniDatabaseSection):
         for index, row in frame.iterrows():
             key = str(row.get("_key"))
             override = self._overrides.get(key)
-            d_value = row.get("d (µm)")
-            D_value = row.get("D (µm)")
+            d_value = row.get(MICROSCOPE_D_COLUMN)
+            D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
             if override:
                 if "d" in override:
                     d_value = override.get("d")
@@ -4791,17 +5311,29 @@ class MicroscopeSection(MiniDatabaseSection):
                     ratio = float(d_value) / float(D_value)
                 except ZeroDivisionError:
                     ratio = None
-            frame.at[index, "d (µm)"] = d_value
-            frame.at[index, "D (µm)"] = D_value
+            frame.at[index, MICROSCOPE_D_COLUMN] = d_value
+            frame.at[index, MICROSCOPE_CAP_D_COLUMN] = D_value
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
         self.data.table = frame
         self.model.set_frame(frame)
         self._auto_fit_columns()
+        self._update_missing_summary()
 
     def refresh(self) -> None:
+    def refresh(self) -> None:
+        self._expected_keys_current = self._expected_microwire_keys()
+        if self._expected_keys_current:
+            self._prepare_initial_table(self._expected_keys_current)
+        super().refresh()
+        if self.data.table.empty and self._expected_keys_current:
+            self._prepare_initial_table(self._expected_keys_current)
+        self._apply_overrides_to_table()
+        self._update_hidden_columns()
+        self._update_missing_summary()
         super().refresh()
         self._apply_overrides_to_table()
         self._update_hidden_columns()
+        self._update_missing_summary()
 
     def process(
         self,
@@ -4824,38 +5356,29 @@ class MicroscopeSection(MiniDatabaseSection):
                 pass
 
         debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
+        expected_keys = self._expected_keys_current or self._expected_microwire_keys()
+
+        def _emit_partial(key: Tuple[str, int, int], measurement: MicroscopeMeasurements) -> None:
+            try:
+                row = self._record_to_row(key, measurement)
+            except Exception:
+                return
+            try:
+                self.partial_row_ready.emit(row)
+            except Exception:
+                pass
+
         index = _group_microscope_measurements(
             paths,
             self.logger,
             progress_callback=_progress if progress is not None else None,
             debug_callback=debug_cb,
+            update_callback=_emit_partial,
         )
-        expected_keys: Set[Tuple[str, int, int]] = set()
-        try:
-            annealing_records = MiniDatabaseStore("annealing").load_payload(
-                "annealing_records"
-            )
-        except Exception:
-            annealing_records = None
-        if isinstance(annealing_records, list):
-            for record in annealing_records:
-                metadata = getattr(record, "metadata", None)
-                if metadata is None:
-                    continue
-                composition = getattr(metadata, "composition_token", None)
-                draw = getattr(metadata, "draw_x", None)
-                piece = getattr(metadata, "piece_y", None)
-                if not composition or draw is None or piece is None:
-                    continue
-                try:
-                    key = (str(composition), int(draw), int(piece))
-                except (TypeError, ValueError):
-                    continue
-                expected_keys.add(key)
-        for key in expected_keys:
-            index.setdefault(key, MicroscopeMeasurements())
+        if expected_keys:
+            for key in expected_keys:
+                index.setdefault(key, MicroscopeMeasurements())
         self._check_cancelled()
-        # Retain overrides only for existing keys
         filtered_overrides = {
             key: value
             for key, value in self._overrides.items()
@@ -4872,7 +5395,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
                 continue
-        total_records = len(index)
+
         def _count_measurements(entries: Sequence[MicroscopeDetection]) -> int:
             count = 0
             for entry in entries:
@@ -4885,6 +5408,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     count += 1
             return count
 
+        total_records = len(index)
         total_core = sum(_count_measurements(m.core) for m in index.values())
         total_glass = sum(_count_measurements(m.glass) for m in index.values())
         if total_core or total_glass:
@@ -4903,6 +5427,10 @@ class MicroscopeSection(MiniDatabaseSection):
             payloads={"microscope_index": index},
             extra={"overrides": filtered_overrides},
         )
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._update_missing_summary()
 
     @property
     def overrides(self) -> Dict[str, Dict[str, float]]:
@@ -4992,7 +5520,7 @@ class StrainSection(MiniDatabaseSection):
     COLUMN_MICROWIRE = "Microwire"
     COLUMN_DRAW = "Draw"
     COLUMN_PIECE = "Piece"
-    COLUMN_D = "d (µm)"
+    COLUMN_D = MICROSCOPE_D_COLUMN
     COLUMN_MASS = "m"
     COLUMN_M_LENGTH = "M length"
     COLUMN_A_LENGTH = "A length"
@@ -5694,7 +6222,7 @@ class StrainSection(MiniDatabaseSection):
                     piece_int = int(float(piece))
                 except (TypeError, ValueError):
                     continue
-                d_value = _parse_strain_float(row.get("d (µm)"))
+                d_value = _parse_strain_float(row.get(MICROSCOPE_D_COLUMN))
                 if d_value is None:
                     continue
                 d_lookup[(composition, draw_int, piece_int)] = d_value
@@ -5776,6 +6304,10 @@ class StrainSection(MiniDatabaseSection):
         if hasattr(self, "composition_combo"):
             self._update_composition_suggestions()
         self._update_status()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
 
     def _build_records_from_table(self) -> Dict[tuple[str, int, int], StrainRecord]:
         records: Dict[tuple[str, int, int], StrainRecord] = {}
@@ -5981,7 +6513,12 @@ class AssemblySection(QtWidgets.QWidget):
             self.logger.log(level, message)
 
     def _choose_output_dir(self) -> None:
-        directory = QtWidgets.QFileDialog.getExistingDirectory(self, "Select output directory")
+        start_dir = _dialog_start_directory()
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Select output directory",
+            str(start_dir),
+        )
         if directory:
             self.output_dir_edit.setText(directory)
 
@@ -6243,11 +6780,25 @@ class AssemblySection(QtWidgets.QWidget):
 class BuilderWindow(QtWidgets.QMainWindow):
     """New workbench for preparing and assembling microwire databases."""
 
+    PROJECT_EXTENSION = ".pydpj"
+    PROJECT_VERSION = 1
+    PROJECT_KIND = "MicrowireDataBuilder"
+
     def __init__(self) -> None:
         super().__init__()
         self.logger = logging.getLogger(LOGGER_NAME)
         self.setWindowTitle("Microwire Data Builder")
         self.resize(1100, 720)
+
+        self._project_path: Optional[Path] = None
+        self._save_project_action: QtGui.QAction | None = None
+        self._save_project_as_action: QtGui.QAction | None = None
+        downloads_dir = Path.home() / "Downloads"
+        self._default_output_dir = (
+            downloads_dir if downloads_dir.exists() and downloads_dir.is_dir() else Path.cwd()
+        )
+        self._last_output_dir = str(self._default_output_dir)
+        self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
@@ -6344,6 +6895,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._project_items[key] = item
             section.status_changed.connect(partial(self._handle_section_status_changed, key))
             section.sources_changed.connect(partial(self._handle_section_sources_changed, key))
+            try:
+                section.data_updated.connect(self._update_project_actions)
+            except Exception:
+                pass
             self._handle_section_sources_changed(key, section.data.sources)
 
         self.project_dock = QtWidgets.QDockWidget("Project Explorer", self)
@@ -6406,7 +6961,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
 
-        install_standard_menu(self, help_topic="builder_database", console=self.log_view)
+        menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
+        self._setup_project_actions(menu_bar)
+        self._update_project_actions()
         self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
         self._retabify_primary_docks()
 
@@ -6595,6 +7152,166 @@ class BuilderWindow(QtWidgets.QMainWindow):
             item.addChild(child)
         if sources:
             item.setExpanded(False)
+        self._update_project_actions()
+
+    def _project_settings_key(self, name: str) -> str:
+        return f"project/{name}"
+
+    def _setup_project_actions(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        file_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_file")
+        if file_menu is None:
+            return
+        save_action = QtGui.QAction("Save Project", self)
+        try:
+            save_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save))
+        except Exception:
+            pass
+        save_action.triggered.connect(self._save_project)
+        save_action.setEnabled(False)
+
+        save_as_action = QtGui.QAction("Save Project &As…", self)
+        try:
+            save_as_action.setShortcut(QtGui.QKeySequence("Ctrl+Shift+S"))
+        except Exception:
+            pass
+        save_as_action.triggered.connect(self._save_project_as)
+        save_as_action.setEnabled(False)
+
+        insert_before: Optional[QtGui.QAction] = None
+        for action in file_menu.actions():
+            text = action.text() or ""
+            if "Close" in text:
+                insert_before = action
+                break
+        if insert_before is not None:
+            file_menu.insertAction(insert_before, save_as_action)
+            file_menu.insertAction(insert_before, save_action)
+            file_menu.insertSeparator(insert_before)
+        else:
+            file_menu.addSeparator()
+            file_menu.addAction(save_action)
+            file_menu.addAction(save_as_action)
+
+        self._save_project_action = save_action
+        self._save_project_as_action = save_as_action
+
+    def _update_project_actions(self, *_: object) -> None:
+        has_data = self._has_project_data_to_save()
+        if self._save_project_action is not None:
+            self._save_project_action.setEnabled(has_data)
+        if self._save_project_as_action is not None:
+            self._save_project_as_action.setEnabled(has_data)
+
+    def _has_project_data_to_save(self) -> bool:
+        for section in self.sections.values():
+            if isinstance(section, MiniDatabaseSection) and section.has_project_data():
+                return True
+        return False
+
+    def _project_dialog_start_directory(self) -> Path:
+        stored = self.settings.value(self._project_settings_key("last_dir"), "")
+        if isinstance(stored, str) and stored:
+            candidate = Path(stored)
+            if candidate.exists():
+                return candidate
+        if isinstance(self._project_path, Path):
+            return self._project_path.parent
+        try:
+            return Path(self._last_output_dir)
+        except Exception:
+            return _dialog_start_directory()
+
+    def _default_project_filename(self) -> str:
+        return f"microwire_project{self.PROJECT_EXTENSION}"
+
+    def _build_project_payload(self) -> Dict[str, Any]:
+        sections_payload: Dict[str, Any] = {}
+        for key, section in self.sections.items():
+            if not isinstance(section, MiniDatabaseSection):
+                continue
+            try:
+                sections_payload[key] = section.export_project_payload()
+            except Exception as exc:
+                self.logger.error("Failed to export section %s: %s", key, exc)
+        return {
+            "version": self.PROJECT_VERSION,
+            "kind": self.PROJECT_KIND,
+            "saved_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M"),
+            "sections": sections_payload,
+        }
+
+    def _save_project(self) -> None:
+        if not self._has_project_data_to_save():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project",
+                "There is no processed data to save yet.",
+            )
+            return
+        if self._project_path is None:
+            self._save_project_as()
+            return
+        self._write_project_file(self._project_path)
+
+    def _save_project_as(self) -> None:
+        if not self._has_project_data_to_save():
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project As",
+                "Process or import data before saving a project.",
+            )
+            return
+        start_dir = self._project_dialog_start_directory()
+        suggested = start_dir / self._default_project_filename()
+        filters = f"Microwire Project (*{self.PROJECT_EXTENSION});;All files (*)"
+        path_str, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Save Project As",
+            str(suggested),
+            filters,
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        if target.suffix.lower() != self.PROJECT_EXTENSION:
+            target = target.with_suffix(self.PROJECT_EXTENSION)
+        self._write_project_file(target)
+
+    def _write_project_file(self, target: Path) -> None:
+        payload = self._build_project_payload()
+        sections = payload.get("sections", {})
+        if not sections:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Save Project",
+                "No processed sections are available to save.",
+            )
+            return
+        try:
+            target.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Save Project",
+                f"Failed to write project file:\\n{exc}",
+            )
+            return
+        self._project_path = target
+        self._remember_project_directory(target.parent)
+        self._update_project_actions()
+        self.logger.info("Project saved to %s", target)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Save Project",
+            f"Project saved to {target}",
+        )
+
+    def _remember_project_directory(self, directory: Path) -> None:
+        try:
+            resolved = directory.resolve()
+        except Exception:
+            resolved = directory
+        self.settings.setValue(self._project_settings_key("last_dir"), str(resolved))
 
     def _display_dataframe_in_console(self, frame: pd.DataFrame) -> None:
         if not isinstance(frame, pd.DataFrame):
@@ -6633,11 +7350,6 @@ def main() -> QtWidgets.QWidget | None:
 
 
 __all__ = ["BuilderWindow", "main", "run_app"]
-
-
-
-
-
 
 
 

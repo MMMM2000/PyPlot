@@ -11,10 +11,24 @@ from .core import (
     build_fabrication_index,
     LOGGER_NAME,
 )
-from .ui import BuilderWindow, main, run_app
+try:
+    from .ui import BuilderWindow, main, run_app
+except Exception:  # pragma: no cover - optional UI dependencies
+    BuilderWindow = None  # type: ignore[assignment]
 
-# Backwards compatibility for older imports expecting a Tkinter-style name.
-BuilderApp = BuilderWindow
+    def main() -> None:
+        raise ImportError(
+            "Microwire builder UI dependencies are not installed. Install the extras "
+            "from requirements.txt to launch the Qt application."
+        )
+
+    def run_app() -> None:
+        main()
+
+    BuilderApp = None  # type: ignore[assignment]
+else:
+    # Backwards compatibility for older imports expecting a Tkinter-style name.
+    BuilderApp = BuilderWindow
 
 __all__ = [
     "BuilderApp",

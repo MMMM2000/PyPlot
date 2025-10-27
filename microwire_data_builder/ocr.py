@@ -18,6 +18,14 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 DEFAULT_LOGGER = "microwire_data_builder"
 _MISSING_PADDLE_WARNED = False
 
+if os.name == "nt":
+    _ORIGINAL_HOME = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
+else:
+    _ORIGINAL_HOME = Path(os.path.expanduser("~"))
+
+ORIGINAL_HOME = _ORIGINAL_HOME
+os.environ.setdefault("MICROWIRE_ORIGINAL_HOME", str(ORIGINAL_HOME))
+
 # Environment variables that influence PaddleOCR/PaddleX cache locations. We map
 # each one to a known ASCII-only directory so Windows accounts with diacritics
 # do not break lazy model downloads.
@@ -35,17 +43,16 @@ def _prepare_paddle_cache() -> Path:
     """Return a filesystem location that is ASCII-safe for PaddleOCR caches."""
 
     temp_root = Path(tempfile.gettempdir())
-    try:
-        str(temp_root).encode("ascii")
-    except UnicodeEncodeError:
-        if os.name == "nt":
-            drive = temp_root.drive or Path.cwd().drive or "C:"
-            drive_path = Path(drive + os.sep)
-            base = drive_path / "microwire_paddle_cache"
-        else:
-            base = Path("/tmp") / "microwire_paddle_cache"
+    if os.name == "nt":
+        drive = temp_root.drive or Path.cwd().drive or "C:"
+        base = Path(drive + os.sep) / "microwire_paddle_cache"
     else:
-        base = temp_root / "microwire_paddle_cache"
+        try:
+            str(temp_root).encode("ascii")
+        except UnicodeEncodeError:
+            base = Path("/tmp") / "microwire_paddle_cache"
+        else:
+            base = temp_root / "microwire_paddle_cache"
 
     cache_root = base.resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -75,6 +82,22 @@ def _prepare_paddle_cache() -> Path:
         # Windows resolves HOMEPATH relative to HOMEDRIVE; ensure both are ASCII.
         os.environ.setdefault("HOMEDRIVE", Path(ascii_home).drive or "C:")
         os.environ["HOMEPATH"] = os.path.splitdrive(str(ascii_home))[1]
+        for subdir in ("Desktop", "Documents", "Downloads"):
+            try:
+                (ascii_home / subdir).mkdir(exist_ok=True)
+            except Exception:  # pragma: no cover - defensive
+                continue
+    temp_dir = cache_root / "tmp"
+    temp_dir.mkdir(exist_ok=True)
+    for env_var in ("TMPDIR", "TEMP", "TMP"):
+        existing = os.environ.get(env_var)
+        if existing:
+            try:
+                existing.encode("ascii")
+            except UnicodeEncodeError:
+                os.environ[env_var] = str(temp_dir)
+        else:
+            os.environ[env_var] = str(temp_dir)
 
     return cache_root
 
@@ -160,7 +183,7 @@ def _candidate_kwargs(signature: inspect.Signature | None) -> list[dict[str, obj
         "use_angle_cls": True,
         "det_db_box_thresh": 0.18,
         "det_db_unclip_ratio": 2.6,
-        "det_limit_side_len": 4096,
+        "det_limit_side_len": 4000,
         "drop_score": 0.1,
         "max_text_length": 96,
         "rec_algorithm": "SVTR_LCNet",
@@ -195,13 +218,17 @@ def _create_default_ocr() -> "PaddleOCR":
         signature = None
 
     try:
-        return _initialise_paddle(PaddleOCR, signature)
+        instance = _initialise_paddle(PaddleOCR, signature)
+        setattr(instance, "_microwire_backend", "PaddleOCR")
+        return instance
     except Exception as exc:
         corrupted, path = _looks_like_corrupted_model(exc)
         if corrupted:
             extra = path.parent if path is not None else None
             _purge_corrupted_cache(_CACHE_ROOT, extra_path=extra)
-            return _initialise_paddle(PaddleOCR, signature)
+            instance = _initialise_paddle(PaddleOCR, signature)
+            setattr(instance, "_microwire_backend", "PaddleOCR")
+            return instance
         raise
 
 
@@ -209,10 +236,12 @@ def get_paddle_ocr(logger: Optional[logging.Logger] = None):
     """Return a configured PaddleOCR instance or ``None`` when unavailable."""
 
     log = logger or logging.getLogger(DEFAULT_LOGGER)
+    global _MISSING_PADDLE_WARNED
     try:
-        return _create_default_ocr()
+        ocr = _create_default_ocr()
+        setattr(ocr, "_microwire_backend", "PaddleOCR")
+        return ocr
     except ImportError:
-        global _MISSING_PADDLE_WARNED
         if not _MISSING_PADDLE_WARNED:
             log.error(
                 "paddleocr is not installed; OCR-dependent features are disabled."
@@ -228,4 +257,4 @@ def get_paddle_ocr(logger: Optional[logging.Logger] = None):
     return None
 
 
-__all__ = ["get_paddle_ocr"]
+__all__ = ["get_paddle_ocr", "ORIGINAL_HOME"]

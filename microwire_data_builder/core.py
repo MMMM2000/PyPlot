@@ -1493,23 +1493,17 @@ def _parse_microscope_candidates(texts: Iterable[str]) -> List[float]:
 def _extract_microscope_diameters(
     path: Path,
     logger: logging.Logger,
-    *,
-    allow_tesseract_fallback: bool = True,
 ) -> MicroscopeOCRResult:
     """Attempt to OCR diameter annotations from a microscope capture."""
 
     log = logger or logging.getLogger(LOGGER_NAME)
     ocr = get_paddle_ocr(log)
     if ocr is None:
-        if allow_tesseract_fallback:
-            log.warning(
-                "PaddleOCR is not available; falling back to Tesseract for %s", path
-            )
-        else:
-            log.warning(
-                "PaddleOCR is not available; skipping microscope OCR fallback for %s",
-                path,
-            )
+        log.warning(
+            "PaddleOCR is not available; skipping microscope OCR for %s",
+            path,
+        )
+        return MicroscopeOCRResult()
 
     try:
         from PIL import Image, ImageEnhance, ImageFilter, ImageOps  # type: ignore[import-not-found]
@@ -1529,12 +1523,12 @@ def _extract_microscope_diameters(
 
     def _resample(image):
         width, height = image.size
-        target = 4096
+        target = 4000
         longest = max(width, height)
-        if longest <= 0:
+        if longest <= 0 or longest <= target:
             return image
         scale = target / float(longest)
-        if math.isclose(scale, 1.0, rel_tol=1e-3):
+        if scale >= 1.0 or math.isclose(scale, 1.0, rel_tol=1e-3):
             return image
         new_size = (max(int(round(width * scale)), 1), max(int(round(height * scale)), 1))
         resample_attr = getattr(Image, "Resampling", None)
@@ -1767,276 +1761,6 @@ def _extract_microscope_diameters(
             continue
         variant_entries.append((label, variant, (0, 0), reference_size))
 
-    def _run_tesseract_fallback() -> bool:
-        try:  # pragma: no cover - optional dependency
-            import pytesseract  # type: ignore[import-not-found]
-        except Exception:
-            return False
-
-        try:  # pragma: no cover - optional dependency
-            from pytesseract import TesseractNotFoundError  # type: ignore[import-not-found]
-        except Exception:  # pragma: no cover - optional dependency
-            class TesseractNotFoundError(RuntimeError):  # type: ignore[override]
-                pass
-
-        try:  # pragma: no cover - optional dependency
-            from pytesseract import Output  # type: ignore[import-not-found]
-        except Exception:  # pragma: no cover - optional dependency
-            Output = None  # type: ignore[assignment]
-
-        try:  # pragma: no cover - optional dependency
-            pytesseract.get_tesseract_version()
-        except TesseractNotFoundError:
-            log.debug(
-                "Tesseract binary not found; skipping fallback OCR for %s", path
-            )
-            return False
-        except Exception:
-            log.debug("Tesseract version probe failed", exc_info=True)
-
-        resample_attr = getattr(Image, "Resampling", None)
-        resample_filter = getattr(resample_attr, "LANCZOS", Image.BICUBIC)
-
-        def _candidate_rois() -> List[Tuple[int, int, int, int]]:
-            width, height = base_resized.size
-            regions: List[Tuple[int, int, int, int]] = []
-            try:
-                import cv2  # type: ignore[import-not-found]
-            except Exception:  # pragma: no cover - optional dependency
-                cv2 = None  # type: ignore[assignment]
-            if cv2 is not None:
-                try:
-                    array = np.array(base_resized.convert("RGB"))
-                except Exception:
-                    array = None
-                if array is not None and array.ndim == 3 and array.shape[2] == 3:
-                    try:
-                        bgr = array[:, :, ::-1]
-                        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-                        lower1 = np.array([0, 80, 70], dtype=np.uint8)
-                        upper1 = np.array([15, 255, 255], dtype=np.uint8)
-                        lower2 = np.array([160, 80, 70], dtype=np.uint8)
-                        upper2 = np.array([180, 255, 255], dtype=np.uint8)
-                        mask = cv2.inRange(hsv, lower1, upper1)
-                        mask = cv2.bitwise_or(mask, cv2.inRange(hsv, lower2, upper2))
-                        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-                        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-                        mask = cv2.dilate(mask, kernel, iterations=1)
-                        contours, _ = cv2.findContours(
-                            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-                        )
-                    except Exception:
-                        contours = None
-                    if contours:
-                        for contour in contours:
-                            try:
-                                x, y, w, h = cv2.boundingRect(contour)
-                            except Exception:
-                                continue
-                            if w < 30 or h < 18:
-                                continue
-                            pad_x = max(int(round(w * 0.3)), 6)
-                            pad_y = max(int(round(h * 0.35)), 6)
-                            x0 = max(x - pad_x, 0)
-                            y0 = max(y - pad_y, 0)
-                            x1 = min(x + w + pad_x, width)
-                            y1 = min(y + h + pad_y, height)
-                            if x1 - x0 < 24 or y1 - y0 < 18:
-                                continue
-                            regions.append((x0, y0, x1, y1))
-            if not regions:
-                mid = max(int(height * 0.55), 0)
-                regions.append((0, mid, width, height))
-            deduped: List[Tuple[int, int, int, int]] = []
-            for box in sorted(regions, key=lambda item: (item[1], item[0])):
-                x0, y0, x1, y1 = box
-                keep = True
-                for existing in deduped:
-                    ex0, ey0, ex1, ey1 = existing
-                    inter_x0 = max(x0, ex0)
-                    inter_y0 = max(y0, ey0)
-                    inter_x1 = min(x1, ex1)
-                    inter_y1 = min(y1, ey1)
-                    if inter_x1 <= inter_x0 or inter_y1 <= inter_y0:
-                        continue
-                    inter_area = (inter_x1 - inter_x0) * (inter_y1 - inter_y0)
-                    area_a = (x1 - x0) * (y1 - y0)
-                    area_b = (ex1 - ex0) * (ey1 - ey0)
-                    union = area_a + area_b - inter_area
-                    if union <= 0:
-                        continue
-                    if inter_area / float(union) > 0.6:
-                        keep = False
-                        break
-                if keep:
-                    deduped.append(box)
-                if len(deduped) >= 4:
-                    break
-            return deduped
-
-        def _prepare_for_tesseract(image: Image.Image) -> Image.Image:
-            rgb = np.array(image.convert("RGB"), dtype=np.float32)
-            if rgb.ndim != 3 or rgb.shape[2] != 3:
-                return image.convert("L")
-            emphasised = rgb[..., 0] * 1.35 - 0.25 * rgb[..., 1] - 0.25 * rgb[..., 2] + 60.0
-            emphasised = np.clip(emphasised, 0, 255).astype("uint8")
-            processed = Image.fromarray(emphasised, mode="L")
-            processed = ImageOps.autocontrast(processed)
-            return processed.filter(ImageFilter.UnsharpMask(radius=2, percent=200))
-
-        appended = False
-        for roi_index, roi in enumerate(_candidate_rois()):
-            x0, y0, x1, y1 = roi
-            if x1 <= x0 or y1 <= y0:
-                continue
-            crop = base_resized.crop(roi)
-            if crop.width < 6 or crop.height < 6:
-                continue
-            scale = max(2, min(6, int(round(1800 / max(crop.width, crop.height, 1)))))
-            scaled = crop.resize((crop.width * scale, crop.height * scale), resample_filter)
-            prepared = _prepare_for_tesseract(scaled)
-            to_data = getattr(pytesseract, "image_to_data", None)
-            if to_data is None:
-                try:
-                    fallback_text = pytesseract.image_to_string(
-                        prepared,
-                        config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[]().,umµ",
-                    )
-                except Exception:
-                    log.debug(
-                        "Tesseract failed while processing %s region %s",
-                        path,
-                        roi,
-                        exc_info=True,
-                    )
-                    continue
-                cleaned = _normalise_microscope_text(fallback_text or "")
-                if cleaned:
-                    _append_candidate(cleaned)
-                    tagged = f"tesseract/roi{roi_index}: {cleaned}"
-                    if tagged not in seen_texts:
-                        result.texts.append(tagged)
-                        seen_texts.add(tagged)
-                    matched_any = False
-                    for match in re.finditer(
-                        r"\[(?P<label>[12Il])\]\s*(?P<value>\d+(?:[.,]\d+)?)",
-                        cleaned,
-                    ):
-                        label_token = match.group("label")
-                        if label_token in {"I", "l"}:
-                            label_token = "1"
-                        try:
-                            numeric = float(match.group("value").replace(",", "."))
-                        except ValueError:
-                            continue
-                        if not math.isfinite(numeric) or numeric <= 0:
-                            continue
-                        result.append_value(numeric)
-                        matched_any = True
-                    if not matched_any:
-                        parsed = _parse_microscope_candidates([cleaned])
-                        for value in parsed:
-                            result.append_value(value)
-                        matched_any = bool(parsed)
-                    if matched_any:
-                        appended = True
-                        break
-                continue
-            if Output is None:
-                to_data = None
-            if to_data is None:
-                continue
-            try:
-                data = to_data(
-                    prepared,
-                    output_type=Output.DICT if Output is not None else None,
-                    config="--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789[]().,umµ",
-                )
-            except Exception:
-                log.debug(
-                    "Tesseract failed while processing %s region %s",
-                    path,
-                    roi,
-                    exc_info=True,
-                )
-                continue
-            words: List[_OCRWord] = []
-            count = len(data.get("text", []))
-            for idx in range(count):
-                token = (data["text"][idx] or "").strip()
-                if not token:
-                    continue
-                try:
-                    left = int(data["left"][idx])
-                    top = int(data["top"][idx])
-                    width = int(data["width"][idx])
-                    height = int(data["height"][idx])
-                except Exception:
-                    continue
-                conf_value = None
-                try:
-                    conf_raw = float(data.get("conf", [None])[idx])
-                except Exception:
-                    conf_raw = None
-                if conf_raw is not None and math.isfinite(conf_raw) and conf_raw >= 0:
-                    conf_value = conf_raw / 100.0
-                words.append(
-                    _OCRWord(
-                        text=token,
-                        left=left,
-                        top=top,
-                        width=width,
-                        height=height,
-                        conf=conf_value,
-                    )
-                )
-            if not words:
-                continue
-            grouped_lines: Dict[Tuple[int, int, int], List[_OCRWord]] = {}
-            for idx, word in enumerate(words):
-                block = int(data.get("block_num", [0])[idx])
-                paragraph = int(data.get("par_num", [0])[idx])
-                line_idx = int(data.get("line_num", [0])[idx])
-                grouped_lines.setdefault((block, paragraph, line_idx), []).append(word)
-            for line_words in grouped_lines.values():
-                line_words.sort(key=lambda w: w.left)
-                line_text = " ".join(entry.text for entry in line_words if entry.text)
-                if line_text:
-                    _append_candidate(line_text)
-                    tagged = f"tesseract/roi{roi_index}: {line_text}"
-                    if tagged not in seen_texts:
-                        result.texts.append(tagged)
-                        seen_texts.add(tagged)
-                for detection in _extract_line_detections(
-                    line_words,
-                    prepared.size,
-                    offset=(x0, y0),
-                    reference_size=base_resized.size,
-                ):
-                    bbox = detection.bbox or (0, 0, 0, 0)
-                    key = (
-                        round(detection.value, 2),
-                        bbox[0],
-                        bbox[1],
-                        bbox[2],
-                        bbox[3],
-                    )
-                    if key in seen_detections:
-                        continue
-                    detection.source = "tesseract"
-                    result.detections.append(detection)
-                    seen_detections.add(key)
-                    result.append_value(detection.value)
-                    appended = True
-            if appended:
-                break
-
-        if appended:
-            parsed = _parse_microscope_candidates(candidates)
-            for value in parsed:
-                result.append_value(value)
-        return appended
-
     @dataclass
     class _OCRWord:
         text: str
@@ -2050,6 +1774,91 @@ def _extract_microscope_diameters(
         words: List[_OCRWord] = []
         for entry in raw_result or []:
             if not entry:
+                continue
+            if isinstance(entry, dict):
+                texts = entry.get("rec_texts") or []
+                scores = entry.get("rec_scores") or []
+                polys = entry.get("rec_polys") or entry.get("dt_polys") or []
+                boxes = entry.get("rec_boxes")
+                for idx, text in enumerate(texts):
+                    token = (text or "").strip()
+                    if not token:
+                        continue
+                    score = None
+                    if idx < len(scores):
+                        try:
+                            score = float(scores[idx])
+                        except (TypeError, ValueError):
+                            score = None
+                    points_seq = []
+                    poly = None
+                    if isinstance(polys, (list, tuple)):
+                        if idx < len(polys):
+                            poly = polys[idx]
+                        elif polys:
+                            poly = polys[0]
+                    elif polys is not None:
+                        poly = polys
+                    if poly is not None:
+                        try:
+                            iterable = poly.tolist()
+                        except AttributeError:
+                            iterable = list(poly)
+                        for pt in iterable or []:
+                            if not pt:
+                                continue
+                            if isinstance(pt, (list, tuple)) and len(pt) >= 2:
+                                try:
+                                    points_seq.append([float(pt[0]), float(pt[1])])
+                                except (TypeError, ValueError):
+                                    continue
+                    if not points_seq and boxes is not None:
+                        box = None
+                        if isinstance(boxes, (list, tuple)):
+                            if idx < len(boxes):
+                                box = boxes[idx]
+                            elif boxes:
+                                box = boxes[0]
+                        else:
+                            box = boxes
+                        if box is not None:
+                            try:
+                                flat = box.tolist()
+                            except AttributeError:
+                                flat = list(box)
+                            if len(flat) == 4:
+                                x0, y0, x1, y1 = flat
+                                points_seq = [
+                                    [float(x0), float(y0)],
+                                    [float(x1), float(y0)],
+                                    [float(x1), float(y1)],
+                                    [float(x0), float(y1)],
+                                ]
+                    if not points_seq:
+                        continue
+                    xs = [float(pt[0]) for pt in points_seq if pt]
+                    ys = [float(pt[1]) for pt in points_seq if pt]
+                    if not xs or not ys:
+                        continue
+                    left = min(xs)
+                    top = min(ys)
+                    right = max(xs)
+                    bottom = max(ys)
+                    width = max(int(round(right - left)), 0)
+                    height = max(int(round(bottom - top)), 0)
+                    conf = None
+                    if score is not None and math.isfinite(score):
+                        conf = float(score)
+                    words.append(
+                        _OCRWord(
+                            text=token,
+                            left=int(round(left)),
+                            top=int(round(top)),
+                            width=width,
+                            height=height,
+                            conf=conf,
+                        )
+                    )
                 continue
             for detection in entry:
                 if not detection:
@@ -2303,7 +2112,7 @@ def _extract_microscope_diameters(
     processed_any_variant = False
     if ocr is not None:
         try:
-            direct_result = ocr.ocr(str(path), cls=True)
+            direct_result = ocr.ocr(str(path))
         except Exception:
             direct_result = None
         if direct_result:
@@ -2325,7 +2134,7 @@ def _extract_microscope_diameters(
             variant_array = variant_array.astype("uint8", copy=False)
             bgr_image = variant_array[:, :, ::-1].copy()
             try:
-                ocr_result = ocr.ocr(bgr_image, cls=True)
+                ocr_result = ocr.ocr(bgr_image)
             except Exception:
                 log.debug(
                     "PaddleOCR failed while processing %s; skipping this variant",
@@ -2350,9 +2159,6 @@ def _extract_microscope_diameters(
                     break
             if result.values:
                 break
-
-    if allow_tesseract_fallback and not result.values and _run_tesseract_fallback():
-        processed_any_variant = True
 
     if not processed_any_variant:
         log.debug("PaddleOCR produced no candidate text for %s", path)
@@ -2417,6 +2223,9 @@ def _group_microscope_measurements(
     logger: Optional[logging.Logger],
     progress_callback: Optional[Callable[[int, int], None]] = None,
     debug_callback: Optional[Callable[[Path, MicroscopeOCRResult], None]] = None,
+    update_callback: Optional[
+        Callable[[Tuple[str, int, int], MicroscopeMeasurements], None]
+    ] = None,
 ) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
     log = _logger(logger)
     combined: List[Path] = []
@@ -2496,10 +2305,16 @@ def _group_microscope_measurements(
             grouped_detections: Dict[str, List[MicroscopeDetection]] = {}
             for detection in detections:
                 override_category = category
-                if detection.marker == 1:
-                    override_category = "core"
-                elif detection.marker == 2:
-                    override_category = "glass"
+                if category == "glass":
+                    if detection.marker == 2:
+                        continue
+                    if detection.marker == 1:
+                        override_category = "glass"
+                else:
+                    if detection.marker == 1:
+                        override_category = "core"
+                    elif detection.marker == 2:
+                        override_category = "glass"
                 grouped_detections.setdefault(override_category, []).append(detection)
             used_keys: Set[float] = set()
             for det_category, det_list in grouped_detections.items():
@@ -2535,6 +2350,11 @@ def _group_microscope_measurements(
             continue
         if not detections and values:
             record.add_placeholder(category, path)
+        if update_callback is not None:
+            try:
+                update_callback(key, record)
+            except Exception:
+                log.debug("Microscope update callback failed for %s", key, exc_info=True)
         _notify()
     missing_references: List[str] = []
     mismatched_references: List[str] = []

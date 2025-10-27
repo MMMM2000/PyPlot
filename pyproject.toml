@@ -11,8 +11,10 @@ dependencies = [
     "openpyxl==3.1.5",
     "originpro==1.1.14",
     "pypdf==6.1.2",
+    "pypdfium2==5.0.0",
     "pyqtgraph==0.13.7",
     "plotly==6.3.1",
+    "reportlab==4.2.5",
     "XlsxWriter==3.2.9",
     "tqdm==4.67.1",
     "pyinstaller==6.16.0",
@@ -21,7 +23,6 @@ dependencies = [
     "zeroconf==0.148.0",
     "paddleocr==3.3.0",
     "paddlepaddle==3.2.0",
-    "pytesseract==0.3.13",
 ]
 requires-python = ">=3.10"
 

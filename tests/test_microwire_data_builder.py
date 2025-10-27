@@ -8,7 +8,6 @@ from pathlib import Path
 import importlib.util
 import logging
 import sys
-import types
 
 import pandas as pd
 import pytest
@@ -147,43 +146,6 @@ def test_piece_header_backfill_extracts_diameters(tmp_path: Path) -> None:
     assert record["fabrication_resistance_ohm"] == pytest.approx(2.15)
     display = record.get("d_um__display")
     assert isinstance(display, list) and "7" in display[0]
-
-
-def test_microscope_tesseract_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    sample = Path("sample_data/database_builder/microscope/Ni46Fe23Ga23Co8 1_1 core.jpg")
-    if not sample.exists():
-        pytest.skip("sample microscope image missing")
-
-    stub = types.ModuleType("pytesseract")
-
-    class _StubError(Exception):
-        pass
-
-    stub.TesseractNotFoundError = _StubError  # type: ignore[attr-defined]
-    stub.get_tesseract_version = lambda: "stub"
-
-    captured: list[str] = []
-
-    def _fake_image_to_string(_image, config=None):  # pragma: no cover - trivial
-        captured.append(config or "")
-        return "[1]6.7um [2]13.2um"
-
-    stub.image_to_string = _fake_image_to_string  # type: ignore[attr-defined]
-
-    monkeypatch.setitem(sys.modules, "pytesseract", stub)
-
-    monkeypatch.setitem(sys.modules, "paddleocr", types.ModuleType("paddleocr"))
-
-    def _no_paddle(_logger=None):  # pragma: no cover - stub
-        return None
-
-    monkeypatch.setattr(core, "get_paddle_ocr", _no_paddle)
-
-    result = _extract_microscope_diameters(sample, logging.getLogger("test"))
-    assert result.values
-    assert any(pytest.approx(value, rel=1e-3) == 6.7 for value in result.values)
-    assert any(pytest.approx(value, rel=1e-3) == 13.2 for value in result.values)
-    assert captured, "expected pytesseract fallback to be invoked"
 
 
 def test_merged_header_row_combines_unit_suffix() -> None:
