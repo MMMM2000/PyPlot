@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import importlib.util
@@ -33,6 +34,32 @@ FabricationIndex = core.FabricationIndex
 _merged_header_row = core._merged_header_row
 _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
+
+
+def test_paddle_candidate_kwargs_include_ascii_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from microwire_data_builder import ocr
+
+    monkeypatch.setattr(ocr, "_CACHE_ROOT", tmp_path)
+    home_dir = tmp_path / "paddleocr_home"
+    home_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(ocr, "_PADDLE_HOME", home_dir, raising=False)
+
+    params = [
+        inspect.Parameter("self", inspect.Parameter.POSITIONAL_OR_KEYWORD),
+        inspect.Parameter("lang", inspect.Parameter.KEYWORD_ONLY, default="en"),
+        inspect.Parameter("home_path", inspect.Parameter.KEYWORD_ONLY, default=None),
+        inspect.Parameter("use_angle_cls", inspect.Parameter.KEYWORD_ONLY, default=True),
+    ]
+    signature = inspect.Signature(parameters=params)
+
+    combos = ocr._candidate_kwargs(signature)
+    assert combos, "expected candidate kwargs to be generated"
+
+    for combo in combos:
+        if "home_path" in combo:
+            value = combo["home_path"]
+            assert value == str(home_dir)
+            value.encode("ascii")
 
 
 def test_filename_parser_extracts_metadata(tmp_path: Path) -> None:

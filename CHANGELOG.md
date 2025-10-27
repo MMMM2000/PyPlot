@@ -1,4 +1,11 @@
 # Changelog
+## 2025-10-27 10:20 UTC
+
+- Passed an ASCII-only `home_path` to PaddleOCR so Windows accounts with
+  diacritic user names download models into the temporary cache prepared by the
+  builder instead of failing to open `inference.json` from `%USERPROFILE%`.
+- Added a regression test that asserts the PaddleOCR initialisation kwargs use
+  the cache directory and remain ASCII-safe.
 
 ## 2025-10-27 09:45 UTC
 

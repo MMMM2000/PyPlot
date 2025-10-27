@@ -80,6 +80,8 @@ def _prepare_paddle_cache() -> Path:
 
 
 _CACHE_ROOT = _prepare_paddle_cache()
+_PADDLE_HOME = _CACHE_ROOT / "paddleocr_home"
+_PADDLE_HOME.mkdir(parents=True, exist_ok=True)
 
 
 def _purge_corrupted_cache(cache_root: Path, extra_path: Path | None = None) -> None:
@@ -165,12 +167,20 @@ def _candidate_kwargs(signature: inspect.Signature | None) -> list[dict[str, obj
     }
     if "show_log" in supported:
         tuned["show_log"] = False
+    if "home_path" in supported:
+        tuned["home_path"] = str(_PADDLE_HOME)
 
     baseline = {"lang": "en", "use_angle_cls": True}
     if "show_log" in supported:
         baseline["show_log"] = False
+    if "home_path" in supported:
+        baseline["home_path"] = str(_PADDLE_HOME)
 
-    return [tuned, baseline, {"lang": "en"}]
+    minimal: dict[str, object] = {"lang": "en"}
+    if "home_path" in supported:
+        minimal["home_path"] = str(_PADDLE_HOME)
+
+    return [tuned, baseline, minimal]
 
 
 @lru_cache(maxsize=1)
