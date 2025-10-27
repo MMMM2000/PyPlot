@@ -1,5 +1,16 @@
 # Changelog
 
+## 2025-10-27 09:30 UTC
+
+- Forced PaddleOCR and PaddleX to download models into an ASCII-only cache
+  before the library is imported, purging any previous downloads from diacritic
+  Windows paths and retrying so the OCR backends initialise cleanly on laptops
+  like “Martin Eliáš”.
+- Refreshed the README installation guidance to highlight the
+  `pip install -r requirements.txt` runtime setup and the follow-up
+  `pip install .[test]` extras command so no manual dependency steps are needed
+  outside experiments.
+
 ## 2025-10-26 23:15 UTC
 
 - Replaced the microscope Tesseract fallback with an HSV-guided ROI scanner

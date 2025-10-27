@@ -16,6 +16,11 @@ loggers, plotters, emulators, and builders without starting individual scripts.
    `pip install .[test]`
 6. Launch the hub: `python -m launcher`
 
+> **Tip:** The `pip install -r requirements.txt` command pulls in every
+> dependency required to run the launcher and builder tools. Run `pip install
+> .[test]` afterwards if you also plan to execute the bundled tests or
+> experiment scripts.
+
 OriginPro users should also install `originpro`, `numpy`, `pandas`,
 `python-dateutil`, `pytz`, `six`, and `tzdata` inside Origin’s embedded Python
 before choosing the Origin backend.

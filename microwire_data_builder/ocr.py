@@ -5,6 +5,7 @@ from __future__ import annotations
 import inspect
 import logging
 import os
+import re
 import shutil
 import tempfile
 from functools import lru_cache
@@ -16,38 +17,90 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 
 DEFAULT_LOGGER = "microwire_data_builder"
 _MISSING_PADDLE_WARNED = False
-_CACHE_ENV_VARS = ("PADDLEOCR_HOME", "PPOCR_MODEL_CACHE_DIR")
+
+# Environment variables that influence PaddleOCR/PaddleX cache locations. We map
+# each one to a known ASCII-only directory so Windows accounts with diacritics
+# do not break lazy model downloads.
+_CACHE_ENV_VARS: dict[str, str] = {
+    "PADDLE_HOME": "paddle_home",
+    "PADDLE_MODEL_HOME": "paddle_models",
+    "PADDLEX_HOME": "paddlex",
+    "PADDLEX_OFFICIAL_MODEL_HOME": "paddlex_official_models",
+    "PADDLEOCR_HOME": "paddleocr",
+    "PPOCR_MODEL_CACHE_DIR": "ppocr_models",
+}
 
 
 def _prepare_paddle_cache() -> Path:
     """Return a filesystem location that is ASCII-safe for PaddleOCR caches."""
 
-    cache_root = Path(tempfile.gettempdir()) / "microwire_paddleocr_cache"
+    temp_root = Path(tempfile.gettempdir())
+    try:
+        str(temp_root).encode("ascii")
+    except UnicodeEncodeError:
+        if os.name == "nt":
+            drive = temp_root.drive or Path.cwd().drive or "C:"
+            drive_path = Path(drive + os.sep)
+            base = drive_path / "microwire_paddle_cache"
+        else:
+            base = Path("/tmp") / "microwire_paddle_cache"
+    else:
+        base = temp_root / "microwire_paddle_cache"
+
+    cache_root = base.resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
-    for env_var in _CACHE_ENV_VARS:
-        os.environ.setdefault(env_var, str(cache_root))
+
+    for env_var, subdir in _CACHE_ENV_VARS.items():
+        target = cache_root / subdir
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault(env_var, str(target))
+
     return cache_root
 
 
-def _purge_corrupted_cache(cache_root: Path) -> None:
+_CACHE_ROOT = _prepare_paddle_cache()
+
+
+def _purge_corrupted_cache(cache_root: Path, extra_path: Path | None = None) -> None:
     """Remove cache artefacts that might have been partially downloaded."""
 
-    if not cache_root.exists():
-        return
-
-    for child in cache_root.iterdir():
-        if child.is_dir():
-            shutil.rmtree(child, ignore_errors=True)
+    def _purge(path: Path) -> None:
+        if not path.exists():
+            return
+        if path.is_dir():
+            shutil.rmtree(path, ignore_errors=True)
         else:
             try:
-                child.unlink()
+                path.unlink()
             except FileNotFoundError:  # pragma: no cover - race condition guard
-                continue
+                return
+
+    _purge(cache_root)
+    cache_root.mkdir(parents=True, exist_ok=True)
+    for env_var, subdir in _CACHE_ENV_VARS.items():
+        target = cache_root / subdir
+        target.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault(env_var, str(target))
+
+    if extra_path is not None:
+        _purge(extra_path)
 
 
-def _looks_like_corrupted_model(exc: Exception) -> bool:
+_CORRUPTED_MODEL_RE = re.compile(r"Cannot open file ([^,]+)")
+
+
+def _looks_like_corrupted_model(exc: Exception) -> tuple[bool, Path | None]:
     message = str(exc)
-    return "Cannot open file" in message and "inference.json" in message
+    if "Cannot open file" in message and "inference.json" in message:
+        match = _CORRUPTED_MODEL_RE.search(message)
+        if match:
+            candidate = match.group(1).strip().strip("`\"")
+            try:
+                return True, Path(candidate).resolve()
+            except OSError:  # pragma: no cover - Windows path edge cases
+                return True, None
+        return True, None
+    return False, None
 
 
 def _initialise_paddle(
@@ -105,8 +158,6 @@ def _create_default_ocr() -> "PaddleOCR":
 
     from paddleocr import PaddleOCR  # type: ignore[import-not-found]
 
-    cache_root = _prepare_paddle_cache()
-
     try:
         signature = inspect.signature(PaddleOCR.__init__)
     except (TypeError, ValueError):  # pragma: no cover - CPython guard
@@ -115,8 +166,10 @@ def _create_default_ocr() -> "PaddleOCR":
     try:
         return _initialise_paddle(PaddleOCR, signature)
     except Exception as exc:
-        if _looks_like_corrupted_model(exc):
-            _purge_corrupted_cache(cache_root)
+        corrupted, path = _looks_like_corrupted_model(exc)
+        if corrupted:
+            extra = path.parent if path is not None else None
+            _purge_corrupted_cache(_CACHE_ROOT, extra_path=extra)
             return _initialise_paddle(PaddleOCR, signature)
         raise
 
