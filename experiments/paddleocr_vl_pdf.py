@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -89,22 +90,29 @@ def _collect_strings(payload: object, *, prompt: str) -> List[str]:
 def _initialise_vl_engine(disable_vl: bool) -> Tuple[PaddleOCR | PaddleOCRVL, str]:
     """Create the OCR engines used by the converter."""
 
-    if not disable_vl:
-        try:
-            engine = PaddleOCRVL()
-            LOGGER.info("Using PaddleOCR-VL pipeline for page-level summaries.")
-            return engine, "vl"
-        except Exception as exc:  # pragma: no cover - optional dependency
-            LOGGER.warning("Failed to initialise PaddleOCR-VL: %s", exc, exc_info=True)
+    if disable_vl:
+        LOGGER.info("PaddleOCR-VL disabled; using classic PaddleOCR for summaries.")
+        classic = PaddleOCR(
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            text_det_limit_side_len=4000,
+            use_textline_orientation=False,
+        )
+        return classic, "classic"
 
-    LOGGER.info("Falling back to classic PaddleOCR pipeline for summaries.")
-    classic = PaddleOCR(
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        text_det_limit_side_len=4000,
-        use_textline_orientation=False,
-    )
-    return classic, "classic"
+    try:
+        engine = PaddleOCRVL()
+    except Exception as exc:  # pragma: no cover - optional dependency
+        missing_msg = (
+            "PaddleOCR-VL requires the paddlex[ocr] extra (and a safetensors build with paddle support). "
+            "Install with `pip install \"paddlex[ocr]\"` to pull the Python deps and, on macOS, install Rust "
+            "then rebuild safetensors from source: `pip install --no-binary safetensors safetensors`. "
+            "You can also uncheck \"Use PaddleOCR-VL for page summaries\" to fall back to classic OCR."
+        )
+        raise RuntimeError(missing_msg) from exc
+
+    LOGGER.info("Using PaddleOCR-VL pipeline for page-level summaries.")
+    return engine, "vl"
 
 
 def _initialise_classic_engine() -> PaddleOCR:
@@ -236,6 +244,10 @@ def _build_canvas(
     pdf.save()
 
 
+class ConversionCancelled(Exception):
+    """Raised when the PDF conversion is cancelled by the user."""
+
+
 def convert_pdf(
     input_path: Path,
     output_path: Path,
@@ -246,6 +258,7 @@ def convert_pdf(
     include_images: bool,
     summary_font: float,
     progress_callback: Optional[Callable[[int, int], None]] = None,
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     vl_engine, vl_mode = _initialise_vl_engine(disable_vl)
     classic_engine = _initialise_classic_engine()
@@ -253,13 +266,22 @@ def convert_pdf(
 
     with tempfile.TemporaryDirectory(prefix="paddleocr_vl_") as temp_dir_str:
         temp_dir = Path(temp_dir_str)
-        pdf_doc = pdfium.PdfDocument(str(input_path))
+        try:
+            pdf_doc = pdfium.PdfDocument(str(input_path))
+        except Exception as exc:
+            raise RuntimeError(
+                f"Failed to load document (PDFium: {exc}). Try re-saving the PDF without encryption or export a fresh copy."
+            ) from exc
         total_pages = len(pdf_doc)
         if progress_callback is not None:
             progress_callback(0, total_pages)
         scale = dpi / 72.0
 
         for page_number, page in enumerate(pdf_doc, start=1):
+            if cancel_event is not None and cancel_event.is_set():
+                LOGGER.info("Conversion cancelled before processing page %s.", page_number)
+                raise ConversionCancelled()
+
             renderer = page.render(scale=scale)
             pil_image = renderer.to_pil()
             renderer.close()
@@ -290,9 +312,15 @@ def convert_pdf(
             )
             if progress_callback is not None:
                 progress_callback(page_number, total_pages)
+            if cancel_event is not None and cancel_event.is_set():
+                LOGGER.info("Conversion cancelled after processing page %s.", page_number)
+                raise ConversionCancelled()
 
         pdf_doc.close()
 
+    if cancel_event is not None and cancel_event.is_set():
+        LOGGER.info("Conversion cancelled before writing output.")
+        raise ConversionCancelled()
     _build_canvas(output_path, payloads, show_images=include_images, summary_font=summary_font)
     LOGGER.info("Searchable PDF written to %s", output_path)
 
@@ -316,6 +344,7 @@ class _ConversionWorker(QtCore.QObject):
     progress = QtCore.pyqtSignal(int, int)
     finished = QtCore.pyqtSignal()
     failed = QtCore.pyqtSignal(str)
+    cancelled = QtCore.pyqtSignal()
 
     def __init__(
         self,
@@ -336,6 +365,7 @@ class _ConversionWorker(QtCore.QObject):
         self._prompt = prompt
         self._include_images = include_images
         self._summary_font = summary_font
+        self._cancel_event = threading.Event()
 
     @QtCore.pyqtSlot()
     def run(self) -> None:  # pragma: no cover - exercised via GUI
@@ -349,7 +379,10 @@ class _ConversionWorker(QtCore.QObject):
                 include_images=self._include_images,
                 summary_font=self._summary_font,
                 progress_callback=self._emit_progress,
+                cancel_event=self._cancel_event,
             )
+        except ConversionCancelled:
+            self.cancelled.emit()
         except Exception as exc:
             self.failed.emit(str(exc))
         else:
@@ -361,6 +394,9 @@ class _ConversionWorker(QtCore.QObject):
         except Exception:
             pass
 
+    def cancel(self) -> None:
+        self._cancel_event.set()
+
 
 class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
     def __init__(self) -> None:
@@ -370,6 +406,12 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
 
         self._thread: QtCore.QThread | None = None
         self._worker: _ConversionWorker | None = None
+        self._settings = QtCore.QSettings("MicrowireTools", "PaddleOCRVLPDF")
+        last_dir_value = self._settings.value("last_dir")
+        if isinstance(last_dir_value, str) and last_dir_value:
+            self._last_dir = Path(last_dir_value)
+        else:
+            self._last_dir = Path.cwd()
 
         self._build_ui()
         self._configure_logging()
@@ -438,6 +480,10 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
+        self.stop_button = QtWidgets.QPushButton("Stop")
+        self.stop_button.setEnabled(False)
+        self.stop_button.clicked.connect(self._cancel_conversion)
+        button_row.addWidget(self.stop_button)
         self.convert_button = QtWidgets.QPushButton("Convert")
         self.convert_button.clicked.connect(self._start_conversion)
         button_row.addWidget(self.convert_button)
@@ -456,27 +502,54 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
         if scrollbar is not None:
             scrollbar.setValue(scrollbar.maximum())
 
+    def _effective_start_dir(self) -> Path:
+        try:
+            candidate = self._last_dir
+        except AttributeError:
+            return Path.cwd()
+        if isinstance(candidate, Path) and candidate.exists():
+            return candidate
+        return Path.cwd()
+
+    def _update_last_dir(self, path: Path) -> None:
+        if not isinstance(path, Path):
+            return
+        directory = path if path.is_dir() else path.parent
+        if not isinstance(directory, Path):
+            return
+        self._last_dir = directory
+        self._settings.setValue("last_dir", str(directory))
+
     def _choose_input(self) -> None:
+        start_dir = self._effective_start_dir()
         path, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
             "Select PDF",
-            str(Path.cwd()),
+            str(start_dir),
             "PDF files (*.pdf)",
         )
         if path:
+            self._update_last_dir(Path(path))
             self.input_edit.setText(path)
             if not self.output_edit.text():
                 stem = Path(path).stem + "_searchable.pdf"
                 self.output_edit.setText(str(Path(path).with_name(stem)))
 
     def _choose_output(self) -> None:
+        current_output = self.output_edit.text().strip()
+        if current_output:
+            start_path = Path(current_output)
+            start_dir = start_path.parent if start_path.parent.exists() else self._effective_start_dir()
+        else:
+            start_dir = self._effective_start_dir()
         path, _ = QtWidgets.QFileDialog.getSaveFileName(
             self,
             "Save Searchable PDF",
-            self.output_edit.text() or str(Path.cwd() / "searchable.pdf"),
+            current_output or str(start_dir / "searchable.pdf"),
             "PDF files (*.pdf)",
         )
         if path:
+            self._update_last_dir(Path(path))
             if not path.lower().endswith(".pdf"):
                 path += ".pdf"
             self.output_edit.setText(path)
@@ -512,6 +585,9 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
         self.progress_bar.setRange(0, 0)
         self.log_view.clear()
         self._append_log(f"Starting conversion: {input_path} → {output_path}")
+        self.stop_button.setEnabled(True)
+        self._update_last_dir(input_path.parent)
+        self._update_last_dir(output_path.parent)
 
         self._thread = QtCore.QThread(self)
         self._worker = _ConversionWorker(
@@ -528,10 +604,24 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
         self._worker.progress.connect(self._handle_progress)
         self._worker.finished.connect(self._handle_finished)
         self._worker.failed.connect(self._handle_failed)
+        self._worker.cancelled.connect(self._handle_cancelled)
         self._worker.finished.connect(self._thread.quit)
         self._worker.failed.connect(self._thread.quit)
+        self._worker.cancelled.connect(self._thread.quit)
         self._thread.finished.connect(self._cleanup_worker)
         self._thread.start()
+
+    def _cancel_conversion(self) -> None:
+        if self._worker is None or self._thread is None:
+            return
+        if not self._thread.isRunning():
+            return
+        self._append_log("Cancellation requested; stopping after current page.")
+        self.stop_button.setEnabled(False)
+        try:
+            self._worker.cancel()
+        except Exception:
+            pass
 
     def _handle_progress(self, current: int, total: int) -> None:
         if total <= 0:
@@ -548,7 +638,15 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
 
     def _handle_failed(self, message: str) -> None:
         self._append_log(f"Conversion failed: {message}")
-        QtWidgets.QMessageBox.critical(self, "Conversion failed", message)
+        details = message
+        if "Failed to load document (PDFium" in message:
+            details += "\n\nPDFium could not parse the file. Save a local copy without encryption or re-export the PDF, then try again."
+        QtWidgets.QMessageBox.critical(self, "Conversion failed", details)
+        self._reset_controls()
+
+    def _handle_cancelled(self) -> None:
+        self._append_log("Conversion cancelled.")
+        QtWidgets.QMessageBox.information(self, "Conversion cancelled", "The PDF conversion was cancelled.")
         self._reset_controls()
 
     def _cleanup_worker(self) -> None:
@@ -563,9 +661,11 @@ class PaddleOCRVLPDFWindow(QtWidgets.QWidget):
         self.convert_button.setEnabled(True)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
+        self.stop_button.setEnabled(False)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._thread is not None and self._thread.isRunning():
+            self._cancel_conversion()
             self._append_log("Waiting for conversion to finish before closing...")
             self._thread.quit()
             self._thread.wait(2000)

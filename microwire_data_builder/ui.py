@@ -1,4 +1,4 @@
-﻿"""PyQt6 user interface for the microwire database builder."""
+"""PyQt6 user interface for the microwire database builder."""
 
 from __future__ import annotations
 
@@ -4782,18 +4782,6 @@ class MicroscopeSection(MiniDatabaseSection):
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         self._expected_keys_current: Set[Tuple[str, int, int]] = set()
         super().__init__(logger, log_callback, parent)
-        stored_overrides = self.data.extra.get("overrides")
-        if isinstance(stored_overrides, dict):
-            self._overrides = {
-                str(key): {k: float(v) for k, v in value.items() if isinstance(v, (int, float))}
-                for key, value in stored_overrides.items()
-                if isinstance(value, dict)
-            }
-        if not self.data.table.empty:
-            self._apply_overrides_to_table()
-        self._update_hidden_columns()
-        self._update_missing_summary()
-        self.partial_row_ready.connect(self._apply_partial_row)
 
         self._missing_summary_label = QtWidgets.QLabel("", self)
         self._missing_summary_label.setObjectName("microscopeMissingSummaryLabel")
@@ -4806,6 +4794,19 @@ class MicroscopeSection(MiniDatabaseSection):
         self._missing_list.setVisible(False)
         self._missing_list.itemActivated.connect(self._handle_missing_item_activated)
         self.main_layout.insertWidget(3, self._missing_list)
+
+        stored_overrides = self.data.extra.get("overrides")
+        if isinstance(stored_overrides, dict):
+            self._overrides = {
+                str(key): {k: float(v) for k, v in value.items() if isinstance(v, (int, float))}
+                for key, value in stored_overrides.items()
+                if isinstance(value, dict)
+            }
+        if not self.data.table.empty:
+            self._apply_overrides_to_table()
+        self._update_hidden_columns()
+        self._update_missing_summary()
+        self.partial_row_ready.connect(self._apply_partial_row)
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
@@ -5320,17 +5321,12 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_missing_summary()
 
     def refresh(self) -> None:
-    def refresh(self) -> None:
         self._expected_keys_current = self._expected_microwire_keys()
         if self._expected_keys_current:
             self._prepare_initial_table(self._expected_keys_current)
         super().refresh()
         if self.data.table.empty and self._expected_keys_current:
             self._prepare_initial_table(self._expected_keys_current)
-        self._apply_overrides_to_table()
-        self._update_hidden_columns()
-        self._update_missing_summary()
-        super().refresh()
         self._apply_overrides_to_table()
         self._update_hidden_columns()
         self._update_missing_summary()
@@ -7350,7 +7346,3 @@ def main() -> QtWidgets.QWidget | None:
 
 
 __all__ = ["BuilderWindow", "main", "run_app"]
-
-
-
-

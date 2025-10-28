@@ -1,4 +1,23 @@
 # Changelog
+## 2025-10-28 09:50 UTC
+
+- Marked the `originpro` automation dependency as Windows-only and regenerated `requirements.txt` so macOS/Linux installs no longer fail on missing Origin wheels.
+- Documented the Windows-only `pip install originpro==1.1.14 originext==1.2.5` step in the README to keep Origin export support available on supported hosts.
+- Repaired the Microwire builder refresh routine so the Qt UI imports cleanly after installing the standard requirements.
+- Added a stop button (with graceful cancellation) to the PaddleOCR-VL PDF converter so long runs can be aborted without killing the process.
+- Hardened the PaddleOCR-VL PDF converter error handling so PDFium data-format issues surface actionable guidance instead of raw tracebacks.
+- Require the PaddleOCR-VL extras when the VL option is selected instead of silently falling back to classic OCR.
+- Added `paddlex[ocr-core]==3.3.5` to the default dependency set so PaddleOCR-VL installs with the rest of the stack.
+- Switched the dependency pin to `paddlex[ocr]==3.3.5`, taught the PaddleOCR-VL converter to remember the most recently used folder, and surfaced detailed guidance when the safetensors paddle backend is missing (macOS users must rebuild safetensors from source or disable VL summaries).
+
+## 2025-10-28 09:25 UTC
+
+- Updated the README extras install command to `pip install '.[test]'` so shells like zsh do not glob away the bracketed extra specifier.
+
+## 2025-10-27 15:40 UTC
+
+- Clarified the README quick start to pin virtual environment creation to Python 3.13 (3.13.9 baseline) so macOS and Windows installations share the supported interpreter.
+
 ## 2025-10-27 14:55 UTC
 
 - Redirected file pickers to the original user home and forced Paddle temp directories into ASCII-safe caches so Windows no longer shows "Location not available" when connecting data folders.

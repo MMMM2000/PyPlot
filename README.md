@@ -6,20 +6,27 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 
 ## Quick Start
 
-1. Create a virtual environment: `python3 -m venv .venv`
-2. Activate it (`source .venv/bin/activate` on macOS/Linux or
+1. Install Python 3.13.x (we pin dependencies with Python 3.13; 3.13.9 is the current reference build).
+2. Create a virtual environment with that interpreter:
+   `python3.13 -m venv .venv` (macOS/Linux) or `py -3.13 -m venv .venv` (Windows)
+3. Activate it (`source .venv/bin/activate` on macOS/Linux or
    `.venv\Scripts\activate` on Windows)
-3. Upgrade pip: `python -m pip install --upgrade pip`
-4. Install the runtime stack for every non-experiment tool:
+4. Upgrade pip: `python -m pip install --upgrade pip`
+5. Install the runtime stack for every non-experiment tool:
    `pip install -r requirements.txt`
-5. (Optional) Install experiment helpers and test tooling:
-   `pip install .[test]`
-6. Launch the hub: `python -m launcher`
+6. (Optional) Install experiment helpers and test tooling:
+   `pip install '.[test]'`
+7. Launch the hub: `python -m launcher`
 
 > **Tip:** The `pip install -r requirements.txt` command pulls in every
-> dependency required to run the launcher and builder tools. Run `pip install
-> .[test]` afterwards if you also plan to execute the bundled tests or
+> dependency required to run the launcher and builder tools. Run `pip install '.[test]'`
+> afterwards if you also plan to execute the bundled tests or
 > experiment scripts.
+
+**Windows-only Origin exports:** Install the additional Origin automation wheels with
+`pip install originpro==1.1.14 originext==1.2.5` on Windows if you plan to push data into
+OriginPro. These wheels are not published for macOS/Linux, so they are excluded from the
+default requirements lock.
 
 OriginPro users should also install `originpro`, `numpy`, `pandas`,
 `python-dateutil`, `pytz`, `six`, and `tzdata` inside Origin’s embedded Python
