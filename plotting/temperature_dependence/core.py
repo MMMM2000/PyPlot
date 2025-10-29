@@ -82,6 +82,29 @@ LABELS = {
     "sum": "T1+T2 (µs)",
 }
 
+_EXPORT_ORDER = ("sum", "dT", "T1", "T2")
+
+
+def _sanitise_stem(*parts: str) -> str:
+    stem = "_".join(part.strip().replace(" ", "_") for part in parts if part)
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", stem) or "temperature_dependence"
+
+
+def _summarise_samples(samples: pd.Series | None) -> str:
+    if samples is None:
+        return ""
+    try:
+        uniques = [str(val) for val in pd.unique(samples.dropna()) if str(val)]
+    except Exception:
+        uniques = [str(val) for val in pd.unique(samples) if str(val)]
+    if not uniques:
+        return ""
+    if len(uniques) == 1:
+        return uniques[0]
+    head = uniques[:3]
+    suffix = "" if len(uniques) <= 3 else "_etc"
+    return "-".join(head) + suffix
+
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
     m = NAME_RE.match(stem)
     if not m:
@@ -272,6 +295,73 @@ def plot_variable_origin(df: pd.DataFrame, var: str) -> None:
             op.lt_exec('legend;')
         except Exception:
             pass
+
+
+def export_group_to_txt(
+    grp: pd.DataFrame,
+    directory: str | Path,
+    *,
+    include_processed: bool = True,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> Path:
+    """Persist raw and processed temperature dependence tables to ``directory``."""
+
+    out_dir = Path(directory)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    work = grp.copy()
+    for column in ("composition", "anneal", "sample"):
+        if column in work.columns:
+            work[column] = work[column].astype(str)
+    if "filename" in work.columns:
+        work["filename"] = work["filename"].astype(str)
+    work["temp"] = pd.to_numeric(work.get("temp"), errors="coerce")
+    work["line"] = pd.to_numeric(work.get("line"), errors="coerce")
+    work["continuous"] = work.get("continuous", False).astype(bool)
+
+    sort_keys = [col for col in ("sample", "continuous", "temp", "line") if col in work.columns]
+    if sort_keys:
+        work.sort_values(sort_keys, inplace=True, na_position="last")
+
+    if include_processed and work["continuous"].any():
+        cont = work[work["continuous"]].copy()
+        cont.sort_values(["sample", "temp", "line"], inplace=True)
+        for var in _EXPORT_ORDER:
+            if var not in cont.columns:
+                continue
+            med = cont.groupby("sample")[var].transform(
+                lambda series: series.rolling(med_window, center=True, min_periods=1).median()
+            )
+            smooth = med.groupby(cont["sample"]).transform(
+                lambda series: series.rolling(ma_window, center=True, min_periods=1).mean()
+            )
+            work.loc[cont.index, f"{var}_median"] = med
+            work.loc[cont.index, f"{var}_smoothed"] = smooth
+
+    columns: list[str] = [
+        col
+        for col in ("composition", "sample", "anneal", "continuous", "temp", "filename", "line")
+        if col in work.columns
+    ]
+    for var in _EXPORT_ORDER:
+        if var in work.columns:
+            columns.append(var)
+    for var in _EXPORT_ORDER:
+        for suffix in ("median", "smoothed"):
+            column = f"{var}_{suffix}"
+            if column in work.columns:
+                columns.append(column)
+
+    export_df = work[columns].copy()
+    comp_value = str(export_df["composition"].iat[0]) if "composition" in export_df else ""
+    anneal_value = str(export_df["anneal"].iat[0]) if "anneal" in export_df else ""
+    sample_value = _summarise_samples(export_df.get("sample")) if "sample" in export_df else ""
+
+    stem = _sanitise_stem("temperature_dependence", comp_value, sample_value, anneal_value)
+    path = out_dir / f"{stem}.txt"
+    export_df.to_csv(path, sep="\t", index=False, float_format="%.10g")
+    return path
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:

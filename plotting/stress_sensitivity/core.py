@@ -100,6 +100,13 @@ LABELS = {
     "sum": "T1+T2 (µs)",
 }
 
+_EXPORT_ORDER = ("T1", "T2", "dT", "sum")
+
+
+def _sanitise_stem(*parts: str) -> str:
+    stem = "_".join(part.strip().replace(" ", "_") for part in parts if part)
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", stem) or "stress_sensitivity"
+
 
 
 def parse_metadata(stem: str) -> Dict[str, Any] | None:
@@ -570,6 +577,75 @@ def plot_samples_origin(
         op.exit()
     except Exception:
         pass
+
+
+def export_group_to_txt(grp: pd.DataFrame, directory: str | Path) -> Path:
+    """Export stress sensitivity measurements with baseline metadata."""
+
+    out_dir = Path(directory)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    comp = str(grp["composition"].iat[0]) if "composition" in grp else ""
+    title = str(grp["title"].iat[0]) if "title" in grp else ""
+    anneal = str(grp["anneal"].iat[0]) if "anneal" in grp else ""
+
+    work = grp.copy()
+    work["load"] = pd.to_numeric(work.get("load"), errors="coerce")
+    work["line"] = pd.to_numeric(work.get("line"), errors="coerce")
+    work.sort_values(["sample_end", "dir", "load", "line"], inplace=True, na_position="last")
+    if "sample" in work:
+        work["sample_label"] = work["sample"].astype(str)
+    else:
+        work["sample_label"] = work.get("sample_end", "").astype(str)
+
+    base_mask = (
+        (work.get("dir") == "b")
+        & work["load"].notna()
+        & (work["load"].sub(BASE_LOAD).abs() < 1e-6)
+    )
+    end_mask = (
+        (work.get("dir") == "b")
+        & work["load"].notna()
+        & (work["load"].sub(END_LOAD).abs() < 1e-6)
+    )
+
+    baselines = {
+        var: work.loc[base_mask].groupby("sample_end")[var].mean()
+        for var in _EXPORT_ORDER
+    }
+    end_means = {
+        var: work.loc[end_mask].groupby("sample_end")[var].mean()
+        for var in _EXPORT_ORDER
+    }
+
+    for var in _EXPORT_ORDER:
+        base_series = baselines[var]
+        end_series = end_means[var]
+        work[f"baseline_{var}"] = work["sample_end"].map(base_series)
+        work[f"{var}_relative"] = work[var] - work[f"baseline_{var}"]
+        delta_series = end_series - base_series.reindex(end_series.index)
+        work[f"delta_{var}"] = work["sample_end"].map(delta_series)
+
+    columns: list[str] = [
+        "composition",
+        "title",
+        "anneal",
+        "sample_end",
+        "sample_label",
+        "filename",
+        "dir",
+        "load",
+        "line",
+    ]
+    for var in _EXPORT_ORDER:
+        columns.extend([var, f"{var}_relative", f"baseline_{var}", f"delta_{var}"])
+
+    export_cols = [col for col in columns if col in work.columns]
+    export_df = work[export_cols].copy()
+    stem = _sanitise_stem("stress_sensitivity", comp, title, anneal)
+    path = out_dir / f"{stem}.txt"
+    export_df.to_csv(path, sep="\t", index=False, float_format="%.10g")
+    return path
 
 
 def main(files: List[str], backend: str = BACKEND) -> None:

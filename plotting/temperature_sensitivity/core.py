@@ -83,6 +83,13 @@ TS_LABELS = {
     "sum": "T1+T2 (\u03BCs)",
 }
 
+_EXPORT_ORDER = tuple(TS_LABELS.keys())
+
+
+def _sanitise_stem(*parts: str) -> str:
+    stem = "_".join(part.strip().replace(" ", "_") for part in parts if part)
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", stem) or "temperature_sensitivity"
+
 
 def _format_temp_label(temp: float | int) -> str:
     """Return ``temp`` formatted without unnecessary decimal places."""
@@ -1124,6 +1131,103 @@ def plot_variable_origin(
             pass
 
 from ..common import maybe_handle_outliers
+
+
+def export_group_to_txt(
+    grp: pd.DataFrame,
+    directory: str | Path,
+    *,
+    baseline_mode: str = BASELINE_MODE,
+    include_cont: bool = INCLUDE_CONTINUOUS,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> Path:
+    """Persist the processed temperature sensitivity tables to ``directory``."""
+
+    out_dir = Path(directory)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    comp = str(grp.get("composition", [""])[0]) if "composition" in grp else ""
+    anneal = str(grp.get("anneal", [""])[0]) if "anneal" in grp else ""
+    title = str(grp.get("title", [""])[0]) if "title" in grp else ""
+
+    work = grp.copy()
+    work["temp"] = pd.to_numeric(work.get("temp"), errors="coerce")
+    work["line"] = pd.to_numeric(work.get("line"), errors="coerce")
+    work["continuous"] = work.get("continuous", False).astype(bool)
+    if "sample" in work:
+        work["sample"] = work["sample"].astype(str)
+    elif "sample_end" in work:
+        work["sample"] = work["sample_end"].astype(str)
+    else:
+        work["sample"] = ""
+    work.sort_values(["sample", "continuous", "temp", "line"], inplace=True, na_position="last")
+
+    discrete = work[~work["continuous"]].copy()
+    baselines = {
+        var: discrete.loc[discrete["temp"].eq(25.0)].groupby("sample")[var].mean()
+        for var in _EXPORT_ORDER
+    }
+    high_points = {
+        var: discrete.loc[discrete["temp"].eq(100.0)].groupby("sample")[var].mean()
+        for var in _EXPORT_ORDER
+    }
+
+    for var in _EXPORT_ORDER:
+        base_series = baselines[var]
+        work[f"baseline_{var}"] = work["sample"].map(base_series)
+        if baseline_mode in {"zero_25", "both"}:
+            work[f"{var}_zero25"] = work[var] - work[f"baseline_{var}"]
+        else:
+            work[f"{var}_zero25"] = work[var] - work[f"baseline_{var}"]
+        delta_series = high_points[var] - base_series.reindex(high_points[var].index)
+        work[f"delta_{var}"] = work["sample"].map(delta_series)
+
+    if include_cont and work["continuous"].any():
+        cont = work[work["continuous"]].copy()
+        cont.sort_values(["sample", "temp", "line"], inplace=True)
+        for var in _EXPORT_ORDER:
+            med = cont.groupby("sample")[var].transform(
+                lambda s: s.rolling(med_window, center=True, min_periods=1).median()
+            )
+            smooth = med.groupby(cont["sample"]).transform(
+                lambda s: s.rolling(ma_window, center=True, min_periods=1).mean()
+            )
+            work.loc[cont.index, f"{var}_cont_median"] = med
+            work.loc[cont.index, f"{var}_cont_smoothed"] = smooth
+            work.loc[cont.index, f"{var}_cont_smoothed_zero25"] = (
+                smooth - work.loc[cont.index, f"baseline_{var}"]
+            )
+
+    columns: list[str] = [
+        "composition",
+        "title",
+        "anneal",
+        "sample",
+        "continuous",
+        "temp",
+        "filename",
+        "line",
+    ]
+    for var in _EXPORT_ORDER:
+        columns.extend(
+            [
+                var,
+                f"{var}_zero25",
+                f"baseline_{var}",
+                f"delta_{var}",
+                f"{var}_cont_median",
+                f"{var}_cont_smoothed",
+                f"{var}_cont_smoothed_zero25",
+            ]
+        )
+
+    export_cols = [col for col in columns if col in work.columns]
+    export_df = work[export_cols].copy()
+    stem = _sanitise_stem("temperature_sensitivity", comp, title, anneal)
+    path = out_dir / f"{stem}.txt"
+    export_df.to_csv(path, sep="\t", index=False, float_format="%.10g")
+    return path
 
 
 def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFrame | None = None):

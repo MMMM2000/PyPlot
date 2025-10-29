@@ -43,6 +43,7 @@ from plotting.temperature_sensitivity import core as temp_sens_core
 from plotting.current_annealing import core as anneal_core
 from plotting.stress_dependence import core as stress_core
 from plotting.stress_dependence import stress_gui
+from plotting.stress_sensitivity import core as sens_core
 from plotting.stress_sensitivity import sens_gui
 from plotting.hsw_load_compare import load_compare_gui
 from plotting.maxion_continuous import maxion_gui
@@ -342,6 +343,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         self._dpi_spin: QtWidgets.QSpinBox | None = None
         self._output_edit: QtWidgets.QLineEdit | None = None
         self._subfolder_checkbox: QtWidgets.QCheckBox | None = None
+        self._last_export_dir: Path | None = None
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(True)
@@ -600,12 +602,73 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         if hasattr(self.host, "normalize_button"):
             self.host.normalize_button.setEnabled(False)
         if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
+            self.host.export_button.setEnabled(has_data)
         if hasattr(self.host, "open_origin_button"):
             self.host.open_origin_button.setEnabled(has_data)
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
         self.host._update_project_actions()
+
+    def export_txt(self) -> None:  # type: ignore[override]
+        if self._data is None:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load temperature dependence data before exporting TXT files.",
+            )
+            return
+        config = self._apply_settings_to_core()
+        start_dir = (
+            str(self._last_export_dir)
+            if self._last_export_dir is not None
+            else config.get("output_dir")
+            or ""
+        )
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self.host,
+            "Select TXT export folder",
+            start_dir or str(Path.home()),
+        )
+        if not directory:
+            return
+        target = Path(directory)
+        exported = 0
+        try:
+            dataframe = temp_core.maybe_handle_outliers(self._data.copy())
+            for (_, _), group in dataframe.groupby(
+                ["composition", "anneal"], dropna=False
+            ):
+                temp_core.export_group_to_txt(
+                    group,
+                    target,
+                    include_processed=temp_core.PLOT_MODE in {"processed", "both"},
+                    med_window=temp_core.MED_WINDOW,
+                    ma_window=temp_core.MA_WINDOW,
+                )
+                exported += 1
+            self._last_export_dir = target
+        except Exception as exc:  # pragma: no cover - GUI path
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to export TXT data:\n{exc}",
+            )
+            self._log(f"TXT export failed: {exc}", level="error")
+            return
+        if not exported:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "No temperature sensitivity groups were available to export.",
+            )
+            return
+        self._last_export_dir = target
+        QtWidgets.QMessageBox.information(
+            self.host,
+            self.name,
+            f"Exported {exported} temperature sensitivity table(s) to {target}",
+        )
+        self._log(f"Exported {exported} temperature sensitivity table(s) to {target}.")
 
 
 class TemperatureSensitivityPlugin(PyPlotPlugin):
@@ -1636,6 +1699,7 @@ class StressDependencePlugin(PyPlotPlugin):
         self._processed_checkbox: QtWidgets.QCheckBox | None = None
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
+        self._last_export_dir: Path | None = None
         try:
             stress_core.ProgressDialog = stress_gui.ProgressDialog  # type: ignore[assignment]
         except Exception:
@@ -2053,6 +2117,60 @@ class StressDependencePlugin(PyPlotPlugin):
         else:
             self._log("Sent stress dependence plots to Origin.")
 
+    def export_txt(self) -> None:  # type: ignore[override]
+        if self._data is None:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load stress dependence data before exporting TXT files.",
+            )
+            return
+        config = self._apply_settings_to_core()
+        start_dir = (
+            str(self._last_export_dir)
+            if self._last_export_dir is not None
+            else config.get("output_dir")
+            or ""
+        )
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self.host,
+            "Select TXT export folder",
+            start_dir or str(Path.home()),
+        )
+        if not directory:
+            return
+        target = Path(directory)
+        exported = 0
+        try:
+            dataframe = stress_core.maybe_handle_outliers(self._data.copy())
+            for _, grp in dataframe.groupby(
+                ["composition", "title", "sample_end", "anneal"], dropna=False
+            ):
+                stress_core.export_group_to_txt(grp, target)
+                exported += 1
+        except Exception as exc:  # pragma: no cover - GUI path
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to export TXT data:\n{exc}",
+            )
+            self._log(f"TXT export failed: {exc}", level="error")
+            return
+        if not exported:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "No stress dependence groups were available to export.",
+            )
+            return
+        self._last_export_dir = target
+        QtWidgets.QMessageBox.information(
+            self.host,
+            self.name,
+            f"Exported {exported} stress dependence table(s) to {target}",
+        )
+        self._log(f"Exported {exported} stress dependence table(s) to {target}.")
+
     def update_ui(self) -> None:
         has_data = self._data is not None
         has_files = bool(self._loaded_files)
@@ -2067,7 +2185,7 @@ class StressDependencePlugin(PyPlotPlugin):
         if hasattr(self.host, "normalize_button"):
             self.host.normalize_button.setEnabled(False)
         if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
+            self.host.export_button.setEnabled(has_data)
         if hasattr(self.host, "open_origin_button"):
             self.host.open_origin_button.setEnabled(has_files)
         if hasattr(self.host, "popout_button"):
@@ -2075,17 +2193,509 @@ class StressDependencePlugin(PyPlotPlugin):
         self.host._update_project_actions()
 
 
-class StressSensitivityPlugin(EmbeddedWidgetPlugin):
-    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
-        super().__init__(host, name, self._create_dialog)
+class StressSensitivityPlugin(PyPlotPlugin):
+    """Embed the stress sensitivity workflow directly inside PyPlot."""
 
-    @staticmethod
-    def _create_dialog() -> QtWidgets.QWidget:
+    requires_imported_data = True
+
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name)
+        self._data: pd.DataFrame | None = None
+        self._loaded_files: list[str] = []
+        self._plot_tabs: list[QtWidgets.QWidget] = []
+        self._summary_label: QtWidgets.QLabel | None = None
+        self._var_checks: dict[str, QtWidgets.QCheckBox] = {}
+        self._include_dep_checkbox: QtWidgets.QCheckBox | None = None
+        self._med_spin: QtWidgets.QSpinBox | None = None
+        self._ma_spin: QtWidgets.QSpinBox | None = None
+        self._show_checkbox: QtWidgets.QCheckBox | None = None
+        self._save_checkbox: QtWidgets.QCheckBox | None = None
+        self._backend_combo: QtWidgets.QComboBox | None = None
+        self._format_combo: QtWidgets.QComboBox | None = None
+        self._dpi_spin: QtWidgets.QSpinBox | None = None
+        self._output_edit: QtWidgets.QLineEdit | None = None
+        self._subfolder_checkbox: QtWidgets.QCheckBox | None = None
+        self._last_export_dir: Path | None = None
         try:
-            sens_gui.orig.ProgressDialog = sens_gui.ProgressDialog
+            sens_core.ProgressDialog = sens_gui.ProgressDialog  # type: ignore[assignment]
         except Exception:
             pass
-        return sens_gui.SettingsDialog()
+
+    # Lifecycle -----------------------------------------------------
+    def activate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(True)
+        self.update_ui()
+
+    def deactivate(self) -> None:  # type: ignore[override]
+        self.host._set_data_sources_visible(False)
+
+    # UI helpers ----------------------------------------------------
+    def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        summary = QtWidgets.QLabel(
+            "Select stress sensitivity files, load them, then generate plots."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        layout.addStretch(1)
+        self._summary_label = summary
+        return container
+
+    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
+        if self._settings_widget is not None:
+            return self._settings_widget
+
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        var_group = QtWidgets.QGroupBox("Variables to plot", container)
+        var_layout = QtWidgets.QVBoxLayout(var_group)
+        var_layout.setContentsMargins(8, 8, 8, 8)
+        for key, label in sens_core.LABELS.items():
+            checkbox = QtWidgets.QCheckBox(label, var_group)
+            checkbox.setChecked(key in getattr(sens_core, "PLOT_VARS", []))
+            self._var_checks[key] = checkbox
+            var_layout.addWidget(checkbox)
+        layout.addWidget(var_group)
+
+        dep_group = QtWidgets.QGroupBox("Stress dependence overlay", container)
+        dep_layout = QtWidgets.QGridLayout(dep_group)
+        dep_layout.setContentsMargins(8, 8, 8, 8)
+        dep_layout.setHorizontalSpacing(6)
+        dep_layout.setVerticalSpacing(4)
+        include_cb = QtWidgets.QCheckBox("Include processed dependence curve", dep_group)
+        include_cb.setChecked(bool(getattr(sens_core, "INCLUDE_DEPENDENCE", False)))
+        self._include_dep_checkbox = include_cb
+        dep_layout.addWidget(include_cb, 0, 0, 1, 2)
+        med_spin = QtWidgets.QSpinBox(dep_group)
+        med_spin.setRange(1, 9999)
+        med_spin.setValue(int(getattr(sens_core, "MED_WINDOW", 5)))
+        self._med_spin = med_spin
+        ma_spin = QtWidgets.QSpinBox(dep_group)
+        ma_spin.setRange(1, 9999)
+        ma_spin.setValue(int(getattr(sens_core, "MA_WINDOW", 20)))
+        self._ma_spin = ma_spin
+        dep_layout.addWidget(QtWidgets.QLabel("Median window:"), 1, 0)
+        dep_layout.addWidget(med_spin, 1, 1)
+        dep_layout.addWidget(QtWidgets.QLabel("Moving average window:"), 2, 0)
+        dep_layout.addWidget(ma_spin, 2, 1)
+        layout.addWidget(dep_group)
+
+        output_group = QtWidgets.QGroupBox("Output", container)
+        output_layout = QtWidgets.QGridLayout(output_group)
+        output_layout.setContentsMargins(8, 8, 8, 8)
+        output_layout.setHorizontalSpacing(6)
+        output_layout.setVerticalSpacing(4)
+        show_cb = QtWidgets.QCheckBox("Show plots", output_group)
+        show_cb.setChecked(bool(getattr(sens_core, "SHOW_PLOTS", True)))
+        self._show_checkbox = show_cb
+        save_cb = QtWidgets.QCheckBox("Save plots", output_group)
+        save_cb.setChecked(bool(getattr(sens_core, "SAVE_PLOTS", False)))
+        self._save_checkbox = save_cb
+        output_layout.addWidget(show_cb, 0, 0, 1, 2)
+        output_layout.addWidget(save_cb, 1, 0, 1, 2)
+
+        output_layout.addWidget(QtWidgets.QLabel("Backend:"), 2, 0)
+        backend_combo = QtWidgets.QComboBox(output_group)
+        backend_combo.addItems(["Matplotlib", "Origin", "Both"])
+        restore_backend_choice(
+            "stress_sensitivity",
+            backend_combo,
+            getattr(sens_core, "BACKEND", "matplotlib"),
+        )
+        self._backend_combo = backend_combo
+        output_layout.addWidget(backend_combo, 2, 1)
+
+        fmt_combo = QtWidgets.QComboBox(output_group)
+        fmt_combo.addItems(["png", "pdf", "svg"])
+        fmt_combo.setCurrentText(str(getattr(sens_core, "SAVE_FORMAT", "png")))
+        self._format_combo = fmt_combo
+        output_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
+        output_layout.addWidget(fmt_combo, 3, 1)
+
+        dpi_spin = QtWidgets.QSpinBox(output_group)
+        dpi_spin.setRange(72, 3000)
+        sens_core.PNG_DPI = restore_png_dpi(
+            "stress_sensitivity", dpi_spin, getattr(sens_core, "PNG_DPI", 1200)
+        )
+        self._dpi_spin = dpi_spin
+        output_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
+        output_layout.addWidget(dpi_spin, 4, 1)
+
+        subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
+        subfolder_cb.setChecked(False)
+        self._subfolder_checkbox = subfolder_cb
+        output_layout.addWidget(subfolder_cb, 5, 0, 1, 2)
+
+        output_layout.addWidget(QtWidgets.QLabel("Directory:"), 6, 0)
+        output_edit = QtWidgets.QLineEdit(
+            get_last_output_dir(key="stress_sensitivity"), output_group
+        )
+        self._output_edit = output_edit
+        output_layout.addWidget(output_edit, 6, 1)
+        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
+
+        def _choose_dir() -> None:
+            directory = QtWidgets.QFileDialog.getExistingDirectory(
+                container,
+                "Select output directory",
+                output_edit.text() or str(Path.home()),
+            )
+            if directory:
+                output_edit.setText(directory)
+
+        browse_btn.clicked.connect(_choose_dir)
+        output_layout.addWidget(browse_btn, 6, 2)
+        layout.addWidget(output_group)
+
+        layout.addStretch(1)
+        self._settings_widget = container
+        return container
+
+    # Behaviour -----------------------------------------------------
+    def _log(self, message: str, *, level: str = "info") -> None:
+        append = getattr(self.host, "_append_log", None)
+        if callable(append):
+            try:
+                append(message, level=level)
+                return
+            except Exception:
+                pass
+        print(message)
+
+    def _selected_variables(self) -> list[str]:
+        selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
+        return selected or ["sum"]
+
+    def _apply_settings_to_core(self) -> dict[str, Any]:
+        variables = self._selected_variables()
+        sens_core.PLOT_VARS = list(variables)
+        sens_core.PLOT_SUM = "sum" in variables
+        sens_core.PLOT_DT = "dT" in variables
+        sens_core.PLOT_T1 = "T1" in variables
+        sens_core.PLOT_T2 = "T2" in variables
+
+        include_dep = bool(self._include_dep_checkbox and self._include_dep_checkbox.isChecked())
+        sens_core.INCLUDE_DEPENDENCE = include_dep
+        if isinstance(self._med_spin, QtWidgets.QSpinBox):
+            sens_core.MED_WINDOW = int(self._med_spin.value())
+        if isinstance(self._ma_spin, QtWidgets.QSpinBox):
+            sens_core.MA_WINDOW = int(self._ma_spin.value())
+
+        show_flag = bool(self._show_checkbox and self._show_checkbox.isChecked())
+        save_flag = bool(self._save_checkbox and self._save_checkbox.isChecked())
+        sens_core.SHOW_PLOTS = show_flag
+        sens_core.SAVE_PLOTS = save_flag
+
+        output_dir = getattr(sens_core, "OUTPUT_DIR", str(Path.home()))
+        base_dir = (
+            self._output_edit.text().strip()
+            if isinstance(self._output_edit, QtWidgets.QLineEdit)
+            else output_dir
+        )
+        subfolder = bool(self._subfolder_checkbox and self._subfolder_checkbox.isChecked())
+        if save_flag:
+            resolved = prepare_output_dir(base_dir or output_dir, "stress_sensitivity", subfolder)
+            set_last_output_dir(base_dir or resolved, key="stress_sensitivity")
+            output_dir = resolved
+        elif base_dir:
+            output_dir = base_dir
+        sens_core.OUTPUT_DIR = output_dir
+
+        if isinstance(self._format_combo, QtWidgets.QComboBox):
+            sens_core.SAVE_FORMAT = self._format_combo.currentText()
+        if isinstance(self._dpi_spin, QtWidgets.QSpinBox):
+            sens_core.PNG_DPI = store_png_dpi(
+                "stress_sensitivity", int(self._dpi_spin.value())
+            )
+        backend = "matplotlib"
+        if isinstance(self._backend_combo, QtWidgets.QComboBox):
+            backend = store_backend_choice(
+                "stress_sensitivity", selected_backend(self._backend_combo)
+            )
+        sens_core.BACKEND = backend
+
+        return {
+            "variables": variables,
+            "save": save_flag,
+            "output_dir": output_dir,
+            "include_dep": include_dep,
+        }
+
+    def _clear_existing_tabs(self) -> None:
+        if not self._plot_tabs:
+            return
+        clear = getattr(self.host, "_clear_tab_list", None)
+        if callable(clear):
+            clear(self._plot_tabs)
+        else:
+            for tab in self._plot_tabs:
+                index = self.host.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.host.tab_widget.removeTab(index)
+        self._plot_tabs.clear()
+
+    # Host actions --------------------------------------------------
+    def load_data(self) -> None:  # type: ignore[override]
+        paths = self.host._selected_paths()
+        if not paths:
+            try:
+                self.host._choose_files()
+            except Exception:
+                self._log(
+                    "Failed to open file dialog for stress sensitivity selection",
+                    level="error",
+                )
+            paths = self.host._selected_paths()
+        if not paths:
+            return
+        string_paths = [str(path) for path in paths]
+        try:
+            self._data = sens_core.load_data(string_paths)
+        except Exception as exc:  # pragma: no cover - GUI path
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to load stress sensitivity data:\n{exc}",
+            )
+            self._data = None
+            return
+        self._loaded_files = string_paths
+        if paths:
+            self.host._plugin_last_directories[self.name] = paths[0].parent
+        if self._summary_label is not None:
+            self._summary_label.setText(
+                "Click Generate plots to review stress sensitivity summaries."
+            )
+        self._log(f"Loaded {len(paths)} stress sensitivity file(s).")
+        self.update_ui()
+
+    def generate(self) -> None:  # type: ignore[override]
+        if self._data is None:
+            self.load_data()
+        if self._data is None:
+            return
+        config = self._apply_settings_to_core()
+        dataframe = sens_core.maybe_handle_outliers(self._data.copy())
+        grouped = list(
+            dataframe.groupby(["composition", "title", "anneal"], sort=False)
+        )
+        if not grouped:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "No valid stress sensitivity groups were found in the selected files.",
+            )
+            return
+        self._clear_existing_tabs()
+        total_steps = len(grouped) * len(config["variables"])
+        progress_dialog: QtWidgets.QProgressDialog | None = None
+        if total_steps > 1:
+            progress_dialog = QtWidgets.QProgressDialog(
+                "Generating stress sensitivity plots…",
+                "Cancel",
+                0,
+                total_steps,
+                self.host,
+            )
+            progress_dialog.setWindowTitle("Processing")
+            progress_dialog.setAutoClose(True)
+            progress_dialog.setAutoReset(True)
+            progress_dialog.show()
+
+        cancelled = False
+        plots_created = 0
+        for (composition, title, anneal), group in grouped:
+            for variable in config["variables"]:
+                if progress_dialog is not None:
+                    QtWidgets.QApplication.processEvents()
+                    if progress_dialog.wasCanceled():
+                        cancelled = True
+                        break
+                try:
+                    fig, saved_name = sens_core.plot_samples(
+                        group.copy(), variable, config["save"], config["output_dir"]
+                    )
+                except Exception as exc:
+                    self._log(
+                        f"Failed to plot {variable} for {composition} {anneal}: {exc}",
+                        level="error",
+                    )
+                    continue
+                canvas = FigureCanvas(fig)
+                canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                tab = QtWidgets.QWidget()
+                tab_layout = QtWidgets.QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.addWidget(canvas)
+                ax = fig.axes[0] if fig.axes else None
+                title_text = ax.get_title() if ax else variable
+                descriptor = TabDescriptor(
+                    kind="stress_sensitivity",
+                    title=title_text,
+                    root_label=f"{composition} {anneal}",
+                    x_label="Sample",
+                    y_label=sens_core.LABELS.get(variable, variable),
+                    canvas=canvas,
+                    axes=ax,
+                    lines={},
+                    metadata={
+                        "composition": composition,
+                        "title": title,
+                        "anneal": anneal,
+                        "variable": variable,
+                        "saved_path": saved_name if config["save"] else "",
+                        "source_files": list(self._loaded_files),
+                    },
+                )
+                self.host.tab_widget.addTab(tab, sens_core.LABELS.get(variable, variable))
+                self.host._register_plot_tab(tab, canvas, ax, descriptor)
+                self._plot_tabs.append(tab)
+                plots_created += 1
+                if progress_dialog is not None:
+                    progress_dialog.setValue(progress_dialog.value() + 1)
+            if cancelled:
+                break
+
+        if progress_dialog is not None:
+            progress_dialog.close()
+
+        if not self._plot_tabs:
+            QtWidgets.QMessageBox.warning(
+                self.host,
+                self.name,
+                "No plots were generated. Check your settings and input files.",
+            )
+            return
+
+        self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+        if self._summary_label is not None:
+            self._summary_label.setText(
+                f"Generated {plots_created} stress sensitivity plot(s)."
+            )
+        if cancelled:
+            self._log("Plot generation cancelled by user.", level="error")
+        else:
+            self._log(f"Generated {plots_created} stress sensitivity plot(s).")
+
+        backend = getattr(sens_core, "BACKEND", "matplotlib")
+        if backend in ("origin", "both"):
+            try:
+                sens_core.SHOW_PLOTS = False
+                sens_core.main(self._loaded_files, backend="origin")
+            except Exception as exc:
+                QtWidgets.QMessageBox.warning(
+                    self.host,
+                    self.name,
+                    f"Origin export failed:\n{exc}",
+                )
+                self._log(f"Origin export failed: {exc}", level="error")
+            else:
+                self._log("Sent stress sensitivity plots to Origin.")
+
+        self.update_ui()
+
+    def open_origin(self) -> None:  # type: ignore[override]
+        if not self._loaded_files:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load stress sensitivity data before exporting to Origin.",
+            )
+            return
+        self._apply_settings_to_core()
+        try:
+            sens_core.SHOW_PLOTS = False
+            sens_core.main(self._loaded_files, backend="origin")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to export stress sensitivity plots to Origin:\n{exc}",
+            )
+            self._log(f"Origin export failed: {exc}", level="error")
+        else:
+            self._log("Sent stress sensitivity plots to Origin.")
+
+    def export_txt(self) -> None:  # type: ignore[override]
+        if self._data is None:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load stress sensitivity data before exporting TXT files.",
+            )
+            return
+        config = self._apply_settings_to_core()
+        start_dir = (
+            str(self._last_export_dir)
+            if self._last_export_dir is not None
+            else config.get("output_dir")
+            or ""
+        )
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self.host,
+            "Select TXT export folder",
+            start_dir or str(Path.home()),
+        )
+        if not directory:
+            return
+        target = Path(directory)
+        exported = 0
+        try:
+            dataframe = sens_core.maybe_handle_outliers(self._data.copy())
+            for _, grp in dataframe.groupby(
+                ["composition", "title", "anneal"], dropna=False
+            ):
+                sens_core.export_group_to_txt(grp, target)
+                exported += 1
+        except Exception as exc:  # pragma: no cover - GUI path
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to export TXT data:\n{exc}",
+            )
+            self._log(f"TXT export failed: {exc}", level="error")
+            return
+        if not exported:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "No stress sensitivity groups were available to export.",
+            )
+            return
+        self._last_export_dir = target
+        QtWidgets.QMessageBox.information(
+            self.host,
+            self.name,
+            f"Exported {exported} stress sensitivity table(s) to {target}",
+        )
+        self._log(f"Exported {exported} stress sensitivity table(s) to {target}.")
+
+    def update_ui(self) -> None:
+        has_data = self._data is not None
+        has_files = bool(self._loaded_files)
+        has_plots = bool(self._plot_tabs)
+        if hasattr(self.host, "load_data_button"):
+            self.host.load_data_button.setEnabled(True)
+        if hasattr(self.host, "plot_button"):
+            self.host.plot_button.setEnabled(has_data)
+            self.host.plot_button.setText("Generate Stress Sensitivity")
+        if hasattr(self.host, "save_graph_button"):
+            self.host.save_graph_button.setEnabled(has_plots)
+        if hasattr(self.host, "normalize_button"):
+            self.host.normalize_button.setEnabled(False)
+        if hasattr(self.host, "export_button"):
+            self.host.export_button.setEnabled(has_data)
+        if hasattr(self.host, "open_origin_button"):
+            self.host.open_origin_button.setEnabled(has_files)
+        if hasattr(self.host, "popout_button"):
+            self.host.popout_button.setEnabled(has_plots)
+        self.host._update_project_actions()
 
 
 class HswLoadComparePlugin(EmbeddedWidgetPlugin):

@@ -1,4 +1,9 @@
 # Changelog
+## 2025-10-30 10:00 UTC
+
+- Added `requirements-win.txt` so Windows builders can install the Origin automation
+  wheels alongside the shared dependency lock before freezing `launcher.exe`; updated the
+  README instructions to reference the new file.
 ## 2025-10-29 09:49 UTC
 
 - Made microscope OCR faster by trimming the resample ceiling, using the lighter PaddleOCR recognition stack, and caching per-image results for reuse across refreshes.
@@ -564,11 +569,27 @@
   then optional `pip install .[test]`) in the README to clarify how to enable
   experiments and the test suite.
 
+## 2025-10-30 12:30 UTC
+
+- Integrated the stress sensitivity workflow into the PyPlot workbench so the
+  host toolbar drives Matplotlib generation, Origin export, and new TXT data
+  exports without launching the legacy dialog.
+- Added reusable TXT export helpers for stress dependence, stress sensitivity,
+  and temperature sensitivity datasets and wired them into the PyPlot export
+  buttons.
+- Documented the PyPlot stress and temperature plotters in the README to call
+  out their Matplotlib, Origin, and TXT export capabilities.
+
 ## 2025-10-27 09:45 UTC
 
 - Forced PaddleOCR caches to use ASCII-only home directories (overriding HOME/
   USERPROFILE when necessary) so Windows accounts with diacritics no longer
   trigger repeated `inference.json` load failures during model downloads.
+
+## 2025-10-22 12:45 UTC
+
+- Fixed the PyPlot temperature dependence TXT exporter to use the dedicated
+  workflow, preventing KeyErrors when exporting temperature dependence runs.
 
 ## 2025-10-22 11:00 UTC
 
