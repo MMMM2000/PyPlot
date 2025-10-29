@@ -1,4 +1,9 @@
 # Changelog
+## 2025-10-29 09:49 UTC
+
+- Made microscope OCR faster by trimming the resample ceiling, using the lighter PaddleOCR recognition stack, and caching per-image results for reuse across refreshes.
+- Added a `Reviewed` flag and "Mark reviewed" / "Clear review" controls to the microscope table so validated rows can be skipped on subsequent passes while keeping their values visible.
+
 ## 2025-10-28 09:50 UTC
 
 - Marked the `originpro` automation dependency as Windows-only and regenerated `requirements.txt` so macOS/Linux installs no longer fail on missing Origin wheels.

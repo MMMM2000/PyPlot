@@ -180,20 +180,20 @@ def _candidate_kwargs(signature: inspect.Signature | None) -> list[dict[str, obj
 
     tuned: dict[str, object] = {
         "lang": "en",
-        "use_angle_cls": True,
+        "use_angle_cls": False,
         "det_db_box_thresh": 0.18,
         "det_db_unclip_ratio": 2.6,
-        "det_limit_side_len": 4000,
+        "det_limit_side_len": 2200,
         "drop_score": 0.1,
-        "max_text_length": 96,
-        "rec_algorithm": "SVTR_LCNet",
+        "max_text_length": 64,
+        "rec_algorithm": "CRNN",
     }
     if "show_log" in supported:
         tuned["show_log"] = False
     if "home_path" in supported:
         tuned["home_path"] = str(_PADDLE_HOME)
 
-    baseline = {"lang": "en", "use_angle_cls": True}
+    baseline = {"lang": "en", "use_angle_cls": False}
     if "show_log" in supported:
         baseline["show_log"] = False
     if "home_path" in supported:

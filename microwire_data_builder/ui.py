@@ -52,6 +52,7 @@ from .core import (
     MicroscopeMeasurements,
     MicroscopeDetection,
     MicroscopeOCRResult,
+    MicroscopeCacheEntry,
     MICROSCOPE_IMAGE_COLUMNS,
     MeasurementRecord,
     VideoMetricsSummary,
@@ -91,6 +92,7 @@ MICROSCOPE_TABLE_COLUMNS = [
     MICROSCOPE_D_COLUMN,
     MICROSCOPE_CAP_D_COLUMN,
     "d/D",
+    "Reviewed",
     MICROSCOPE_IMAGE_COLUMNS[0],
     MICROSCOPE_IMAGE_COLUMNS[1],
     "_key",
@@ -3051,6 +3053,7 @@ def _microscope_index_to_frame(
                 MICROSCOPE_D_COLUMN: d_value,
                 MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
+                "Reviewed": False,
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -3436,6 +3439,13 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             return frame.iloc[row]
         except Exception:
             return None
+
+    @staticmethod
+    def _path_key(path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except Exception:
+            return str(path)
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
         _ = row
@@ -4777,6 +4787,8 @@ class MicroscopeSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._overrides: Dict[str, Dict[str, float]] = {}
+        self._ocr_cache: Dict[str, MicroscopeCacheEntry] = {}
+        self._validated: Dict[str, Dict[str, Any]] = {}
         self._selected_key: str | None = None
         self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
@@ -4804,9 +4816,35 @@ class MicroscopeSection(MiniDatabaseSection):
             }
         if not self.data.table.empty:
             self._apply_overrides_to_table()
+
+        stored_cache = self.data.extra.get("ocr_cache")
+        if isinstance(stored_cache, dict):
+            for key, payload in stored_cache.items():
+                entry: Optional[MicroscopeCacheEntry]
+                if isinstance(payload, MicroscopeCacheEntry):
+                    entry = payload
+                elif isinstance(payload, dict):
+                    entry = MicroscopeCacheEntry.from_dict(payload)
+                else:
+                    entry = None
+                if entry is None:
+                    continue
+                self._ocr_cache[str(key)] = entry
+
+        stored_validated = self.data.extra.get("validated")
+        if isinstance(stored_validated, dict):
+            cleaned: Dict[str, Dict[str, Any]] = {}
+            for key, payload in stored_validated.items():
+                if not isinstance(payload, dict):
+                    continue
+                cleaned[str(key)] = dict(payload)
+            self._validated = cleaned
+            if not self.data.table.empty:
+                self._apply_overrides_to_table()
         self._update_hidden_columns()
         self._update_missing_summary()
         self.partial_row_ready.connect(self._apply_partial_row)
+        self._update_review_buttons()
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
@@ -4878,6 +4916,12 @@ class MicroscopeSection(MiniDatabaseSection):
         self.clear_override_button = QtWidgets.QPushButton("Clear override")
         self.clear_override_button.clicked.connect(self._clear_override)
         button_row.addWidget(self.clear_override_button)
+        self.mark_reviewed_button = QtWidgets.QPushButton("Mark reviewed")
+        self.mark_reviewed_button.clicked.connect(self._mark_reviewed)
+        button_row.addWidget(self.mark_reviewed_button)
+        self.clear_review_button = QtWidgets.QPushButton("Clear review")
+        self.clear_review_button.clicked.connect(self._clear_review)
+        button_row.addWidget(self.clear_review_button)
         preview_layout.addLayout(button_row)
 
         return splitter
@@ -4929,6 +4973,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: None,
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
+                    "Reviewed": False,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": key_str,
@@ -5007,6 +5052,7 @@ class MicroscopeSection(MiniDatabaseSection):
             MICROSCOPE_D_COLUMN: d_value,
             MICROSCOPE_CAP_D_COLUMN: D_value,
             "d/D": ratio,
+            "Reviewed": bool(self._validated.get(key_str)),
             MICROSCOPE_IMAGE_COLUMNS[0]: None,
             MICROSCOPE_IMAGE_COLUMNS[1]: None,
             "_key": key_str,
@@ -5220,6 +5266,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 label.set_placeholder()
             self.d_edit.clear()
             self.D_edit.clear()
+            self._update_review_buttons()
             return
         key = row.get("_key")
         self._selected_key = str(key) if key is not None else None
@@ -5245,6 +5292,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     label.set_preview(pixmap)
                     continue
             label.set_placeholder()
+        self._update_review_buttons()
 
     def _apply_override(self) -> None:
         if not self._selected_key:
@@ -5279,6 +5327,113 @@ class MicroscopeSection(MiniDatabaseSection):
         self.d_edit.clear()
         self.D_edit.clear()
 
+    def _mark_reviewed(self) -> None:
+        if not self._selected_key:
+            return
+        row = self._selected_row()
+        if row is None:
+            return
+        sources = self._row_sources(row)
+        if not sources:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "No source images are associated with the selected row; cannot mark as reviewed.",
+            )
+            return
+        metadata: List[Dict[str, Any]] = []
+        for source in sources:
+            try:
+                stat = source.stat()
+            except OSError:
+                continue
+            metadata.append(
+                {
+                    "path": str(source),
+                    "key": self._path_key(source),
+                    "mtime": float(stat.st_mtime),
+                    "size": int(stat.st_size),
+                }
+            )
+        if not metadata:
+            QtWidgets.QMessageBox.warning(
+                self,
+                self.section_title,
+                "The source files for this row are not accessible; review status was not updated.",
+            )
+            return
+        entry: Dict[str, Any] = {"sources": metadata}
+        d_value = row.get(MICROSCOPE_D_COLUMN)
+        if isinstance(d_value, (int, float)) and math.isfinite(float(d_value)):
+            entry["d"] = float(d_value)
+        D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
+        if isinstance(D_value, (int, float)) and math.isfinite(float(D_value)):
+            entry["D"] = float(D_value)
+        entry["timestamp"] = datetime.utcnow().isoformat() + "Z"
+        self._validated[self._selected_key] = entry
+        self._store_validation()
+        self._update_review_buttons()
+
+    def _clear_review(self) -> None:
+        if not self._selected_key:
+            return
+        if self._selected_key in self._validated:
+            self._validated.pop(self._selected_key, None)
+            self._store_validation()
+        self._update_review_buttons()
+
+    def _store_validation(self, persist: bool = True) -> None:
+        self.data.extra["validated"] = self._validated
+        if persist:
+            self.store.save(self.data)
+        self._apply_overrides_to_table()
+        self._update_review_buttons()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
+    def _refresh_validations(self) -> None:
+        changed = False
+        for key, payload in list(self._validated.items()):
+            entry_changed = False
+            sources = payload.get("sources")
+            if not isinstance(sources, list) or not sources:
+                entry_changed = True
+            else:
+                for source in sources:
+                    path_text = source.get("path")
+                    if not path_text:
+                        entry_changed = True
+                        break
+                    path_obj = Path(path_text)
+                    try:
+                        stat = path_obj.stat()
+                    except OSError:
+                        entry_changed = True
+                        break
+                    if (
+                        float(source.get("mtime", -1.0)) != float(stat.st_mtime)
+                        or int(source.get("size", -1)) != int(stat.st_size)
+                    ):
+                        entry_changed = True
+                        break
+                    source.setdefault("key", self._path_key(path_obj))
+            if entry_changed:
+                self._validated.pop(key, None)
+                changed = True
+        if changed:
+            self._store_validation()
+
+    def _update_review_buttons(self) -> None:
+        if not hasattr(self, "mark_reviewed_button"):
+            return
+        has_selection = bool(self._selected_key)
+        is_reviewed = bool(has_selection and self._validated.get(self._selected_key or ""))
+        self.mark_reviewed_button.setEnabled(has_selection)
+        self.mark_reviewed_button.setText("Update review" if is_reviewed else "Mark reviewed")
+        self.clear_review_button.setEnabled(is_reviewed)
+
     def _store_overrides(self) -> None:
         self.data.extra["overrides"] = self._overrides
         self.store.save(self.data)
@@ -5292,6 +5447,8 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _apply_overrides_to_table(self) -> None:
         frame = self.data.table.copy()
+        if "Reviewed" not in frame.columns:
+            frame["Reviewed"] = False
         if frame.empty:
             self.model.set_frame(frame)
             return
@@ -5312,6 +5469,7 @@ class MicroscopeSection(MiniDatabaseSection):
                     ratio = float(d_value) / float(D_value)
                 except ZeroDivisionError:
                     ratio = None
+            frame.at[index, "Reviewed"] = bool(self._validated.get(key))
             frame.at[index, MICROSCOPE_D_COLUMN] = d_value
             frame.at[index, MICROSCOPE_CAP_D_COLUMN] = D_value
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
@@ -5319,8 +5477,10 @@ class MicroscopeSection(MiniDatabaseSection):
         self.model.set_frame(frame)
         self._auto_fit_columns()
         self._update_missing_summary()
+        self._update_review_buttons()
 
     def refresh(self) -> None:
+        self._refresh_validations()
         self._expected_keys_current = self._expected_microwire_keys()
         if self._expected_keys_current:
             self._prepare_initial_table(self._expected_keys_current)
@@ -5330,20 +5490,24 @@ class MicroscopeSection(MiniDatabaseSection):
         self._apply_overrides_to_table()
         self._update_hidden_columns()
         self._update_missing_summary()
+        self._update_review_buttons()
 
     def process(
         self,
         paths: List[Path],
         progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
     ) -> SectionProcessResult:
+        self._refresh_validations()
+        unique_paths = list(dict.fromkeys(Path(p) for p in paths))
+
         def _progress(idx: int, total: int) -> None:
             self._check_cancelled()
             if progress is None:
                 return
             message = None
-            if 0 < idx <= len(paths):
+            if 0 < idx <= len(unique_paths):
                 try:
-                    message = f"Grouping {Path(paths[idx - 1]).name}"
+                    message = f"Grouping {unique_paths[idx - 1].name}"
                 except Exception:
                     message = None
             try:
@@ -5364,13 +5528,42 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 pass
 
-        index = _group_microscope_measurements(
-            paths,
+        cache_lookup: Dict[str, MicroscopeCacheEntry] = {}
+        for candidate in unique_paths:
+            path_obj = Path(candidate)
+            key_tuple = _microscope_key(path_obj)
+            if key_tuple is None:
+                continue
+            comp, draw, piece = key_tuple
+            key = f"{comp}|{draw}|{piece}"
+            validated_entry = self._validated.get(key)
+            if not isinstance(validated_entry, dict):
+                continue
+            sources = validated_entry.get("sources")
+            if not isinstance(sources, list):
+                continue
+            path_key = self._path_key(path_obj)
+            if not any(
+                isinstance(source, dict)
+                and source.get("path")
+                and self._path_key(Path(source.get("path"))) == path_key
+                for source in sources
+            ):
+                continue
+            cache_entry = self._ocr_cache.get(path_key)
+            if cache_entry is None:
+                continue
+            cache_lookup[path_key] = cache_entry
+
+        index, cache_map = _group_microscope_measurements(
+            unique_paths,
             self.logger,
             progress_callback=_progress if progress is not None else None,
             debug_callback=debug_cb,
             update_callback=_emit_partial,
+            cache=cache_lookup,
         )
+        self._ocr_cache = dict(cache_map)
         if expected_keys:
             for key in expected_keys:
                 index.setdefault(key, MicroscopeMeasurements())
@@ -5385,8 +5578,13 @@ class MicroscopeSection(MiniDatabaseSection):
         }
         self._overrides = filtered_overrides
         table = _microscope_index_to_frame(index, filtered_overrides)
+        if "Reviewed" not in table.columns:
+            table["Reviewed"] = False
+        if "_key" in table.columns:
+            table["Reviewed"] = table["_key"].apply(lambda value: bool(self._validated.get(str(value))))
+
         processed: Dict[str, float] = {}
-        for path in paths:
+        for path in unique_paths:
             try:
                 processed[str(path)] = float(path.stat().st_mtime)
             except OSError:
@@ -5417,16 +5615,23 @@ class MicroscopeSection(MiniDatabaseSection):
                 "Microscope OCR completed but no diameters were detected. Ensure the PaddleOCR models are installed and the microscope captures contain visible annotations.",
                 level=logging.WARNING,
             )
+        cache_payload = {key: entry.as_dict() for key, entry in self._ocr_cache.items()}
+        extra_payload = {
+            "overrides": filtered_overrides,
+            "ocr_cache": cache_payload,
+            "validated": self._validated,
+        }
         return SectionProcessResult(
             table=table,
             processed=processed,
             payloads={"microscope_index": index},
-            extra={"overrides": filtered_overrides},
+            extra=extra_payload,
         )
 
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
         self._update_missing_summary()
+        self._update_review_buttons()
 
     @property
     def overrides(self) -> Dict[str, Dict[str, float]]:

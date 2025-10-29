@@ -15,7 +15,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
 
 import numpy as np
 import pandas as pd
@@ -76,41 +76,43 @@ ORIGIN_DIR_NAME = "origin_objects"
 class BuildCancelledError(Exception):
     """Raised when a build is cancelled by the caller."""
 
-MICRO_SIGN = "µ"
+MICRO_SIGN = "Âµ"
+MICROSCOPE_RESIZE_TARGET = 2200
+FOCUS_ROI_LIMIT = 3
 
 OUTPUT_COLUMNS = [
     "Composition",
     "Microwire",
-    "d (µm)",
-    "D (µm)",
+    "d (Âµm)",
+    "D (Âµm)",
     "d/D",
-    "Figure — 1000 mA",
-    "Figure — low mA",
+    "Figure â€” 1000 mA",
+    "Figure â€” low mA",
     "Strain",
     "Length (m)",
     "Production datetime",
     "Mass (g)",
-    "Resistance (Ω)",
-    "Temperature (°C)",
+    "Resistance (Î©)",
+    "Temperature (Â°C)",
     "Winding speed (m/min)",
     "Glass feeding (mm/min)",
     "Underpressure",
     "Notes",
-    "Figure — 1000 mA (Origin)",
-    "Figure — low mA (Origin)",
+    "Figure â€” 1000 mA (Origin)",
+    "Figure â€” low mA (Origin)",
     "Low mA value (mA)",
     "File 1000 mA",
     "File low mA",
 ]
 
 MICROSCOPE_IMAGE_COLUMNS = (
-    "d (µm) image",
-    "D (µm) image",
+    "d (Âµm) image",
+    "D (Âµm) image",
 )
 
 FIGURE_COLUMNS = (
-    "Figure — 1000 mA",
-    "Figure — low mA",
+    "Figure â€” 1000 mA",
+    "Figure â€” low mA",
 )
 
 STRAIN_COLUMN = "Strain"
@@ -151,13 +153,13 @@ RAW_VALUE_FIELDS = (
 )
 
 HEADER_HINTS: Dict[str, str] = {
-    "zloženie": "composition_label",
+    "zloÅ¾enie": "composition_label",
     "zlozenie": "composition_label",
     "composition": "composition_label",
-    "dátum a čas výroby": "production_datetime",
+    "dÃ¡tum a Äas vÃ½roby": "production_datetime",
     "datum a cas vyroby": "production_datetime",
     "datumacasvyroby": "production_datetime",
-    "hmotnosť": "mass_g",
+    "hmotnosÅ¥": "mass_g",
     "hmotnost": "mass_g",
     "mass": "mass_g",
     "odpor": "fabrication_resistance_ohm",
@@ -168,40 +170,40 @@ HEADER_HINTS: Dict[str, str] = {
     "glass feeding (mm/min)": "glass_feed_mm_per_min",
     "underpressure": "underpressure",
     "bistabilny/nebistabilny": "bistable_status",
-    "poznámka": "notes",
-    "Poznámka": "notes",
+    "poznÃ¡mka": "notes",
+    "PoznÃ¡mka": "notes",
     "poznamka": "notes",
     "Poznamka": "notes",
     "pozn.": "notes",
     "pozn": "notes",
-    "poznámky": "notes",
-    "p.č": "piece_y",
+    "poznÃ¡mky": "notes",
+    "p.Ä": "piece_y",
     "p.c": "piece_y",
-    "p.č.": "piece_y",
-    "počet otáčok": "piece_turns",
+    "p.Ä.": "piece_y",
+    "poÄet otÃ¡Äok": "piece_turns",
     "pocet otacok": "piece_turns",
-    "dĺžka (m)": "length_m",
+    "dÄºÅ¾ka (m)": "length_m",
     "dlzka (m)": "length_m",
-    "d (µm)": "d_um",
+    "d (Âµm)": "d_um",
     "d (um)": "d_um",
-    "d (μm)": "d_um",
-    "d(µm)": "d_um",
+    "d (Î¼m)": "d_um",
+    "d(Âµm)": "d_um",
     "d(um)": "d_um",
-    "d(μm)": "d_um",
+    "d(Î¼m)": "d_um",
     "d": "d_um",
-    "D (µm)": "D_um",
+    "D (Âµm)": "D_um",
     "D (um)": "D_um",
-    "D (μm)": "D_um",
-    "D(µm)": "D_um",
+    "D (Î¼m)": "D_um",
+    "D(Âµm)": "D_um",
     "D(um)": "D_um",
-    "D(μm)": "D_um",
+    "D(Î¼m)": "D_um",
     "D": "D_um",
     "d/D": "d_over_D",
     "d/d": "d_over_D",
     "Datum": "piece_date",
-    "Dátum": "piece_date",
+    "DÃ¡tum": "piece_date",
     "datum": "piece_date",
-    "dátum": "piece_date",
+    "dÃ¡tum": "piece_date",
 }
 
 ANNEALING_COLUMNS = ["I_A", "V_V", "R_ohm"]
@@ -231,7 +233,7 @@ MICROSCOPE_VALUE_PATTERN = re.compile(
 )
 MICROSCOPE_SECONDARY_PREFIX = re.compile(r"\[2]\s*$", re.IGNORECASE)
 MICROSCOPE_NUMBER_TOKEN = re.compile(r"^\d+(?:[.,]\d+)?$")
-MICROSCOPE_UNIT_HINTS = ("µm", "um", "μm")
+MICROSCOPE_UNIT_HINTS = ("Âµm", "um", "Î¼m")
 
 KNOWN_TIMEZONE_TOKENS = {
     "UTC",
@@ -568,6 +570,154 @@ class MicroscopeOCRResult:
 
 
 @dataclass
+class MicroscopeCacheEntry:
+    """Serialized OCR output for a single microscope capture."""
+
+    path: str
+    mtime: float
+    size: int
+    values: List[float] = field(default_factory=list)
+    detections: List[Dict[str, Any]] = field(default_factory=list)
+    texts: List[str] = field(default_factory=list)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "path": self.path,
+            "mtime": float(self.mtime),
+            "size": int(self.size),
+            "values": list(self.values),
+            "detections": list(self.detections),
+            "texts": list(self.texts),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> Optional["MicroscopeCacheEntry"]:
+        if not isinstance(payload, Mapping):
+            return None
+        path = str(payload.get("path") or "")
+        try:
+            mtime = float(payload.get("mtime", 0.0))
+        except (TypeError, ValueError):
+            mtime = 0.0
+        try:
+            size = int(payload.get("size", 0))
+        except (TypeError, ValueError):
+            size = 0
+        values_raw = payload.get("values") or []
+        detections_raw = payload.get("detections") or []
+        texts_raw = payload.get("texts") or []
+        values: List[float] = []
+        for entry in values_raw:
+            try:
+                numeric = float(entry)
+            except (TypeError, ValueError):
+                continue
+            values.append(numeric)
+        detections: List[Dict[str, Any]] = []
+        for entry in detections_raw:
+            if isinstance(entry, Mapping):
+                detections.append(dict(entry))
+        texts: List[str] = []
+        for entry in texts_raw:
+            text = str(entry)
+            if text:
+                texts.append(text)
+        return cls(path=path, mtime=mtime, size=size, values=values, detections=detections, texts=texts)
+
+    @classmethod
+    def from_result(
+        cls,
+        path: Path,
+        mtime: float,
+        size: int,
+        result: MicroscopeOCRResult,
+    ) -> "MicroscopeCacheEntry":
+        detections_payload: List[Dict[str, Any]] = []
+        for detection in result.detections:
+            payload: Dict[str, Any] = {
+                "value": float(detection.value),
+                "bbox": list(detection.bbox) if detection.bbox else None,
+                "text": detection.text,
+                "source": detection.source,
+                "confidence": detection.confidence,
+                "marker": detection.marker,
+                "category": detection.category,
+                "image_path": str(detection.image_path) if detection.image_path else None,
+                "crop_path": str(detection.crop_path) if detection.crop_path else None,
+            }
+            detections_payload.append(payload)
+        return cls(
+            path=str(path),
+            mtime=float(mtime),
+            size=int(size),
+            values=list(result.values),
+            detections=detections_payload,
+            texts=list(result.texts),
+        )
+
+    def is_current(self, path: Path) -> bool:
+        try:
+            stat_result = path.stat()
+        except OSError:
+            return False
+        return (
+            math.isclose(float(stat_result.st_mtime), float(self.mtime), rel_tol=0.0, abs_tol=1e-6)
+            and int(stat_result.st_size) == int(self.size)
+        )
+
+    def to_result(self, path: Path) -> MicroscopeOCRResult:
+        detections: List[MicroscopeDetection] = []
+        for entry in self.detections:
+            value = entry.get("value")
+            if not isinstance(value, (int, float)):
+                continue
+            bbox_source = entry.get("bbox")
+            bbox: Optional[Tuple[int, int, int, int]] = None
+            if isinstance(bbox_source, (list, tuple)) and len(bbox_source) == 4:
+                try:
+                    bbox = tuple(int(round(float(coord))) for coord in bbox_source)
+                except (TypeError, ValueError):
+                    bbox = None
+            image_token = entry.get("image_path")
+            if image_token:
+                try:
+                    image_path = Path(str(image_token))
+                except Exception:
+                    image_path = path
+            else:
+                image_path = path
+            crop_token = entry.get("crop_path")
+            crop_path: Optional[Path]
+            if crop_token:
+                try:
+                    crop_candidate = Path(str(crop_token))
+                except Exception:
+                    crop_candidate = None
+                crop_path = crop_candidate
+            else:
+                crop_path = None
+            detection = MicroscopeDetection(
+                value=float(value),
+                image_path=image_path,
+                bbox=bbox,
+                text=entry.get("text"),
+                source=str(entry.get("source") or "ocr"),
+                confidence=float(entry["confidence"]) if isinstance(entry.get("confidence"), (int, float)) else None,
+                marker=int(entry["marker"]) if isinstance(entry.get("marker"), (int, float)) else None,
+                crop_path=crop_path,
+            )
+            category = entry.get("category")
+            if category is not None:
+                detection.category = str(category)
+            detections.append(detection)
+        return MicroscopeOCRResult(
+            values=list(self.values),
+            detections=detections,
+            texts=list(self.texts),
+        )
+
+
+@dataclass
 class MicroscopeMeasurements:
     """Diameter samples gathered from microscope images."""
 
@@ -770,7 +920,7 @@ def _normalise_text(value: object) -> str:
 
 
 def _is_unit_suffix(text: str) -> bool:
-    """Return ``True`` when *text* only contains unit markers such as ``µm``."""
+    """Return ``True`` when *text* only contains unit markers such as ``Âµm``."""
 
     if not text:
         return False
@@ -780,9 +930,9 @@ def _is_unit_suffix(text: str) -> bool:
     ascii_text = unicodedata.normalize("NFKD", stripped)
     ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch))
     simplified = re.sub(r"\s+", "", ascii_text).lower()
-    if simplified in {"um", "µm", "μm", "(um)", "(µm)", "(μm)", "um)", "µm)", "μm)"}:
+    if simplified in {"um", "Âµm", "Î¼m", "(um)", "(Âµm)", "(Î¼m)", "um)", "Âµm)", "Î¼m)"}:
         return True
-    unit_chars = set("uµμm()/.-[]{}")
+    unit_chars = set("uÂµÎ¼m()/.-[]{}")
     if simplified and all(ch in unit_chars for ch in simplified):
         return True
     return False
@@ -875,13 +1025,13 @@ def _header_key(value: object) -> Optional[str]:
         return "underpressure"
     if "bistabil" in lowered:
         return "bistable_status"
-    if "p.c" in lowered or "p.č" in lowered or simple_compact == "pc":
+    if "p.c" in lowered or "p.Ä" in lowered or simple_compact == "pc":
         return "piece_y"
     if "pocet" in lowered and "otac" in lowered:
         return "piece_turns"
-    if "dlzk" in lowered or "dlžk" in lowered:
+    if "dlzk" in lowered or "dlÅ¾k" in lowered:
         return "length_m"
-    micron_hint = any(token in lowered for token in ("µm", "um", "μm", "mikro", "micro"))
+    micron_hint = any(token in lowered for token in ("Âµm", "um", "Î¼m", "mikro", "micro"))
     ascii_simple = ascii_text.replace("\u00a0", " ")
     if micron_hint:
         if re.search(r"\bD\d*\b", ascii_text):
@@ -894,12 +1044,12 @@ def _header_key(value: object) -> Optional[str]:
             return "d_um"
         if re.search(r"\bd\s*/\s*D\b", ascii_simple, re.IGNORECASE):
             return "d_over_D"
-    if lowered.strip().startswith("d") and "µm" in lowered:
+    if lowered.strip().startswith("d") and "Âµm" in lowered:
         first = ascii_text.strip()[:1]
         if first == "D":
             return "D_um"
         return "d_um"
-    if lowered.strip().startswith("d") and "um" in lowered and "µ" not in lowered:
+    if lowered.strip().startswith("d") and "um" in lowered and "Âµ" not in lowered:
         first = ascii_text.strip()[:1]
         if first == "D":
             return "D_um"
@@ -912,7 +1062,7 @@ def _header_key(value: object) -> Optional[str]:
         return "d_um"
     if any(token in lowered for token in ("sklo", "skla", "glass", "clad", "cladding", "sheath")) and re.search(r"\bD\d*\b", ascii_text):
         return "D_um"
-    if ("datum" in lowered or "dátum" in lowered) and "cas" not in lowered:
+    if ("datum" in lowered or "dÃ¡tum" in lowered) and "cas" not in lowered:
         return "piece_date"
     return None
 
@@ -1146,7 +1296,7 @@ def _canonical_dimension_field(field: Optional[str]) -> Optional[str]:
     if cleaned in {"D", "D.", "D:"}:
         return "D_um"
 
-    has_micron_hint = any(token in lowered for token in ("_um", " um", "µm", "μm", "mic"))
+    has_micron_hint = any(token in lowered for token in ("_um", " um", "Âµm", "Î¼m", "mic"))
     context_hint = any(
         token in lowered
         for token in (
@@ -1397,7 +1547,7 @@ def _auto_discover_microscope_paths(
 
 def _normalise_microscope_text(text: str) -> str:
     cleaned = unicodedata.normalize("NFKC", text or "")
-    cleaned = cleaned.replace("μ", MICRO_SIGN)
+    cleaned = cleaned.replace("Î¼", MICRO_SIGN)
     cleaned = cleaned.replace("|", "1")
     cleaned = re.sub(r"(^|\s)(?:1|I|l){1,2}\]", lambda m: f"{m.group(1)}[1]", cleaned)
     cleaned = re.sub(r"(^|\s)(?:2|Z)\]", lambda m: f"{m.group(1)}[2]", cleaned)
@@ -1424,7 +1574,7 @@ def _has_primary_marker(prefix: str) -> bool:
     snippet = unicodedata.normalize("NFKC", prefix[-8:] if prefix else "")
     if not snippet:
         return False
-    snippet = snippet.replace("μ", MICRO_SIGN)
+    snippet = snippet.replace("Î¼", MICRO_SIGN)
     snippet = snippet.replace("|", "1").replace("I", "1").replace("l", "1")
     snippet = snippet.replace("{", "[").replace("(", "[")
     snippet = snippet.replace("}", "]").replace(")", "]")
@@ -1523,7 +1673,7 @@ def _extract_microscope_diameters(
 
     def _resample(image):
         width, height = image.size
-        target = 4000
+        target = MICROSCOPE_RESIZE_TARGET
         longest = max(width, height)
         if longest <= 0 or longest <= target:
             return image
@@ -1562,13 +1712,56 @@ def _extract_microscope_diameters(
         seen_candidates.add(cleaned)
 
     grayscale = ImageOps.grayscale(base_resized)
-    resized = grayscale
-    enhanced = ImageEnhance.Contrast(resized).enhance(2.0)
-    sharpened = enhanced.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
-    autocontrasted = ImageOps.autocontrast(resized)
-    inverted = ImageOps.invert(resized)
-    binary = resized.point(lambda p: 255 if p > 160 else 0, mode="1")
-    binary_gray = ImageOps.autocontrast(binary.convert("L"))
+
+    variant_cache: Dict[str, Optional[Image.Image]] = {
+        "base": base_resized,
+        "grayscale": grayscale,
+    }
+
+    def _variant(name: str, factory: Callable[[], Optional[Image.Image]]) -> Optional[Image.Image]:
+        if name not in variant_cache:
+            try:
+                variant_cache[name] = factory()
+            except Exception:
+                variant_cache[name] = None
+        return variant_cache.get(name)
+
+    def _make_contrast() -> Optional[Image.Image]:
+        gray = variant_cache.get("grayscale")
+        if gray is None:
+            return None
+        return ImageEnhance.Contrast(gray).enhance(2.0)
+
+    def _make_sharpen() -> Optional[Image.Image]:
+        contrast_img = _variant("contrast", _make_contrast)
+        if contrast_img is None:
+            return None
+        return contrast_img.filter(ImageFilter.UnsharpMask(radius=2, percent=175))
+
+    def _make_autocontrast() -> Optional[Image.Image]:
+        gray = variant_cache.get("grayscale")
+        if gray is None:
+            return None
+        return ImageOps.autocontrast(gray)
+
+    def _make_invert() -> Optional[Image.Image]:
+        gray = variant_cache.get("grayscale")
+        if gray is None:
+            return None
+        return ImageOps.invert(gray)
+
+    def _make_binary() -> Optional[Image.Image]:
+        gray = variant_cache.get("grayscale")
+        if gray is None:
+            return None
+        binary = gray.point(lambda p: 255 if p > 160 else 0, mode="1")
+        return ImageOps.autocontrast(binary.convert("L"))
+
+    def _make_binary_invert() -> Optional[Image.Image]:
+        binary_img = _variant("binary", _make_binary)
+        if binary_img is None:
+            return None
+        return ImageOps.invert(binary_img)
 
     def _fourier_sharpen(image: Image.Image) -> Image.Image:
         array = np.array(image.convert("L"), dtype=np.float32)
@@ -1611,26 +1804,33 @@ def _extract_microscope_diameters(
         enhanced_image = Image.fromarray(emphasised, mode="L")
         return ImageOps.autocontrast(enhanced_image)
 
-    red_mask = _red_enhance(base_resized)
-    red_binary = None
-    if red_mask is not None:
-        red_binary = red_mask.point(lambda p: 255 if p > 140 else 0, mode="1").convert("L")
+    def _make_fourier() -> Optional[Image.Image]:
+        gray = variant_cache.get("grayscale")
+        if gray is None:
+            return None
+        return _fourier_sharpen(gray)
 
-    variants = [
-        ("base", base_resized),
-        ("grayscale", resized),
-        ("contrast", enhanced),
-        ("sharpen", sharpened),
-        ("autocontrast", autocontrasted),
-        ("invert", inverted),
-        ("binary", binary_gray),
-        ("binary_invert", ImageOps.invert(binary_gray)),
-        ("red_mask", red_mask),
-        ("red_binary", red_binary),
-        ("fourier", _fourier_sharpen(resized)),
-    ]
+    def _make_red_mask() -> Optional[Image.Image]:
+        return _red_enhance(base_resized)
 
-    focus_variants: List[Tuple[str, Image.Image, Tuple[int, int]]] = []
+    def _make_red_binary() -> Optional[Image.Image]:
+        mask = _variant("red_mask", _make_red_mask)
+        if mask is None:
+            return None
+        return mask.point(lambda p: 255 if p > 140 else 0, mode="1").convert("L")
+
+    def _iter_variants() -> Iterable[Tuple[str, Optional[Image.Image]]]:
+        yield "base", variant_cache["base"]
+        yield "grayscale", variant_cache["grayscale"]
+        yield "contrast", _variant("contrast", _make_contrast)
+        yield "sharpen", _variant("sharpen", _make_sharpen)
+        yield "autocontrast", _variant("autocontrast", _make_autocontrast)
+        yield "invert", _variant("invert", _make_invert)
+        yield "binary", _variant("binary", _make_binary)
+        yield "binary_invert", _variant("binary_invert", _make_binary_invert)
+        yield "red_mask", _variant("red_mask", _make_red_mask)
+        yield "red_binary", _variant("red_binary", _make_red_binary)
+        yield "fourier", _variant("fourier", _make_fourier)    focus_variants: List[Tuple[str, Image.Image, Tuple[int, int]]] = []
     try:  # pragma: no cover - optional dependency
         import cv2  # type: ignore[import-not-found]
     except Exception:  # pragma: no cover - optional dependency
@@ -1700,7 +1900,7 @@ def _extract_microscope_diameters(
                             continue
                         rois.append((x0, y0, x1, y1))
                     rois.sort(key=lambda rect: (rect[0], rect[1]))
-                    for idx, rect in enumerate(rois[:6]):
+                    for idx, rect in enumerate(rois[:FOCUS_ROI_LIMIT]):
                         _append_focus_crop(f"focus{prefix}{idx + 1}", rect)
 
                 _collect_rois(mask, "")
@@ -1752,15 +1952,15 @@ def _extract_microscope_diameters(
                 if x1 - x0 >= 40 and y1 - y0 >= 25:
                     _append_focus_crop("focus", (x0, y0, x1, y1))
 
-    variant_entries: List[Tuple[str, Image.Image, Tuple[int, int], Tuple[int, int]]] = []
     reference_size = (resized_width, resized_height)
-    for label, crop, offset in focus_variants:
-        variant_entries.append((label, crop, offset, reference_size))
-    for label, variant in variants:
-        if variant is None:
-            continue
-        variant_entries.append((label, variant, (0, 0), reference_size))
 
+    def _iter_variant_entries() -> Iterable[Tuple[str, Image.Image, Tuple[int, int], Tuple[int, int]]]:
+        for label, crop, offset in focus_variants:
+            yield label, crop, offset, reference_size
+        for label, variant in _iter_variants():
+            if variant is None:
+                continue
+            yield label, variant, (0, 0), reference_size
     @dataclass
     class _OCRWord:
         text: str
@@ -1943,7 +2143,7 @@ def _extract_microscope_diameters(
         scale_ref_y = ref_h / float(vh)
         offset_x, offset_y = offset
         normalised_words = [_normalise_microscope_text(word.text) for word in words]
-        lowered_words = [text.lower().replace("μ", "µ") for text in normalised_words]
+        lowered_words = [text.lower().replace("Î¼", "Âµ") for text in normalised_words]
         for idx, word in enumerate(words):
             normalised = normalised_words[idx]
             marker_match = re.match(r"^\[\s*([12Il])\s*\]\s*", normalised)
@@ -1986,7 +2186,7 @@ def _extract_microscope_diameters(
             if unit_idx is None and marker is not None:
                 unit_idx = idx
             if marker is None:
-                context_normalised = context_prefix.replace("μ", MICRO_SIGN)
+                context_normalised = context_prefix.replace("Î¼", MICRO_SIGN)
                 if any(hint in context_normalised for hint in ("[1", "1]", "[1]")):
                     marker = 1
                 elif any(hint in context_normalised for hint in ("[2", "2]", "[2]")):
@@ -2119,7 +2319,7 @@ def _extract_microscope_diameters(
             if _consume_ocr_output("original", direct_result, (original_width, original_height)):
                 processed_any_variant = True
 
-        for label, variant, offset, ref_size in variant_entries:
+        for label, variant, offset, ref_size in _iter_variant_entries():
             if variant is None:
                 continue
             variant_size = variant.size
@@ -2226,7 +2426,10 @@ def _group_microscope_measurements(
     update_callback: Optional[
         Callable[[Tuple[str, int, int], MicroscopeMeasurements], None]
     ] = None,
-) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
+    cache: Optional[Mapping[str, Any]] = None,
+) -> Tuple[Dict[Tuple[str, int, int], MicroscopeMeasurements], Dict[str, MicroscopeCacheEntry]]:
+    """Group microscope captures into microwire measurements while caching OCR output."""
+
     log = _logger(logger)
     combined: List[Path] = []
     seen: Set[Path] = set()
@@ -2240,9 +2443,31 @@ def _group_microscope_measurements(
             continue
         seen.add(resolved)
         combined.append(path)
+
+    def _cache_key(path: Path) -> str:
+        try:
+            return str(path.resolve())
+        except Exception:
+            return str(path)
+
+    cache_lookup: Dict[str, MicroscopeCacheEntry] = {}
+    if cache:
+        for key, payload in cache.items():
+            entry: Optional[MicroscopeCacheEntry]
+            if isinstance(payload, MicroscopeCacheEntry):
+                entry = payload
+            elif isinstance(payload, Mapping):
+                entry = MicroscopeCacheEntry.from_dict(payload)
+            else:
+                entry = None
+            if entry is None:
+                continue
+            cache_lookup[str(key)] = entry
+
     total = len(combined)
     processed = 0
     grouped: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+    updated_cache: Dict[str, MicroscopeCacheEntry] = {}
     for raw_path in combined:
         path = raw_path.expanduser()
         processed += 1
@@ -2257,13 +2482,14 @@ def _group_microscope_measurements(
                     pass
 
         try:
-            if not path.exists():
-                log.debug("Microscope image %s does not exist; skipping", path)
-                _notify()
-                continue
+            stat_result = path.stat()
         except OSError:
+            log.debug("Microscope image %s does not exist; skipping", path)
             _notify()
             continue
+        mtime = float(stat_result.st_mtime)
+        size = int(stat_result.st_size)
+
         key = _microscope_key(path)
         if key is None:
             log.debug("Unable to derive microwire key from microscope image %s", path)
@@ -2271,29 +2497,48 @@ def _group_microscope_measurements(
             continue
         category = _microscope_category(path)
         record = grouped.setdefault(key, MicroscopeMeasurements())
-        try:
-            extracted = _extract_microscope_diameters(path, log)
-        except BuildCancelledError:
-            raise
-        except Exception:
-            log.exception("Microscope OCR failed for %s", path)
-            _notify()
-            continue
-        debug_texts: List[str] = []
-        if isinstance(extracted, MicroscopeOCRResult):
-            values = list(extracted.values)
-            detections = list(extracted.detections)
-            debug_texts = list(extracted.texts)
+
+        cache_token = _cache_key(path)
+        cache_entry = cache_lookup.get(cache_token) or cache_lookup.get(str(path))
+        raw_result: MicroscopeOCRResult | Iterable[float] | None = None
+        if cache_entry is not None and cache_entry.is_current(path):
+            try:
+                raw_result = cache_entry.to_result(path)
+            except Exception:
+                raw_result = None
+        if raw_result is None:
+            try:
+                raw_result = _extract_microscope_diameters(path, log)
+            except BuildCancelledError:
+                raise
+            except Exception:
+                log.exception("Microscope OCR failed for %s", path)
+                _notify()
+                continue
+
+        if isinstance(raw_result, MicroscopeOCRResult):
+            result = MicroscopeOCRResult(
+                values=list(raw_result.values),
+                detections=list(raw_result.detections),
+                texts=list(raw_result.texts),
+            )
         else:
             values = [
                 float(v)
-                for v in extracted
+                for v in raw_result
                 if isinstance(v, (int, float)) and math.isfinite(float(v)) and float(v) > 0
             ]
-            detections = []
+            result = MicroscopeOCRResult(values=values)
+
+        values = list(result.values)
+        detections = list(result.detections)
+        debug_texts = list(result.texts)
+
         if debug_callback is not None:
             debug_payload = MicroscopeOCRResult(
-                values=list(values), detections=list(detections), texts=list(debug_texts)
+                values=list(result.values),
+                detections=list(result.detections),
+                texts=list(debug_texts),
             )
             try:
                 debug_callback(path, debug_payload)
@@ -2301,6 +2546,7 @@ def _group_microscope_measurements(
                 log.debug(
                     "Microscope OCR debug callback failed for %s", path, exc_info=True
                 )
+
         if detections:
             grouped_detections: Dict[str, List[MicroscopeDetection]] = {}
             for detection in detections:
@@ -2346,6 +2592,9 @@ def _group_microscope_measurements(
             record.extend(category, values, detections)
         else:
             record.add_placeholder(category, path)
+            cache_entry_final = MicroscopeCacheEntry.from_result(path, mtime, size, result)
+            cache_entry_final.path = cache_token
+            updated_cache[cache_token] = cache_entry_final
             _notify()
             continue
         if not detections and values:
@@ -2354,8 +2603,15 @@ def _group_microscope_measurements(
             try:
                 update_callback(key, record)
             except Exception:
-                log.debug("Microscope update callback failed for %s", key, exc_info=True)
+                log.debug(
+                    "Microscope OCR debug callback failed for %s", key, exc_info=True
+                )
+
+        cache_entry_final = MicroscopeCacheEntry.from_result(path, mtime, size, result)
+        cache_entry_final.path = cache_token
+        updated_cache[cache_token] = cache_entry_final
         _notify()
+
     missing_references: List[str] = []
     mismatched_references: List[str] = []
     for key, override in MANUAL_DIAMETER_OVERRIDES.items():
@@ -2396,8 +2652,7 @@ def _group_microscope_measurements(
         log.warning(
             "Microscope OCR deviates from manual references: %s", preview
         )
-    return grouped
-
+    return grouped, updated_cache
 
 def _draw_key(path: Path) -> Optional[Tuple[str, int]]:
     candidates: List[str] = [parent.name for parent in path.parents]
@@ -2604,7 +2859,7 @@ def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.L
     header_idx = None
     for idx, row in df.iterrows():
         values = [_normalise_text(cell).lower() for cell in row.tolist()]
-        if any("p.c" in v or "p.č" in v or v == "pc" for v in values if v):
+        if any("p.c" in v or "p.Ä" in v or v == "pc" for v in values if v):
             header_idx = idx
             break
     if header_idx is None:
@@ -3437,7 +3692,7 @@ def _embed_assets_with_xlsxwriter(
     figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
     origin_columns = [
         column
-        for column in ("Figure — 1000 mA (Origin)", "Figure — low mA (Origin)")
+        for column in ("Figure â€” 1000 mA (Origin)", "Figure â€” low mA (Origin)")
         if column in dataframe.columns
     ]
     microscope_columns = [
@@ -3720,11 +3975,11 @@ def build_database(
     microscope_image_columns: Tuple[str, ...] = ()
     if include_crops:
         microscope_image_columns = MICROSCOPE_IMAGE_COLUMNS
-        if "d (µm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[0] not in output_columns:
-            d_index = output_columns.index("d (µm)")
+        if "d (Âµm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[0] not in output_columns:
+            d_index = output_columns.index("d (Âµm)")
             output_columns.insert(d_index + 1, MICROSCOPE_IMAGE_COLUMNS[0])
-        if "D (µm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[1] not in output_columns:
-            D_index = output_columns.index("D (µm)")
+        if "D (Âµm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[1] not in output_columns:
+            D_index = output_columns.index("D (Âµm)")
             output_columns.insert(D_index + 1, MICROSCOPE_IMAGE_COLUMNS[1])
 
     raw_backends = tuple(config.plot_backends) if config.plot_backends else ()
@@ -3822,7 +4077,7 @@ def build_database(
         _analysis_notify()
 
     if microscope_index is None:
-        microscope_index = _group_microscope_measurements(
+        microscope_index, _ = _group_microscope_measurements(
             microscope_sources,
             log,
             progress_callback=micro_callback,
@@ -3877,10 +4132,10 @@ def build_database(
             if not ok:
                 stats.resistance_checks_failed += 1
                 if mean_error is None:
-                    log.warning("R≈V/I sanity check failed for %s", path)
+                    log.warning("Râ‰ˆV/I sanity check failed for %s", path)
                 else:
                     log.warning(
-                        "R≈V/I sanity check failed for %s (mean error %.2f%%)",
+                        "Râ‰ˆV/I sanity check failed for %s (mean error %.2f%%)",
                         path,
                         mean_error * 100,
                     )
@@ -3912,14 +4167,14 @@ def build_database(
         row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
         row["Microwire"] = _microwire_label(draw_x, piece_y)
-        row["d (µm)"] = None
-        row["D (µm)"] = None
+        row["d (Âµm)"] = None
+        row["D (Âµm)"] = None
         row["d/D"] = None
         row["Length (m)"] = _value_for_output(piece_info, "length_m")
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
-        row["Resistance (Ω)"] = _value_for_output(draw_info, "fabrication_resistance_ohm")
-        row["Temperature (°C)"] = _value_for_output(draw_info, "fabrication_temperature_c")
+        row["Resistance (Î©)"] = _value_for_output(draw_info, "fabrication_resistance_ohm")
+        row["Temperature (Â°C)"] = _value_for_output(draw_info, "fabrication_temperature_c")
         row["Winding speed (m/min)"] = _value_for_output(draw_info, "winding_speed_m_per_min")
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
@@ -3927,25 +4182,25 @@ def build_database(
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None
-        d_numeric = _parse_numeric(row["d (µm)"])
-        D_numeric = _parse_numeric(row["D (µm)"])
+        d_numeric = _parse_numeric(row["d (Âµm)"])
+        D_numeric = _parse_numeric(row["D (Âµm)"])
         ratio_numeric = _parse_numeric(row["d/D"])
         microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
             if d_detection is not None:
-                row["d (µm)"] = d_detection.value
+                row["d (Âµm)"] = d_detection.value
                 d_numeric = d_detection.value
                 if d_detection.source == "ocr":
-                    row_highlights.add("d (µm)")
+                    row_highlights.add("d (Âµm)")
             if D_numeric is None:
                 D_detection = microscope_data.best_glass_detection()
                 if D_detection is not None:
-                    row["D (µm)"] = D_detection.value
+                    row["D (Âµm)"] = D_detection.value
                     D_numeric = D_detection.value
                     if D_detection.source == "ocr":
-                        row_highlights.add("D (µm)")
+                        row_highlights.add("D (Âµm)")
             if ratio_numeric is None and d_numeric is not None and D_numeric not in (None, 0):
                 try:
                     ratio = d_numeric / D_numeric
@@ -3989,12 +4244,12 @@ def build_database(
         if video_data is None:
             video_data = video_index.get((composition, draw_x, None))
         if video_data:
-            temp_numeric = _parse_numeric(row["Temperature (°C)"])
+            temp_numeric = _parse_numeric(row["Temperature (Â°C)"])
             if temp_numeric is None:
                 temp = video_data.temperature()
                 if temp is not None:
-                    row["Temperature (°C)"] = temp
-                    row_highlights.add("Temperature (°C)")
+                    row["Temperature (Â°C)"] = temp
+                    row_highlights.add("Temperature (Â°C)")
             under_numeric = _parse_numeric(row["Underpressure"])
             if under_numeric is None:
                 under_value = video_data.underpressure()
@@ -4062,7 +4317,7 @@ def build_database(
                         cached = None
                 if cached is not None:
                     figure_name = Path(cached).name
-                    row["Figure — 1000 mA"] = figure_name
+                    row["Figure â€” 1000 mA"] = figure_name
                     plot_name_to_path.setdefault(figure_name, cached)
                     if figure_name not in plot_records:
                         plot_records.append(figure_name)
@@ -4082,7 +4337,7 @@ def build_database(
                         cached = None
                 if cached is not None:
                     figure_name = Path(cached).name
-                    row["Figure — low mA"] = figure_name
+                    row["Figure â€” low mA"] = figure_name
                     plot_name_to_path.setdefault(figure_name, cached)
                     if figure_name not in plot_records:
                         plot_records.append(figure_name)
@@ -4111,7 +4366,7 @@ def build_database(
                             origin_cache[high_record.metadata.measurement_id] = cached_origin
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
-                    row["Figure — 1000 mA (Origin)"] = cached_origin.descriptor
+                    row["Figure â€” 1000 mA (Origin)"] = cached_origin.descriptor
             if origin_enabled and low_record:
                 cached_origin = origin_cache.get(low_record.metadata.measurement_id)
                 if cached_origin is None:
@@ -4136,7 +4391,7 @@ def build_database(
                             origin_cache[low_record.metadata.measurement_id] = cached_origin
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
-                    row["Figure — low mA (Origin)"] = cached_origin.descriptor
+                    row["Figure â€” low mA (Origin)"] = cached_origin.descriptor
         row_index = len(rows)
         rows.append(row)
         if row_highlights:
@@ -4257,7 +4512,7 @@ def build_database(
         else:
             log.warning("Unsupported export format '%s'; skipping", fmt)
     log.info(
-        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Missing low mA: %s | R≈V/I failures: %s",
+        "Measurements parsed: %s | Skipped: %s | Rows built: %s | Missing draw info: %s | Missing piece info: %s | Missing 1000 mA: %s | Missing low mA: %s | Râ‰ˆV/I failures: %s",
         stats.parsed,
         stats.skipped,
         stats.rows_built,
@@ -4296,3 +4551,6 @@ __all__ = [
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
 ]
+
+
+
