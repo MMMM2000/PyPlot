@@ -614,7 +614,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             QtWidgets.QMessageBox.information(
                 self.host,
                 self.name,
-                "Load temperature sensitivity data before exporting TXT files.",
+                "Load temperature dependence data before exporting TXT files.",
             )
             return
         config = self._apply_settings_to_core()
@@ -634,19 +634,19 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         target = Path(directory)
         exported = 0
         try:
-            dataframe = temp_sens_core.maybe_handle_outliers(self._data.copy())
+            dataframe = temp_core.maybe_handle_outliers(self._data.copy())
             for (_, _), group in dataframe.groupby(
                 ["composition", "anneal"], dropna=False
             ):
-                temp_sens_core.export_group_to_txt(
+                temp_core.export_group_to_txt(
                     group,
                     target,
-                    baseline_mode=config.get("baseline_mode", "none"),
-                    include_cont=config.get("include_continuous", True),
-                    med_window=config.get("med_window", temp_sens_core.MED_WINDOW),
-                    ma_window=config.get("ma_window", temp_sens_core.MA_WINDOW),
+                    include_processed=temp_core.PLOT_MODE in {"processed", "both"},
+                    med_window=temp_core.MED_WINDOW,
+                    ma_window=temp_core.MA_WINDOW,
                 )
                 exported += 1
+            self._last_export_dir = target
         except Exception as exc:  # pragma: no cover - GUI path
             QtWidgets.QMessageBox.critical(
                 self.host,

@@ -586,6 +586,11 @@
   USERPROFILE when necessary) so Windows accounts with diacritics no longer
   trigger repeated `inference.json` load failures during model downloads.
 
+## 2025-10-22 12:45 UTC
+
+- Fixed the PyPlot temperature dependence TXT exporter to use the dedicated
+  workflow, preventing KeyErrors when exporting temperature dependence runs.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
