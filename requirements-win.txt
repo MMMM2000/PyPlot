@@ -1,0 +1,7 @@
+# Windows convenience lock that adds the Origin automation wheels on top of the
+# shared runtime stack. Evaluate the platform marker locally so macOS/Linux
+# hosts can ignore the Origin dependencies while reusing the file for linting
+# or packaging scripts.
+-r requirements.txt
+originpro==1.1.14; sys_platform == "win32"
+originext==1.2.5; sys_platform == "win32"

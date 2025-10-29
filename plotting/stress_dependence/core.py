@@ -88,6 +88,32 @@ LABELS = {
     "sum": "T1+T2 (\u03BCs)",
 }
 
+_EXPORT_ORDER = ("T1", "T2", "dT", "sum")
+
+
+def _baseline_for_variable(grp: pd.DataFrame, var: str) -> float:
+    """Return the baseline used for ``var`` according to ``BASELINE_MODE``."""
+
+    means = grp.groupby(["dir", "load"], as_index=False).agg({var: "mean"})
+    if means.empty:
+        return float("nan")
+    first = float(means["load"].min())
+    if BASELINE_MODE == "first":
+        base_series = cast(
+            pd.Series,
+            means.loc[(means["dir"] == "a") & (means["load"] == first), var],
+        )
+        return float(base_series.iloc[0]) if not base_series.empty else float("nan")
+    target = means.loc[means["dir"] == "a", var]
+    return float(target.min()) if not target.empty else float("nan")
+
+
+def _sanitise_stem(*parts: str) -> str:
+    """Return a filesystem-friendly stem constructed from ``parts``."""
+
+    stem = "_".join(part.strip().replace(" ", "_") for part in parts if part)
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", stem) or "stress_dependence"
+
 class ProgressDialog:
     """Fallback progress indicator used when no GUI is provided."""
 
@@ -352,15 +378,7 @@ def _origin_compute_tables(grp: pd.DataFrame, var: str):
     """Return jittered raw data, means and delta for Origin plotting."""
 
     means = grp.groupby(["dir", "load"], as_index=False).agg({var: "mean"})
-    first = float(means["load"].min())
-    if BASELINE_MODE == "first":
-        base_series = cast(
-            pd.Series,
-            means.loc[(means["dir"] == "a") & (means["load"] == first), var],
-        )
-        base = float(base_series.iloc[0]) if not base_series.empty else float("nan")
-    else:
-        base = float(means.loc[means["dir"] == "a", var].min())
+    base = _baseline_for_variable(grp, var)
 
     rng = np.random.default_rng(0)
     x_center = grp["load"] + grp["dir"].map({"a": -OFFSET, "b": +OFFSET})
@@ -578,6 +596,62 @@ def plot_variable_origin(grp: pd.DataFrame, var: str) -> None:
     )
 
     _origin_build_graph(raw_a, raw_b, mean_a, mean_b, title_to_use, var, delta)
+
+
+def export_group_to_txt(grp: pd.DataFrame, directory: str | Path) -> Path:
+    """Write ``grp`` to ``directory`` with baseline-adjusted columns.
+
+    The exported table mirrors the data shown in Matplotlib/Origin:
+
+    - raw measurements for every variable
+    - baseline-adjusted versions that subtract the configured baseline
+    - per-variable baseline values for traceability
+    """
+
+    out_dir = Path(directory)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    comp = str(grp["composition"].iat[0]) if "composition" in grp else ""
+    title = str(grp["title"].iat[0]) if "title" in grp else ""
+    sample_end = str(grp["sample_end"].iat[0]) if "sample_end" in grp else ""
+    anneal = str(grp["anneal"].iat[0]) if "anneal" in grp else ""
+
+    baselines = {var: _baseline_for_variable(grp, var) for var in _EXPORT_ORDER}
+    work = grp.copy()
+    work["load"] = pd.to_numeric(work.get("load"), errors="coerce")
+    work["line"] = pd.to_numeric(work.get("line"), errors="coerce")
+    work.sort_values(["dir", "load", "line"], inplace=True, na_position="last")
+    if "sample_end" in work:
+        work["sample_label"] = work["sample_end"].map(format_sample_end)
+    else:
+        work["sample_label"] = ""
+
+    for var, base in baselines.items():
+        rel_col = f"{var}_relative"
+        base_col = f"baseline_{var}"
+        work[rel_col] = work[var] - base
+        work[base_col] = base
+
+    columns: list[str] = [
+        "composition",
+        "title",
+        "sample_end",
+        "sample_label",
+        "anneal",
+        "filename",
+        "dir",
+        "load",
+        "line",
+    ]
+    for var in _EXPORT_ORDER:
+        columns.extend([var, f"{var}_relative", f"baseline_{var}"])
+
+    export_cols = [col for col in columns if col in work.columns]
+    export_df = work[export_cols].copy()
+    stem = _sanitise_stem("stress", comp, title, sample_end, anneal)
+    path = out_dir / f"{stem}.txt"
+    export_df.to_csv(path, sep="\t", index=False, float_format="%.10g")
+    return path
 
 def main(files: List[str], backend: str = BACKEND) -> None:
     if IMPROVE_READABILITY:

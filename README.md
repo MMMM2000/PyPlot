@@ -13,7 +13,9 @@ loggers, plotters, emulators, and builders without starting individual scripts.
    `.venv\Scripts\activate` on Windows)
 4. Upgrade pip: `python -m pip install --upgrade pip`
 5. Install the runtime stack for every non-experiment tool:
-   `pip install -r requirements.txt`
+   - macOS/Linux: `pip install -r requirements.txt`
+   - Windows (bundles Origin automation wheels):
+     `pip install -r requirements-win.txt`
 6. (Optional) Install experiment helpers and test tooling:
    `pip install '.[test]'`
 7. Launch the hub: `python -m launcher`
@@ -23,10 +25,10 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 > afterwards if you also plan to execute the bundled tests or
 > experiment scripts.
 
-**Windows-only Origin exports:** Install the additional Origin automation wheels with
-`pip install originpro==1.1.14 originext==1.2.5` on Windows if you plan to push data into
-OriginPro. These wheels are not published for macOS/Linux, so they are excluded from the
-default requirements lock.
+**Windows-only Origin exports:** Installing from `requirements-win.txt` pulls in the
+Origin automation wheels alongside the shared dependency lock, keeping PyInstaller
+builds Origin-ready without a follow-up `pip install`. The wheels remain excluded from
+the cross-platform `requirements.txt` because they are not published for macOS/Linux.
 
 OriginPro users should also install `originpro`, `numpy`, `pandas`,
 `python-dateutil`, `pytz`, `six`, and `tzdata` inside Origin’s embedded Python
@@ -38,6 +40,10 @@ before choosing the Origin backend.
   and recent-history sorting.
 - VSM Hysteresis Loops – plot loops by temperature/angle, align endpoints,
   export to Matplotlib figures or Origin workbooks.
+- Stress Dependence/Sensitivity – analyse stress workflows from PyPlot with
+  Matplotlib previews, Origin automation, and TXT exports for archival.
+- Temperature Sensitivity – generate zeroed or raw temperature curves with
+  optional continuous sweeps, then export to Origin or TXT directly from PyPlot.
 - Serial Data Logger – capture instrument output with live plots and flexible
   filename templates.
 - Microwire Data Builder – combine fabrication spreadsheets and annealing logs
@@ -48,7 +54,8 @@ before choosing the Origin backend.
 ## Building
 
 Create a standalone application with PyInstaller after installing the project
-dependencies:
+dependencies (`pip install -r requirements-win.txt` on Windows, `pip install -r
+requirements.txt` on macOS/Linux):
 
 ```bash
 pyinstaller launcher.spec
