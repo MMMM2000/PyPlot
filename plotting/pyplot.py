@@ -1245,6 +1245,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
+        project_dock.setMinimumWidth(240)
         self.project_dock = project_dock
 
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -1269,6 +1270,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
+        object_dock.setMinimumWidth(240)
         self.object_dock = object_dock
 
         graph_settings_widget = QtWidgets.QWidget()
@@ -1310,6 +1312,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
         else:
             self._dock_switcher_panels.extend([None, None])
+
+        QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
 
         for tracked in (project_dock, log_dock, graph_dock, object_dock):
             if tracked is None:
@@ -2241,7 +2245,36 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         errors: List[str] = []
         imported = 0
-        for file_path in files:
+        total_files = len(files)
+        progress: QtWidgets.QProgressDialog | None = None
+        if total_files > 1:
+            progress = QtWidgets.QProgressDialog(
+                "Importing data…",
+                "Cancel",
+                0,
+                total_files,
+                self,
+            )
+            progress.setWindowTitle("Import Data")
+            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+        cancelled = False
+        position = 0
+        try:
+            for position, file_path in enumerate(files, start=1):
+                if progress is not None:
+                    progress.setLabelText(
+                        f"Importing {file_path.name} ({position}/{total_files})"
+                    )
+                    progress.setValue(position - 1)
+                    try:
+                        QtWidgets.QApplication.processEvents()
+                    except Exception:
+                        pass
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
             result = self._load_workbook_from_file(file_path)
             if result is None:
                 continue
@@ -2252,6 +2285,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 errors.append(f"{file_path}: {exc}")
                 continue
             imported += len(worksheets)
+        finally:
+            if progress is not None:
+                try:
+                    final_value = total_files if not cancelled else max(position - 1, 0)
+                    progress.setValue(final_value)
+                    progress.close()
+                except Exception:
+                    pass
+        if cancelled:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Import Data",
+                "Import cancelled before all files were processed.",
+            )
+            return
         if errors:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -2695,6 +2743,28 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return panel
+
+    def _apply_initial_dock_sizes(self) -> None:
+        project = getattr(self, "project_dock", None)
+        if isinstance(project, QtWidgets.QDockWidget):
+            width = max(project.sizeHint().width(), 320)
+            try:
+                self.resizeDocks([project], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                try:
+                    project.resize(width, project.height())
+                except Exception:
+                    pass
+        obj_dock = getattr(self, "object_dock", None)
+        if isinstance(obj_dock, QtWidgets.QDockWidget):
+            width = max(obj_dock.sizeHint().width(), 320)
+            try:
+                self.resizeDocks([obj_dock], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                try:
+                    obj_dock.resize(width, obj_dock.height())
+                except Exception:
+                    pass
 
     def _handle_primary_dock_location_change(
         self,

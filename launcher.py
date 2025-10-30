@@ -3,73 +3,87 @@ from __future__ import annotations
 import sys
 import os
 import time
-from typing import Callable, Dict, cast
+from importlib import import_module
+from typing import Any, Callable, Dict, Tuple, cast
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 
-from data_logging import data_logger
-from data_logging.current_annealing_logger import current_annealing_logger
-from emulators import virtual_serial_emulator_gui
 from plotting import common
-from plotting.pyplot_app import main as pyplot_main
-from plotting.hsw_distribution import distribution_gui
-from plotting.hsw_load_compare import load_compare_gui
-from plotting.hysteresis_loops import loops_gui
-from plotting.maxion_continuous import maxion_gui
-from plotting.current_annealing import anneal_gui as current_anneal_gui
-from plotting.pdf_plotter import pdf_gui
-from plotting.stress_dependence import stress_gui
-from plotting.stress_sensitivity import sens_gui
-from plotting.temperature_dependence import temp_dep_gui
-from plotting.temperature_sensitivity import temp_gui
-from plotting.vsm_hysteresis_loops import main as vsm_loops_main
-from plotting.strain_3d_plot import main as strain_3d_plot_main
 from plotting.utils import ensure_app_theme, install_standard_menu, developer_options
-from microwire_data_builder import main as microwire_builder_main
 from experiments import EXPERIMENTS
 
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
 
-LEGACY_PLOTTERS: Dict[str, LauncherFactory] = {
-    "Stress Dependence": stress_gui.main,
-    "Hsw Load Compare": load_compare_gui.main,
-    "Maxion Continuous": maxion_gui.main,
-    "Hsw Distribution": distribution_gui.main,
-    "Strain 3D Plot": strain_3d_plot_main,
-    "Temperature Sensitivity": temp_gui.main,
-    "Temperature Dependence": temp_dep_gui.main,
-    "Stress Sensitivity": sens_gui.main,
-    "Current Annealing": current_anneal_gui.main,
-    "PDF Plotter": pdf_gui.main,
-    "Hysteresis Loops": loops_gui.main,
-    "VSM Hysteresis Loops": vsm_loops_main,
+
+def _lazy(module: str, attr: str = "main") -> LauncherFactory:
+    def factory(*args: Any, **kwargs: Any) -> QtWidgets.QWidget | None:
+        module_obj = import_module(module)
+        target: Any = module_obj
+        for segment in attr.split("."):
+            target = getattr(target, segment)
+        if callable(target):
+            return target(*args, **kwargs)
+        raise TypeError(f"{module}.{attr} is not callable")
+
+    return factory
+
+
+LEGACY_PLOTTER_TARGETS: Dict[str, Tuple[str, str]] = {
+    "Stress Dependence": ("plotting.stress_dependence.stress_gui", "main"),
+    "Hsw Load Compare": ("plotting.hsw_load_compare.load_compare_gui", "main"),
+    "Maxion Continuous": ("plotting.maxion_continuous.maxion_gui", "main"),
+    "Hsw Distribution": ("plotting.hsw_distribution.distribution_gui", "main"),
+    "Strain 3D Plot": ("plotting.strain_3d_plot", "main"),
+    "Temperature Sensitivity": ("plotting.temperature_sensitivity.temp_gui", "main"),
+    "Temperature Dependence": ("plotting.temperature_dependence.temp_dep_gui", "main"),
+    "Stress Sensitivity": ("plotting.stress_sensitivity.sens_gui", "main"),
+    "Current Annealing": ("plotting.current_annealing.anneal_gui", "main"),
+    "PDF Plotter": ("plotting.pdf_plotter.pdf_gui", "main"),
+    "Hysteresis Loops": ("plotting.hysteresis_loops.loops_gui", "main"),
+    "VSM Hysteresis Loops": ("plotting.vsm_hysteresis_loops", "main"),
 }
+
+
+def _legacy_plotter_factories() -> Dict[str, LauncherFactory]:
+    factories: Dict[str, LauncherFactory] = {}
+    for name, (module, attr) in LEGACY_PLOTTER_TARGETS.items():
+        factories[name] = _lazy(module, attr)
+    return factories
 
 
 def launch_pyplot(initial: str | None = None) -> QtWidgets.QWidget | None:
     """Open the base plotter workbench, optionally selecting a script."""
 
-    return pyplot_main(available_plotters=LEGACY_PLOTTERS, initial_plotter=initial)
+    from plotting.pyplot_app import main as pyplot_main
+
+    return pyplot_main(
+        available_plotters=_legacy_plotter_factories(),
+        initial_plotter=initial,
+    )
 
 
 PLOTTERS: Dict[str, LauncherFactory] = {
-        "PyPlot": lambda: launch_pyplot(),
+    "PyPlot": lambda: launch_pyplot(),
 }
-for _name in LEGACY_PLOTTERS:
+for _name in LEGACY_PLOTTER_TARGETS:
     PLOTTERS[_name] = (lambda n=_name: launch_pyplot(initial=n))
 
 LOGGERS: Dict[str, LauncherFactory] = {
-    "Serial Data Logger": data_logger.main,
-    "Current Annealing Logger": current_annealing_logger.main,
+    "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
+    "Current Annealing Logger": _lazy(
+        "data_logging.current_annealing_logger", "main"
+    ),
 }
 
 EMULATORS: Dict[str, LauncherFactory] = {
-    "Universal Serial Emulator": virtual_serial_emulator_gui.main,
+    "Universal Serial Emulator": _lazy(
+        "emulators.virtual_serial_emulator_gui", "main"
+    ),
 }
 
 BUILDERS: Dict[str, LauncherFactory] = {
-    "Microwire Data Builder": microwire_builder_main,
+    "Microwire Data Builder": _lazy("microwire_data_builder", "main"),
 }
 
 

@@ -1,4 +1,14 @@
 # Changelog
+## 2025-10-30 16:15 UTC
+
+- Deferred heavyweight plotter imports in the master launcher so the window
+  appears immediately while still supporting every plotting script on demand.
+- Auto-sized the microscope OCR worksheet splitter and columns so all
+  measurements are visible without hand-tuning column widths.
+- Added a cancellable progress dialog for PyPlot data imports and widened the
+  initial Project Explorer/Object Manager dock layouts to keep the window
+  responsive at startup.
+ 
 ## 2025-10-30 14:30 UTC
 
 - Removed the Origin Clone prototype and dependency in favour of a built-in
