@@ -2870,6 +2870,8 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._base_title = title
         self._logger = logger
         self._canvas: FigureCanvasQTAgg | None = None
+        self._motion_cid: Optional[int] = None
+        self._cursor_units: str = "mA"
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2899,6 +2901,13 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._stack.addWidget(self._placeholder)
+
+        self.cursor_label = QtWidgets.QLabel("Cursor: —")
+        self.cursor_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.cursor_label.setStyleSheet("color: palette(mid); font-size: 11px;")
+        layout.addWidget(self.cursor_label)
 
     def set_record(
         self,
@@ -2949,12 +2958,23 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
 
         canvas = FigureCanvasQTAgg(figure)
         if self._canvas is not None:
+            self._disconnect_motion_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
         self._stack.insertWidget(0, canvas)
         self._stack.setCurrentWidget(canvas)
         self._canvas = canvas
+        try:
+            canvas.setMouseTracking(True)
+        except Exception:
+            pass
+        try:
+            self._motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
+        except Exception:
+            self._motion_cid = None
+        self._cursor_units = "mA"
+        self._update_cursor_label(None)
 
     def clear(self, message: str) -> None:
         self._show_placeholder(message)
@@ -2962,6 +2982,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
 
     def _show_placeholder(self, message: str) -> None:
         if self._canvas is not None:
+            self._disconnect_motion_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
@@ -2969,6 +2990,35 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self.subtitle_label.setText("")
         self._placeholder.setText(message)
         self._stack.setCurrentWidget(self._placeholder)
+        self._update_cursor_label(None)
+
+    def _disconnect_motion_handler(self) -> None:
+        if self._canvas is not None and self._motion_cid is not None:
+            try:
+                self._canvas.mpl_disconnect(self._motion_cid)
+            except Exception:
+                pass
+        self._motion_cid = None
+
+    def _handle_motion(self, event: Any) -> None:
+        if event is None or event.inaxes is None or event.xdata is None:
+            self._update_cursor_label(None)
+            return
+        try:
+            value = float(event.xdata)
+        except Exception:
+            self._update_cursor_label(None)
+            return
+        self._update_cursor_label(value)
+
+    def _update_cursor_label(self, value: Optional[float]) -> None:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            text = "Cursor: —"
+        else:
+            formatted = f"{float(value):.3f}".rstrip("0").rstrip(".")
+            suffix = f" {self._cursor_units}" if self._cursor_units else ""
+            text = f"Cursor: {formatted}{suffix}"
+        self.cursor_label.setText(text)
 
     def _build_figure(self, record: MeasurementRecord):
         frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
@@ -4635,6 +4685,11 @@ class AnnealingSection(MiniDatabaseSection):
         )
         table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
         )
         table.setSortingEnabled(True)
         table.setIconSize(

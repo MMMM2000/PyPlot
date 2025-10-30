@@ -468,7 +468,8 @@ class FabricationIndex:
                                 merged.append(item)
                 existing[field] = merged
             else:
-                existing[field] = value
+                if _has_meaningful_value(value) or field not in existing:
+                    existing[field] = value
         self.draw_level[key] = existing
 
     def set_piece(self, composition: str, draw_x: int, piece_y: int, data: Dict[str, object]) -> None:
@@ -484,7 +485,8 @@ class FabricationIndex:
                                 merged.append(item)
                 existing[field] = merged
             else:
-                existing[field] = value
+                if _has_meaningful_value(value) or field not in existing:
+                    existing[field] = value
         self.piece_level[key] = existing
 
     def get_draw(self, composition: str, draw_x: Optional[int]) -> Dict[str, object]:
@@ -1138,6 +1140,16 @@ def _clean_str(value: object) -> str:
     else:
         text = _normalise_text(value)
     return text.strip() if text else ""
+
+
+def _has_meaningful_value(value: object) -> bool:
+    if value is None:
+        return False
+    if _is_nan(value):
+        return False
+    if isinstance(value, str):
+        return bool(_clean_str(value))
+    return True
 
 
 def _parse_strain_float(value: object) -> Optional[float]:

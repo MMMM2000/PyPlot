@@ -1215,30 +1215,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         central_layout.setContentsMargins(12, 12, 12, 12)
         central_layout.setSpacing(10)
 
-        controls = QtWidgets.QWidget()
-        controls_layout = QtWidgets.QGridLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(6)
-
-        controls_layout.addWidget(QtWidgets.QLabel("Data sources"), 0, 0)
         self.path_edit = QtWidgets.QLineEdit()
         self.path_edit.setPlaceholderText("Select files or folders…")
         self.path_edit.editingFinished.connect(self._handle_manual_path_entry)
-        controls_layout.addWidget(self.path_edit, 0, 1, 1, 3)
-
-        self.browse_files_button = QtWidgets.QPushButton("Browse files…")
-        self.browse_files_button.clicked.connect(self._choose_files)
-        controls_layout.addWidget(self.browse_files_button, 0, 4)
-
-        self.browse_folder_button = QtWidgets.QPushButton("Browse folder…")
-        self.browse_folder_button.clicked.connect(self._choose_folder)
-        controls_layout.addWidget(self.browse_folder_button, 0, 5)
-
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(2, 1)
-        self._data_sources_widget = controls
-        central_layout.addWidget(controls)
+        self.path_edit.hide()
+        self.browse_files_button = None
+        self.browse_folder_button = None
+        self._data_sources_widget = None
 
         self._script_panel_container = QtWidgets.QFrame()
         self._script_panel_container.setObjectName("mw_script_panel_container")

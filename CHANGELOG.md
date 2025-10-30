@@ -1,4 +1,10 @@
 # Changelog
+## 2025-10-30 10:51 UTC
+
+- Kept fabrication piece metadata from being overwritten by blank imports so length values persist in the fabrication grid.
+- Allowed As/Ms phase markers to be edited directly in the annealing table and surfaced live cursor readouts on the preview graphs for manual picking.
+- Retired the legacy PyPlot data-sources row in favour of the shared Data menu and removed the Origin Clone prototype from the experiments launcher.
+
 ## 2025-10-30 12:35 UTC
 
 - Fixed the builder worker and CLI code paths so manually selected As/Ms transition points persist into assembled worksheets and exports instead of being dropped.
