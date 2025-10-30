@@ -1102,7 +1102,25 @@ def _header_key(value: object) -> Optional[str]:
 
 
 def _is_nan(value: object) -> bool:
-    return isinstance(value, float) and math.isnan(value)
+    if isinstance(value, (float, np.floating)):
+        try:
+            return math.isnan(float(value))
+        except ValueError:
+            return True
+    if value is None:
+        return False
+    try:
+        if value is pd.NA:  # type: ignore[attr-defined]
+            return True
+    except AttributeError:
+        pass
+    try:
+        result = pd.isna(value)
+    except Exception:
+        return False
+    if isinstance(result, (bool, np.bool_)):
+        return bool(result)
+    return False
 
 
 def _raw_string(value: object) -> Optional[str]:

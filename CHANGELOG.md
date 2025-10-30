@@ -1,4 +1,10 @@
 # Changelog
+## 2025-10-30 13:20 UTC
+
+- Treated `pandas.NA`/`numpy.nan` fabrication imports as blanks so previously
+  recorded wire lengths stay intact instead of being overwritten by missing
+  values, and added regression coverage for the merge behaviour.
+ 
 ## 2025-10-30 10:51 UTC
 
 - Kept fabrication piece metadata from being overwritten by blank imports so length values persist in the fabrication grid.
