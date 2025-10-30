@@ -1,4 +1,20 @@
 # Changelog
+## 2025-10-30 12:35 UTC
+
+- Fixed the builder worker and CLI code paths so manually selected As/Ms transition points persist into assembled worksheets and exports instead of being dropped.
+- Narrowed the microscope diameter fallback so the D column only populates once a glass detection is present, keeping interim core values out of the highlights.
+
+## 2025-10-30 12:05 UTC
+
+- Added a Current density tab that derives current densities from microscope diameters and annealing setpoints, with an exportable worksheet view.
+- Let the Assemble preview support column drag-reordering and export the visible worksheet with the on-screen column order.
+- Reused in-memory annealing groups for current density calculations so large refreshes no longer stall the UI while reading payloads from disk.
+- Normalised current imports to auto-detect mA inputs, fixed the annealing axes, and regenerated thumbnails at higher DPI so plots stay sharp.
+- Relaxed fabrication workbook header detection so piece spreadsheets from the lab parse instead of leaving the table blank.
+- Added As (mA) and Ms (mA) columns with an interactive plot picker so phase transitions can be annotated and exported alongside the graphs.
+- Microscope D values stay blank until a glass measurement is parsed, preventing temporary core values from leaking into the table.
+- The launcher now opens an instant "Loading Microwire Data Builder..." shell while the full UI initialises so users get immediate feedback instead of waiting on a blank screen.
+
 ## 2025-10-30 10:00 UTC
 
 - Added `requirements-win.txt` so Windows builders can install the Origin automation

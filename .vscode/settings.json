@@ -5,6 +5,11 @@
   "C_Cpp.default.includePath": [
     "C:/Program Files/OriginLab/Origin 2025b/OriginC/Include"
   ],
-  "python.analysis.autoImportCompletions": true
+  "python.analysis.autoImportCompletions": true,
+  "python.testing.pytestArgs": [
+    "tests"
+  ],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true
 }
 

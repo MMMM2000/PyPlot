@@ -88,6 +88,8 @@ OUTPUT_COLUMNS = [
     "d/D",
     "Figure â€” 1000 mA",
     "Figure â€” low mA",
+    "As (mA)",
+    "Ms (mA)",
     "Strain",
     "Length (m)",
     "Production datetime",
@@ -104,6 +106,10 @@ OUTPUT_COLUMNS = [
     "File 1000 mA",
     "File low mA",
 ]
+
+DIAMETER_COLUMN = OUTPUT_COLUMNS[2]
+GLASS_DIAMETER_COLUMN = OUTPUT_COLUMNS[3]
+DIAMETER_RATIO_COLUMN = OUTPUT_COLUMNS[4]
 
 MICROSCOPE_IMAGE_COLUMNS = (
     "d (Âµm) image",
@@ -153,6 +159,10 @@ RAW_VALUE_FIELDS = (
 )
 
 HEADER_HINTS: Dict[str, str] = {
+    "Dtum": "piece_date",
+    "dtum": "piece_date",
+    "Poet otok": "piece_turns",
+    "P.": "piece_y",
     "zloÅ¾enie": "composition_label",
     "zlozenie": "composition_label",
     "composition": "composition_label",
@@ -187,6 +197,9 @@ HEADER_HINTS: Dict[str, str] = {
     "d (Âµm)": "d_um",
     "d (um)": "d_um",
     "d (Î¼m)": "d_um",
+    "d (μm)": "d_um",
+    "d (�m)": "d_um",
+    "d (µm)": "d_um",
     "d(Âµm)": "d_um",
     "d(um)": "d_um",
     "d(Î¼m)": "d_um",
@@ -194,6 +207,9 @@ HEADER_HINTS: Dict[str, str] = {
     "D (Âµm)": "D_um",
     "D (um)": "D_um",
     "D (Î¼m)": "D_um",
+    "D (μm)": "D_um",
+    "D (�m)": "D_um",
+    "D (µm)": "D_um",
     "D(Âµm)": "D_um",
     "D(um)": "D_um",
     "D(Î¼m)": "D_um",
@@ -837,12 +853,12 @@ class MicroscopeMeasurements:
     def best_core_detection(self) -> Optional[MicroscopeDetection]:
         return self._best_detection_sequence(("core", "other", "glass"), "min")
 
+    def best_glass_detection(self) -> Optional[MicroscopeDetection]:
+        return self._best_detection_sequence(("glass", "other", "core"), "max")
+
     def best_glass(self) -> Optional[float]:
         detection = self.best_glass_detection()
         return detection.value if detection is not None else None
-
-    def best_glass_detection(self) -> Optional[MicroscopeDetection]:
-        return self._best_detection_sequence(("glass", "other", "core"), "max")
 
 
 @dataclass
@@ -916,11 +932,12 @@ def _normalise_text(value: object) -> str:
     if not text:
         return ""
     text = unicodedata.normalize("NFKC", text)
+    text = text.replace("Âµ", "µ").replace("�", "µ").replace("ï¿½", "µ")
     return text
 
 
 def _is_unit_suffix(text: str) -> bool:
-    """Return ``True`` when *text* only contains unit markers such as ``Âµm``."""
+    """Return True when *text* only contains unit markers such as µm."""
 
     if not text:
         return False
@@ -930,13 +947,13 @@ def _is_unit_suffix(text: str) -> bool:
     ascii_text = unicodedata.normalize("NFKD", stripped)
     ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch))
     simplified = re.sub(r"\s+", "", ascii_text).lower()
-    if simplified in {"um", "Âµm", "Î¼m", "(um)", "(Âµm)", "(Î¼m)", "um)", "Âµm)", "Î¼m)"}:
+    canonical_units = {"um", "µm", "μm"}
+    if simplified in canonical_units | {"(um)", "(µm)", "(μm)", "um)", "µm)", "μm)"}:
         return True
-    unit_chars = set("uÂµÎ¼m()/.-[]{}")
+    unit_chars = set("uµμm()/.-[]{}")
     if simplified and all(ch in unit_chars for ch in simplified):
         return True
     return False
-
 
 def _merged_header_row(
     df: pd.DataFrame, header_idx: int, *, lookback: int = 3
@@ -1001,8 +1018,19 @@ def _header_key(value: object) -> Optional[str]:
     hint = HEADER_HINTS.get(text)
     if hint:
         return hint
+    if text in {"d (�m)", "D (�m)"}:
+        text = text.replace("�", "µ")
+        hint = HEADER_HINTS.get(text)
+        if hint:
+            return hint
     ascii_text = unicodedata.normalize("NFKD", text)
     ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch))
+    ascii_hint = HEADER_HINTS.get(ascii_text)
+    if ascii_hint:
+        return ascii_hint
+    ascii_hint = HEADER_HINTS.get(ascii_text.lower())
+    if ascii_hint:
+        return ascii_hint
     lowered = ascii_text.lower()
     simple = lowered.replace("\u00a0", " ")
     simple = re.sub(r"\s+", " ", simple)
@@ -1025,13 +1053,17 @@ def _header_key(value: object) -> Optional[str]:
         return "underpressure"
     if "bistabil" in lowered:
         return "bistable_status"
+    if "dtum" in lowered and "cas" not in lowered:
+        return "piece_date"
     if "p.c" in lowered or "p.Ä" in lowered or simple_compact == "pc":
         return "piece_y"
     if "pocet" in lowered and "otac" in lowered:
         return "piece_turns"
+    if "poet" in lowered and "otok" in lowered:
+        return "piece_turns"
     if "dlzk" in lowered or "dlÅ¾k" in lowered:
         return "length_m"
-    micron_hint = any(token in lowered for token in ("Âµm", "um", "Î¼m", "mikro", "micro"))
+    micron_hint = any(token in lowered for token in ("Âµm", "µm", "um", "Î¼m", "mikro", "micro"))
     ascii_simple = ascii_text.replace("\u00a0", " ")
     if micron_hint:
         if re.search(r"\bD\d*\b", ascii_text):
@@ -1044,12 +1076,12 @@ def _header_key(value: object) -> Optional[str]:
             return "d_um"
         if re.search(r"\bd\s*/\s*D\b", ascii_simple, re.IGNORECASE):
             return "d_over_D"
-    if lowered.strip().startswith("d") and "Âµm" in lowered:
+    if lowered.strip().startswith("d") and any(token in lowered for token in ("Âµm", "µm")):
         first = ascii_text.strip()[:1]
         if first == "D":
             return "D_um"
         return "d_um"
-    if lowered.strip().startswith("d") and "um" in lowered and "Âµ" not in lowered:
+    if lowered.strip().startswith("d") and "um" in lowered and all(token not in lowered for token in ("Âµ", "µ")):
         first = ascii_text.strip()[:1]
         if first == "D":
             return "D_um"
@@ -1830,7 +1862,9 @@ def _extract_microscope_diameters(
         yield "binary_invert", _variant("binary_invert", _make_binary_invert)
         yield "red_mask", _variant("red_mask", _make_red_mask)
         yield "red_binary", _variant("red_binary", _make_red_binary)
-        yield "fourier", _variant("fourier", _make_fourier)    focus_variants: List[Tuple[str, Image.Image, Tuple[int, int]]] = []
+        yield "fourier", _variant("fourier", _make_fourier)
+
+    focus_variants: List[Tuple[str, Image.Image, Tuple[int, int]]] = []
     try:  # pragma: no cover - optional dependency
         import cv2  # type: ignore[import-not-found]
     except Exception:  # pragma: no cover - optional dependency
@@ -2418,6 +2452,50 @@ def _extract_microscope_diameters(
     return result
 
 
+class MicroscopeGroupingResult(tuple):
+    """Combined grouping output that behaves like both tuple and mapping."""
+
+    __slots__ = ()
+
+    def __new__(
+        cls,
+        index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
+        cache: Dict[str, MicroscopeCacheEntry],
+    ) -> "MicroscopeGroupingResult":
+        return super().__new__(cls, (index, cache))
+
+    @property
+    def index(self) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
+        return super().__getitem__(0)
+
+    @property
+    def cache(self) -> Dict[str, MicroscopeCacheEntry]:
+        return super().__getitem__(1)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self.index
+
+    def __getitem__(self, key):  # type: ignore[override]
+        if isinstance(key, (int, slice)):
+            return super().__getitem__(key)
+        return self.index[key]
+
+    def get(self, key, default=None):
+        return self.index.get(key, default)
+
+    def keys(self):
+        return self.index.keys()
+
+    def items(self):
+        return self.index.items()
+
+    def values(self):
+        return self.index.values()
+
+    def __repr__(self) -> str:
+        return f"MicroscopeGroupingResult(index={self.index!r}, cache={self.cache!r})"
+
+
 def _group_microscope_measurements(
     microscope_files: Sequence[Path],
     logger: Optional[logging.Logger],
@@ -2652,7 +2730,7 @@ def _group_microscope_measurements(
         log.warning(
             "Microscope OCR deviates from manual references: %s", preview
         )
-    return grouped, updated_cache
+    return MicroscopeGroupingResult(grouped, updated_cache)
 
 def _draw_key(path: Path) -> Optional[Tuple[str, int]]:
     candidates: List[str] = [parent.name for parent in path.parents]
@@ -2851,22 +2929,71 @@ def _parse_composition_workbook(path: Path, index: FabricationIndex, logger: log
     _parse_draw_rows(data, headers, composition, index, logger, path)
 
 
+def _is_piece_header_row(values: Sequence[object]) -> bool:
+    tokens: List[str] = []
+    collapsed: List[str] = []
+    for value in values:
+        text = _normalise_text(value)
+        if not text:
+            continue
+        ascii_text = unicodedata.normalize("NFKD", text)
+        ascii_text = "".join(ch for ch in ascii_text if not unicodedata.combining(ch)).lower()
+        tokens.append(ascii_text)
+        collapsed.append(re.sub(r"[^a-z0-9]", "", ascii_text))
+    if not tokens:
+        return False
+    collapsed_set = {token for token in collapsed if token}
+    token_set = {token for token in tokens if token}
+    score = 0
+    if any(token.startswith("p") and len(token) <= 3 for token in collapsed_set):
+        score += 1
+    if any("datum" in token for token in token_set):
+        score += 1
+    if any("dlka" in token or "dka" in token or "dlzka" in token for token in token_set):
+        score += 1
+    if any(token in {"dum", "d", "dmu"} or "dum" in token for token in collapsed_set):
+        score += 1
+    if any("d/d" in token or "d/" in token for token in token_set) or "dd" in collapsed_set:
+        score += 1
+    if any("intenzita" in token for token in token_set):
+        score += 1
+    if any("hsw" in token for token in token_set):
+        score += 1
+    return score >= 3
+
+
 def _parse_piece_workbook(path: Path, index: FabricationIndex, logger: logging.Logger) -> None:
     df = _read_excel(path, logger)
     if df.empty:
         logger.warning("%s is empty", path)
         return
-    header_idx = None
+    best_idx: Optional[int] = None
+    best_headers: List[Optional[str]] = []
+    best_score = -1
     for idx, row in df.iterrows():
-        values = [_normalise_text(cell).lower() for cell in row.tolist()]
-        if any("p.c" in v or "p.Ä" in v or v == "pc" for v in values if v):
-            header_idx = idx
-            break
-    if header_idx is None:
-        logger.warning("%s: unable to locate header row", path)
-        return
+        if not _is_piece_header_row(row.tolist()):
+            continue
+        candidate_values = _merged_header_row(df, idx)
+        candidate_headers = [_header_key(value) for value in candidate_values]
+        score = sum(1 for field in candidate_headers if field)
+        if score > best_score:
+            best_idx = idx
+            best_headers = candidate_headers
+            best_score = score
+    if best_idx is None:
+        if len(df.index) > 1:
+            best_idx = 1
+            logger.warning("%s: unable to locate header row; using the second row as a fallback", path)
+            candidate_values = _merged_header_row(df, best_idx)
+            best_headers = [_header_key(value) for value in candidate_values]
+        else:
+            logger.warning("%s: unable to locate header row", path)
+            return
+    header_idx = best_idx
     header_values = _merged_header_row(df, header_idx)
-    headers = [_header_key(value) for value in header_values]
+    if not best_headers:
+        best_headers = [_header_key(value) for value in header_values]
+    headers = best_headers
     data = df.iloc[header_idx + 1 :].reset_index(drop=True)
     stem = path.stem
     match = re.search(r"(?P<draw>\d+)[._](?P<comp>[A-Za-z0-9]+)", stem)
@@ -2969,7 +3096,11 @@ def _metadata_from_path(path: Path, root: Optional[Path] = None) -> MeasurementM
     )
 
 
-def _load_annealing(path: Path) -> pd.DataFrame:
+def _load_annealing(
+    path: Path,
+    *,
+    expected_setpoint_mA: Optional[float] = None,
+) -> pd.DataFrame:
     try:
         df = pd.read_csv(path, sep=None, engine="python", names=ANNEALING_COLUMNS, header=None)
     except (csv.Error, pd.errors.ParserError):
@@ -2984,8 +3115,24 @@ def _load_annealing(path: Path) -> pd.DataFrame:
     for column in ANNEALING_COLUMNS:
         df[column] = pd.to_numeric(df[column], errors="coerce")
     df = df.dropna(subset=["I_A", "R_ohm"]).reset_index(drop=True)
-    df.loc[:, "I_A"] = df["I_A"].to_numpy(dtype=float)
-    df.loc[:, "I_mA"] = df["I_A"].to_numpy(dtype=float) * 1_000.0
+    currents = df["I_A"].to_numpy(dtype=float)
+    finite = currents[np.isfinite(currents)]
+    scale = 1.0
+    if finite.size:
+        max_abs = float(np.nanmax(np.abs(finite)))
+        median_abs = float(np.nanmedian(np.abs(finite)))
+        if expected_setpoint_mA and expected_setpoint_mA > 0:
+            expected_amp = expected_setpoint_mA / 1000.0
+            if expected_amp > 0 and max_abs > expected_amp * 5:
+                scale = 1e-3
+        if scale == 1.0:
+            if max_abs > 500:
+                scale = 1e-3
+            elif median_abs > 10:
+                scale = 1e-3
+    scaled_currents = currents * scale
+    df.loc[:, "I_A"] = scaled_currents
+    df.loc[:, "I_mA"] = scaled_currents * 1_000.0
 
     try:
         from plotting.current_annealing.burnthrough import trim_burnthrough_glitch
@@ -3006,6 +3153,17 @@ def _load_annealing(path: Path) -> pd.DataFrame:
         df.loc[:, "R_ohm"] = trimmed_resistances
         df = df.reset_index(drop=True)
     return df
+
+
+def _series_to_mA(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="coerce")
+    try:
+        max_abs = float(numeric.abs().max(skipna=True) or 0.0)
+    except Exception:
+        max_abs = 0.0
+    if max_abs <= 50:
+        return numeric * 1e3
+    return numeric
 
 
 def _resistance_sanity_check(df: pd.DataFrame) -> Tuple[bool, Optional[float]]:
@@ -3218,11 +3376,16 @@ def _plot_measurement_matplotlib(
     plot_dir.mkdir(parents=True, exist_ok=True)
     title = format_annealing_title(source.stem)
     if "I_mA" in df.columns:
-        currents = df["I_mA"]
+        currents = pd.to_numeric(df["I_mA"], errors="coerce")
     else:
-        currents = df["I_A"] * 1e3
-    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": df["R_ohm"]})
-    fig, fname = plot_one(plot_df, title, figsize=figsize)
+        currents = _series_to_mA(df["I_A"])
+    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": pd.to_numeric(df["R_ohm"], errors="coerce")}).dropna()
+    dpi_target = 192
+    target_px = (
+        max(int(figsize[0] * dpi_target), 200),
+        max(int(figsize[1] * dpi_target), 120),
+    )
+    fig, fname = plot_one(plot_df, title, target_px=target_px)
     safe_stem = _safe_plot_stem(fname)
     plot_path = plot_dir / f"{safe_stem}.png"
     plot_path.parent.mkdir(parents=True, exist_ok=True)
@@ -3366,10 +3529,10 @@ def _plot_measurement_origin(
         raise RuntimeError("originpro is not available") from exc
 
     if "I_mA" in df.columns:
-        currents = df["I_mA"]
+        currents = pd.to_numeric(df["I_mA"], errors="coerce")
     else:
-        currents = df["I_A"] * 1e3
-    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": df["R_ohm"]})
+        currents = _series_to_mA(df["I_A"])
+    plot_df = pd.DataFrame({"I_mA": currents, "R_Ohm": pd.to_numeric(df["R_ohm"], errors="coerce")}).dropna()
     title = format_annealing_title(source.stem)
     handles = plot_one_origin(
         plot_df,
@@ -3963,6 +4126,7 @@ def build_database(
         Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]
     ] = None,
     strain_records: Optional[Dict[Tuple[str, int, int], StrainRecord]] = None,
+    phase_points: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> BuildResult:
     log = _logger(logger)
     output_dir = config.output_dir
@@ -3972,6 +4136,9 @@ def build_database(
     include_crops = bool(getattr(config, "include_microscope_crops", True))
     highlight_ocr = bool(getattr(config, "highlight_ocr_values", True))
     output_columns = list(OUTPUT_COLUMNS)
+    d_column = DIAMETER_COLUMN
+    D_column = GLASS_DIAMETER_COLUMN
+    ratio_column = DIAMETER_RATIO_COLUMN
     microscope_image_columns: Tuple[str, ...] = ()
     if include_crops:
         microscope_image_columns = MICROSCOPE_IMAGE_COLUMNS
@@ -4038,6 +4205,16 @@ def build_database(
         strain_records = _load_strain_records(getattr(config, "strain_files", []), log)
     else:
         strain_records = dict(strain_records)
+
+    phase_points_map: Dict[str, Dict[str, float]] = {}
+    if phase_points:
+        for key, payload in phase_points.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            cleaned = {label: float(value) for label, value in payload.items() if isinstance(value, (int, float))}
+            if cleaned:
+                phase_points_map[key] = cleaned
+    phase_points_map = dict(phase_points_map)
 
     analysis_total_local = analysis_total
     if analysis_total_local is None:
@@ -4119,15 +4296,15 @@ def build_database(
     else:
         total = len(config.annealing_files)
         for idx, path in enumerate(config.annealing_files, start=1):
+            metadata = _metadata_from_path(path, root_for_relpaths)
             try:
-                df = _load_annealing(path)
+                df = _load_annealing(path, expected_setpoint_mA=metadata.setpoint_mA)
             except Exception:
                 log.exception("Failed to parse %s", path)
                 stats.skipped += 1
                 if progress_callback:
                     progress_callback(idx, total)
                 continue
-            metadata = _metadata_from_path(path, root_for_relpaths)
             ok, mean_error = _resistance_sanity_check(df)
             if not ok:
                 stats.resistance_checks_failed += 1
@@ -4169,7 +4346,7 @@ def build_database(
         row["Microwire"] = _microwire_label(draw_x, piece_y)
         row["d (Âµm)"] = None
         row["D (Âµm)"] = None
-        row["d/D"] = None
+        row[ratio_column] = None
         row["Length (m)"] = _value_for_output(piece_info, "length_m")
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
@@ -4179,35 +4356,51 @@ def build_database(
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
         row["Notes"] = _compose_notes(draw_info, piece_info)
+        phase_entry = phase_points_map.get(f"{composition}|{draw_x}|{piece_y}", {})
+        if phase_entry:
+            if "As" in phase_entry:
+                row["As (mA)"] = phase_entry["As"]
+            if "Ms" in phase_entry:
+                row["Ms (mA)"] = phase_entry["Ms"]
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None
         d_numeric = _parse_numeric(row["d (Âµm)"])
         D_numeric = _parse_numeric(row["D (Âµm)"])
-        ratio_numeric = _parse_numeric(row["d/D"])
+        ratio_numeric = _parse_numeric(row[ratio_column])
         microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
-            if d_detection is not None:
-                row["d (Âµm)"] = d_detection.value
-                d_numeric = d_detection.value
-                if d_detection.source == "ocr":
-                    row_highlights.add("d (Âµm)")
+                if (
+                    isinstance(d_detection, MicroscopeDetection)
+                    and getattr(d_detection, "category", None) == "core"
+                    and isinstance(d_detection.value, (int, float))
+                    and math.isfinite(float(d_detection.value))
+                ):
+                    row[d_column] = float(d_detection.value)
+                    d_numeric = float(d_detection.value)
+                    if d_detection.source == "ocr":
+                        row_highlights.add(d_column)
             if D_numeric is None:
                 D_detection = microscope_data.best_glass_detection()
-                if D_detection is not None:
-                    row["D (Âµm)"] = D_detection.value
-                    D_numeric = D_detection.value
+                if (
+                    isinstance(D_detection, MicroscopeDetection)
+                    and getattr(D_detection, "category", None) == "glass"
+                    and isinstance(D_detection.value, (int, float))
+                    and math.isfinite(float(D_detection.value))
+                ):
+                    row[D_column] = float(D_detection.value)
+                    D_numeric = float(D_detection.value)
                     if D_detection.source == "ocr":
-                        row_highlights.add("D (Âµm)")
+                        row_highlights.add(D_column)
             if ratio_numeric is None and d_numeric is not None and D_numeric not in (None, 0):
                 try:
                     ratio = d_numeric / D_numeric
                 except ZeroDivisionError:
                     ratio = None
                 if ratio is not None and math.isfinite(ratio):
-                    row["d/D"] = ratio
+                    row[ratio_column] = ratio
                     ratio_numeric = ratio
         if include_crops:
             if MICROSCOPE_IMAGE_COLUMNS[0] in row:

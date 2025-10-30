@@ -27,7 +27,7 @@ import pandas as pd
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_agg import FigureCanvasAgg
-from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 import matplotlib.pyplot as plt
 
 from plotting.current_annealing.core import plot_one as plot_annealing_curve
@@ -101,12 +101,28 @@ MICROSCOPE_TABLE_COLUMNS = [
     "_images",
 ]
 
+CURRENT_DENSITY_COLUMNS = [
+    "Composition",
+    "Microwire",
+    MICROSCOPE_D_COLUMN,
+    "Area (mm^2)",
+    "High setpoint (mA)",
+    "High current density (A/mm^2)",
+    "Low setpoint (mA)",
+    "Low current density (A/mm^2)",
+    "Setpoints (mA)",
+    "Sources",
+    "Notes",
+]
+
 
 ANNEALING_GRAPH_WIDTH = 420
 ANNEALING_GRAPH_HEIGHT = 200
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
+ANNEALING_AS_COLUMN = "As (mA)"
+ANNEALING_MS_COLUMN = "Ms (mA)"
 
 
 _STAGE_LABELS = {
@@ -211,6 +227,7 @@ class WorkerInputs:
     highlight_ocr_values: bool = True
     analyse_videos: bool = True
     strain_files: list[Path] = field(default_factory=list)
+    phase_points: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
 
 FIGURE_WIDTH_DEFAULT_MM = round(DEFAULT_FIGSIZE[0] * 25.4, 1)
@@ -802,6 +819,7 @@ class BuildWorker(QtCore.QObject):
                 analysis_progress_callback=_analysis_bridge,
                 analysis_total=analysis_units,
                 root_for_relpaths=Path.cwd(),
+                phase_points=inputs.phase_points or None,
             )
             final_steps = max(len(result.exports), 1)
             if config.make_plots and (
@@ -1945,6 +1963,11 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             )
             return
 
+        phase_points: Dict[str, Dict[str, float]] = {}
+        annealing_section = self.sections.get("annealing")
+        if isinstance(annealing_section, AnnealingSection):
+            phase_points = dict(getattr(annealing_section, "_phase_points", {}))
+
         worker_inputs = WorkerInputs(
             annealing_files=annealing_files,
             manual_microscope_files=list(dict.fromkeys(self.microscope_paths)),
@@ -1962,6 +1985,7 @@ class LegacyBuilderWindow(QtWidgets.QMainWindow):
             highlight_ocr_values=self.highlight_ocr_check.isChecked(),
             analyse_videos=self.video_metrics_check.isChecked(),
             strain_files=strain_files,
+            phase_points=phase_points,
         )
         self._save_settings()
         self._set_running(True)
@@ -2260,6 +2284,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._decoration_provider: Optional[
             Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]
         ] = None
+        self._editable_columns: set[str] = set()
 
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
@@ -2275,6 +2300,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             self.layoutChanged.emit()
         except Exception:
             pass
+
+    def set_editable_columns(self, columns: Iterable[str]) -> None:
+        self._editable_columns = {str(column) for column in columns}
 
     def frame(self) -> pd.DataFrame:
         return self._frame
@@ -2344,6 +2372,70 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                 return ""
             return f"{value:.4g}"
         return str(value) if value is not None else ""
+
+    def flags(self, index: QtCore.QModelIndex) -> QtCore.Qt.ItemFlags:  # type: ignore[override]
+        base_flags = super().flags(index)
+        if not index.isValid():
+            return base_flags
+        try:
+            column_label = str(self._frame.columns[index.column()])
+        except Exception:
+            return base_flags
+        if column_label in self._editable_columns:
+            return base_flags | QtCore.Qt.ItemFlag.ItemIsEditable
+        return base_flags
+
+    def setData(
+        self,
+        index: QtCore.QModelIndex,
+        value: Any,
+        role: int = QtCore.Qt.ItemDataRole.EditRole,
+    ) -> bool:  # type: ignore[override]
+        if role not in (
+            QtCore.Qt.ItemDataRole.EditRole,
+            QtCore.Qt.ItemDataRole.DisplayRole,
+        ):
+            return False
+        if not index.isValid():
+            return False
+        try:
+            column_label = str(self._frame.columns[index.column()])
+        except Exception:
+            return False
+        if column_label not in self._editable_columns:
+            return False
+        if isinstance(value, QtCore.QVariant):  # pragma: no cover - PyQt guard
+            value = value.value()
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                coerced: Any = None
+            else:
+                try:
+                    coerced = float(text)
+                except ValueError:
+                    return False
+        elif isinstance(value, (int, float)):
+            numeric = float(value)
+            coerced = numeric if math.isfinite(numeric) else None
+        else:
+            return False
+        try:
+            self._frame.iat[index.row(), index.column()] = coerced
+        except Exception:
+            return False
+        try:
+            self.dataChanged.emit(
+                index,
+                index,
+                [
+                    QtCore.Qt.ItemDataRole.DisplayRole,
+                    QtCore.Qt.ItemDataRole.EditRole,
+                ],
+            )
+        except Exception:
+            pass
+        return True
 
     def headerData(
         self,
@@ -2494,9 +2586,15 @@ def _render_measurement_pixmap(
             }
         ).dropna()
     elif "I_A" in frame.columns and "R_ohm" in frame.columns:
+        currents_A = pd.to_numeric(frame["I_A"], errors="coerce")
+        max_abs = float(currents_A.abs().max(skipna=True) or 0.0)
+        if max_abs <= 50:
+            currents_mA = currents_A * 1e3
+        else:
+            currents_mA = currents_A
         plot_df = pd.DataFrame(
             {
-                "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                "I_mA": currents_mA,
                 "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
             }
         ).dropna()
@@ -2524,7 +2622,9 @@ def _render_measurement_pixmap(
             title = format_annealing_title(metadata)
         except Exception:
             title = ""
-    figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    target_width = max(int(width_px * 2), width_px)
+    target_height = max(int(height_px * 2), height_px)
+    figsize = (max(target_width / 96.0, 1.0), max(target_height / 96.0, 1.0))
     canvas_agg: FigureCanvasAgg | None = None
     figure = None
     rc_overrides = {
@@ -2537,7 +2637,11 @@ def _render_measurement_pixmap(
     }
     try:
         with plt.rc_context(rc_overrides):
-            figure, _ = plot_annealing_curve(plot_df, title, figsize=figsize)
+            figure, _ = plot_annealing_curve(
+                plot_df,
+                title,
+                target_px=(target_width, target_height),
+            )
         if figure is not None:
             figure.subplots_adjust(left=0.08, right=0.98, top=0.9, bottom=0.16)
             for ax in figure.axes:
@@ -2605,7 +2709,13 @@ def _render_measurement_pixmap(
             if fallback is None:
                 fallback = QtGui.QImage.Format_ARGB32  # type: ignore[attr-defined]
             image = QtGui.QImage(buffer, width, height, 4 * width, fallback)
-        return QtGui.QPixmap.fromImage(image.copy())
+        pixmap = QtGui.QPixmap.fromImage(image.copy())
+        return pixmap.scaled(
+            width_px,
+            height_px,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
     except Exception:
         logger.exception(
             "Failed to render annealing preview for %s",
@@ -2626,6 +2736,8 @@ def _annealing_records_to_frame(
         "Microwire",
         "Graph — 1000 mA",
         "Graph — low mA",
+        "As (mA)",
+        "Ms (mA)",
         "Low current setpoint",
         "Updated",
         "_group_key",
@@ -2687,6 +2799,8 @@ def _annealing_records_to_frame(
                 "Microwire": microwire,
                 "Graph — 1000 mA": None,
                 "Graph — low mA": None,
+                "As (mA)": None,
+                "Ms (mA)": None,
                 "Low current setpoint": low_setpoint,
                 "Updated": updated,
                 "_group_key": group_key,
@@ -2868,9 +2982,15 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 }
             ).dropna()
         elif "I_A" in frame.columns and "R_ohm" in frame.columns:
+            currents_A = pd.to_numeric(frame["I_A"], errors="coerce")
+            max_abs = float(currents_A.abs().max(skipna=True) or 0.0)
+            if max_abs <= 50:
+                currents_mA = currents_A * 1e3
+            else:
+                currents_mA = currents_A
             plot_df = pd.DataFrame(
                 {
-                    "I_mA": pd.to_numeric(frame["I_A"], errors="coerce") * 1e3,
+                    "I_mA": currents_mA,
                     "R_Ohm": pd.to_numeric(frame["R_ohm"], errors="coerce"),
                 }
             ).dropna()
@@ -2895,7 +3015,13 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         if not stem:
             stem = getattr(getattr(record, "metadata", object()), "file_name", "")
         title = format_annealing_title(str(stem or "Current annealing"))
-        figure, _ = plot_annealing_curve(plot_df, title, figsize=DEFAULT_FIGSIZE)
+        target_width = max(int(ANNEALING_GRAPH_WIDTH * 2), ANNEALING_GRAPH_WIDTH)
+        target_height = max(int(ANNEALING_GRAPH_HEIGHT * 2), ANNEALING_GRAPH_HEIGHT)
+        figure, _ = plot_annealing_curve(
+            plot_df,
+            title,
+            target_px=(target_width, target_height),
+        )
         return figure
 
 
@@ -2957,6 +3083,139 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
             setpoint=_extract_setpoint(low),
             description="No lower-current measurement available for this microwire.",
         )
+
+
+
+class _TransitionPickerDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget,
+        record_pairs: List[Tuple[str, MeasurementRecord]],
+        existing: Dict[str, float],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Interactive annealing plot")
+        self.resize(960, 640)
+        self._points: Dict[str, Optional[float]] = {
+            "As": float(existing.get("As")) if isinstance(existing.get("As"), (int, float)) else None,
+            "Ms": float(existing.get("Ms")) if isinstance(existing.get("Ms"), (int, float)) else None,
+        }
+        self._plots: Dict[str, Dict[str, Any]] = {}
+        self._lines: Dict[str, Dict[str, Optional[Any]]] = {}
+        self.cursor_value_label = QtWidgets.QLabel("—")
+        self.cursor_value_label.setMinimumWidth(80)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        self._tab_widget = QtWidgets.QTabWidget(self)
+        layout.addWidget(self._tab_widget, 1)
+
+        for label, record in record_pairs:
+            frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
+            metadata = getattr(record, "metadata", None)
+            if metadata is not None:
+                title = format_annealing_title(metadata)
+            else:
+                path_attr = getattr(record, "path", None)
+                title = Path(path_attr).name if path_attr else "Current annealing"
+            figure, _ = plot_annealing_curve(frame, title, target_px=(1280, 640))
+            canvas = FigureCanvasQTAgg(figure)
+            toolbar = NavigationToolbar2QT(canvas, self)
+            page = QtWidgets.QWidget(self)
+            page_layout = QtWidgets.QVBoxLayout(page)
+            page_layout.setContentsMargins(0, 0, 0, 0)
+            page_layout.addWidget(toolbar)
+            page_layout.addWidget(canvas, 1)
+            self._tab_widget.addTab(page, label)
+            axes = figure.axes[0] if figure.axes else figure.add_subplot(111)
+            cid = canvas.mpl_connect("button_press_event", lambda event, lbl=label: self._handle_click(lbl, event))
+            motion_cid = canvas.mpl_connect("motion_notify_event", lambda event, lbl=label: self._handle_motion(lbl, event))
+            self._plots[label] = {"canvas": canvas, "figure": figure, "axes": axes, "cid": cid, "motion_cid": motion_cid}
+            self._lines[label] = {"As": None, "Ms": None}
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.addWidget(QtWidgets.QLabel("Cursor:"))
+        controls.addWidget(self.cursor_value_label)
+        controls.addSpacing(20)
+        self.as_radio = QtWidgets.QRadioButton("Set As (mA)")
+        self.ms_radio = QtWidgets.QRadioButton("Set Ms (mA)")
+        self.as_radio.setChecked(True)
+        controls.addWidget(self.as_radio)
+        controls.addWidget(self.ms_radio)
+        controls.addSpacing(20)
+        self.as_value_label = QtWidgets.QLabel(self._format_value(self._points["As"]))
+        self.ms_value_label = QtWidgets.QLabel(self._format_value(self._points["Ms"]))
+        controls.addWidget(QtWidgets.QLabel("As:"))
+        controls.addWidget(self.as_value_label)
+        clear_as = QtWidgets.QPushButton("Clear As")
+        clear_as.clicked.connect(lambda: self._clear_point("As"))
+        controls.addWidget(clear_as)
+        controls.addSpacing(10)
+        controls.addWidget(QtWidgets.QLabel("Ms:"))
+        controls.addWidget(self.ms_value_label)
+        clear_ms = QtWidgets.QPushButton("Clear Ms")
+        clear_ms.clicked.connect(lambda: self._clear_point("Ms"))
+        controls.addWidget(clear_ms)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=self,
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        self._refresh_lines()
+
+    @staticmethod
+    def _format_value(value: Optional[float]) -> str:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            return "unset"
+        return f"{float(value):.3f}".rstrip("0").rstrip(".")
+
+    def _clear_point(self, label: str) -> None:
+        self._points[label] = None
+        self._refresh_lines()
+
+    def _handle_click(self, label: str, event: Any) -> None:
+        if event is None or event.inaxes is None or event.xdata is None:
+            return
+        if event.button != 1:
+            return
+        target = "As" if self.as_radio.isChecked() else "Ms"
+        self._points[target] = float(event.xdata)
+        self._refresh_lines()
+
+    def _handle_motion(self, label: str, event: Any) -> None:
+        if event is None or event.inaxes is None or event.xdata is None:
+            self.cursor_value_label.setText("—")
+            return
+        self.cursor_value_label.setText(f"{float(event.xdata):.3f} mA")
+
+    def _refresh_lines(self) -> None:
+        for label, plot in self._plots.items():
+            axes = plot["axes"]
+            canvas = plot["canvas"]
+            for point_name, color in (("As", "tab:green"), ("Ms", "tab:purple")):
+                value = self._points.get(point_name)
+                line = self._lines[label].get(point_name)
+                if value is None:
+                    if line is not None:
+                        line.remove()
+                        self._lines[label][point_name] = None
+                    continue
+                if line is None:
+                    line = axes.axvline(float(value), color=color, linestyle="--", linewidth=1.2)
+                    self._lines[label][point_name] = line
+                else:
+                    line.set_xdata([float(value), float(value)])
+            canvas.draw_idle()
+        self.as_value_label.setText(self._format_value(self._points.get("As")))
+        self.ms_value_label.setText(self._format_value(self._points.get("Ms")))
+
+    def result_points(self) -> Dict[str, Optional[float]]:
+        return dict(self._points)
 
 class _SectionWorker(QtCore.QObject):
     progress = QtCore.pyqtSignal(int, int, object)
@@ -4333,15 +4592,37 @@ class AnnealingSection(MiniDatabaseSection):
     ) -> None:
         super().__init__(logger, log_callback, parent)
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
+        self._phase_points: Dict[str, Dict[str, float]] = {}
+        stored_phase_points = self.data.extra.get("phase_points")
+        if isinstance(stored_phase_points, dict):
+            cleaned: Dict[str, Dict[str, float]] = {}
+            for key, payload in stored_phase_points.items():
+                if not isinstance(key, str) or not isinstance(payload, dict):
+                    continue
+                entry: Dict[str, float] = {}
+                for label in ("As", "Ms"):
+                    value = payload.get(label)
+                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        entry[label] = float(value)
+                if entry:
+                    cleaned[key] = entry
+            self._phase_points = cleaned
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
+            self.model.set_editable_columns({ANNEALING_AS_COLUMN, ANNEALING_MS_COLUMN})
+            self.model.dataChanged.connect(self._handle_phase_point_cells_changed)
         self._sanitize_graph_columns()
         self._record_groups: Dict[str, List[MeasurementRecord]] = {}
+        self.annotate_button = QtWidgets.QPushButton("Open interactive plot…")
+        self.annotate_button.clicked.connect(self._open_transition_dialog)
+        self.annotate_button.setEnabled(False)
+        self.controls_layout.addWidget(self.annotate_button)
         self.export_button = QtWidgets.QPushButton("Export worksheet…")
         self.export_button.clicked.connect(self._export_worksheet)
         self.controls_layout.addWidget(self.export_button)
         self._update_export_enabled()
         self._refresh_record_groups()
+        self._apply_phase_points_to_table()
         self._hide_columns(["_group_key", "_sources"])
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -4378,8 +4659,9 @@ class AnnealingSection(MiniDatabaseSection):
         sanity_failures: List[Tuple[Path, Optional[float]]] = []
         for idx, path in enumerate(paths, start=1):
             self._check_cancelled()
+            metadata = _metadata_from_path(path)
             try:
-                df = _load_annealing(path)
+                df = _load_annealing(path, expected_setpoint_mA=metadata.setpoint_mA)
             except Exception:
                 self.logger.exception("Failed to parse %s", path)
                 if progress is not None:
@@ -4388,7 +4670,6 @@ class AnnealingSection(MiniDatabaseSection):
                     except Exception:
                         pass
                 continue
-            metadata = _metadata_from_path(path)
             ok, mean_error = _resistance_sanity_check(df)
             if not ok:
                 sanity_failures.append((path, mean_error))
@@ -4410,6 +4691,14 @@ class AnnealingSection(MiniDatabaseSection):
                 except Exception:
                     pass
         table = _annealing_records_to_frame(records, self.logger)
+        column_keys = table.get("_group_key") if isinstance(table, pd.DataFrame) else None
+        valid_keys = {
+            str(value)
+            for value in (column_keys.tolist() if column_keys is not None else [])
+            if value not in (None, "", "None") and not (isinstance(value, float) and math.isnan(value))
+        }
+        self._prune_phase_points(valid_keys, store=False)
+        table = self._apply_phase_points_to_frame(table)
         if sanity_failures:
             preview = ", ".join(p.name for p, _ in sanity_failures[:5])
             if len(sanity_failures) > 5:
@@ -4427,6 +4716,7 @@ class AnnealingSection(MiniDatabaseSection):
             table=table,
             processed=processed,
             payloads={"annealing_records": records},
+            extra={"phase_points": dict(self._phase_points)},
         )
 
     def refresh(self) -> None:
@@ -4434,11 +4724,211 @@ class AnnealingSection(MiniDatabaseSection):
         self._sanitize_graph_columns()
         self._hide_columns(["_group_key", "_sources"])
         self._refresh_record_groups()
+        self._prune_phase_points()
+        self._apply_phase_points_to_table()
         self._update_export_enabled()
 
     def _update_export_enabled(self) -> None:
+        has_rows = isinstance(self.data.table, pd.DataFrame) and not self.data.table.empty
         if hasattr(self, "export_button"):
-            self.export_button.setEnabled(not self.data.table.empty)
+            self.export_button.setEnabled(has_rows)
+        if hasattr(self, "annotate_button"):
+            self.annotate_button.setEnabled(has_rows and bool(self._selected_rows()))
+
+    def _apply_phase_points_to_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not isinstance(frame, pd.DataFrame):
+            return frame
+        working = frame.copy()
+        if ANNEALING_AS_COLUMN not in working.columns:
+            working[ANNEALING_AS_COLUMN] = pd.Series([None] * len(working))
+        if ANNEALING_MS_COLUMN not in working.columns:
+            working[ANNEALING_MS_COLUMN] = pd.Series([None] * len(working))
+        for idx in range(len(working.index)):
+            try:
+                key = str(working.loc[idx, "_group_key"])
+            except Exception:
+                key = ""
+            if not key or key == "None":
+                working.at[idx, ANNEALING_AS_COLUMN] = None
+                working.at[idx, ANNEALING_MS_COLUMN] = None
+                continue
+            points = self._phase_points.get(key, {})
+            working.at[idx, ANNEALING_AS_COLUMN] = points.get("As")
+            working.at[idx, ANNEALING_MS_COLUMN] = points.get("Ms")
+        return working
+
+    def _apply_phase_points_to_table(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if frame.empty:
+            return
+        updated = self._apply_phase_points_to_frame(frame)
+        self.data.table = updated
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_frame(updated)
+
+    def _handle_phase_point_cells_changed(
+        self,
+        top_left: QtCore.QModelIndex,
+        bottom_right: QtCore.QModelIndex,
+        roles: Tuple[QtCore.Qt.ItemDataRole, ...] = (),
+    ) -> None:
+        if roles and QtCore.Qt.ItemDataRole.EditRole not in roles:
+            return
+        if not isinstance(self.model, DataFrameModel):
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        try:
+            columns_slice = frame.columns[top_left.column() : bottom_right.column() + 1]
+        except Exception:
+            columns_slice = []
+        relevant_columns = {ANNEALING_AS_COLUMN, ANNEALING_MS_COLUMN}
+        if not any(column in relevant_columns for column in columns_slice):
+            return
+
+        updated_keys: Set[str] = set()
+
+        def _coerce(value: Any) -> Optional[float]:
+            if isinstance(value, (int, float)):
+                numeric = float(value)
+                return numeric if math.isfinite(numeric) else None
+            if isinstance(value, str):
+                text = value.strip()
+                if not text:
+                    return None
+                try:
+                    numeric = float(text)
+                except ValueError:
+                    return None
+                return numeric if math.isfinite(numeric) else None
+            return None
+
+        for row in range(top_left.row(), bottom_right.row() + 1):
+            if row < 0 or row >= len(frame.index):
+                continue
+            series = frame.iloc[row]
+            key_raw = series.get("_group_key")
+            key = str(key_raw).strip() if key_raw not in (None, "", float("nan")) else ""
+            if not key or key == "None":
+                continue
+            entry: Dict[str, float] = {}
+            as_value = _coerce(series.get(ANNEALING_AS_COLUMN))
+            ms_value = _coerce(series.get(ANNEALING_MS_COLUMN))
+            if as_value is not None:
+                entry["As"] = as_value
+            if ms_value is not None:
+                entry["Ms"] = ms_value
+            if entry:
+                self._phase_points[key] = entry
+            elif key in self._phase_points:
+                self._phase_points.pop(key, None)
+            updated_keys.add(key)
+
+        if not updated_keys:
+            return
+
+        self.data.table = frame.copy()
+        self._store_phase_points()
+        self._update_export_enabled()
+
+    def _store_phase_points(self) -> None:
+        snapshot: Dict[str, Dict[str, float]] = {}
+        for key, payload in self._phase_points.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            snapshot[key] = {label: float(value) for label, value in payload.items() if isinstance(value, (int, float))}
+        self.data.extra["phase_points"] = snapshot
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist phase transition points")
+
+    def _prune_phase_points(self, valid_keys: Optional[Iterable[str]] = None, *, store: bool = True) -> None:
+        if valid_keys is None:
+            frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+            if frame.empty or "_group_key" not in frame.columns:
+                valid_set: Set[str] = set()
+            else:
+                valid_set = {str(value) for value in frame["_group_key"].dropna().astype(str)}
+        else:
+            valid_set = {str(value) for value in valid_keys if value}
+        removed = False
+        for key in list(self._phase_points.keys()):
+            if key not in valid_set:
+                self._phase_points.pop(key, None)
+                removed = True
+        if removed and store:
+            self._store_phase_points()
+
+    def _selected_group_key(self) -> Optional[str]:
+        rows = self._selected_rows()
+        if not rows:
+            return None
+        series = self._row_series(rows[0])
+        if series is None:
+            return None
+        key = series.get("_group_key")
+        if key in (None, "", float("nan")):
+            return None
+        return str(key)
+
+
+    def _open_transition_dialog(self) -> None:
+        key = self._selected_group_key()
+        if not key:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select a microwire row before opening the interactive plot.",
+            )
+            return
+        records = self._record_groups.get(key)
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No annealing measurements are available for the selected microwire.",
+            )
+            return
+        high_record, low_record = _select_high_low_pair(records)
+        record_pairs: List[Tuple[str, MeasurementRecord]] = []
+        if high_record is not None:
+            record_pairs.append(("High current", high_record))
+        if low_record is not None:
+            record_pairs.append(("Low current", low_record))
+        if not record_pairs:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "The selected microwire does not have plot-ready data.",
+            )
+            return
+        existing = self._phase_points.get(key, {})
+        dialog = _TransitionPickerDialog(self, record_pairs, existing)
+        if dialog.exec() != QtWidgets.QDialog.DialogCode.Accepted:
+            return
+        points = dialog.result_points()
+        cleaned = {label: float(value) for label, value in points.items() if isinstance(value, (int, float)) and math.isfinite(float(value))}
+        if cleaned:
+            self._phase_points[key] = cleaned
+        elif key in self._phase_points:
+            self._phase_points.pop(key, None)
+        self._apply_phase_points_to_table()
+        self._store_phase_points()
+        self._update_export_enabled()
+
+    def _update_open_sources_enabled(self) -> None:
+        super()._update_open_sources_enabled()
+        if hasattr(self, "annotate_button"):
+            has_rows = isinstance(self.data.table, pd.DataFrame) and not self.data.table.empty
+            self.annotate_button.setEnabled(has_rows and bool(self._selected_rows()))
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._refresh_record_groups()
+        self._apply_phase_points_to_table()
+        self._update_export_enabled()
 
     def _refresh_record_groups(self) -> None:
         grouped: Dict[str, List[MeasurementRecord]] = {}
@@ -4488,6 +4978,8 @@ class AnnealingSection(MiniDatabaseSection):
             "Microwire",
             "Graph — 1000 mA",
             "Graph — low mA",
+            "As (mA)",
+            "Ms (mA)",
             "Low current setpoint",
             "Updated",
             "_group_key",
@@ -5010,13 +5502,29 @@ class MicroscopeSection(MiniDatabaseSection):
 
         d_value = override.get("d")
         if d_value is None:
-            core_best = measurement.best_core()
-            d_value = float(core_best) if isinstance(core_best, (int, float)) else None
+            core_detection = measurement.best_core_detection()
+            if (
+                isinstance(core_detection, MicroscopeDetection)
+                and getattr(core_detection, "category", None) == "core"
+                and self._is_valid_diameter(getattr(core_detection, "value", None))
+            ):
+                try:
+                    d_value = float(core_detection.value)
+                except (TypeError, ValueError):
+                    d_value = None
 
         D_value = override.get("D")
         if D_value is None:
-            glass_best = measurement.best_glass()
-            D_value = float(glass_best) if isinstance(glass_best, (int, float)) else None
+            glass_detection = measurement.best_glass_detection()
+            if (
+                isinstance(glass_detection, MicroscopeDetection)
+                and getattr(glass_detection, "category", None) == "glass"
+                and self._is_valid_diameter(getattr(glass_detection, "value", None))
+            ):
+                try:
+                    D_value = float(glass_detection.value)
+                except (TypeError, ValueError):
+                    D_value = None
 
         ratio = None
         if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
@@ -5636,6 +6144,446 @@ class MicroscopeSection(MiniDatabaseSection):
     @property
     def overrides(self) -> Dict[str, Dict[str, float]]:
         return dict(self._overrides)
+
+
+class CurrentDensitySection(QtWidgets.QWidget):
+    section_key = "current_density"
+    section_title = "Current density"
+
+    status_changed = QtCore.pyqtSignal(str)
+    sources_changed = QtCore.pyqtSignal(list)
+    data_updated = QtCore.pyqtSignal()
+
+    def __init__(
+        self,
+        annealing_section: AnnealingSection,
+        microscope_section: MicroscopeSection,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.logger = logger
+        self._log_callback = log_callback
+        self._annealing_section = annealing_section
+        self._microscope_section = microscope_section
+        self._current_frame = pd.DataFrame(columns=CURRENT_DENSITY_COLUMNS)
+        self._last_sources: List[str] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        controls = QtWidgets.QHBoxLayout()
+        self.refresh_button = QtWidgets.QPushButton("Recalculate")
+        self.refresh_button.clicked.connect(self.refresh_data)
+        controls.addWidget(self.refresh_button)
+        self.export_button = QtWidgets.QPushButton("Export worksheet...")
+        self.export_button.clicked.connect(self._export_worksheet)
+        self.export_button.setEnabled(False)
+        controls.addWidget(self.export_button)
+        controls.addStretch(1)
+        layout.addLayout(controls)
+
+        self.status_label = QtWidgets.QLabel("Waiting for data.", self)
+        layout.addWidget(self.status_label)
+
+        self.model = DataFrameModel(self._current_frame)
+        table = QtWidgets.QTableView(self)
+        table.setModel(self.model)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+        table.setSortingEnabled(True)
+        table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+            header.setSectionsMovable(True)
+            header.setSectionsClickable(True)
+        vertical_bar = table.verticalScrollBar()
+        if vertical_bar is not None:
+            vertical_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
+        layout.addWidget(table, 1)
+        self.table_view = table
+
+        if hasattr(self._annealing_section, "data_updated"):
+            try:
+                self._annealing_section.data_updated.connect(self.refresh_data)
+            except Exception:
+                pass
+        if hasattr(self._microscope_section, "data_updated"):
+            try:
+                self._microscope_section.data_updated.connect(self.refresh_data)
+            except Exception:
+                pass
+        QtCore.QTimer.singleShot(0, self.refresh_data)
+
+    def log(self, message: str, level: int = logging.INFO) -> None:
+        try:
+            self._log_callback(level, message)
+        except Exception:
+            self.logger.log(level, message)
+
+    def refresh_data(self) -> None:
+        previous_order = self._current_column_order()
+        try:
+            frame = self._calculate_frame()
+        except Exception:
+            self.logger.exception("Failed to calculate current density table")
+            self.status_label.setText("Failed to calculate current density.")
+            self.export_button.setEnabled(False)
+            return
+        self._current_frame = frame
+        self.model.set_frame(frame)
+        if previous_order:
+            QtCore.QTimer.singleShot(0, lambda: self._apply_column_order(previous_order))
+        try:
+            self.table_view.resizeColumnsToContents()
+        except Exception:
+            pass
+        total = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
+        complete = 0
+        if total and isinstance(frame, pd.DataFrame):
+            high_valid = pd.Series(frame["High current density (A/mm^2)"]).notna()
+            low_valid = pd.Series(frame["Low current density (A/mm^2)"]).notna()
+            complete = int((high_valid | low_valid).sum())
+        status_text = (
+            f"{complete} of {total} microwire(s) include current density."
+            if total
+            else "No overlapping microscope and annealing data yet."
+        )
+        self.status_label.setText(status_text)
+        self.export_button.setEnabled(total > 0)
+        try:
+            self.status_changed.emit(status_text)
+        except Exception:
+            pass
+        try:
+            self.sources_changed.emit(list(self._last_sources))
+        except Exception:
+            pass
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
+    def _calculate_frame(self) -> pd.DataFrame:
+        diameter_map = self._collect_microscope_data()
+        setpoint_map = self._collect_setpoint_data()
+        keys = sorted(set(diameter_map.keys()) | set(setpoint_map.keys()))
+        rows: List[Dict[str, Any]] = []
+        all_sources: Set[str] = set()
+        for composition, draw, piece in keys:
+            micro_info = diameter_map.get((composition, draw, piece), {})
+            setpoint_info = setpoint_map.get((composition, draw, piece), {})
+            diameter_um = micro_info.get("diameter")
+            area_mm2 = self._diameter_to_area(diameter_um)
+            setpoints = setpoint_info.get("setpoints", [])
+            high_setpoint = max(setpoints) if setpoints else None
+            low_setpoint = min(setpoints) if setpoints else None
+            high_density = self._compute_density(high_setpoint, area_mm2)
+            low_density = self._compute_density(low_setpoint, area_mm2)
+            sources = setpoint_info.get("sources", [])
+            all_sources.update(str(source) for source in sources)
+            notes: List[str] = []
+            if diameter_um is None or area_mm2 is None:
+                notes.append("Missing diameter")
+            if not setpoints:
+                notes.append("No setpoint data")
+            composition_label = micro_info.get("composition") or setpoint_info.get("composition") or composition
+            try:
+                microwire_label = micro_info.get("label") or _microwire_label(draw, piece)
+            except Exception:
+                microwire_label = micro_info.get("label") or f"{draw}/{piece}"
+            rows.append(
+                {
+                    "Composition": composition_label,
+                    "Microwire": microwire_label,
+                    MICROSCOPE_D_COLUMN: diameter_um,
+                    "Area (mm^2)": area_mm2,
+                    "High setpoint (mA)": high_setpoint,
+                    "High current density (A/mm^2)": high_density,
+                    "Low setpoint (mA)": low_setpoint,
+                    "Low current density (A/mm^2)": low_density,
+                    "Setpoints (mA)": self._format_setpoints(setpoints),
+                    "Sources": self._summarise_sources(sources),
+                    "Notes": "; ".join(notes) if notes else "",
+                }
+            )
+        self._last_sources = sorted(all_sources)
+        if not rows:
+            return pd.DataFrame(columns=CURRENT_DENSITY_COLUMNS)
+        frame = pd.DataFrame(rows)
+        return frame.loc[:, CURRENT_DENSITY_COLUMNS]
+
+    def _collect_microscope_data(self) -> Dict[Tuple[str, int, int], Dict[str, Any]]:
+        result: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+        table = getattr(getattr(self._microscope_section, "data", None), "table", None)
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return result
+        for _, row in table.iterrows():
+            key = self._extract_key(row.get("Composition"), row.get("Microwire"), row.get("_key"))
+            if key is None:
+                continue
+            composition, draw, piece = key
+            diameter = self._to_positive_float(row.get(MICROSCOPE_D_COLUMN))
+            composition_label = self._normalise_text(row.get("Composition")) or composition
+            label = self._normalise_text(row.get("Microwire"))
+            if not label:
+                try:
+                    label = _microwire_label(draw, piece)
+                except Exception:
+                    label = f"{draw}/{piece}"
+            result[key] = {
+                "composition": composition_label,
+                "label": label,
+                "diameter": diameter,
+            }
+        return result
+
+    def _collect_setpoint_data(self) -> Dict[Tuple[str, int, int], Dict[str, Any]]:
+        result: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+        groups = getattr(self._annealing_section, "_record_groups", {})
+        if not isinstance(groups, dict) or not groups:
+            return result
+        for records in groups.values():
+            for record in records:
+                metadata = getattr(record, "metadata", None)
+                if metadata is None:
+                    continue
+                composition = getattr(metadata, "composition_token", None)
+                draw = getattr(metadata, "draw_x", None)
+                piece = getattr(metadata, "piece_y", None)
+                setpoint = getattr(metadata, "setpoint_mA", None)
+                if (
+                    composition is None
+                    or draw is None
+                    or piece is None
+                    or setpoint is None
+                ):
+                    continue
+                try:
+                    key = (str(composition), int(draw), int(piece))
+                    setpoint_value = float(setpoint)
+                except (TypeError, ValueError):
+                    continue
+                if not math.isfinite(setpoint_value):
+                    continue
+                entry = result.setdefault(
+                    key,
+                    {
+                        "setpoints": [],
+                        "sources": set(),
+                        "composition": str(composition),
+                    },
+                )
+                entry["setpoints"].append(setpoint_value)
+                path = getattr(record, "path", None)
+                if path:
+                    try:
+                        entry["sources"].add(str(Path(path)))
+                    except Exception:
+                        pass
+        for entry in result.values():
+            entry["setpoints"] = sorted(dict.fromkeys(entry["setpoints"]))
+            entry["sources"] = sorted(entry["sources"])
+        return result
+
+    @staticmethod
+    def _normalise_text(value: object) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, (float, int)):
+            try:
+                if math.isnan(float(value)):
+                    return ""
+            except Exception:
+                pass
+        text = str(value).strip()
+        if not text or text.lower() in {"nan", "none"}:
+            return ""
+        return text
+
+    def _extract_key(
+        self,
+        composition: object,
+        microwire: object,
+        stored_key: object,
+    ) -> Optional[Tuple[str, int, int]]:
+        comp_text = self._normalise_text(composition)
+        if isinstance(stored_key, str):
+            parts = stored_key.split("|")
+            if len(parts) == 3:
+                base_comp = parts[0].strip()
+                try:
+                    draw = int(parts[1])
+                    piece = int(parts[2])
+                except ValueError:
+                    pass
+                else:
+                    comp_value = comp_text or base_comp
+                    if comp_value:
+                        return (comp_value, draw, piece)
+        label_text = self._normalise_text(microwire)
+        if label_text and comp_text:
+            draw_piece = _microwire_tuple_from_label(label_text)
+            if draw_piece is not None:
+                draw, piece = draw_piece
+                return (comp_text, int(draw), int(piece))
+        return None
+
+    @staticmethod
+    def _to_positive_float(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+        else:
+            text = str(value).strip().replace(",", ".")
+            if not text:
+                return None
+            try:
+                numeric = float(text)
+            except ValueError:
+                return None
+        if not math.isfinite(numeric) or numeric <= 0:
+            return None
+        return numeric
+
+    @staticmethod
+    def _diameter_to_area(diameter_um: Optional[float]) -> Optional[float]:
+        if diameter_um is None or not math.isfinite(diameter_um) or diameter_um <= 0:
+            return None
+        radius_mm = (diameter_um * 1e-3) / 2.0
+        if radius_mm <= 0:
+            return None
+        return math.pi * radius_mm * radius_mm
+
+    @staticmethod
+    def _compute_density(setpoint_mA: Optional[float], area_mm2: Optional[float]) -> Optional[float]:
+        if setpoint_mA is None or area_mm2 is None or area_mm2 <= 0:
+            return None
+        current_A = setpoint_mA / 1000.0
+        return current_A / area_mm2
+
+    @staticmethod
+    def _format_setpoints(values: Sequence[float]) -> str:
+        if not values:
+            return ""
+        formatted = [f"{value:.3f}".rstrip("0").rstrip(".") if isinstance(value, float) else str(value) for value in values]
+        return ", ".join(formatted)
+
+    @staticmethod
+    def _summarise_sources(sources: Iterable[str]) -> str:
+        unique = []
+        for entry in sources:
+            text = str(entry)
+            if text and text not in unique:
+                unique.append(text)
+        names = [Path(text).name for text in unique]
+        return ", ".join(names)
+
+    def _current_column_order(self) -> List[str]:
+        header = self.table_view.horizontalHeader()
+        frame = self.model.frame()
+        if header is None or not isinstance(frame, pd.DataFrame):
+            return []
+        order: List[str] = []
+        for visual_index in range(header.count()):
+            logical = header.logicalIndex(visual_index)
+            try:
+                column = str(frame.columns[logical])
+            except Exception:
+                continue
+            order.append(column)
+        return order
+
+    def _apply_column_order(self, order: Sequence[str]) -> None:
+        if not order:
+            return
+        header = self.table_view.horizontalHeader()
+        frame = self.model.frame()
+        if header is None or not isinstance(frame, pd.DataFrame):
+            return
+        mapping = {str(column): idx for idx, column in enumerate(frame.columns)}
+        for target_visual, column_name in enumerate(order):
+            logical = mapping.get(column_name)
+            if logical is None:
+                continue
+            current_visual = header.visualIndex(logical)
+            if current_visual == target_visual:
+                continue
+            header.moveSection(current_visual, target_visual)
+
+    def _ordered_export_frame(self) -> pd.DataFrame:
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame):
+            return pd.DataFrame(columns=CURRENT_DENSITY_COLUMNS)
+        order = self._current_column_order()
+        if order:
+            missing = [column for column in frame.columns if column not in order]
+            order = list(order) + missing
+            export_frame = frame.loc[:, order].copy()
+        else:
+            export_frame = frame.copy()
+        return export_frame
+
+    def _export_worksheet(self) -> None:
+        frame = self._ordered_export_frame()
+        if frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export worksheet",
+                "There is no current density data to export yet.",
+            )
+            return
+        start_dir = _dialog_start_directory()
+        suggested = start_dir / "current_density.xlsx"
+        path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export worksheet",
+            str(suggested),
+            "Excel files (*.xlsx);;CSV files (*.csv)",
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        suffix = path.suffix.lower()
+        if suffix not in {".xlsx", ".csv"}:
+            if "Excel" in selected_filter:
+                path = path.with_suffix(".xlsx")
+                suffix = ".xlsx"
+            else:
+                path = path.with_suffix(".csv")
+                suffix = ".csv"
+        export_frame = frame.copy()
+        for column in export_frame.columns:
+            series = export_frame[column]
+            if getattr(series, "dtype", None) == object:
+                export_frame[column] = series.map(
+                    lambda value: "" if isinstance(value, (QtGui.QPixmap, QtGui.QImage)) else value
+                )
+        try:
+            if suffix == ".xlsx":
+                export_frame.to_excel(path, index=False)
+            else:
+                export_frame.to_csv(path, index=False)
+        except Exception as exc:
+            self.logger.exception("Failed to export current density worksheet")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export worksheet",
+                f"Failed to export worksheet:\n{exc}",
+            )
+            return
+        self.log(f"Current density worksheet exported to {path}")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export worksheet",
+            f"Worksheet exported to:\n{path}",
+        )
 
 
 class VideoSection(MiniDatabaseSection):
@@ -6684,7 +7632,17 @@ class AssemblySection(QtWidgets.QWidget):
         self.preview_table = QtWidgets.QTableView()
         self.preview_table.setModel(self.preview_model)
         self.preview_table.setAlternatingRowColors(True)
-        self.preview_table.horizontalHeader().setStretchLastSection(True)
+        self.preview_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.preview_table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        header = self.preview_table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+            header.setSectionsMovable(True)
+            header.setSectionsClickable(True)
         self.preview_table.setVerticalScrollMode(
             QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
@@ -6699,6 +7657,10 @@ class AssemblySection(QtWidgets.QWidget):
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
+        self.export_preview_button = QtWidgets.QPushButton("Export worksheet...")
+        self.export_preview_button.clicked.connect(self._export_preview_worksheet)
+        self.export_preview_button.setEnabled(False)
+        button_row.addWidget(self.export_preview_button)
         self.preview_button = QtWidgets.QPushButton("Preview database")
         self.preview_button.clicked.connect(self._preview)
         button_row.addWidget(self.preview_button)
@@ -6748,6 +7710,7 @@ class AssemblySection(QtWidgets.QWidget):
             Dict[Tuple[str, int, int], MicroscopeMeasurements],
             Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
             Dict[Tuple[str, int, int], StrainRecord],
+            Dict[str, Dict[str, float]],
             Dict[str, Dict[str, float]],
         ]
     ]:
@@ -6804,6 +7767,10 @@ class AssemblySection(QtWidgets.QWidget):
             elif require_payloads:
                 missing.append("strain")
 
+        phase_points: Dict[str, Dict[str, float]] = {}
+        annealing_section = self.sections.get("annealing")
+        if isinstance(annealing_section, AnnealingSection):
+            phase_points = dict(getattr(annealing_section, "_phase_points", {}))
         if missing:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -6819,10 +7786,14 @@ class AssemblySection(QtWidgets.QWidget):
             video_index,
             strain_records,
             overrides,
+            phase_points,
         )
 
     def _update_preview(self, frame: pd.DataFrame) -> None:
+        previous_order = self._current_preview_column_order()
         self.preview_model.set_frame(frame)
+        if previous_order:
+            QtCore.QTimer.singleShot(0, lambda: self._apply_preview_column_order(previous_order))
         self.preview_table.setVisible(True)
         try:
             self.preview_table.resizeColumnsToContents()
@@ -6834,10 +7805,116 @@ class AssemblySection(QtWidgets.QWidget):
             except Exception:
                 self.logger.exception("Failed to publish preview dataframe to console")
         row_count = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
-        if row_count:
-            self.status_label.setText(f"Preview ready — {row_count} row(s).")
-        else:
-            self.status_label.setText("Preview is empty.")
+        self.status_label.setText(
+            f"Preview ready - {row_count} row(s)." if row_count else "Preview is empty."
+        )
+        if hasattr(self, "export_preview_button"):
+            self.export_preview_button.setEnabled(row_count > 0)
+
+    def _current_preview_column_order(self) -> List[str]:
+        header = self.preview_table.horizontalHeader()
+        frame = self.preview_model.frame()
+        if header is None or not isinstance(frame, pd.DataFrame):
+            return []
+        order: List[str] = []
+        for visual_index in range(header.count()):
+            logical = header.logicalIndex(visual_index)
+            try:
+                column = str(frame.columns[logical])
+            except Exception:
+                continue
+            order.append(column)
+        return order
+
+    def _apply_preview_column_order(self, order: Sequence[str]) -> None:
+        if not order:
+            return
+        header = self.preview_table.horizontalHeader()
+        frame = self.preview_model.frame()
+        if header is None or not isinstance(frame, pd.DataFrame):
+            return
+        mapping = {str(column): idx for idx, column in enumerate(frame.columns)}
+        for target_visual, column_name in enumerate(order):
+            logical = mapping.get(column_name)
+            if logical is None:
+                continue
+            current_visual = header.visualIndex(logical)
+            if current_visual == target_visual:
+                continue
+            header.moveSection(current_visual, target_visual)
+
+    def _ordered_preview_frame(self) -> pd.DataFrame:
+        frame = self.preview_model.frame()
+        if not isinstance(frame, pd.DataFrame):
+            return pd.DataFrame()
+        order = self._current_preview_column_order()
+        if order:
+            remaining = [column for column in frame.columns if column not in order]
+            return frame.loc[:, list(order) + remaining].copy()
+        return frame.copy()
+
+    @staticmethod
+    def _serialise_preview_value(value: Any) -> Any:
+        if isinstance(value, (QtGui.QPixmap, QtGui.QImage)):
+            return ""
+        if isinstance(value, (list, tuple, set)):
+            return ", ".join(str(item) for item in value)
+        return value
+
+    def _export_preview_worksheet(self) -> None:
+        frame = self._ordered_preview_frame()
+        if frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export worksheet",
+                "There is no preview data to export.",
+            )
+            return
+        export_frame = frame.copy()
+        for column in export_frame.columns:
+            series = export_frame[column]
+            if getattr(series, "dtype", None) == object:
+                export_frame[column] = series.map(self._serialise_preview_value)
+        preferred_dir = self.output_dir_edit.text().strip()
+        start_dir = _dialog_start_directory(preferred_dir) if preferred_dir else _dialog_start_directory()
+        default_name = _normalise_output_name(self.output_name_edit.text() or DEFAULT_OUTPUT_NAME)
+        suggested = start_dir / f"{default_name}_worksheet.xlsx"
+        path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export worksheet",
+            str(suggested),
+            "Excel files (*.xlsx);;CSV files (*.csv)",
+        )
+        if not path_str:
+            return
+        path = Path(path_str)
+        suffix = path.suffix.lower()
+        if suffix not in {".xlsx", ".csv"}:
+            if "Excel" in selected_filter:
+                path = path.with_suffix(".xlsx")
+                suffix = ".xlsx"
+            else:
+                path = path.with_suffix(".csv")
+                suffix = ".csv"
+        try:
+            if suffix == ".xlsx":
+                export_frame.to_excel(path, index=False)
+            else:
+                export_frame.to_csv(path, index=False)
+        except Exception as exc:
+            self.logger.exception("Failed to export preview worksheet")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export worksheet",
+                f"Failed to export worksheet:\n{exc}",
+            )
+            return
+        self.log(f"Preview worksheet exported to {path}")
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export worksheet",
+            f"Worksheet exported to:\n{path}",
+        )
 
     def _combine(self) -> None:
         selected = self._selected_sections()
@@ -6852,6 +7929,7 @@ class AssemblySection(QtWidgets.QWidget):
             video_index,
             strain_records,
             overrides,
+            phase_points,
         ) = inputs
 
         if "microscope" in selected and overrides:
@@ -6896,6 +7974,7 @@ class AssemblySection(QtWidgets.QWidget):
                 microscope_index=microscope_index if "microscope" in selected else {},
                 video_index=video_index if "videos" in selected else {},
                 strain_records=strain_records if "strain" in selected else {},
+                phase_points=phase_points,
             )
         except Exception as exc:
             self.logger.exception("Assembly failed")
@@ -6930,6 +8009,7 @@ class AssemblySection(QtWidgets.QWidget):
             video_index,
             strain_records,
             overrides,
+            phase_points,
         ) = inputs
 
         if "microscope" in selected and overrides:
@@ -6963,6 +8043,7 @@ class AssemblySection(QtWidgets.QWidget):
                 microscope_index=microscope_index if "microscope" in selected else {},
                 video_index=video_index if "videos" in selected else {},
                 strain_records=strain_records if "strain" in selected else {},
+                phase_points=phase_points,
                 skip_exports=True,
             )
         except Exception as exc:
@@ -7020,7 +8101,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_view.setMaximumBlockCount(2000)
         self.log_view.setObjectName("builderMessageLogView")
 
-        self.sections: Dict[str, MiniDatabaseSection] = {}
+        self.sections: Dict[str, QtWidgets.QWidget] = {}
         self._log_has_unread_errors = False
         self._log_highlight_active = False
 
@@ -7053,6 +8134,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.microscope_section = MicroscopeSection(self.logger, _append_log)
         self.tab_widget.addTab(self.microscope_section, "Microscope")
         self.sections["microscope"] = self.microscope_section
+
+        self.current_density_section = CurrentDensitySection(
+            self.annealing_section,
+            self.microscope_section,
+            self.logger,
+            _append_log,
+        )
+        self.tab_widget.addTab(self.current_density_section, "Current density")
+        self.sections["current_density"] = self.current_density_section
 
         self.video_section = VideoSection(self.logger, _append_log)
         self.tab_widget.addTab(self.video_section, "Videos")
@@ -7100,7 +8190,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 section.data_updated.connect(self._update_project_actions)
             except Exception:
                 pass
-            self._handle_section_sources_changed(key, section.data.sources)
+            initial_sources: Iterable[str] = []
+            if isinstance(section, MiniDatabaseSection):
+                initial_sources = section.data.sources
+            self._handle_section_sources_changed(key, initial_sources)
 
         self.project_dock = QtWidgets.QDockWidget("Project Explorer", self)
         self.project_dock.setObjectName("builderProjectExplorerDock")
@@ -7543,11 +8636,34 @@ def main() -> QtWidgets.QWidget | None:
         app = QtWidgets.QApplication(sys.argv)
         ensure_app_theme(app)
         owns_app = True
-    window = BuilderWindow()
-    window.show()
+    placeholder = QtWidgets.QMainWindow()
+    placeholder.setWindowTitle("Microwire Data Builder")
+    placeholder.resize(420, 260)
+    loading_label = QtWidgets.QLabel("Loading Microwire Data Builder...", placeholder)
+    loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    loading_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+    placeholder.setCentralWidget(loading_label)
+    placeholder.show()
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+
+    window_holder: dict[str, QtWidgets.QWidget] = {}
+
+    def _launch() -> None:
+        window = BuilderWindow()
+        window_holder["window"] = window
+        window.show()
+        placeholder.close()
+
     if owns_app:
+        QtCore.QTimer.singleShot(0, _launch)
         app.exec()
-    return window
+        return window_holder.get("window")
+
+    _launch()
+    return window_holder.get("window")
 
 
 __all__ = ["BuilderWindow", "main", "run_app"]

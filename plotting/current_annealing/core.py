@@ -132,7 +132,7 @@ def load_file(path: str) -> pd.DataFrame:
             df = df.iloc[: trimmed_currents.shape[0]].copy()
             df["I_mA"] = trimmed_currents
             df["R_Ohm"] = trimmed_resistances
-    if not df.empty:
+    if len(df.index) > 3:
         tolerance = 0.6
         mask = np.ones(len(df), dtype=bool)
         values = df["I_mA"].to_numpy(dtype=float)
@@ -707,11 +707,20 @@ def plot_one(
     title: str,
     *,
     figsize: Tuple[float, float] | None = None,
+    target_px: Tuple[int, int] | None = None,
 ) -> Tuple[Figure, str]:
-    if not figsize:
-        figsize = (8.0, 4.5)
-    width, height = max(float(figsize[0]), 0.5), max(float(figsize[1]), 0.5)
-    fig, ax = plt.subplots(figsize=(width, height))
+    if target_px is not None:
+        target_width, target_height = target_px
+        dpi = 180.0
+        width = max(float(target_width) / dpi, 0.5)
+        height = max(float(target_height) / dpi, 0.5)
+    else:
+        if not figsize:
+            figsize = (4.0, 2.25)
+        width = max(float(figsize[0]), 0.5)
+        height = max(float(figsize[1]), 0.5)
+        dpi = 144.0
+    fig, ax = plt.subplots(figsize=(width, height), dpi=dpi)
 
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
