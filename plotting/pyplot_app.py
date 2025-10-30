@@ -3003,19 +3003,41 @@ class PyPlotWorkbench(PyPlotWindow):
         plugin = self._current_plugin
         requires_data = bool(getattr(plugin, "requires_imported_data", False))
         if requires_data:
-            selection = self._selected_paths()
+            selection = [path for path in self._selected_paths() if path.is_file()]
+            if selection and len(selection) != len(self._selected_path_entries):
+                self._selected_path_entries = selection
+                formatted = self._format_paths(selection)
+                if hasattr(self, "path_edit"):
+                    try:
+                        self.path_edit.blockSignals(True)
+                    except Exception:
+                        pass
+                    self.path_edit.setText(formatted)
+                    try:
+                        self.path_edit.blockSignals(False)
+                    except Exception:
+                        pass
+                self._remember_directory_from_paths(selection)
             if not selection:
                 self._sync_selected_paths_with_imports()
-                selection = self._selected_paths()
+                selection = [path for path in self._selected_paths() if path.is_file()]
             if not selection:
                 sources: list[Path] = []
                 for workbook in self._workbooks.values():
                     source = getattr(workbook, "source", None)
-                    if isinstance(source, Path) and source.exists():
+                    if isinstance(source, Path) and source.exists() and source.is_file():
                         sources.append(source)
                 if sources:
-                    self._selected_path_entries = sources
-                    formatted = self._format_paths(sources)
+                    unique_sources: list[Path] = []
+                    seen: set[str] = set()
+                    for source in sources:
+                        key = str(source.resolve()) if source.exists() else str(source)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        unique_sources.append(source)
+                    self._selected_path_entries = unique_sources
+                    formatted = self._format_paths(unique_sources)
                     if hasattr(self, "path_edit"):
                         try:
                             self.path_edit.blockSignals(True)
@@ -3026,9 +3048,9 @@ class PyPlotWorkbench(PyPlotWindow):
                             self.path_edit.blockSignals(False)
                         except Exception:
                             pass
-                    self._remember_directory_from_paths(sources)
+                    self._remember_directory_from_paths(unique_sources)
                     self._sync_selected_paths_with_imports()
-                    selection = sources
+                    selection = [path for path in unique_sources if path.is_file()]
             if not selection:
                 if self._show_data_menu():
                     return
@@ -3476,6 +3498,10 @@ class PyPlotWorkbench(PyPlotWindow):
 
         def _push(candidate: Path | None) -> None:
             if not isinstance(candidate, Path):
+                return
+            if not candidate.exists():
+                return
+            if candidate.is_dir():
                 return
             try:
                 resolved = candidate.resolve()

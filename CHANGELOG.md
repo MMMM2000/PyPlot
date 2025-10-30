@@ -644,6 +644,12 @@
 - Fixed the PyPlot temperature dependence TXT exporter to use the dedicated
   workflow, preventing KeyErrors when exporting temperature dependence runs.
 
+## 2025-10-30 12:45 UTC
+
+- Tightened the PyPlot loader so "Load data" only proceeds when real files are
+  available, prompting the Data menu when nothing is imported instead of
+  passing empty directory selections to plotting scripts.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
