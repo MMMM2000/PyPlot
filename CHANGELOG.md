@@ -1,4 +1,13 @@
 # Changelog
+## 2025-10-30 17:27 UTC
+
+- Fixed PyPlot's import progress loop so files process correctly without
+  raising a syntax error and added defensive type checks when embedding
+  workbooks, restoring launcher stability.
+- Hardened the Microwire builder's Excel exporters against ambiguous column
+  indexes and optional worksheet types to keep microscope OCR layouts sizing
+  reliably across engines.
+
 ## 2025-10-30 16:15 UTC
 
 - Deferred heavyweight plotter imports in the master launcher so the window

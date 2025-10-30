@@ -22,9 +22,10 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
         target: Any = module_obj
         for segment in attr.split("."):
             target = getattr(target, segment)
-        if callable(target):
-            return target(*args, **kwargs)
-        raise TypeError(f"{module}.{attr} is not callable")
+        if not callable(target):
+            raise TypeError(f"{module}.{attr} is not callable")
+        callable_target = cast(LauncherFactory, target)
+        return callable_target(*args, **kwargs)
 
     return factory
 

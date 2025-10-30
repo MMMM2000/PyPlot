@@ -2275,16 +2275,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     if progress.wasCanceled():
                         cancelled = True
                         break
-            result = self._load_workbook_from_file(file_path)
-            if result is None:
-                continue
-            workbook, worksheets = result
-            try:
-                self._register_imported_workbook(workbook, worksheets)
-            except Exception as exc:  # pragma: no cover - defensive, UI fallback
-                errors.append(f"{file_path}: {exc}")
-                continue
-            imported += len(worksheets)
+                result = self._load_workbook_from_file(file_path)
+                if result is None:
+                    continue
+                workbook, worksheets = result
+                try:
+                    self._register_imported_workbook(workbook, worksheets)
+                except Exception as exc:  # pragma: no cover - defensive, UI fallback
+                    errors.append(f"{file_path}: {exc}")
+                    continue
+                imported += len(worksheets)
         finally:
             if progress is not None:
                 try:
