@@ -14,6 +14,7 @@ import time
 from datetime import datetime
 from dataclasses import dataclass, field
 from functools import partial
+from importlib.util import find_spec
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -38,7 +39,34 @@ from plotting.utils import (
     format_annealing_title,
     developer_options,
 )
-from origin_clone.app import PythonConsoleWidget
+
+if find_spec("origin_clone.app") is not None:
+    from origin_clone.app import PythonConsoleWidget  # type: ignore
+else:
+    class PythonConsoleWidget(QtWidgets.QWidget):
+        """Fallback console placeholder shown when Origin Clone is unavailable."""
+
+        def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+            super().__init__(parent)
+            self.setObjectName("mwPythonConsoleUnavailable")
+            layout = QtWidgets.QVBoxLayout(self)
+            layout.setContentsMargins(12, 12, 12, 12)
+            layout.setSpacing(6)
+
+            title = QtWidgets.QLabel("Python Console Unavailable", self)
+            title.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+            title.setStyleSheet("font-weight: bold;")
+            layout.addWidget(title)
+
+            message = QtWidgets.QLabel(
+                "Install the optional 'origin_clone' package to enable the interactive console.",
+                self,
+            )
+            message.setWordWrap(True)
+            message.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
+            layout.addWidget(message)
+
+            layout.addStretch(1)
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
 

@@ -1,4 +1,10 @@
 # Changelog
+## 2025-10-30 13:45 UTC
+
+- Prevented the PyPlot and Microwire UIs from crashing when the optional
+  `origin_clone` console package is unavailable by substituting a disabled
+  placeholder widget that explains how to restore the feature.
+
 ## 2025-10-30 13:20 UTC
 
 - Treated `pandas.NA`/`numpy.nan` fabrication imports as blanks so previously
