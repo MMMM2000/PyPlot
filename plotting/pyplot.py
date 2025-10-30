@@ -3,7 +3,6 @@ from __future__ import annotations
 import datetime
 import os
 from dataclasses import dataclass, field
-from importlib.util import find_spec
 from pathlib import Path
 from typing import (
     Any,
@@ -31,35 +30,8 @@ from matplotlib.text import Text
 from matplotlib import colors as mcolors
 import pandas as pd
 
+from plotting.python_console import PythonConsoleWidget
 from plotting.utils import install_standard_menu, developer_options
-
-if find_spec("origin_clone.app") is not None:
-    from origin_clone.app import PythonConsoleWidget  # type: ignore
-else:
-    class PythonConsoleWidget(QtWidgets.QWidget):
-        """Fallback console placeholder shown when Origin Clone is unavailable."""
-
-        def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
-            super().__init__(parent)
-            self.setObjectName("pyplotPythonConsoleUnavailable")
-            layout = QtWidgets.QVBoxLayout(self)
-            layout.setContentsMargins(12, 12, 12, 12)
-            layout.setSpacing(6)
-
-            title = QtWidgets.QLabel("Python Console Unavailable", self)
-            title.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
-            title.setStyleSheet("font-weight: bold;")
-            layout.addWidget(title)
-
-            message = QtWidgets.QLabel(
-                "Install the optional 'origin_clone' package to enable the interactive console.",
-                self,
-            )
-            message.setWordWrap(True)
-            message.setAlignment(QtCore.Qt.AlignmentFlag.AlignHCenter)
-            layout.addWidget(message)
-
-            layout.addStretch(1)
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
