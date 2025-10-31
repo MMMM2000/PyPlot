@@ -814,7 +814,39 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = self.host.ensure_data_selection(self, warn_on_missing=True)
+        host = self.host
+
+        def _path_key(path: Path) -> str:
+            try:
+                return str(path.resolve())
+            except Exception:
+                return str(path)
+
+        selected_paths: list[Path] = []
+        if hasattr(host, "_selected_paths"):
+            try:
+                selected_paths = [path for path in host._selected_paths() if path.is_file()]
+            except Exception:
+                selected_paths = []
+
+        pending_sources = {_path_key(path) for path in selected_paths}
+        imported_sources: set[str] = set()
+        workbooks = getattr(host, "_workbooks", {})
+        if isinstance(workbooks, dict):
+            for workbook in workbooks.values():
+                source = getattr(workbook, "source", None)
+                if isinstance(source, Path):
+                    imported_sources.add(_path_key(source))
+
+        if not imported_sources or (pending_sources and pending_sources - imported_sources):
+            opener = getattr(host, "_show_data_menu", None)
+            if callable(opener) and opener():
+                self._log(
+                    "Open the Data menu to import temperature sensitivity files, then click Load data again."
+                )
+                return
+
+        paths = host.ensure_data_selection(self, warn_on_missing=True)
         if not paths:
             return
         string_paths = [str(path) for path in paths]
@@ -833,7 +865,12 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             self._summary_label.setText(
                 f"Loaded {len(paths)} file(s): {names}\nClick Plot Temperature Sensitivity to generate graphs."
             )
-        self._log(f"Loaded {len(paths)} temperature sensitivity file(s).")
+        self._log(
+            "Loaded {count} temperature sensitivity file(s): {names}".format(
+                count=len(paths),
+                names=", ".join(path.name for path in paths),
+            )
+        )
         self.update_ui()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -933,7 +970,10 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     self._plot_tabs.append(tab)
                     plots_created += 1
         if self._plot_tabs:
-            self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+            first_tab = self._plot_tabs[0]
+            index = self.host.tab_widget.indexOf(first_tab)
+            if index >= 0:
+                self.host.tab_widget.setCurrentIndex(index)
         self._log(f"Generated {plots_created} temperature sensitivity plot(s).")
         self.update_ui()
 

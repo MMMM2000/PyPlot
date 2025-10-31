@@ -1,4 +1,9 @@
 # Changelog
+## 2025-10-31 08:00 UTC
+
+- Restored the temperature sensitivity Load data workflow so it opens the Data menu when no files are imported, then registers the selected workbooks and logs every filename that was loaded.
+- Corrected the Plot Temperature Sensitivity action to select the first generated tab via the QMdi proxy so the button no longer crashes.
+
 ## 2025-10-31 07:41 UTC
 
 - Added a shared "Save graph…" workflow that offers PNG/PDF/SVG exports and
