@@ -118,6 +118,10 @@ class PyPlotPlugin:
         )
 
     def save_graph(self) -> None:
+        saver = getattr(self.host, "_save_graph_for_current_tab", None)
+        if callable(saver):
+            saver(parent=self.host)
+            return
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,
@@ -494,13 +498,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.is_file()]
+        paths = self.host.ensure_data_selection(self)
         if not paths:
-            QtWidgets.QMessageBox.warning(
-                self.host,
-                self.name,
-                "Import current annealing logs via the Data menu, then select them before loading.",
-            )
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -687,11 +686,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._include_continuous_checkbox: QtWidgets.QCheckBox | None = None
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
-        self._save_checkbox: QtWidgets.QCheckBox | None = None
-        self._format_combo: QtWidgets.QComboBox | None = None
-        self._dpi_spin: QtWidgets.QSpinBox | None = None
-        self._output_edit: QtWidgets.QLineEdit | None = None
-        self._subfolder_checkbox: QtWidgets.QCheckBox | None = None
+        self._workbook_keys: dict[str, str] = {}
+        self._managed_workbooks: set[str] = set()
 
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(True)
@@ -770,50 +766,6 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         smooth_layout.addWidget(ma_spin, 1, 1)
         layout.addWidget(smooth_group)
 
-        output_group = QtWidgets.QGroupBox("Output", container)
-        output_layout = QtWidgets.QGridLayout(output_group)
-        output_layout.setContentsMargins(8, 8, 8, 8)
-        output_layout.setHorizontalSpacing(6)
-        output_layout.setVerticalSpacing(4)
-        save_checkbox = QtWidgets.QCheckBox("Save plots to disk", output_group)
-        save_checkbox.setChecked(bool(temp_sens_core.SAVE_PLOTS))
-        self._save_checkbox = save_checkbox
-        output_layout.addWidget(save_checkbox, 0, 0, 1, 2)
-        output_layout.addWidget(QtWidgets.QLabel("Directory:"), 1, 0)
-        output_edit = QtWidgets.QLineEdit(str(temp_sens_core.OUTPUT_DIR), output_group)
-        self._output_edit = output_edit
-        output_layout.addWidget(output_edit, 1, 1)
-        browse_btn = QtWidgets.QPushButton("Browse…", output_group)
-        output_layout.addWidget(browse_btn, 1, 2)
-        subfolder_cb = QtWidgets.QCheckBox("Create subfolder", output_group)
-        subfolder_cb.setChecked(False)
-        self._subfolder_checkbox = subfolder_cb
-        output_layout.addWidget(subfolder_cb, 2, 0, 1, 3)
-        output_layout.addWidget(QtWidgets.QLabel("Format:"), 3, 0)
-        format_combo = QtWidgets.QComboBox(output_group)
-        format_combo.addItems(["png", "pdf", "svg"])
-        format_combo.setCurrentText(temp_sens_core.SAVE_FORMAT)
-        self._format_combo = format_combo
-        output_layout.addWidget(format_combo, 3, 1)
-        output_layout.addWidget(QtWidgets.QLabel("PNG dpi:"), 4, 0)
-        dpi_spin = QtWidgets.QSpinBox(output_group)
-        dpi_spin.setRange(72, 3000)
-        dpi_spin.setValue(int(temp_sens_core.PNG_DPI))
-        self._dpi_spin = dpi_spin
-        output_layout.addWidget(dpi_spin, 4, 1)
-        layout.addWidget(output_group)
-
-        def _browse_output() -> None:
-            directory = QtWidgets.QFileDialog.getExistingDirectory(
-                self.host,
-                "Select output directory",
-                output_edit.text() or str(Path.home()),
-            )
-            if directory:
-                output_edit.setText(directory)
-
-        browse_btn.clicked.connect(_browse_output)
-
         layout.addStretch(1)
         self._settings_widget = container
         return container
@@ -847,35 +799,23 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             temp_sens_core.MED_WINDOW = int(self._med_spin.value())
         if isinstance(self._ma_spin, QtWidgets.QSpinBox):
             temp_sens_core.MA_WINDOW = int(self._ma_spin.value())
-        save_flag = bool(self._save_checkbox and self._save_checkbox.isChecked())
-        temp_sens_core.SAVE_PLOTS = save_flag
-        if isinstance(self._format_combo, QtWidgets.QComboBox):
-            temp_sens_core.SAVE_FORMAT = self._format_combo.currentText()
-        if isinstance(self._dpi_spin, QtWidgets.QSpinBox):
-            temp_sens_core.PNG_DPI = int(self._dpi_spin.value())
-        base_dir = self._output_edit.text().strip() if isinstance(self._output_edit, QtWidgets.QLineEdit) else str(temp_sens_core.OUTPUT_DIR)
-        subfolder = bool(self._subfolder_checkbox and self._subfolder_checkbox.isChecked())
-        output_dir = str(temp_sens_core.OUTPUT_DIR)
-        if save_flag:
-            output_dir = str(prepare_output_dir(base_dir or output_dir, "temperature_sensitivity", subfolder))
-            set_last_output_dir(base_dir or output_dir, key="temperature_sensitivity")
-        temp_sens_core.OUTPUT_DIR = output_dir
+        temp_sens_core.SAVE_PLOTS = False
+        temp_sens_core.OUTPUT_DIR = str(temp_sens_core.OUTPUT_DIR)
         temp_sens_core.SHOW_PLOTS = False
         temp_sens_core.BACKEND = "matplotlib"
         return {
             "variables": vars_selected,
             "baseline_mode": baseline_value,
             "include_continuous": include_cont,
-            "save": save_flag,
-            "output_dir": output_dir,
+            "save": False,
+            "output_dir": "",
             "med_window": temp_sens_core.MED_WINDOW,
             "ma_window": temp_sens_core.MA_WINDOW,
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.is_file()]
+        paths = self.host.ensure_data_selection(self, warn_on_missing=True)
         if not paths:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Select one or more data files first.")
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -887,9 +827,11 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        if self._summary_label is not None and not self._summary_label.text().strip():
+        self._register_workbooks(paths)
+        if self._summary_label is not None:
+            names = ", ".join(path.name for path in paths)
             self._summary_label.setText(
-                "Select one or more temperature sensitivity files and click Load data."
+                f"Loaded {len(paths)} file(s): {names}\nClick Plot Temperature Sensitivity to generate graphs."
             )
         self._log(f"Loaded {len(paths)} temperature sensitivity file(s).")
         self.update_ui()
@@ -951,6 +893,18 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     tab_label = temp_sens_core.TS_LABELS.get(variable, variable)
                     if config["baseline_mode"] == "both":
                         tab_label = f"{tab_label} ({mode_labels.get(mode, mode)})"
+                    lines: dict[tuple[str, float | str], GraphLineState] = {}
+                    if ax is not None:
+                        for index, line in enumerate(ax.get_lines(), start=1):
+                            label = line.get_label() or f"Series {index}"
+                            state = GraphLineState(
+                                key=(label, float(index)),
+                                label=label,
+                                line=line,
+                                base_x=line.get_xdata(),
+                                base_y=line.get_ydata(),
+                            )
+                            lines[state.key] = state
                     metadata = {
                         "variable": variable,
                         "baseline_mode": mode,
@@ -971,7 +925,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                         y_label=y_label,
                         canvas=canvas,
                         axes=ax,
-                        lines={},
+                        lines=lines,
                         metadata=metadata,
                     )
                     self.host.tab_widget.addTab(tab, tab_label)
@@ -982,6 +936,94 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
         self._log(f"Generated {plots_created} temperature sensitivity plot(s).")
         self.update_ui()
+
+    def _register_workbooks(self, paths: list[Path]) -> None:
+        data = self._data
+        if data is None:
+            return
+        host = self.host
+        active_keys: set[str] = set()
+        created: list[str] = []
+        if "filename" not in data.columns:
+            return
+        grouped = data.groupby("filename", dropna=False)
+        meta_map = {
+            "temp": ("Temperature", "°C"),
+            "T1": ("T1", "µs"),
+            "T2": ("T2", "µs"),
+            "dT": ("T2-T1", "µs"),
+            "sum": ("T1+T2", "µs"),
+        }
+        for path in paths:
+            file_name = path.name
+            if file_name not in grouped.groups:
+                continue
+            subset = grouped.get_group(file_name).copy()
+            subset = subset.reset_index(drop=True)
+            columns_order = [
+                "line",
+                "temp",
+                "T1",
+                "T2",
+                "dT",
+                "sum",
+                "continuous",
+                "composition",
+                "sample",
+                "anneal",
+            ]
+            available = [column for column in columns_order if column in subset.columns]
+            extras = [column for column in subset.columns if column not in available and column != "filename"]
+            frame = subset[available + extras] if available or extras else subset
+            key = self._workbook_keys.get(str(path))
+            if not key:
+                try:
+                    resolved = path.resolve()
+                except Exception:
+                    resolved = path
+                key = f"temperature_sensitivity::{resolved}"
+                self._workbook_keys[str(path)] = key
+            workbook = WorkbookData(
+                key=key,
+                name=f"{path.stem} (temperature)",
+                worksheets=[],
+                source=path,
+                folder=path.parent,
+            )
+            worksheet = host._create_worksheet_from_frame(workbook, "Temperature data", frame)
+            for column, (long_name, units) in meta_map.items():
+                meta = worksheet.columns.get(column)
+                if isinstance(meta, WorksheetColumnMeta):
+                    meta.long_name = long_name
+                    meta.units = units
+            workbook.worksheets = [worksheet.key]
+            host._register_imported_workbook(workbook, [worksheet])
+            active_keys.add(workbook.key)
+            created.append(path.name)
+        stale = self._managed_workbooks - active_keys
+        if stale:
+            self._remove_managed_workbooks(stale)
+        self._managed_workbooks = active_keys
+        if created or stale:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
+
+    def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
+        host = self.host
+        for key in keys:
+            workbook = host._workbooks.get(key)
+            if workbook is not None:
+                for sheet_key in list(workbook.worksheets):
+                    host._remove_worksheet(sheet_key)
+            host._workbooks.pop(key, None)
+            item = host._data_workbook_items.pop(key, None)
+            if item is not None:
+                parent = item.parent()
+                if parent is not None:
+                    index = parent.indexOfChild(item)
+                    if index >= 0:
+                        parent.takeChild(index)
+            self._managed_workbooks.discard(key)
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._loaded_files:
@@ -1003,6 +1045,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             self.host.load_data_button.setEnabled(True)
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data)
+            self.host.plot_button.setText("Plot Temperature Sensitivity")
         if hasattr(self.host, "save_graph_button"):
             self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
         if hasattr(self.host, "normalize_button"):
@@ -1082,15 +1125,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def load_data(self) -> None:  # type: ignore[override]
         host = self.host
-        paths = [path for path in host._selected_paths() if path.is_file()]
+        paths = host.ensure_data_selection(self)
         if not paths:
-            host._sync_selected_paths_with_imports()
-            paths = [path for path in host._selected_paths() if path.is_file()]
-        if not paths:
-            opener = getattr(host, "_show_data_menu", None)
-            if callable(opener) and opener():
-                return
-            QtWidgets.QMessageBox.warning(host, self.name, "Select one or more data files first.")
             return
         data_by_file: dict[str, pd.DataFrame] = {}
         errors: list[str] = []
@@ -1471,7 +1507,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     def load_data(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
         host = self.host
-        paths = host._selected_paths()
+        paths = [path for path in host._selected_paths() if path.is_file()]
         if not paths:
             imported = self._collect_imported_vsm_sources()
             if imported:
@@ -1479,14 +1515,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
                 host.path_edit.setText(formatted)
                 host._apply_path_text(formatted)
                 host._update_action_states()
-                paths = host._selected_paths()
+                paths = [path for path in host._selected_paths() if path.is_file()]
         if not paths:
-            if not self._open_data_menu():
-                try:
-                    host._choose_files()
-                except Exception:
-                    host.logger.exception("Failed to open file dialog for VSM data selection")
-            return
+            paths = host.ensure_data_selection(self)
+            if not paths:
+                return
         host._load_measurements()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -1928,13 +1961,8 @@ class StressDependencePlugin(PyPlotPlugin):
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.exists() and path.is_file()]
+        paths = self.host.ensure_data_selection(self)
         if not paths:
-            QtWidgets.QMessageBox.warning(
-                self.host,
-                self.name,
-                "Select one or more stress dependence files before loading data.",
-            )
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -2442,16 +2470,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
 
     # Host actions --------------------------------------------------
     def load_data(self) -> None:  # type: ignore[override]
-        paths = self.host._selected_paths()
-        if not paths:
-            try:
-                self.host._choose_files()
-            except Exception:
-                self._log(
-                    "Failed to open file dialog for stress sensitivity selection",
-                    level="error",
-                )
-            paths = self.host._selected_paths()
+        paths = self.host.ensure_data_selection(self)
         if not paths:
             return
         string_paths = [str(path) for path in paths]
@@ -2799,6 +2818,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._initial_plotter = initial_plotter
         self._plotter_history: list[str] = self._load_plotter_history()
         self._spawned_windows: list[PyPlotWorkbench] = []
+        self._last_graph_dir: Path | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         try:
@@ -2819,6 +2839,12 @@ class PyPlotWorkbench(PyPlotWindow):
             candidate = Path(stored_directory)
             if candidate.exists():
                 self._last_directory = candidate
+
+        stored_graph_dir = self.settings.value("last_graph_dir", "")
+        if isinstance(stored_graph_dir, str) and stored_graph_dir.strip():
+            candidate = Path(stored_graph_dir)
+            if candidate.exists():
+                self._last_graph_dir = candidate
 
         self._update_action_states()
         self._set_data_sources_visible(False)
@@ -2942,6 +2968,10 @@ class PyPlotWorkbench(PyPlotWindow):
         self.settings.setValue("sources", self.path_edit.text())
         if self._last_directory is not None:
             self.settings.setValue("last_directory", str(self._last_directory))
+        if self._last_graph_dir is not None:
+            self.settings.setValue("last_graph_dir", str(self._last_graph_dir))
+        else:
+            self.settings.remove("last_graph_dir")
         self.settings.sync()
         super().closeEvent(event)
 
@@ -2992,6 +3022,73 @@ class PyPlotWorkbench(PyPlotWindow):
         data_menu.popup(fallback_pos)
         return True
 
+    def _commit_selected_paths(self, selection: list[Path]) -> None:
+        self._selected_path_entries = list(selection)
+        formatted = self._format_paths(selection)
+        if hasattr(self, "path_edit"):
+            try:
+                self.path_edit.blockSignals(True)
+            except Exception:
+                pass
+            self.path_edit.setText(formatted)
+            try:
+                self.path_edit.blockSignals(False)
+            except Exception:
+                pass
+        self._remember_directory_from_paths(selection)
+
+    def ensure_data_selection(
+        self,
+        plugin: PyPlotPlugin | None = None,
+        *,
+        warn_on_missing: bool = False,
+    ) -> list[Path]:
+        selection = [path for path in self._selected_paths() if path.is_file()]
+        if selection:
+            if len(selection) != len(self._selected_path_entries):
+                self._commit_selected_paths(selection)
+            return selection
+
+        self._sync_selected_paths_with_imports()
+        selection = [path for path in self._selected_paths() if path.is_file()]
+        if selection:
+            return selection
+
+        sources: list[Path] = []
+        for workbook in self._workbooks.values():
+            source = getattr(workbook, "source", None)
+            if isinstance(source, Path) and source.exists() and source.is_file():
+                sources.append(source)
+        if sources:
+            unique_sources: list[Path] = []
+            seen: set[str] = set()
+            for source in sources:
+                try:
+                    resolved = source.resolve()
+                except Exception:
+                    resolved = source
+                key = str(resolved)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique_sources.append(resolved)
+            if unique_sources:
+                self._commit_selected_paths(unique_sources)
+                self._sync_selected_paths_with_imports()
+                return [path for path in self._selected_paths() if path.is_file()]
+
+        if self._show_data_menu():
+            return []
+
+        if warn_on_missing:
+            title = plugin.name if isinstance(plugin, PyPlotPlugin) else "PyPlot"
+            QtWidgets.QMessageBox.information(
+                self,
+                title,
+                "Import data via the Data menu before loading it in this script.",
+            )
+        return []
+
     def _load_data(self) -> None:
         if self._current_plugin is None:
             QtWidgets.QMessageBox.information(
@@ -3003,40 +3100,8 @@ class PyPlotWorkbench(PyPlotWindow):
         plugin = self._current_plugin
         requires_data = bool(getattr(plugin, "requires_imported_data", False))
         if requires_data:
-            selection = self._selected_paths()
+            selection = self.ensure_data_selection(plugin, warn_on_missing=True)
             if not selection:
-                self._sync_selected_paths_with_imports()
-                selection = self._selected_paths()
-            if not selection:
-                sources: list[Path] = []
-                for workbook in self._workbooks.values():
-                    source = getattr(workbook, "source", None)
-                    if isinstance(source, Path) and source.exists():
-                        sources.append(source)
-                if sources:
-                    self._selected_path_entries = sources
-                    formatted = self._format_paths(sources)
-                    if hasattr(self, "path_edit"):
-                        try:
-                            self.path_edit.blockSignals(True)
-                        except Exception:
-                            pass
-                        self.path_edit.setText(formatted)
-                        try:
-                            self.path_edit.blockSignals(False)
-                        except Exception:
-                            pass
-                    self._remember_directory_from_paths(sources)
-                    self._sync_selected_paths_with_imports()
-                    selection = sources
-            if not selection:
-                if self._show_data_menu():
-                    return
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "PyPlot",
-                    "Import data via the Data menu before loading it in this script.",
-                )
                 return
         plugin.load_data()
         self._update_action_states()
@@ -3476,6 +3541,10 @@ class PyPlotWorkbench(PyPlotWindow):
 
         def _push(candidate: Path | None) -> None:
             if not isinstance(candidate, Path):
+                return
+            if not candidate.exists():
+                return
+            if candidate.is_dir():
                 return
             try:
                 resolved = candidate.resolve()

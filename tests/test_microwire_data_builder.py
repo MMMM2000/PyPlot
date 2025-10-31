@@ -10,6 +10,7 @@ import logging
 import sys
 
 import pandas as pd
+import numpy as np
 import pytest
 
 CORE_PATH = Path(__file__).resolve().parent.parent / "microwire_data_builder" / "core.py"
@@ -146,6 +147,32 @@ def test_piece_header_backfill_extracts_diameters(tmp_path: Path) -> None:
     assert record["fabrication_resistance_ohm"] == pytest.approx(2.15)
     display = record.get("d_um__display")
     assert isinstance(display, list) and "7" in display[0]
+
+
+def test_fabrication_index_preserves_existing_length_on_blank_override() -> None:
+    index = FabricationIndex()
+    index.set_piece(
+        "Ni50Fe27Ga23",
+        2,
+        5,
+        {"length_m": 12.3456, "length_m_raw": "12.3456"},
+    )
+    index.set_piece(
+        "Ni50Fe27Ga23",
+        2,
+        5,
+        {"length_m": pd.NA, "length_m_raw": pd.NA},
+    )
+    index.set_piece(
+        "Ni50Fe27Ga23",
+        2,
+        5,
+        {"length_m": np.nan, "length_m_raw": ""},
+    )
+
+    record = index.get_piece("Ni50Fe27Ga23", 2, 5)
+    assert record["length_m"] == pytest.approx(12.3456)
+    assert record["length_m_raw"] == "12.3456"
 
 
 def test_merged_header_row_combines_unit_suffix() -> None:

@@ -15,7 +15,7 @@ import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 import numpy as np
 import pandas as pd
@@ -62,7 +62,7 @@ except ImportError:
     else:
         raise
 
-sys.modules.setdefault("microwire_data_builder.core", sys.modules.get(__name__))
+sys.modules.setdefault("microwire_data_builder.core", sys.modules[__name__])
 
 os.environ.setdefault("MPLBACKEND", "Agg")
 
@@ -468,7 +468,8 @@ class FabricationIndex:
                                 merged.append(item)
                 existing[field] = merged
             else:
-                existing[field] = value
+                if _has_meaningful_value(value) or field not in existing:
+                    existing[field] = value
         self.draw_level[key] = existing
 
     def set_piece(self, composition: str, draw_x: int, piece_y: int, data: Dict[str, object]) -> None:
@@ -484,7 +485,8 @@ class FabricationIndex:
                                 merged.append(item)
                 existing[field] = merged
             else:
-                existing[field] = value
+                if _has_meaningful_value(value) or field not in existing:
+                    existing[field] = value
         self.piece_level[key] = existing
 
     def get_draw(self, composition: str, draw_x: Optional[int]) -> Dict[str, object]:
@@ -1100,7 +1102,25 @@ def _header_key(value: object) -> Optional[str]:
 
 
 def _is_nan(value: object) -> bool:
-    return isinstance(value, float) and math.isnan(value)
+    if isinstance(value, (float, np.floating)):
+        try:
+            return math.isnan(float(value))
+        except ValueError:
+            return True
+    if value is None:
+        return False
+    try:
+        if value is pd.NA:  # type: ignore[attr-defined]
+            return True
+    except AttributeError:
+        pass
+    try:
+        result = pd.isna(value)
+    except Exception:
+        return False
+    if isinstance(result, (bool, np.bool_)):
+        return bool(result)
+    return False
 
 
 def _raw_string(value: object) -> Optional[str]:
@@ -1138,6 +1158,16 @@ def _clean_str(value: object) -> str:
     else:
         text = _normalise_text(value)
     return text.strip() if text else ""
+
+
+def _has_meaningful_value(value: object) -> bool:
+    if value is None:
+        return False
+    if _is_nan(value):
+        return False
+    if isinstance(value, str):
+        return bool(_clean_str(value))
+    return True
 
 
 def _parse_strain_float(value: object) -> Optional[float]:
@@ -3443,7 +3473,7 @@ def _update_existing_excel_with_strain(
         raise RuntimeError("openpyxl is required to update Excel exports") from exc
 
     wb = load_workbook(path)
-    ws = wb.active
+    ws = cast(Any, wb.active)
     if ws.max_row < 1:
         wb.save(path)
         return
@@ -3750,7 +3780,15 @@ def _embed_plots_in_excel_openpyxl(
                     if not math.isclose(height_px, desired_height_px, rel_tol=1e-3):
                         image.height = desired_height_px
 
-                column_index = dataframe.columns.get_loc(column) + 1
+                location = dataframe.columns.get_loc(column)
+                if isinstance(location, slice):
+                    continue
+                if isinstance(location, np.ndarray):
+                    continue
+                try:
+                    column_index = int(location) + 1
+                except Exception:
+                    continue
                 row_number = row_idx + 2  # account for the header row
                 column_letter = get_column_letter(column_index)
                 cell_reference = f"{column_letter}{row_number}"
@@ -3790,7 +3828,15 @@ def _embed_plots_in_excel_openpyxl(
                         "Failed to load microscope image %s for Excel export", image_path
                     )
                     continue
-                column_index = dataframe.columns.get_loc(column) + 1
+                location = dataframe.columns.get_loc(column)
+                if isinstance(location, slice):
+                    continue
+                if isinstance(location, np.ndarray):
+                    continue
+                try:
+                    column_index = int(location) + 1
+                except Exception:
+                    continue
                 row_number = row_idx + 2
                 column_letter = get_column_letter(column_index)
                 cell_reference = f"{column_letter}{row_number}"
@@ -3816,7 +3862,15 @@ def _embed_plots_in_excel_openpyxl(
             for column, rows in highlight_map.items():
                 if column not in dataframe.columns:
                     continue
-                column_index = dataframe.columns.get_loc(column) + 1
+                location = dataframe.columns.get_loc(column)
+                if isinstance(location, slice):
+                    continue
+                if isinstance(location, np.ndarray):
+                    continue
+                try:
+                    column_index = int(location) + 1
+                except Exception:
+                    continue
                 column_letter = get_column_letter(column_index)
                 for row_idx in rows:
                     if row_idx < 0 or row_idx >= len(reset_df):
@@ -3844,13 +3898,22 @@ def _embed_assets_with_xlsxwriter(
     highlight_map: Optional[Dict[str, Set[int]]] = None,
 ) -> None:
     try:
-        workbook = writer.book
-        worksheets = list(writer.sheets.values())
+        workbook_obj = getattr(writer, "book")
     except Exception:
         return
+    if workbook_obj is None:
+        return
+    workbook = cast(Any, workbook_obj)
+    try:
+        sheets_mapping = getattr(writer, "sheets")
+    except Exception:
+        return
+    if not sheets_mapping:
+        return
+    worksheets = [cast(Any, sheet) for sheet in sheets_mapping.values()]
     if not worksheets:
         return
-    worksheet = worksheets[0]
+    worksheet = cast(Any, worksheets[0])
 
     figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
     origin_columns = [
@@ -3928,6 +3991,21 @@ def _embed_assets_with_xlsxwriter(
             return
         column_widths_chars[col_idx] = minimum_chars
 
+    def _column_index(column: str) -> Optional[int]:
+        location = dataframe.columns.get_loc(column)
+        if isinstance(location, slice):
+            return None
+        if isinstance(location, np.ndarray):
+            return None
+        if isinstance(location, tuple):
+            return None
+        if isinstance(location, list):
+            return None
+        try:
+            return int(location)
+        except Exception:
+            return None
+
     for row_idx, row in reset_df.iterrows():
         row_number = row_idx + 1
         for column in figure_columns:
@@ -3961,7 +4039,9 @@ def _embed_assets_with_xlsxwriter(
                 options["x_scale"] = x_scale
             if height_px and not math.isclose(y_scale, 1.0, rel_tol=1e-3):
                 options["y_scale"] = y_scale
-            column_index = dataframe.columns.get_loc(column)
+            column_index = _column_index(column)
+            if column_index is None:
+                continue
             worksheet.write_blank(row_number, column_index, None)
             try:
                 worksheet.insert_image(row_number, column_index, str(image_path), options)
@@ -4003,7 +4083,9 @@ def _embed_assets_with_xlsxwriter(
                 height_px = 140
             width_in = width_px / (dpi_x or EXCEL_EMBED_DPI)
             height_in = height_px / (dpi_y or EXCEL_EMBED_DPI)
-            column_index = dataframe.columns.get_loc(column)
+            column_index = _column_index(column)
+            if column_index is None:
+                continue
             worksheet.write_blank(row_number, column_index, None)
             try:
                 worksheet.insert_image(row_number, column_index, str(image_path))
@@ -4036,7 +4118,9 @@ def _embed_assets_with_xlsxwriter(
                     continue
             except OSError:
                 continue
-            column_index = dataframe.columns.get_loc(column)
+            column_index = _column_index(column)
+            if column_index is None:
+                continue
             worksheet.write_blank(row_number, column_index, None)
             options: Dict[str, object] = {"object_position": 1}
             try:
@@ -4060,7 +4144,9 @@ def _embed_assets_with_xlsxwriter(
         for column, rows in highlight_map.items():
             if column not in dataframe.columns:
                 continue
-            column_index = dataframe.columns.get_loc(column)
+            column_index = _column_index(column)
+            if column_index is None:
+                continue
             for row_idx in rows:
                 if row_idx < 0 or row_idx >= len(reset_df):
                     continue

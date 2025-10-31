@@ -1,4 +1,61 @@
 # Changelog
+## 2025-10-31 07:41 UTC
+
+- Added a shared "Save graph…" workflow that offers PNG/PDF/SVG exports and
+  reuses the last save directory across PyPlot sessions.
+- Registered temperature sensitivity imports as workbooks with Origin-style
+  metadata so long names, units, and the object manager stay in sync with the
+  generated plots.
+- Updated the temperature sensitivity plug-in to reuse imported files, surface
+  clearer load/plot actions, and populate graph metadata for the shared toolbar.
+
+## 2025-10-30 19:05 UTC
+
+- Unified the PyPlot "Load data" workflow so plugins reuse imported workbook
+  selections, automatically opening the Data menu when nothing is available and
+  preserving object manager metadata across scripts.
+- Smoothed the dock switcher hover handling to prevent freezes when the side
+  panel tabs are moused over, keeping the PyPlot window responsive.
+- Display a "Loading PyPlot Launcher…" placeholder instantly so the master
+  launcher no longer appears to hang while its tool list initializes.
+
+## 2025-10-30 17:27 UTC
+
+- Fixed PyPlot's import progress loop so files process correctly without
+  raising a syntax error and added defensive type checks when embedding
+  workbooks, restoring launcher stability.
+- Hardened the Microwire builder's Excel exporters against ambiguous column
+  indexes and optional worksheet types to keep microscope OCR layouts sizing
+  reliably across engines.
+
+## 2025-10-30 16:15 UTC
+
+- Deferred heavyweight plotter imports in the master launcher so the window
+  appears immediately while still supporting every plotting script on demand.
+- Auto-sized the microscope OCR worksheet splitter and columns so all
+  measurements are visible without hand-tuning column widths.
+- Added a cancellable progress dialog for PyPlot data imports and widened the
+  initial Project Explorer/Object Manager dock layouts to keep the window
+  responsive at startup.
+ 
+## 2025-10-30 14:30 UTC
+
+- Removed the Origin Clone prototype and dependency in favour of a built-in
+  Python console shared across PyPlot and the Microwire builder, updating the
+  launcher help, experiments list, and tests to match.
+
+## 2025-10-30 13:20 UTC
+
+- Treated `pandas.NA`/`numpy.nan` fabrication imports as blanks so previously
+  recorded wire lengths stay intact instead of being overwritten by missing
+  values, and added regression coverage for the merge behaviour.
+ 
+## 2025-10-30 10:51 UTC
+
+- Kept fabrication piece metadata from being overwritten by blank imports so length values persist in the fabrication grid.
+- Allowed As/Ms phase markers to be edited directly in the annealing table and surfaced live cursor readouts on the preview graphs for manual picking.
+- Retired the legacy PyPlot data-sources row in favour of the shared Data menu and removed the Origin Clone prototype from the experiments launcher.
+
 ## 2025-10-30 12:35 UTC
 
 - Fixed the builder worker and CLI code paths so manually selected As/Ms transition points persist into assembled worksheets and exports instead of being dropped.
@@ -606,6 +663,12 @@
 
 - Fixed the PyPlot temperature dependence TXT exporter to use the dedicated
   workflow, preventing KeyErrors when exporting temperature dependence runs.
+
+## 2025-10-30 12:45 UTC
+
+- Tightened the PyPlot loader so "Load data" only proceeds when real files are
+  available, prompting the Data menu when nothing is imported instead of
+  passing empty directory selections to plotting scripts.
 
 ## 2025-10-22 11:00 UTC
 

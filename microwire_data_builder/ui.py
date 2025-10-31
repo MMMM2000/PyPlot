@@ -32,13 +32,13 @@ import matplotlib.pyplot as plt
 
 from plotting.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot import _DockSwitcherWidget
+from plotting.python_console import PythonConsoleWidget
 from plotting.utils import (
     ensure_app_theme,
     install_standard_menu,
     format_annealing_title,
     developer_options,
 )
-from origin_clone.app import PythonConsoleWidget
 
 from .storage import MiniDatabaseData, MiniDatabaseStore
 
@@ -2870,6 +2870,8 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._base_title = title
         self._logger = logger
         self._canvas: FigureCanvasQTAgg | None = None
+        self._motion_cid: Optional[int] = None
+        self._cursor_units: str = "mA"
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -2899,6 +2901,13 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._placeholder.setWordWrap(True)
         self._stack.addWidget(self._placeholder)
+
+        self.cursor_label = QtWidgets.QLabel("Cursor: —")
+        self.cursor_label.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
+        )
+        self.cursor_label.setStyleSheet("color: palette(mid); font-size: 11px;")
+        layout.addWidget(self.cursor_label)
 
     def set_record(
         self,
@@ -2949,12 +2958,23 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
 
         canvas = FigureCanvasQTAgg(figure)
         if self._canvas is not None:
+            self._disconnect_motion_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
         self._stack.insertWidget(0, canvas)
         self._stack.setCurrentWidget(canvas)
         self._canvas = canvas
+        try:
+            canvas.setMouseTracking(True)
+        except Exception:
+            pass
+        try:
+            self._motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
+        except Exception:
+            self._motion_cid = None
+        self._cursor_units = "mA"
+        self._update_cursor_label(None)
 
     def clear(self, message: str) -> None:
         self._show_placeholder(message)
@@ -2962,6 +2982,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
 
     def _show_placeholder(self, message: str) -> None:
         if self._canvas is not None:
+            self._disconnect_motion_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
@@ -2969,6 +2990,35 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self.subtitle_label.setText("")
         self._placeholder.setText(message)
         self._stack.setCurrentWidget(self._placeholder)
+        self._update_cursor_label(None)
+
+    def _disconnect_motion_handler(self) -> None:
+        if self._canvas is not None and self._motion_cid is not None:
+            try:
+                self._canvas.mpl_disconnect(self._motion_cid)
+            except Exception:
+                pass
+        self._motion_cid = None
+
+    def _handle_motion(self, event: Any) -> None:
+        if event is None or event.inaxes is None or event.xdata is None:
+            self._update_cursor_label(None)
+            return
+        try:
+            value = float(event.xdata)
+        except Exception:
+            self._update_cursor_label(None)
+            return
+        self._update_cursor_label(value)
+
+    def _update_cursor_label(self, value: Optional[float]) -> None:
+        if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            text = "Cursor: —"
+        else:
+            formatted = f"{float(value):.3f}".rstrip("0").rstrip(".")
+            suffix = f" {self._cursor_units}" if self._cursor_units else ""
+            text = f"Cursor: {formatted}{suffix}"
+        self.cursor_label.setText(text)
 
     def _build_figure(self, record: MeasurementRecord):
         frame = record.dataframe if isinstance(record.dataframe, pd.DataFrame) else pd.DataFrame()
@@ -4636,6 +4686,11 @@ class AnnealingSection(MiniDatabaseSection):
         table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         table.setSortingEnabled(True)
         table.setIconSize(
             QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
@@ -5285,6 +5340,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         self._expected_keys_current: Set[Tuple[str, int, int]] = set()
+        self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
 
         self._missing_summary_label = QtWidgets.QLabel("", self)
@@ -5337,12 +5393,23 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_missing_summary()
         self.partial_row_ready.connect(self._apply_partial_row)
         self._update_review_buttons()
+        QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
+        splitter.setChildrenCollapsible(False)
+        splitter.setOpaqueResize(False)
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 2)
+        self._table_splitter = splitter
+
         table = QtWidgets.QTableView(splitter)
         table.setModel(self.model)
-        table.horizontalHeader().setStretchLastSection(True)
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(False)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
+            header.setMinimumSectionSize(90)
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -5351,11 +5418,11 @@ class MicroscopeSection(MiniDatabaseSection):
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         table.setSortingEnabled(True)
-        header = table.verticalHeader()
-        if header is not None:
+        v_header = table.verticalHeader()
+        if v_header is not None:
             default_height = 40
-            header.setDefaultSectionSize(default_height)
-            header.setMinimumSectionSize(default_height)
+            v_header.setDefaultSectionSize(default_height)
+            v_header.setMinimumSectionSize(default_height)
         self.table_view = table
         selection_model = table.selectionModel()
         if selection_model is not None:
@@ -5417,6 +5484,39 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.addLayout(button_row)
 
         return splitter
+
+    def _auto_fit_columns(self) -> None:  # type: ignore[override]
+        super()._auto_fit_columns()
+        QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
+
+    def _ensure_table_autosized(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        try:
+            table.resizeColumnsToContents()
+        except Exception:
+            return
+        header = table.horizontalHeader()
+        column_count = header.count() if header is not None else 0
+        total_width = table.frameWidth() * 2
+        v_header = table.verticalHeader()
+        if v_header is not None:
+            try:
+                total_width += v_header.sizeHint().width()
+            except Exception:
+                total_width += v_header.width()
+        for index in range(column_count):
+            total_width += table.columnWidth(index)
+        if total_width > 0:
+            table.setMinimumWidth(total_width)
+        splitter = self._table_splitter
+        if isinstance(splitter, QtWidgets.QSplitter) and column_count:
+            sizes = splitter.sizes()
+            total = sum(sizes) if sizes and any(sizes) else total_width + 360
+            table_target = max(total_width, int(total * 0.55))
+            preview_target = max(320, total - table_target)
+            splitter.setSizes([table_target, preview_target])
 
     def _expected_microwire_keys(self) -> Set[Tuple[str, int, int]]:
         keys: Set[Tuple[str, int, int]] = set()

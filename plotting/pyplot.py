@@ -30,8 +30,8 @@ from matplotlib.text import Text
 from matplotlib import colors as mcolors
 import pandas as pd
 
+from plotting.python_console import PythonConsoleWidget
 from plotting.utils import install_standard_menu, developer_options
-from origin_clone.app import PythonConsoleWidget
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
@@ -73,6 +73,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
         self._panel_dock = parent if isinstance(parent, QtWidgets.QDockWidget) else None
         self._tabbed_docks: set[QtWidgets.QDockWidget] = set()
+        self._last_hover_index: int | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -154,9 +155,14 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 QtCore.QEvent.Type.HoverEnter,
             ):
                 index = self._tab_index_from_event(event)
-                if index >= 0:
-                    self._activate_index(index)
-            elif event.type() in (QtCore.QEvent.Type.HoverLeave, QtCore.QEvent.Type.Leave):
+                if index >= 0 and index != self._last_hover_index:
+                    self._last_hover_index = index
+                    QtCore.QTimer.singleShot(0, lambda idx=index: self._activate_index(idx))
+            elif event.type() in (
+                QtCore.QEvent.Type.HoverLeave,
+                QtCore.QEvent.Type.Leave,
+            ):
+                self._last_hover_index = None
                 self._schedule_collapse()
         elif obj in self._docks:
             if event.type() == QtCore.QEvent.Type.Enter:
@@ -1164,7 +1170,136 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         raise NotImplementedError
 
     def _save_current_graph(self) -> None:
-        raise NotImplementedError
+        self._save_graph_for_current_tab()
+
+    def _save_graph_for_current_tab(
+        self,
+        *,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> bool:
+        """Persist the currently visible graph to an image file."""
+
+        target = parent or self
+        tab_widget = getattr(self, "tab_widget", None)
+        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+            QtWidgets.QMessageBox.information(
+                target,
+                "Save Graph",
+                "No plot area is available to save.",
+            )
+            return False
+
+        tab = tab_widget.currentWidget()
+        if tab is None:
+            QtWidgets.QMessageBox.information(
+                target,
+                "Save Graph",
+                "Select a plot tab before saving a graph.",
+            )
+            return False
+
+        descriptor = self._tab_descriptors.get(tab)
+        canvas = self._canvas_by_tab.get(tab)
+        figure = None
+        if canvas is not None:
+            figure = getattr(canvas, "figure", None)
+        if figure is None and descriptor is not None:
+            axes_obj = getattr(descriptor, "axes", None)
+            figure = getattr(axes_obj, "figure", None)
+        if figure is None:
+            QtWidgets.QMessageBox.information(
+                target,
+                "Save Graph",
+                "The selected tab does not contain a Matplotlib graph to save.",
+            )
+            return False
+
+        def _clean_stem(text: str) -> str:
+            stem_chars = [
+                ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text
+            ]
+            stem = "".join(stem_chars).strip("._")
+            return stem or "Graph"
+
+        default_name = ""
+        if descriptor is not None:
+            saved_path = str(descriptor.metadata.get("saved_path", "") or "").strip()
+            if saved_path:
+                default_name = Path(saved_path).stem
+            elif descriptor.title:
+                default_name = descriptor.title
+            elif descriptor.root_label:
+                default_name = descriptor.root_label
+        if not default_name:
+            default_name = "Graph"
+        suggested_filename = _clean_stem(default_name) + ".png"
+
+        start_dir = getattr(self, "_last_graph_dir", None)
+        if not isinstance(start_dir, Path) or not start_dir.exists():
+            project_path = getattr(self, "_project_path", None)
+            if isinstance(project_path, Path) and project_path.exists():
+                start_dir = project_path.parent
+        if not isinstance(start_dir, Path) or not start_dir.exists():
+            start_dir = Path.home()
+        suggested_path = start_dir / suggested_filename
+
+        filters = "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;All files (*)"
+        path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            target,
+            "Save Graph",
+            str(suggested_path),
+            filters,
+        )
+        if not path_str:
+            return False
+
+        path = Path(path_str)
+        filter_map = {
+            "PNG Image (*.png)": ".png",
+            "PDF Document (*.pdf)": ".pdf",
+            "SVG Image (*.svg)": ".svg",
+        }
+        valid_exts = {".png", ".pdf", ".svg"}
+        suffix = path.suffix.lower()
+        if suffix not in valid_exts:
+            chosen_ext = filter_map.get(selected_filter, ".png")
+            path = path.with_suffix(chosen_ext)
+
+        try:
+            figure.savefig(str(path))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                target,
+                "Save Graph",
+                f"Failed to save the graph:\n{exc}",
+            )
+            return False
+
+        try:
+            status = self.statusBar()
+        except Exception:
+            status = None
+        if status is not None:
+            status.showMessage(f"Saved graph to {path}", 5000)
+
+        if descriptor is not None:
+            try:
+                descriptor.metadata["saved_path"] = str(path)
+            except Exception:
+                pass
+
+        try:
+            self._last_graph_dir = path.parent
+        except Exception:
+            self._last_graph_dir = None
+        settings = getattr(self, "settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            if getattr(self, "_last_graph_dir", None):
+                settings.setValue("last_graph_dir", str(self._last_graph_dir))
+            else:
+                settings.remove("last_graph_dir")
+            settings.sync()
+        return True
 
     def _normalize_current_graph(self) -> None:
         raise NotImplementedError
@@ -1215,30 +1350,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         central_layout.setContentsMargins(12, 12, 12, 12)
         central_layout.setSpacing(10)
 
-        controls = QtWidgets.QWidget()
-        controls_layout = QtWidgets.QGridLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setHorizontalSpacing(8)
-        controls_layout.setVerticalSpacing(6)
-
-        controls_layout.addWidget(QtWidgets.QLabel("Data sources"), 0, 0)
         self.path_edit = QtWidgets.QLineEdit()
         self.path_edit.setPlaceholderText("Select files or folders…")
         self.path_edit.editingFinished.connect(self._handle_manual_path_entry)
-        controls_layout.addWidget(self.path_edit, 0, 1, 1, 3)
-
-        self.browse_files_button = QtWidgets.QPushButton("Browse files…")
-        self.browse_files_button.clicked.connect(self._choose_files)
-        controls_layout.addWidget(self.browse_files_button, 0, 4)
-
-        self.browse_folder_button = QtWidgets.QPushButton("Browse folder…")
-        self.browse_folder_button.clicked.connect(self._choose_folder)
-        controls_layout.addWidget(self.browse_folder_button, 0, 5)
-
-        controls_layout.setColumnStretch(1, 1)
-        controls_layout.setColumnStretch(2, 1)
-        self._data_sources_widget = controls
-        central_layout.addWidget(controls)
+        self.path_edit.hide()
+        self.browse_files_button = None
+        self.browse_folder_button = None
+        self._data_sources_widget = None
 
         self._script_panel_container = QtWidgets.QFrame()
         self._script_panel_container.setObjectName("mw_script_panel_container")
@@ -1262,6 +1380,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
+        project_dock.setMinimumWidth(240)
         self.project_dock = project_dock
 
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -1286,6 +1405,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
+        object_dock.setMinimumWidth(240)
         self.object_dock = object_dock
 
         graph_settings_widget = QtWidgets.QWidget()
@@ -1327,6 +1447,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
         else:
             self._dock_switcher_panels.extend([None, None])
+
+        QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
 
         for tracked in (project_dock, log_dock, graph_dock, object_dock):
             if tracked is None:
@@ -2258,17 +2380,61 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         errors: List[str] = []
         imported = 0
-        for file_path in files:
-            result = self._load_workbook_from_file(file_path)
-            if result is None:
-                continue
-            workbook, worksheets = result
-            try:
-                self._register_imported_workbook(workbook, worksheets)
-            except Exception as exc:  # pragma: no cover - defensive, UI fallback
-                errors.append(f"{file_path}: {exc}")
-                continue
-            imported += len(worksheets)
+        total_files = len(files)
+        progress: QtWidgets.QProgressDialog | None = None
+        if total_files > 1:
+            progress = QtWidgets.QProgressDialog(
+                "Importing data…",
+                "Cancel",
+                0,
+                total_files,
+                self,
+            )
+            progress.setWindowTitle("Import Data")
+            progress.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+        cancelled = False
+        position = 0
+        try:
+            for position, file_path in enumerate(files, start=1):
+                if progress is not None:
+                    progress.setLabelText(
+                        f"Importing {file_path.name} ({position}/{total_files})"
+                    )
+                    progress.setValue(position - 1)
+                    try:
+                        QtWidgets.QApplication.processEvents()
+                    except Exception:
+                        pass
+                    if progress.wasCanceled():
+                        cancelled = True
+                        break
+                result = self._load_workbook_from_file(file_path)
+                if result is None:
+                    continue
+                workbook, worksheets = result
+                try:
+                    self._register_imported_workbook(workbook, worksheets)
+                except Exception as exc:  # pragma: no cover - defensive, UI fallback
+                    errors.append(f"{file_path}: {exc}")
+                    continue
+                imported += len(worksheets)
+        finally:
+            if progress is not None:
+                try:
+                    final_value = total_files if not cancelled else max(position - 1, 0)
+                    progress.setValue(final_value)
+                    progress.close()
+                except Exception:
+                    pass
+        if cancelled:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Import Data",
+                "Import cancelled before all files were processed.",
+            )
+            return
         if errors:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -2712,6 +2878,28 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         return panel
+
+    def _apply_initial_dock_sizes(self) -> None:
+        project = getattr(self, "project_dock", None)
+        if isinstance(project, QtWidgets.QDockWidget):
+            width = max(project.sizeHint().width(), 320)
+            try:
+                self.resizeDocks([project], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                try:
+                    project.resize(width, project.height())
+                except Exception:
+                    pass
+        obj_dock = getattr(self, "object_dock", None)
+        if isinstance(obj_dock, QtWidgets.QDockWidget):
+            width = max(obj_dock.sizeHint().width(), 320)
+            try:
+                self.resizeDocks([obj_dock], [width], QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                try:
+                    obj_dock.resize(width, obj_dock.height())
+                except Exception:
+                    pass
 
     def _handle_primary_dock_location_change(
         self,
