@@ -494,13 +494,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.is_file()]
+        paths = self.host.ensure_data_selection(self)
         if not paths:
-            QtWidgets.QMessageBox.warning(
-                self.host,
-                self.name,
-                "Import current annealing logs via the Data menu, then select them before loading.",
-            )
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -873,9 +868,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.is_file()]
+        paths = self.host.ensure_data_selection(self)
         if not paths:
-            QtWidgets.QMessageBox.warning(self.host, self.name, "Select one or more data files first.")
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -1082,15 +1076,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def load_data(self) -> None:  # type: ignore[override]
         host = self.host
-        paths = [path for path in host._selected_paths() if path.is_file()]
+        paths = host.ensure_data_selection(self)
         if not paths:
-            host._sync_selected_paths_with_imports()
-            paths = [path for path in host._selected_paths() if path.is_file()]
-        if not paths:
-            opener = getattr(host, "_show_data_menu", None)
-            if callable(opener) and opener():
-                return
-            QtWidgets.QMessageBox.warning(host, self.name, "Select one or more data files first.")
             return
         data_by_file: dict[str, pd.DataFrame] = {}
         errors: list[str] = []
@@ -1471,7 +1458,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     def load_data(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
         host = self.host
-        paths = host._selected_paths()
+        paths = [path for path in host._selected_paths() if path.is_file()]
         if not paths:
             imported = self._collect_imported_vsm_sources()
             if imported:
@@ -1479,14 +1466,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
                 host.path_edit.setText(formatted)
                 host._apply_path_text(formatted)
                 host._update_action_states()
-                paths = host._selected_paths()
+                paths = [path for path in host._selected_paths() if path.is_file()]
         if not paths:
-            if not self._open_data_menu():
-                try:
-                    host._choose_files()
-                except Exception:
-                    host.logger.exception("Failed to open file dialog for VSM data selection")
-            return
+            paths = host.ensure_data_selection(self)
+            if not paths:
+                return
         host._load_measurements()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -1928,13 +1912,8 @@ class StressDependencePlugin(PyPlotPlugin):
         }
 
     def load_data(self) -> None:  # type: ignore[override]
-        paths = [path for path in self.host._selected_paths() if path.exists() and path.is_file()]
+        paths = self.host.ensure_data_selection(self)
         if not paths:
-            QtWidgets.QMessageBox.warning(
-                self.host,
-                self.name,
-                "Select one or more stress dependence files before loading data.",
-            )
             return
         string_paths = [str(path) for path in paths]
         try:
@@ -2442,16 +2421,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
 
     # Host actions --------------------------------------------------
     def load_data(self) -> None:  # type: ignore[override]
-        paths = self.host._selected_paths()
-        if not paths:
-            try:
-                self.host._choose_files()
-            except Exception:
-                self._log(
-                    "Failed to open file dialog for stress sensitivity selection",
-                    level="error",
-                )
-            paths = self.host._selected_paths()
+        paths = self.host.ensure_data_selection(self)
         if not paths:
             return
         string_paths = [str(path) for path in paths]
@@ -2992,6 +2962,73 @@ class PyPlotWorkbench(PyPlotWindow):
         data_menu.popup(fallback_pos)
         return True
 
+    def _commit_selected_paths(self, selection: list[Path]) -> None:
+        self._selected_path_entries = list(selection)
+        formatted = self._format_paths(selection)
+        if hasattr(self, "path_edit"):
+            try:
+                self.path_edit.blockSignals(True)
+            except Exception:
+                pass
+            self.path_edit.setText(formatted)
+            try:
+                self.path_edit.blockSignals(False)
+            except Exception:
+                pass
+        self._remember_directory_from_paths(selection)
+
+    def ensure_data_selection(
+        self,
+        plugin: PyPlotPlugin | None = None,
+        *,
+        warn_on_missing: bool = False,
+    ) -> list[Path]:
+        selection = [path for path in self._selected_paths() if path.is_file()]
+        if selection:
+            if len(selection) != len(self._selected_path_entries):
+                self._commit_selected_paths(selection)
+            return selection
+
+        self._sync_selected_paths_with_imports()
+        selection = [path for path in self._selected_paths() if path.is_file()]
+        if selection:
+            return selection
+
+        sources: list[Path] = []
+        for workbook in self._workbooks.values():
+            source = getattr(workbook, "source", None)
+            if isinstance(source, Path) and source.exists() and source.is_file():
+                sources.append(source)
+        if sources:
+            unique_sources: list[Path] = []
+            seen: set[str] = set()
+            for source in sources:
+                try:
+                    resolved = source.resolve()
+                except Exception:
+                    resolved = source
+                key = str(resolved)
+                if key in seen:
+                    continue
+                seen.add(key)
+                unique_sources.append(resolved)
+            if unique_sources:
+                self._commit_selected_paths(unique_sources)
+                self._sync_selected_paths_with_imports()
+                return [path for path in self._selected_paths() if path.is_file()]
+
+        if self._show_data_menu():
+            return []
+
+        if warn_on_missing:
+            title = plugin.name if isinstance(plugin, PyPlotPlugin) else "PyPlot"
+            QtWidgets.QMessageBox.information(
+                self,
+                title,
+                "Import data via the Data menu before loading it in this script.",
+            )
+        return []
+
     def _load_data(self) -> None:
         if self._current_plugin is None:
             QtWidgets.QMessageBox.information(
@@ -3003,62 +3040,8 @@ class PyPlotWorkbench(PyPlotWindow):
         plugin = self._current_plugin
         requires_data = bool(getattr(plugin, "requires_imported_data", False))
         if requires_data:
-            selection = [path for path in self._selected_paths() if path.is_file()]
-            if selection and len(selection) != len(self._selected_path_entries):
-                self._selected_path_entries = selection
-                formatted = self._format_paths(selection)
-                if hasattr(self, "path_edit"):
-                    try:
-                        self.path_edit.blockSignals(True)
-                    except Exception:
-                        pass
-                    self.path_edit.setText(formatted)
-                    try:
-                        self.path_edit.blockSignals(False)
-                    except Exception:
-                        pass
-                self._remember_directory_from_paths(selection)
+            selection = self.ensure_data_selection(plugin, warn_on_missing=True)
             if not selection:
-                self._sync_selected_paths_with_imports()
-                selection = [path for path in self._selected_paths() if path.is_file()]
-            if not selection:
-                sources: list[Path] = []
-                for workbook in self._workbooks.values():
-                    source = getattr(workbook, "source", None)
-                    if isinstance(source, Path) and source.exists() and source.is_file():
-                        sources.append(source)
-                if sources:
-                    unique_sources: list[Path] = []
-                    seen: set[str] = set()
-                    for source in sources:
-                        key = str(source.resolve()) if source.exists() else str(source)
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        unique_sources.append(source)
-                    self._selected_path_entries = unique_sources
-                    formatted = self._format_paths(unique_sources)
-                    if hasattr(self, "path_edit"):
-                        try:
-                            self.path_edit.blockSignals(True)
-                        except Exception:
-                            pass
-                        self.path_edit.setText(formatted)
-                        try:
-                            self.path_edit.blockSignals(False)
-                        except Exception:
-                            pass
-                    self._remember_directory_from_paths(unique_sources)
-                    self._sync_selected_paths_with_imports()
-                    selection = [path for path in unique_sources if path.is_file()]
-            if not selection:
-                if self._show_data_menu():
-                    return
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "PyPlot",
-                    "Import data via the Data menu before loading it in this script.",
-                )
                 return
         plugin.load_data()
         self._update_action_states()

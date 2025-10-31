@@ -631,8 +631,28 @@ def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     ensure_app_theme(app)
-    dlg = MasterLauncher()
-    dlg.show()
+    placeholder = QtWidgets.QMainWindow()
+    placeholder.setWindowTitle("PyPlot Launcher")
+    placeholder.resize(420, 260)
+    loading_label = QtWidgets.QLabel("Loading PyPlot Launcher…", placeholder)
+    loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+    loading_label.setStyleSheet("font-size: 16px; font-weight: 600;")
+    placeholder.setCentralWidget(loading_label)
+    placeholder.show()
+    try:
+        app.processEvents()
+    except Exception:
+        pass
+
+    launcher_holder: dict[str, MasterLauncher] = {}
+
+    def _launch() -> None:
+        window = MasterLauncher()
+        launcher_holder["window"] = window
+        window.show()
+        placeholder.close()
+
+    QtCore.QTimer.singleShot(0, _launch)
     app.exec()
 
 

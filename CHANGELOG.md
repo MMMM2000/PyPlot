@@ -1,4 +1,14 @@
 # Changelog
+## 2025-10-30 19:05 UTC
+
+- Unified the PyPlot "Load data" workflow so plugins reuse imported workbook
+  selections, automatically opening the Data menu when nothing is available and
+  preserving object manager metadata across scripts.
+- Smoothed the dock switcher hover handling to prevent freezes when the side
+  panel tabs are moused over, keeping the PyPlot window responsive.
+- Display a "Loading PyPlot Launcher…" placeholder instantly so the master
+  launcher no longer appears to hang while its tool list initializes.
+
 ## 2025-10-30 17:27 UTC
 
 - Fixed PyPlot's import progress loop so files process correctly without

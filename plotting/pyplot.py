@@ -73,6 +73,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
         self._panel_dock = parent if isinstance(parent, QtWidgets.QDockWidget) else None
         self._tabbed_docks: set[QtWidgets.QDockWidget] = set()
+        self._last_hover_index: int | None = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -154,9 +155,14 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 QtCore.QEvent.Type.HoverEnter,
             ):
                 index = self._tab_index_from_event(event)
-                if index >= 0:
-                    self._activate_index(index)
-            elif event.type() in (QtCore.QEvent.Type.HoverLeave, QtCore.QEvent.Type.Leave):
+                if index >= 0 and index != self._last_hover_index:
+                    self._last_hover_index = index
+                    QtCore.QTimer.singleShot(0, lambda idx=index: self._activate_index(idx))
+            elif event.type() in (
+                QtCore.QEvent.Type.HoverLeave,
+                QtCore.QEvent.Type.Leave,
+            ):
+                self._last_hover_index = None
                 self._schedule_collapse()
         elif obj in self._docks:
             if event.type() == QtCore.QEvent.Type.Enter:
