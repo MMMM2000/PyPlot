@@ -1,4 +1,14 @@
 # Changelog
+## 2025-10-31 08:45 UTC
+
+- Replaced the PyPlot workbench graph settings dock with a script toolbar that
+  hosts the script selector, load data, and generate plot controls while moving
+  shared actions to the general toolbars for a cleaner layout.
+- Added an "Import data…" action that mirrors the Data menu prompt so users can
+  choose files or folders directly from the toolbar.
+- Fixed the temperature sensitivity "Load data" crash by using the Qt
+  `SingleShotConnection` flag when clearing the Data menu hover state.
+ 
 ## 2025-10-31 08:00 UTC
 
 - Restored the temperature sensitivity Load data workflow so it opens the Data menu when no files are imported, then registers the selected workbooks and logs every filename that was loaded.

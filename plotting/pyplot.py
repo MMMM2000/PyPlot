@@ -1066,6 +1066,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     PROJECT_VERSION: int = 1
     PROJECT_CODE: str | None = None
     PROJECT_SETTINGS_PREFIX: str = "project"
+    GRAPH_DOCK_ENABLED: bool = True
     SUPPORTED_IMPORT_EXTENSIONS: tuple[str, ...] = (
         ".csv",
         ".tsv",
@@ -1143,6 +1144,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._format_selection: tuple[str, Any] | None = None
         self._format_updating = False
         self._object_tree_updating = False
+
+        self.graph_dock: QtWidgets.QDockWidget | None = None
+        self.graph_panel: QtWidgets.QWidget | None = None
 
         self._build_base_ui()
         self._update_project_title()
@@ -1408,18 +1412,36 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock.setMinimumWidth(240)
         self.object_dock = object_dock
 
-        graph_settings_widget = QtWidgets.QWidget()
-        graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
-        graph_layout.setContentsMargins(8, 8, 8, 8)
-        graph_layout.setSpacing(12)
-        self._populate_graph_settings(graph_layout)
-        graph_layout.addStretch(1)
+        graph_dock: QtWidgets.QDockWidget | None = None
+        graph_panel: QtWidgets.QWidget | None = None
+        if getattr(self, "GRAPH_DOCK_ENABLED", True):
+            graph_settings_widget = QtWidgets.QWidget()
+            graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
+            graph_layout.setContentsMargins(8, 8, 8, 8)
+            graph_layout.setSpacing(12)
+            self._populate_graph_settings(graph_layout)
+            graph_layout.addStretch(1)
 
-        graph_dock = self._create_dock_widget("Graph Settings", "graphSettingsDock")
-        graph_dock.setWidget(graph_settings_widget)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
-        graph_dock.hide()
-        self.graph_dock = graph_dock
+            graph_dock = self._create_dock_widget("Graph Settings", "graphSettingsDock")
+            graph_dock.setWidget(graph_settings_widget)
+            self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
+            graph_dock.hide()
+            self.graph_dock = graph_dock
+            self.graph_panel = None
+        else:
+            graph_settings_widget = QtWidgets.QWidget()
+            graph_settings_widget.setObjectName("mw_graph_settings_panel")
+            graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
+            graph_layout.setContentsMargins(0, 0, 0, 0)
+            graph_layout.setSpacing(8)
+            self._populate_graph_settings(graph_layout)
+            graph_layout.addStretch(1)
+            insert_index = max(0, central_layout.count() - 1)
+            central_layout.insertWidget(insert_index, graph_settings_widget)
+            graph_settings_widget.setVisible(False)
+            graph_panel = graph_settings_widget
+            self.graph_dock = None
+            self.graph_panel = graph_panel
 
         self.console_widget = PythonConsoleWidget(self)
         self.console_widget.set_environment({"window": self, "pd": pd})
@@ -1430,23 +1452,37 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         console_dock.hide()
         self.console_dock = console_dock
 
+        self._setup_script_toolbar()
         self._setup_action_toolbar()
         self._setup_format_toolbar()
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
-        if self._dock_switcher_supported():
+        dock_switcher_enabled = self._dock_switcher_supported()
+        left_docks = tuple(
+            dock for dock in (project_dock, log_dock, graph_dock) if dock is not None
+        )
+        if dock_switcher_enabled and left_docks:
             self._dock_switcher_panels.append(
                 self._create_dock_switcher(
-                    (project_dock, log_dock, graph_dock),
+                    left_docks,
                     side="left",
                     initial_visible=(0,),
                 )
             )
+        else:
+            self._dock_switcher_panels.append(None)
+
+        right_docks = tuple(dock for dock in (object_dock,) if dock is not None)
+        if dock_switcher_enabled and right_docks:
             self._dock_switcher_panels.append(
-                self._create_dock_switcher((object_dock,), side="right", initial_visible=(0,))
+                self._create_dock_switcher(
+                    right_docks,
+                    side="right",
+                    initial_visible=(0,),
+                )
             )
         else:
-            self._dock_switcher_panels.extend([None, None])
+            self._dock_switcher_panels.append(None)
 
         QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
 
@@ -1477,7 +1513,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._setup_project_menu(menu_bar)
         self._setup_data_menu(menu_bar)
         self._extend_menus(menu_bar)
-        self._after_base_ui_created(project_dock=project_dock, log_dock=log_dock, graph_dock=graph_dock)
+        self._after_base_ui_created(
+            project_dock=project_dock,
+            log_dock=log_dock,
+            graph_dock=graph_dock,
+            graph_panel=graph_panel,
+        )
         self._retabify_primary_docks()
         view_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_view")
         if view_menu is not None and hasattr(self, "console_dock"):
@@ -1644,14 +1685,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         self._update_worksheet_actions()
 
-    def _setup_action_toolbar(self) -> None:
-        toolbar = QtWidgets.QToolBar("Plot actions", self)
-        toolbar.setObjectName("mw_action_toolbar")
+    def _setup_script_toolbar(self) -> None:
+        """Install the default toolbar for script-specific controls."""
+
+        toolbar = QtWidgets.QToolBar("Script", self)
+        toolbar.setObjectName("mw_script_toolbar")
         toolbar.setMovable(True)
         toolbar.setFloatable(False)
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toolbar.setToolTip(toolbar.windowTitle())
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
-        self._action_toolbar = toolbar
+        self._script_toolbar = toolbar
 
         load_action = toolbar.addAction("Load data")
         load_action.setEnabled(False)
@@ -1662,6 +1706,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         generate_action.setEnabled(False)
         generate_action.triggered.connect(self._generate_plots)
         self.plot_button = generate_action
+
+    def _setup_action_toolbar(self) -> None:
+        toolbar = QtWidgets.QToolBar("Plot actions", self)
+        toolbar.setObjectName("mw_action_toolbar")
+        toolbar.setMovable(True)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toolbar.setToolTip(toolbar.windowTitle())
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self._action_toolbar = toolbar
+
+        import_action = toolbar.addAction("Import data…")
+        import_action.triggered.connect(self._prompt_import_data)
+        self.import_data_button = import_action
 
         popout_action = toolbar.addAction("Open in Matplotlib")
         popout_action.setEnabled(False)
@@ -1690,6 +1748,32 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         origin_action.triggered.connect(self._open_origin_prompt)
         self.open_origin_button = origin_action
 
+    def _prompt_import_data(self) -> None:
+        files_action = getattr(self, "_import_files_action", None)
+        folder_action = getattr(self, "_import_folder_action", None)
+
+        menu = QtWidgets.QMenu(self)
+        actions_added = False
+
+        if isinstance(files_action, QtGui.QAction):
+            label = files_action.text() or "Import files…"
+            proxy = menu.addAction(label)
+            proxy.triggered.connect(files_action.trigger)
+            actions_added = True
+
+        if isinstance(folder_action, QtGui.QAction):
+            label = folder_action.text() or "Import folder…"
+            proxy = menu.addAction(label)
+            proxy.triggered.connect(folder_action.trigger)
+            actions_added = True
+
+        if not actions_added:
+            self._show_data_menu()
+            return
+
+        cursor_pos = QtGui.QCursor.pos()
+        menu.exec(cursor_pos)
+
     def _update_save_graph_enabled(self) -> None:
         button = getattr(self, "save_graph_button", None)
         if hasattr(button, "setEnabled"):
@@ -1713,6 +1797,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         toolbar.setMovable(True)
         toolbar.setFloatable(False)
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        toolbar.setToolTip(toolbar.windowTitle())
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         controls.toolbar = toolbar
 
@@ -2797,10 +2882,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         *,
         project_dock: QtWidgets.QDockWidget,
         log_dock: QtWidgets.QDockWidget,
-        graph_dock: QtWidgets.QDockWidget,
+        graph_dock: QtWidgets.QDockWidget | None,
+        graph_panel: QtWidgets.QWidget | None,
     ) -> None:
         """Hook invoked once base dock widgets have been created."""
-        _ = (project_dock, log_dock, graph_dock)
+        _ = (project_dock, log_dock, graph_dock, graph_panel)
 
     # ------------------------------------------------------------------ project helpers
     def _default_project_filename(self) -> str:

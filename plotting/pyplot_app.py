@@ -2826,6 +2826,7 @@ class PyPlotWorkbench(PyPlotWindow):
     PROJECT_EXTENSION = ".pypj"
     PROJECT_CODE = "pyplot"
     PROJECT_SETTINGS_PREFIX = "pyplot"
+    GRAPH_DOCK_ENABLED = False
 
     def __init__(
         self,
@@ -2854,6 +2855,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._plotter_combo: QtWidgets.QComboBox | None = None
         self._plugin_settings_container: QtWidgets.QWidget | None = None
         self._plugin_settings_layout: QtWidgets.QVBoxLayout | None = None
+        self._plugin_settings_panel: QtWidgets.QWidget | None = None
         self._active_plugin_updater: Callable[[], None] | None = None
         self._initial_plotter = initial_plotter
         self._plotter_history: list[str] = self._load_plotter_history()
@@ -2933,6 +2935,42 @@ class PyPlotWorkbench(PyPlotWindow):
             if name not in ordered:
                 ordered.append(name)
         return ordered
+
+    def _setup_script_toolbar(self) -> None:  # type: ignore[override]
+        toolbar = QtWidgets.QToolBar("Script", self)
+        toolbar.setObjectName("mw_script_toolbar")
+        toolbar.setMovable(True)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toolbar.setToolTip(toolbar.windowTitle())
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self._script_toolbar = toolbar
+
+        script_label = QtWidgets.QLabel("Script:", toolbar)
+        script_label.setContentsMargins(4, 0, 6, 0)
+        toolbar.addWidget(script_label)
+
+        combo = QtWidgets.QComboBox(toolbar)
+        combo.setObjectName("mw_script_selector")
+        combo.setSizeAdjustPolicy(QtWidgets.QComboBox.SizeAdjustPolicy.AdjustToContents)
+        combo.setMinimumContentsLength(12)
+        combo.setToolTip("Select a plotting script")
+        combo.currentIndexChanged.connect(lambda _: self._apply_selected_plotter())
+        toolbar.addWidget(combo)
+        self._plotter_combo = combo
+        self._refresh_plotter_combo()
+
+        toolbar.addSeparator()
+
+        load_action = toolbar.addAction("Load data")
+        load_action.setEnabled(False)
+        load_action.triggered.connect(self._load_data)
+        self.load_data_button = load_action
+
+        generate_action = toolbar.addAction("Generate plots")
+        generate_action.setEnabled(False)
+        generate_action.triggered.connect(self._generate_plots)
+        self.plot_button = generate_action
 
     def _refresh_plotter_combo(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
@@ -3049,9 +3087,14 @@ class PyPlotWorkbench(PyPlotWindow):
                         except Exception:
                             pass
 
+                    connection_type = getattr(
+                        QtCore.Qt.ConnectionType,
+                        "SingleShotConnection",
+                        QtCore.Qt.ConnectionType.AutoConnection,
+                    )
                     data_menu.aboutToHide.connect(  # type: ignore[arg-type]
                         _clear_active_action,
-                        QtCore.Qt.ConnectionType.SingleShot,
+                        connection_type,
                     )
                 data_menu.popup(global_pos)
                 return True
@@ -3452,28 +3495,24 @@ class PyPlotWorkbench(PyPlotWindow):
             "Origin export is not available for the selected script.",
         )
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
-        label = QtWidgets.QLabel("Configure graph settings in your plotter subclass.")
-        label.setWordWrap(True)
-        layout.addWidget(label)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        panel = layout.parentWidget()
+        if isinstance(panel, QtWidgets.QWidget):
+            panel.setObjectName("mw_script_settings_panel")
+            panel.setVisible(False)
+            self._plugin_settings_panel = panel
 
-        group = QtWidgets.QGroupBox("Select plotting script")
-        group_layout = QtWidgets.QVBoxLayout(group)
-        group_layout.setContentsMargins(8, 8, 8, 8)
-        group_layout.setSpacing(6)
-        self._plotter_combo = QtWidgets.QComboBox(group)
-        self._plotter_combo.currentIndexChanged.connect(lambda _: self._apply_selected_plotter())
-        group_layout.addWidget(self._plotter_combo)
-        self._refresh_plotter_combo()
-        if not self._plugin_factories:
-            self._plotter_combo.setEnabled(False)
-        layout.addWidget(group)
+        container = QtWidgets.QFrame(self)
+        container.setObjectName("mw_plugin_settings_container")
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(8)
+        container.setVisible(False)
+        layout.addWidget(container)
 
-        self._plugin_settings_container = QtWidgets.QWidget(self)
-        self._plugin_settings_layout = QtWidgets.QVBoxLayout(self._plugin_settings_container)
-        self._plugin_settings_layout.setContentsMargins(0, 0, 0, 0)
-        self._plugin_settings_layout.setSpacing(6)
-        layout.addWidget(self._plugin_settings_container)
-        self._plugin_settings_container.setVisible(False)
+        self._plugin_settings_container = container
+        self._plugin_settings_layout = container_layout
 
     def _set_plugin_settings_widget(self, widget: QtWidgets.QWidget | None) -> None:
         if self._plugin_settings_layout is None or self._plugin_settings_container is None:
@@ -3487,11 +3526,16 @@ class PyPlotWorkbench(PyPlotWindow):
             if child is not None:
                 child.setParent(None)
             del item
+        panel = self._plugin_settings_panel
         if widget is None:
             self._plugin_settings_container.setVisible(False)
+            if isinstance(panel, QtWidgets.QWidget):
+                panel.setVisible(False)
         else:
             layout.addWidget(widget)
             self._plugin_settings_container.setVisible(True)
+            if isinstance(panel, QtWidgets.QWidget):
+                panel.setVisible(True)
 
     def _apply_selected_plotter(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None

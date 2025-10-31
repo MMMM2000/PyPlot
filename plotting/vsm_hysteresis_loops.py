@@ -1651,8 +1651,12 @@ class VSMPlotter(PyPlotWindow):
         *,
         project_dock: QtWidgets.QDockWidget,
         log_dock: QtWidgets.QDockWidget,
-        graph_dock: QtWidgets.QDockWidget,
+        graph_dock: QtWidgets.QDockWidget | None,
+        graph_panel: QtWidgets.QWidget | None,
     ) -> None:
+        _ = graph_panel
+        if graph_dock is None:
+            return
         graph_dock_features = graph_dock.features()
         graph_dock.setFeatures(
             graph_dock_features | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetMovable
