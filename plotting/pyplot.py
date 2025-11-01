@@ -26,6 +26,7 @@ from functools import partial
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
+from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
@@ -430,18 +431,24 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if available is not None:
             width = max(120, min(width, available.width()))
 
+        pointer = QtCore.QPointer(dock)
+
         def _resize() -> None:
-            if dock.isFloating():
+            dock_ref = pointer
+            if dock_ref is None or dock_ref.isNull():
+                return
+            dock_widget = cast(QtWidgets.QDockWidget, dock_ref)
+            if dock_widget.isFloating():
                 return
             try:
-                dock.resize(width, dock.height() or dock.sizeHint().height())
+                dock_widget.resize(width, dock_widget.height() or dock_widget.sizeHint().height())
             except Exception:
                 pass
             main_window = self._main_window()
             if not isinstance(main_window, QtWidgets.QMainWindow):
                 return
             try:
-                main_window.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+                main_window.resizeDocks([dock_widget], [width], QtCore.Qt.Orientation.Horizontal)
             except Exception:
                 pass
             try:
@@ -451,8 +458,14 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                     screen = QtGui.QGuiApplication.primaryScreen()
                 if screen is not None:
                     available_rect = screen.availableGeometry()
-                    new_left = max(available_rect.left(), min(frame.left(), available_rect.right() - frame.width()))
-                    new_top = max(available_rect.top(), min(frame.top(), available_rect.bottom() - frame.height()))
+                    new_left = max(
+                        available_rect.left(),
+                        min(frame.left(), available_rect.right() - frame.width()),
+                    )
+                    new_top = max(
+                        available_rect.top(),
+                        min(frame.top(), available_rect.bottom() - frame.height()),
+                    )
                     main_window.move(new_left, new_top)
             except Exception:
                 pass
@@ -1059,6 +1072,268 @@ class GraphSelectionDialog(QtWidgets.QDialog):
         super().accept()
 
 
+class LegendSettingsDialog(QtWidgets.QDialog):
+    """Configure appearance and layout options for a Matplotlib legend."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        legend: Legend,
+    ) -> None:
+        super().__init__(parent)
+        self._legend = legend
+        self.setWindowTitle("Legend Settings")
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        form = QtWidgets.QFormLayout()
+        form.setSpacing(8)
+        layout.addLayout(form)
+
+        self.visible_checkbox = QtWidgets.QCheckBox("Visible", self)
+        try:
+            self.visible_checkbox.setChecked(bool(legend.get_visible()))
+        except Exception:
+            self.visible_checkbox.setChecked(True)
+        form.addRow("", self.visible_checkbox)
+
+        self.title_edit = QtWidgets.QLineEdit(self)
+        try:
+            self.title_edit.setText(legend.get_title().get_text())
+        except Exception:
+            self.title_edit.setText("")
+        form.addRow("Title", self.title_edit)
+
+        self.font_spin = QtWidgets.QSpinBox(self)
+        self.font_spin.setRange(6, 72)
+        try:
+            sample_size = next((text.get_fontsize() for text in legend.get_texts()), legend.get_title().get_fontsize())
+            self.font_spin.setValue(int(round(float(sample_size))))
+        except Exception:
+            self.font_spin.setValue(14)
+        form.addRow("Font size", self.font_spin)
+
+        self.location_combo = QtWidgets.QComboBox(self)
+        self._location_keys: list[str] = []
+        for key, code in Legend.codes.items():
+            self.location_combo.addItem(key.replace("_", " ").title(), key)
+            self._location_keys.append(key)
+        current_loc = "best"
+        try:
+            loc_value = legend._get_loc()
+        except Exception:
+            loc_value = getattr(legend, "_loc", None)
+        if isinstance(loc_value, str):
+            current_loc = loc_value
+        elif isinstance(loc_value, int):
+            for key, code in Legend.codes.items():
+                if code == loc_value:
+                    current_loc = key
+                    break
+        index = self.location_combo.findData(current_loc)
+        if index >= 0:
+            self.location_combo.setCurrentIndex(index)
+        form.addRow("Location", self.location_combo)
+
+        self.columns_spin = QtWidgets.QSpinBox(self)
+        self.columns_spin.setRange(1, 10)
+        try:
+            ncol = getattr(legend, "_ncol", None)
+            if not isinstance(ncol, int) or ncol <= 0:
+                raise ValueError
+        except Exception:
+            ncol = max(1, len(getattr(legend, "legendHandles", [])))
+        self.columns_spin.setValue(ncol)
+        form.addRow("Columns", self.columns_spin)
+
+        self.frame_checkbox = QtWidgets.QCheckBox("Show frame", self)
+        try:
+            self.frame_checkbox.setChecked(bool(legend.get_frame().get_visible()))
+        except Exception:
+            self.frame_checkbox.setChecked(True)
+        form.addRow("", self.frame_checkbox)
+
+        self.frame_alpha_spin = QtWidgets.QDoubleSpinBox(self)
+        self.frame_alpha_spin.setRange(0.0, 1.0)
+        self.frame_alpha_spin.setSingleStep(0.05)
+        try:
+            self.frame_alpha_spin.setValue(float(legend.get_frame().get_alpha() or 1.0))
+        except Exception:
+            self.frame_alpha_spin.setValue(1.0)
+        form.addRow("Frame opacity", self.frame_alpha_spin)
+
+        self.border_spin = QtWidgets.QDoubleSpinBox(self)
+        self.border_spin.setRange(0.0, 10.0)
+        self.border_spin.setSingleStep(0.1)
+        try:
+            self.border_spin.setValue(float(legend.get_borderpad()))
+        except Exception:
+            self.border_spin.setValue(0.4)
+        form.addRow("Border padding", self.border_spin)
+
+        self.label_spacing_spin = QtWidgets.QDoubleSpinBox(self)
+        self.label_spacing_spin.setRange(0.0, 10.0)
+        self.label_spacing_spin.setSingleStep(0.1)
+        try:
+            self.label_spacing_spin.setValue(float(legend.get_labelspacing()))
+        except Exception:
+            self.label_spacing_spin.setValue(0.5)
+        form.addRow("Label spacing", self.label_spacing_spin)
+
+        self.handle_length_spin = QtWidgets.QDoubleSpinBox(self)
+        self.handle_length_spin.setRange(0.1, 20.0)
+        self.handle_length_spin.setSingleStep(0.1)
+        try:
+            self.handle_length_spin.setValue(float(legend.get_handlelength()))
+        except Exception:
+            self.handle_length_spin.setValue(2.0)
+        form.addRow("Handle length", self.handle_length_spin)
+
+        self.handle_text_pad_spin = QtWidgets.QDoubleSpinBox(self)
+        self.handle_text_pad_spin.setRange(0.0, 10.0)
+        self.handle_text_pad_spin.setSingleStep(0.1)
+        try:
+            self.handle_text_pad_spin.setValue(float(legend.get_handletextpad()))
+        except Exception:
+            self.handle_text_pad_spin.setValue(0.8)
+        form.addRow("Handle text pad", self.handle_text_pad_spin)
+
+        self.column_spacing_spin = QtWidgets.QDoubleSpinBox(self)
+        self.column_spacing_spin.setRange(0.0, 10.0)
+        self.column_spacing_spin.setSingleStep(0.1)
+        try:
+            self.column_spacing_spin.setValue(float(legend.get_columnspacing()))
+        except Exception:
+            self.column_spacing_spin.setValue(2.0)
+        form.addRow("Column spacing", self.column_spacing_spin)
+
+        self.marker_scale_spin = QtWidgets.QDoubleSpinBox(self)
+        self.marker_scale_spin.setRange(0.1, 10.0)
+        self.marker_scale_spin.setSingleStep(0.1)
+        try:
+            self.marker_scale_spin.setValue(float(legend.get_markerscale()))
+        except Exception:
+            self.marker_scale_spin.setValue(1.0)
+        form.addRow("Marker scale", self.marker_scale_spin)
+
+        self.draggable_checkbox = QtWidgets.QCheckBox("Allow drag", self)
+        try:
+            draggable = legend.get_draggable()
+            self.draggable_checkbox.setChecked(bool(draggable))
+        except Exception:
+            self.draggable_checkbox.setChecked(False)
+        form.addRow("", self.draggable_checkbox)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+            | QtWidgets.QDialogButtonBox.StandardButton.Apply,
+            parent=self,
+        )
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        apply_button = button_box.button(QtWidgets.QDialogButtonBox.StandardButton.Apply)
+        if apply_button is not None:
+            apply_button.clicked.connect(self._apply)
+        layout.addWidget(button_box)
+
+    def _apply(self) -> None:
+        legend = self._legend
+        try:
+            legend.set_visible(self.visible_checkbox.isChecked())
+        except Exception:
+            pass
+        try:
+            legend.set_title(self.title_edit.text())
+        except Exception:
+            title = legend.get_title()
+            if title is not None:
+                try:
+                    title.set_text(self.title_edit.text())
+                except Exception:
+                    pass
+        try:
+            legend.set_fontsize(self.font_spin.value())
+        except Exception:
+            for text in legend.get_texts():
+                try:
+                    text.set_fontsize(self.font_spin.value())
+                except Exception:
+                    pass
+            try:
+                legend.get_title().set_fontsize(self.font_spin.value())
+            except Exception:
+                pass
+        try:
+            loc_value = self.location_combo.currentData()
+            legend.set_loc(loc_value)
+        except Exception:
+            try:
+                legend._loc = Legend.codes.get(self.location_combo.currentData(), legend._loc)
+            except Exception:
+                pass
+        try:
+            legend.set_ncol(self.columns_spin.value())
+        except Exception:
+            try:
+                legend._ncol = self.columns_spin.value()
+            except Exception:
+                pass
+        try:
+            legend.set_frame_on(self.frame_checkbox.isChecked())
+        except Exception:
+            pass
+        try:
+            legend.get_frame().set_alpha(self.frame_alpha_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_borderpad(self.border_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_labelspacing(self.label_spacing_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_handlelength(self.handle_length_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_handletextpad(self.handle_text_pad_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_columnspacing(self.column_spacing_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_markerscale(self.marker_scale_spin.value())
+        except Exception:
+            pass
+        try:
+            legend.set_draggable(self.draggable_checkbox.isChecked())
+        except Exception:
+            pass
+
+        canvas = getattr(legend, "figure", None)
+        if canvas is not None:
+            canvas = getattr(canvas, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                try:
+                    canvas.draw()
+                except Exception:
+                    pass
+
+    def accept(self) -> None:  # type: ignore[override]
+        self._apply()
+        super().accept()
+
 class PyPlotWindow(QtWidgets.QMainWindow):
     """Shared UI frame used by plotting tools."""
 
@@ -1094,6 +1369,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self.settings = QtCore.QSettings("MicrowireLab", self.__class__.__name__)
 
         self._load_recent_projects_setting()
+
+        self._last_export_dir: Path | None = None
+        if isinstance(self.settings, QtCore.QSettings):
+            stored_export_dir = self.settings.value("last_export_dir", "")
+            if isinstance(stored_export_dir, str) and stored_export_dir.strip():
+                candidate = Path(stored_export_dir)
+                if candidate.exists():
+                    self._last_export_dir = candidate
 
         # Tab/graph bookkeeping shared by subclasses.
         self._tab_descriptors: Dict[QtWidgets.QWidget, TabDescriptor] = {}
@@ -1165,6 +1448,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._graph_section_bar: QtWidgets.QWidget | None = None
         self._graph_section_layout: QtWidgets.QHBoxLayout | None = None
         self._graph_section_buttons: list[QtWidgets.QToolButton] = []
+        self._graph_settings_sections: list[tuple[str, QtWidgets.QWidget | None]] = []
+        self._graph_settings_hidden_widgets: list[QtWidgets.QWidget] = []
+        self._graph_settings_hidden_tabs: list[
+            tuple[QtWidgets.QTabWidget, list[tuple[int, bool]], int]
+        ] = []
         self._graph_settings_pending_anchor: QtWidgets.QWidget | None = None
         self._graph_settings_scroll: QtWidgets.QScrollArea | None = None
         self._graph_settings_content: QtWidgets.QWidget | None = None
@@ -1192,7 +1480,242 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         raise NotImplementedError
 
     def _open_matplotlib_window(self) -> None:
-        raise NotImplementedError
+        tab_widget = getattr(self, "tab_widget", None)
+        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open in Matplotlib",
+                "No plot area is available to export.",
+            )
+            return
+
+        tab = tab_widget.currentWidget()
+        if tab is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open in Matplotlib",
+                "Select a plot tab before opening a Matplotlib window.",
+            )
+            return
+
+        descriptor = self._tab_descriptors.get(tab)
+        if descriptor is None or not descriptor.lines:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open in Matplotlib",
+                "The selected tab does not expose Matplotlib-compatible data.",
+            )
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open in Matplotlib",
+                f"Matplotlib's interactive backend is unavailable: {exc}",
+            )
+            return
+
+        try:
+            fig, ax = plt.subplots(constrained_layout=True)
+        except TypeError:
+            fig, ax = plt.subplots()
+
+        plotted = False
+        for state in descriptor.lines.values():
+            line = state.line
+            visible = True
+            getter = getattr(line, "get_visible", None)
+            if callable(getter):
+                try:
+                    visible = bool(getter())
+                except Exception:
+                    visible = True
+            if not visible:
+                continue
+            x_data = state.x_data()
+            y_data = state.y_data()
+            if x_data is None or y_data is None:
+                continue
+            label = state.label
+            try:
+                if not label:
+                    label = line.get_label()
+            except Exception:
+                label = ""
+            kwargs: Dict[str, Any] = {}
+            for attr, key in (
+                ("get_color", "color"),
+                ("get_linestyle", "linestyle"),
+                ("get_marker", "marker"),
+                ("get_linewidth", "linewidth"),
+                ("get_markersize", "markersize"),
+                ("get_markerfacecolor", "markerfacecolor"),
+                ("get_markeredgecolor", "markeredgecolor"),
+            ):
+                getter = getattr(line, attr, None)
+                if not callable(getter):
+                    continue
+                try:
+                    value = getter()
+                except Exception:
+                    continue
+                if value in {None, "None"}:
+                    continue
+                kwargs[key] = value
+            ax.plot(x_data, y_data, label=label or None, **kwargs)
+            plotted = True
+            for extra in state.extra_lines:
+                if extra is None:
+                    continue
+                extra_visible = True
+                getter = getattr(extra, "get_visible", None)
+                if callable(getter):
+                    try:
+                        extra_visible = bool(getter())
+                    except Exception:
+                        extra_visible = True
+                if not extra_visible:
+                    continue
+                try:
+                    extra_x = extra.get_xdata()
+                    extra_y = extra.get_ydata()
+                except Exception:
+                    continue
+                if extra_x is None or extra_y is None:
+                    continue
+                try:
+                    extra_label = extra.get_label()
+                except Exception:
+                    extra_label = label
+                extra_kwargs: Dict[str, Any] = {}
+                for attr, key in (
+                    ("get_color", "color"),
+                    ("get_linestyle", "linestyle"),
+                    ("get_marker", "marker"),
+                    ("get_linewidth", "linewidth"),
+                ):
+                    getter = getattr(extra, attr, None)
+                    if not callable(getter):
+                        continue
+                    try:
+                        value = getter()
+                    except Exception:
+                        continue
+                    if value in {None, "None"}:
+                        continue
+                    extra_kwargs[key] = value
+                ax.plot(extra_x, extra_y, label=extra_label or None, **extra_kwargs)
+
+        source_axes = descriptor.axes
+        if source_axes is None:
+            source_canvas = self._canvas_by_tab.get(tab)
+            if source_canvas is not None:
+                try:
+                    figure = source_canvas.figure
+                    axes_list = list(getattr(figure, "axes", []))
+                    if axes_list:
+                        source_axes = axes_list[0]
+                except Exception:
+                    source_axes = None
+
+        if source_axes is not None:
+            try:
+                ax.set_xlim(source_axes.get_xlim())
+                ax.set_ylim(source_axes.get_ylim())
+            except Exception:
+                pass
+            try:
+                ax.set_xscale(source_axes.get_xscale())
+                ax.set_yscale(source_axes.get_yscale())
+            except Exception:
+                pass
+
+        x_label = descriptor.x_label or ""
+        y_label = descriptor.y_label or ""
+        if not x_label and source_axes is not None:
+            try:
+                x_label = source_axes.get_xlabel()
+            except Exception:
+                x_label = ""
+        if not y_label and source_axes is not None:
+            try:
+                y_label = source_axes.get_ylabel()
+            except Exception:
+                y_label = ""
+        if x_label:
+            ax.set_xlabel(x_label)
+        if y_label:
+            ax.set_ylabel(y_label)
+
+        title = descriptor.title or ""
+        if not title and source_axes is not None:
+            try:
+                title = source_axes.get_title()
+            except Exception:
+                title = ""
+        if title:
+            ax.set_title(title)
+
+        legend = None
+        if source_axes is not None:
+            try:
+                source_legend = source_axes.get_legend()
+            except Exception:
+                source_legend = None
+            if source_legend is not None and source_legend.get_visible():
+                loc = "best"
+                try:
+                    loc_value = source_legend._get_loc()
+                except Exception:
+                    loc_value = getattr(source_legend, "_loc", "best")
+                if isinstance(loc_value, str):
+                    loc = loc_value
+                elif isinstance(loc_value, int):
+                    loc = next(
+                        (name for name, code in Legend.codes.items() if code == loc_value),
+                        "best",
+                    )
+                ncol = getattr(source_legend, "_ncol", 1)
+                try:
+                    legend = ax.legend(loc=loc, ncol=ncol)
+                except Exception:
+                    legend = ax.legend()
+                if legend is not None:
+                    try:
+                        legend.set_frame_on(source_legend.get_frame().get_visible())
+                    except Exception:
+                        pass
+                    try:
+                        legend.get_frame().set_alpha(source_legend.get_frame().get_alpha())
+                    except Exception:
+                        pass
+        if legend is None and plotted:
+            try:
+                legend = ax.legend()
+            except Exception:
+                legend = None
+
+        try:
+            fig.canvas.manager.set_window_title(title or descriptor.root_label or "Matplotlib")
+        except Exception:
+            pass
+
+        try:
+            fig.show()
+        except Exception:
+            try:
+                plt.show(block=False)
+            except Exception:
+                pass
+
+        if not plotted:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open in Matplotlib",
+                "No visible data series were available to plot.",
+            )
 
     def _save_current_graph(self) -> None:
         self._save_graph_for_current_tab()
@@ -1330,7 +1853,144 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         raise NotImplementedError
 
     def _export_txt(self) -> None:
-        raise NotImplementedError
+        tab_widget = getattr(self, "tab_widget", None)
+        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export TXT",
+                "No plot area is available to export.",
+            )
+            return
+
+        tab = tab_widget.currentWidget()
+        if tab is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export TXT",
+                "Select a plot tab before exporting data.",
+            )
+            return
+
+        descriptor = self._tab_descriptors.get(tab)
+        if descriptor is None or not descriptor.lines:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export TXT",
+                "The selected tab does not expose exportable data.",
+            )
+            return
+
+        series: list[tuple[str, Any, Any]] = []
+        for index, state in enumerate(descriptor.lines.values(), start=1):
+            label = state.label or f"Series {index}"
+            line = state.line
+            visible = True
+            getter = getattr(line, "get_visible", None)
+            if callable(getter):
+                try:
+                    visible = bool(getter())
+                except Exception:
+                    visible = True
+            if not visible:
+                continue
+            x_data = state.x_data()
+            y_data = state.y_data()
+            if x_data is None or y_data is None:
+                continue
+            series.append((label, x_data, y_data))
+        if not series:
+            for index, state in enumerate(descriptor.lines.values(), start=1):
+                x_data = state.x_data()
+                y_data = state.y_data()
+                if x_data is None or y_data is None:
+                    continue
+                label = state.label or f"Series {index}"
+                series.append((label, x_data, y_data))
+            if not series:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Export TXT",
+                    "No plotted data is available to export.",
+                )
+                return
+
+        def _clean_stem(text: str) -> str:
+            stem_chars = [
+                ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text
+            ]
+            return "".join(stem_chars).strip("._") or "series"
+
+        default_name = descriptor.root_label or descriptor.title or "graph"
+        suggested = _clean_stem(default_name) + ".txt"
+
+        start_dir = getattr(self, "_last_export_dir", None)
+        if not isinstance(start_dir, Path) or not start_dir.exists():
+            start_dir = getattr(self, "_last_graph_dir", None)
+        if not isinstance(start_dir, Path) or not start_dir.exists():
+            project_path = getattr(self, "_project_path", None)
+            if isinstance(project_path, Path) and project_path.exists():
+                start_dir = project_path.parent
+        if not isinstance(start_dir, Path) or not start_dir.exists():
+            start_dir = Path.home()
+
+        path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export TXT",
+            str(Path(start_dir) / suggested),
+            "Text files (*.txt);;CSV files (*.csv);;All files (*)",
+            "Text files (*.txt)",
+        )
+        if not path_str:
+            return
+
+        path = Path(path_str)
+        suffix = path.suffix.lower()
+        if suffix not in {".txt", ".csv"}:
+            suffix = ".csv" if selected_filter.startswith("CSV") else ".txt"
+            path = path.with_suffix(suffix)
+
+        columns: Dict[str, pd.Series] = {}
+        for label, x_data, y_data in series:
+            stem = _clean_stem(label)
+            columns[f"{stem}_x"] = pd.Series(x_data)
+            columns[f"{stem}_y"] = pd.Series(y_data)
+        frame = pd.DataFrame(columns)
+
+        delimiter = "," if path.suffix.lower() == ".csv" else "\t"
+        try:
+            frame.to_csv(path, index=False, sep=delimiter)
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export TXT",
+                f"Failed to export the data:\n{exc}",
+            )
+            return
+
+        if hasattr(self, "statusBar"):
+            try:
+                status = self.statusBar()
+                if status is not None:
+                    status.showMessage(f"Exported data to {path}", 5000)
+            except Exception:
+                pass
+
+        self._append_log(f"Exported plotted data to {path}")
+        try:
+            self._last_export_dir = path.parent
+        except Exception:
+            self._last_export_dir = None
+        settings = getattr(self, "settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            if isinstance(self._last_export_dir, Path):
+                settings.setValue("last_export_dir", str(self._last_export_dir))
+            settings.sync()
+
+        QtWidgets.QMessageBox.information(
+            self,
+            "Export TXT",
+            f"Exported {len(series)} data series to {path}",
+        )
 
     def _open_origin_prompt(self) -> None:
         raise NotImplementedError
@@ -1427,6 +2087,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.object_tree.currentItemChanged.connect(
             self._handle_object_selection_changed
         )
+        self.object_tree.itemDoubleClicked.connect(self._handle_object_item_double_click)
+        self.object_tree.itemActivated.connect(self._handle_object_item_double_click)
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
@@ -1771,6 +2433,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         action.setDefaultWidget(panel)
         menu.addAction(action)
         menu.aboutToShow.connect(self._handle_graph_menu_show)
+        menu.aboutToHide.connect(self._handle_graph_menu_hide)
 
         self._graph_settings_menu = menu
         self._graph_settings_action = action
@@ -1793,6 +2456,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 child.deleteLater()
 
         sections = self._discover_settings_sections(widget)
+        self._graph_settings_sections = sections
         if not sections:
             title = "Settings"
             button = self._create_graph_section_button(title, None, menu)
@@ -1859,7 +2523,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not sections:
             return [("Settings", widget)]
 
-        return [("All", widget)] + sections
+        return sections
 
     def _create_graph_section_button(
         self,
@@ -1890,6 +2554,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             scroll.ensureVisible(0, 0, 0, 0)
             return
         anchor = self._graph_settings_pending_anchor
+        self._apply_graph_section_filter(anchor)
         if anchor is None or not anchor.isVisible():
             scroll.ensureVisible(0, 0, 0, 0)
             return
@@ -1897,12 +2562,118 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         margin = 12
         scroll.ensureVisible(top_left.x(), top_left.y(), margin, margin)
 
+    def _handle_graph_menu_hide(self) -> None:
+        self._restore_graph_section_filter()
+
+    def _apply_graph_section_filter(self, anchor: QtWidgets.QWidget | None) -> None:
+        self._restore_graph_section_filter()
+        container = self._plugin_settings_container
+        if container is None:
+            return
+        if anchor is None:
+            return
+        if anchor is container or anchor is self._active_settings_widget:
+            return
+        sections = list(self._graph_settings_sections)
+        if not sections:
+            return
+        for _, section_widget in sections:
+            if section_widget is None or section_widget is anchor:
+                continue
+            root = self._section_root_widget(section_widget, container)
+            if root is None or not root.isVisible():
+                continue
+            root.setVisible(False)
+            self._graph_settings_hidden_widgets.append(root)
+        tab_widget = self._find_tab_widget(anchor)
+        if tab_widget is not None:
+            tab_bar = tab_widget.tabBar()
+            visibility_state: list[tuple[int, bool]] = []
+            for index in range(tab_widget.count()):
+                visible = True
+                if tab_bar is not None:
+                    try:
+                        visible = tab_bar.isTabVisible(index)
+                    except Exception:
+                        visible = True
+                visibility_state.append((index, visible))
+                try:
+                    tab_widget.setTabVisible(index, tab_widget.widget(index) is anchor)
+                except Exception:
+                    widget = tab_widget.widget(index)
+                    if widget is not None and widget is not anchor:
+                        widget.setVisible(False)
+            previous_index = tab_widget.currentIndex()
+            target_index = tab_widget.indexOf(anchor)
+            if target_index >= 0 and previous_index != target_index:
+                tab_widget.setCurrentIndex(target_index)
+            self._graph_settings_hidden_tabs.append((tab_widget, visibility_state, previous_index))
+
+    def _restore_graph_section_filter(self) -> None:
+        if self._graph_settings_hidden_widgets:
+            for widget in self._graph_settings_hidden_widgets:
+                if widget is not None:
+                    widget.setVisible(True)
+        self._graph_settings_hidden_widgets.clear()
+
+        if self._graph_settings_hidden_tabs:
+            for tab_widget, visibility_state, previous_index in self._graph_settings_hidden_tabs:
+                if tab_widget is None:
+                    continue
+                tab_bar = tab_widget.tabBar()
+                for index, visible in visibility_state:
+                    widget = tab_widget.widget(index)
+                    if tab_bar is not None:
+                        try:
+                            tab_widget.setTabVisible(index, visible)
+                        except Exception:
+                            if widget is not None:
+                                widget.setVisible(visible)
+                    elif widget is not None:
+                        widget.setVisible(visible)
+                if 0 <= previous_index < tab_widget.count():
+                    try:
+                        tab_widget.setCurrentIndex(previous_index)
+                    except Exception:
+                        pass
+            self._graph_settings_hidden_tabs.clear()
+
+    def _section_root_widget(
+        self,
+        widget: QtWidgets.QWidget,
+        container: QtWidgets.QWidget,
+    ) -> QtWidgets.QWidget | None:
+        current: QtWidgets.QWidget | None = widget
+        while current is not None and current is not container:
+            parent = current.parent()
+            if parent is container or parent is None:
+                break
+            if isinstance(parent, QtWidgets.QGroupBox):
+                current = parent
+                break
+            current = cast(QtWidgets.QWidget, parent)
+        if current is container:
+            return widget
+        return current
+
+    def _find_tab_widget(
+        self, widget: QtWidgets.QWidget
+    ) -> QtWidgets.QTabWidget | None:
+        parent = widget.parent()
+        while parent is not None:
+            if isinstance(parent, QtWidgets.QTabWidget):
+                return parent
+            parent = parent.parent()
+        return None
+
     def _set_plugin_settings_widget(self, widget: QtWidgets.QWidget | None) -> None:
         layout = self._plugin_settings_layout
         container = self._plugin_settings_container
         placeholder = self._plugin_settings_placeholder
         if layout is None or container is None:
             return
+
+        self._restore_graph_section_filter()
 
         if self._active_settings_widget is not None:
             layout.removeWidget(self._active_settings_widget)
@@ -3381,15 +4152,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if available is not None:
             width = max(120, min(width, available.width()))
 
+        pointer = QtCore.QPointer(dock)
+
         def _resize() -> None:
-            if dock.isFloating():
+            dock_ref = pointer
+            if dock_ref is None or dock_ref.isNull():
+                return
+            dock_widget = cast(QtWidgets.QDockWidget, dock_ref)
+            if dock_widget.isFloating():
                 return
             try:
-                dock.resize(width, dock.height() or dock.sizeHint().height())
+                dock_widget.resize(width, dock_widget.height() or dock_widget.sizeHint().height())
             except Exception:
                 pass
             try:
-                self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+                self.resizeDocks([dock_widget], [width], QtCore.Qt.Orientation.Horizontal)
             except Exception:
                 pass
             try:
@@ -3399,8 +4176,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     screen = QtGui.QGuiApplication.primaryScreen()
                 if screen is not None:
                     available_rect = screen.availableGeometry()
-                    new_left = max(available_rect.left(), min(frame.left(), available_rect.right() - frame.width()))
-                    new_top = max(available_rect.top(), min(frame.top(), available_rect.bottom() - frame.height()))
+                    new_left = max(
+                        available_rect.left(),
+                        min(frame.left(), available_rect.right() - frame.width()),
+                    )
+                    new_top = max(
+                        available_rect.top(),
+                        min(frame.top(), available_rect.bottom() - frame.height()),
+                    )
                     self.move(new_left, new_top)
             except Exception:
                 pass
@@ -3550,6 +4333,33 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         item.setCheckState(0, fallback)
         self._object_tree_updating = False
+
+    def _handle_object_item_double_click(
+        self, item: QtWidgets.QTreeWidgetItem, column: int
+    ) -> None:
+        if column != 0 or not isinstance(item, QtWidgets.QTreeWidgetItem):
+            return
+        data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(data, dict):
+            return
+        if data.get("kind") != "legend":
+            return
+        legend = data.get("object")
+        if not isinstance(legend, Legend):
+            return
+        dialog = LegendSettingsDialog(self, legend)
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        try:
+            legend_visible = bool(legend.get_visible())
+        except Exception:
+            legend_visible = True
+        self._apply_object_item_visibility(item, legend_visible)
+        try:
+            title = legend.get_title().get_text() if legend.get_title() is not None else "Legend"
+        except Exception:
+            title = "Legend"
+        item.setText(0, title or "Legend")
 
     def _rebuild_object_manager_for_tab(self, tab: QtWidgets.QWidget | None, *_: Any) -> None:
         """Rebuild the object manager tree for ``tab`` with all axes, legends, and lines."""

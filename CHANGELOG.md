@@ -1,4 +1,10 @@
 # Changelog
+## 2025-10-31 21:11 UTC
+
+- Hardened the dock switcher resizing logic with guarded Qt pointers so hovering the Message Log no longer risks a crash before any graphs are drawn.
+- Removed the blanket “All” graph settings button and filter the drop-down to just the requested section, keeping each toolbar launcher focused on its own controls.
+- Enabled the shared Matplotlib pop-out and TXT export flows for every plotting script, hid the temperature sensitivity banner once graphs exist, and bound legend double-clicks to a rich settings dialog.
+
 ## 2025-10-31 19:49 UTC
 
 - Split the script toolbar graph controls into section-specific drop-down buttons so each plugin’s major option group opens from its own launcher.

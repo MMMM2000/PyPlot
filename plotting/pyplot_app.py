@@ -111,6 +111,10 @@ class PyPlotPlugin:
         )
 
     def open_matplotlib(self) -> None:
+        opener = getattr(self.host, "_open_matplotlib_window", None)
+        if callable(opener):
+            opener()
+            return
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,
@@ -136,6 +140,10 @@ class PyPlotPlugin:
         )
 
     def export_txt(self) -> None:
+        exporter = getattr(self.host, "_export_txt", None)
+        if callable(exporter):
+            exporter()
+            return
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,
@@ -1098,6 +1106,20 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data)
             self.host.plot_button.setText("Plot Temperature Sensitivity")
+        if self._summary_label is not None:
+            if self._plot_tabs:
+                self._summary_label.clear()
+                self._summary_label.setVisible(False)
+            else:
+                self._summary_label.setVisible(True)
+                if not has_data:
+                    self._summary_label.setText(
+                        "Select temperature sensitivity files then click Load data."
+                    )
+                elif not self._summary_label.text().strip():
+                    self._summary_label.setText(
+                        "Data loaded. Adjust settings and click Plot Temperature Sensitivity to generate graphs."
+                    )
         if hasattr(self.host, "save_graph_button"):
             self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
         if hasattr(self.host, "normalize_button"):
