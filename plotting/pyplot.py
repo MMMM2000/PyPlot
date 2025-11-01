@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -37,6 +38,46 @@ from plotting.utils import install_standard_menu, developer_options
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+
+
+def _make_qpointer(obj: QtCore.QObject):
+    """Return a Qt QPointer when available, otherwise fall back to a weak reference."""
+
+    pointer_cls = getattr(QtCore, "QPointer", None)
+    if callable(pointer_cls):
+        try:
+            return pointer_cls(obj)
+        except Exception:
+            pass
+    return weakref.ref(obj)
+
+
+def _deref_qpointer(pointer: Any) -> Optional[QtCore.QObject]:
+    """Dereference a Qt QPointer or weak reference safely."""
+
+    if pointer is None:
+        return None
+    is_null = getattr(pointer, "isNull", None)
+    if callable(is_null):
+        try:
+            if is_null():
+                return None
+        except Exception:
+            return None
+    data_method = getattr(pointer, "data", None)
+    if callable(data_method):
+        try:
+            obj = data_method()
+        except Exception:
+            obj = None
+        if isinstance(obj, QtCore.QObject):
+            return obj
+    if callable(pointer):
+        try:
+            return pointer()
+        except Exception:
+            return None
+    return pointer if isinstance(pointer, QtCore.QObject) else None
 
 
 @dataclass
@@ -431,13 +472,12 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if available is not None:
             width = max(120, min(width, available.width()))
 
-        pointer = QtCore.QPointer(dock)
+        pointer = _make_qpointer(dock)
 
         def _resize() -> None:
-            dock_ref = pointer
-            if dock_ref is None or dock_ref.isNull():
+            dock_widget = _deref_qpointer(pointer)
+            if not isinstance(dock_widget, QtWidgets.QDockWidget):
                 return
-            dock_widget = cast(QtWidgets.QDockWidget, dock_ref)
             if dock_widget.isFloating():
                 return
             try:
@@ -4152,13 +4192,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if available is not None:
             width = max(120, min(width, available.width()))
 
-        pointer = QtCore.QPointer(dock)
+        pointer = _make_qpointer(dock)
 
         def _resize() -> None:
-            dock_ref = pointer
-            if dock_ref is None or dock_ref.isNull():
+            dock_widget = _deref_qpointer(pointer)
+            if not isinstance(dock_widget, QtWidgets.QDockWidget):
                 return
-            dock_widget = cast(QtWidgets.QDockWidget, dock_ref)
             if dock_widget.isFloating():
                 return
             try:

@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-01 06:42 UTC
+
+- Moved As/Ms editing into the Current density tab, stacking the Matplotlib previews beside the workbook and recalculating densities from the recorded phase points so hover readouts stay available while you tune transitions.
+- Trimmed the Current annealing table back to composition plus graph thumbnails and dropped the legacy interactive picker button now that phase changes live in Current density.
+- Replaced direct `QtCore.QPointer` usage with a PyQt6-safe weak reference helper so the launcher stops crashing with `AttributeError: module 'PyQt6.QtCore' has no attribute 'QPointer'` at startup.
+
 ## 2025-10-31 21:11 UTC
 
 - Hardened the dock switcher resizing logic with guarded Qt pointers so hovering the Message Log no longer risks a crash before any graphs are drawn.
