@@ -1,4 +1,8 @@
 # Changelog
+## 2025-11-01 16:20 UTC
+
+- Rebuilt the PyPlot script toolbar menus so each button opens its own settings drop-down, keeping plugin controls directly in the toolbar.
+
 ## 2025-11-01 15:47 UTC
 
 - Prevented the VSM hysteresis plugin from crashing when the workbench build omits the Matplotlib pop-out action by guarding the legacy normalization helpers.

@@ -96,6 +96,18 @@ class FormatToolbarControls:
     line_symbol_action: QtGui.QAction | None = None
 
 
+@dataclass
+class _GraphSectionState:
+    """Tracks where a settings section lives so it can be shown inside a menu."""
+
+    anchor: QtWidgets.QWidget
+    parent: QtWidgets.QWidget | None
+    layout: QtWidgets.QLayout | None
+    layout_info: tuple[int, ...] = field(default_factory=tuple)
+    detached: bool = False
+    menu_layout: QtWidgets.QVBoxLayout | None = None
+
+
 class _GraphSectionButton(QtWidgets.QToolButton):
     """QToolButton that records which settings section the user wants to view."""
 
@@ -1710,6 +1722,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._graph_settings_pending_anchor: QtWidgets.QWidget | None = None
         self._graph_settings_scroll: QtWidgets.QScrollArea | None = None
         self._graph_settings_content: QtWidgets.QWidget | None = None
+        self._graph_section_states: dict[QtWidgets.QWidget, _GraphSectionState] = {}
 
         self._build_base_ui()
         self._update_project_title()
@@ -2712,6 +2725,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         sections = self._discover_settings_sections(widget)
         self._graph_settings_sections = sections
+        self._synchronise_graph_section_states(sections)
         if not sections:
             title = "Settings"
             button = self._create_graph_section_button(title, None, menu)
@@ -2723,7 +2737,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         buttons: list[QtWidgets.QToolButton] = []
         for title, anchor in sections:
-            button = self._create_graph_section_button(title, anchor, menu)
+            if anchor is None:
+                section_menu = menu
+            else:
+                section_menu = self._build_graph_section_menu(title, anchor)
+            button = self._create_graph_section_button(title, anchor, section_menu)
             layout.addWidget(button)
             buttons.append(button)
         layout.addStretch(1)
@@ -2791,11 +2809,195 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         button.setText(title)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
         button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
-        button.setMenu(menu)
+        if isinstance(menu, QtWidgets.QMenu):
+            button.setMenu(menu)
         button.setIconSize(self._toolbar_icon_size)
         button.setMinimumHeight(self._toolbar_icon_size.height() + 6)
         button.pressed.connect(lambda anchor=anchor: self._set_graph_settings_anchor(anchor))
         return button
+
+    def _build_graph_section_menu(
+        self, title: str, anchor: QtWidgets.QWidget
+    ) -> QtWidgets.QMenu:
+        state = self._graph_section_states.get(anchor)
+        if state is None:
+            state = self._create_graph_section_state(anchor)
+            self._graph_section_states[anchor] = state
+
+        menu = QtWidgets.QMenu(self)
+        menu.setObjectName(f"mw_graph_settings_menu_{title.lower().replace(' ', '_')}")
+        menu.setToolTipsVisible(True)
+        menu.setMinimumWidth(360)
+
+        action = QtWidgets.QWidgetAction(menu)
+        panel = QtWidgets.QWidget(menu)
+        panel.setObjectName("mw_graph_section_panel")
+        panel_layout = QtWidgets.QVBoxLayout(panel)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        panel_layout.setSpacing(8)
+
+        scroll = QtWidgets.QScrollArea(panel)
+        scroll.setObjectName("mw_graph_settings_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        panel_layout.addWidget(scroll, 1)
+
+        content = QtWidgets.QWidget(scroll)
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        scroll.setWidget(content)
+
+        holder = QtWidgets.QWidget(content)
+        holder_layout = QtWidgets.QVBoxLayout(holder)
+        holder_layout.setContentsMargins(0, 0, 0, 0)
+        holder_layout.setSpacing(8)
+        content_layout.addWidget(holder)
+        content_layout.addStretch(1)
+
+        state.menu_layout = holder_layout
+
+        action.setDefaultWidget(panel)
+        menu.addAction(action)
+        menu.aboutToShow.connect(lambda anchor=anchor: self._prepare_graph_section_menu(anchor))
+        menu.aboutToHide.connect(lambda anchor=anchor: self._teardown_graph_section_menu(anchor))
+        return menu
+
+    def _prepare_graph_section_menu(self, anchor: QtWidgets.QWidget | None) -> None:
+        if anchor is None:
+            return
+        state = self._graph_section_states.get(anchor)
+        if state is None:
+            return
+        layout = state.menu_layout
+        if layout is None:
+            return
+        self._graph_settings_pending_anchor = anchor
+        self._clear_layout(layout)
+        self._detach_graph_section_state(state, layout)
+        layout.addStretch(1)
+
+    def _teardown_graph_section_menu(self, anchor: QtWidgets.QWidget | None) -> None:
+        if anchor is None:
+            return
+        state = self._graph_section_states.get(anchor)
+        if state is None:
+            return
+        layout = state.menu_layout
+        if layout is not None:
+            self._clear_layout(layout)
+        self._restore_graph_section_state(state)
+        if self._graph_settings_pending_anchor is anchor:
+            self._graph_settings_pending_anchor = None
+
+    def _clear_layout(self, layout: QtWidgets.QLayout) -> None:
+        while layout.count():
+            item = layout.takeAt(0)
+            if item is None:
+                continue
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+            child_layout = item.layout()
+            if child_layout is not None:
+                child_layout.setParent(None)
+
+    def _create_graph_section_state(self, anchor: QtWidgets.QWidget) -> _GraphSectionState:
+        parent = anchor.parentWidget()
+        layout: QtWidgets.QLayout | None = None
+        if isinstance(parent, QtWidgets.QWidget):
+            layout = parent.layout()
+        return _GraphSectionState(
+            anchor=anchor,
+            parent=parent,
+            layout=layout,
+        )
+
+    def _synchronise_graph_section_states(
+        self, sections: list[tuple[str, QtWidgets.QWidget | None]]
+    ) -> None:
+        anchors = {anchor for _, anchor in sections if anchor is not None}
+        # Restore any sections that are no longer part of the active widget.
+        for anchor, state in list(self._graph_section_states.items()):
+            if anchor not in anchors:
+                self._teardown_graph_section_menu(anchor)
+                self._graph_section_states.pop(anchor, None)
+        for anchor in anchors:
+            state = self._graph_section_states.get(anchor)
+            if state is None:
+                state = self._create_graph_section_state(anchor)
+                self._graph_section_states[anchor] = state
+            parent = anchor.parentWidget()
+            layout: QtWidgets.QLayout | None = None
+            if isinstance(parent, QtWidgets.QWidget):
+                layout = parent.layout()
+            state.parent = parent
+            state.layout = layout
+
+    def _detach_graph_section_state(
+        self, state: _GraphSectionState, target_layout: QtWidgets.QVBoxLayout
+    ) -> None:
+        if state.detached:
+            return
+        anchor = state.anchor
+        layout = state.layout
+        layout_info: tuple[int, ...] = ()
+        if isinstance(layout, QtWidgets.QGridLayout):
+            index = layout.indexOf(anchor)
+            if index >= 0:
+                layout_info = layout.getItemPosition(index)
+        elif isinstance(layout, QtWidgets.QFormLayout):
+            row, role = layout.getWidgetPosition(anchor)
+            if row >= 0:
+                layout_info = (row, int(role))
+        elif isinstance(layout, QtWidgets.QBoxLayout):
+            index = layout.indexOf(anchor)
+            layout_info = (index,)
+        elif isinstance(layout, QtWidgets.QLayout):
+            layout_info = (layout.indexOf(anchor),)
+        if isinstance(layout, QtWidgets.QLayout):
+            layout.removeWidget(anchor)
+        anchor.setParent(target_layout.parentWidget())
+        target_layout.addWidget(anchor)
+        anchor.show()
+        state.layout_info = layout_info
+        state.detached = True
+
+    def _restore_graph_section_state(self, state: _GraphSectionState) -> None:
+        if not state.detached:
+            return
+        anchor = state.anchor
+        parent = state.parent
+        layout = state.layout
+        layout_info = state.layout_info
+        anchor.hide()
+        if isinstance(parent, QtWidgets.QWidget):
+            anchor.setParent(parent)
+        if isinstance(layout, QtWidgets.QGridLayout) and len(layout_info) == 4:
+            row, col, row_span, col_span = layout_info
+            layout.addWidget(anchor, row, col, row_span, col_span)
+        elif isinstance(layout, QtWidgets.QFormLayout) and len(layout_info) == 2:
+            row, role = layout_info
+            layout.setWidget(row, QtWidgets.QFormLayout.ItemRole(role), anchor)
+        elif isinstance(layout, QtWidgets.QBoxLayout) and layout_info:
+            index = layout_info[0]
+            if index >= 0:
+                layout.insertWidget(index, anchor)
+            else:
+                layout.addWidget(anchor)
+        elif isinstance(layout, QtWidgets.QLayout):
+            layout.addWidget(anchor)
+        anchor.show()
+        state.layout_info = tuple()
+        state.detached = False
+
+    def _reset_graph_section_states(self) -> None:
+        if not self._graph_section_states:
+            return
+        for anchor in list(self._graph_section_states.keys()):
+            self._teardown_graph_section_menu(anchor)
+        self._graph_section_states.clear()
 
     def _set_graph_settings_anchor(self, anchor: QtWidgets.QWidget | None) -> None:
         container = self._plugin_settings_container
@@ -2948,6 +3150,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
 
         self._restore_graph_section_filter()
+        self._reset_graph_section_states()
 
         if self._active_settings_widget is not None:
             layout.removeWidget(self._active_settings_widget)
