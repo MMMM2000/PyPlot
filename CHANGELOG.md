@@ -1,4 +1,15 @@
 # Changelog
+## 2025-10-31 19:49 UTC
+
+- Split the script toolbar graph controls into section-specific drop-down buttons so each plugin’s major option group opens from its own launcher.
+- Defaults the PyPlot window to stack the script toolbar above the other toolbars while keeping them movable.
+- Routed temperature sensitivity load notices into the Message Log, clearing the setup banner once plots are generated and avoiding duplicate terminal output.
+
+## 2025-10-31 19:20 UTC
+
+- Folded the graph settings dock into a `Graph settings` drop-down on the script toolbar so every script keeps its configuration controls in one place.
+- Aligned the script, action, and format toolbars to a shared height for a consistent top-row layout.
+
 ## 2025-10-31 08:45 UTC
 
 - Replaced the PyPlot workbench graph settings dock with a script toolbar that

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1148,6 +1149,26 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
 
+        icon_extent = self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_ToolBarIconSize)
+        if icon_extent <= 0:
+            icon_extent = 24
+        self._toolbar_icon_size = QtCore.QSize(icon_extent, icon_extent)
+
+        self._graph_settings_menu: QtWidgets.QMenu | None = None
+        self._graph_settings_action: QtWidgets.QWidgetAction | None = None
+        self._plugin_settings_panel: QtWidgets.QWidget | None = None
+        self._plugin_settings_container: QtWidgets.QWidget | None = None
+        self._plugin_settings_layout: QtWidgets.QVBoxLayout | None = None
+        self._plugin_settings_placeholder: QtWidgets.QWidget | None = None
+        self._active_settings_widget: QtWidgets.QWidget | None = None
+
+        self._graph_section_bar: QtWidgets.QWidget | None = None
+        self._graph_section_layout: QtWidgets.QHBoxLayout | None = None
+        self._graph_section_buttons: list[QtWidgets.QToolButton] = []
+        self._graph_settings_pending_anchor: QtWidgets.QWidget | None = None
+        self._graph_settings_scroll: QtWidgets.QScrollArea | None = None
+        self._graph_settings_content: QtWidgets.QWidget | None = None
+
         self._build_base_ui()
         self._update_project_title()
         self._update_project_actions()
@@ -1414,34 +1435,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         graph_dock: QtWidgets.QDockWidget | None = None
         graph_panel: QtWidgets.QWidget | None = None
-        if getattr(self, "GRAPH_DOCK_ENABLED", True):
-            graph_settings_widget = QtWidgets.QWidget()
-            graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
-            graph_layout.setContentsMargins(8, 8, 8, 8)
-            graph_layout.setSpacing(12)
-            self._populate_graph_settings(graph_layout)
-            graph_layout.addStretch(1)
-
-            graph_dock = self._create_dock_widget("Graph Settings", "graphSettingsDock")
-            graph_dock.setWidget(graph_settings_widget)
-            self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, graph_dock)
-            graph_dock.hide()
-            self.graph_dock = graph_dock
-            self.graph_panel = None
-        else:
-            graph_settings_widget = QtWidgets.QWidget()
-            graph_settings_widget.setObjectName("mw_graph_settings_panel")
-            graph_layout = QtWidgets.QVBoxLayout(graph_settings_widget)
-            graph_layout.setContentsMargins(0, 0, 0, 0)
-            graph_layout.setSpacing(8)
-            self._populate_graph_settings(graph_layout)
-            graph_layout.addStretch(1)
-            insert_index = max(0, central_layout.count() - 1)
-            central_layout.insertWidget(insert_index, graph_settings_widget)
-            graph_settings_widget.setVisible(False)
-            graph_panel = graph_settings_widget
-            self.graph_dock = None
-            self.graph_panel = graph_panel
+        self.graph_dock = None
+        self.graph_panel = None
 
         self.console_widget = PythonConsoleWidget(self)
         self.console_widget.set_environment({"window": self, "pd": pd})
@@ -1685,15 +1680,263 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         self._update_worksheet_actions()
 
+    def _configure_toolbar(self, toolbar: QtWidgets.QToolBar) -> None:
+        """Apply shared sizing and behaviour to top-level toolbars."""
+
+        toolbar.setMovable(True)
+        toolbar.setFloatable(False)
+        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        toolbar.setToolTip(toolbar.windowTitle())
+        toolbar.setIconSize(self._toolbar_icon_size)
+
+    def _init_graph_settings_menu(self, toolbar: QtWidgets.QToolBar) -> None:
+        """Embed the graph settings container inside the provided toolbar."""
+
+        if self._graph_section_bar is not None:
+            return
+
+        toolbar.addSeparator()
+
+        section_bar = QtWidgets.QWidget(toolbar)
+        section_bar.setObjectName("mw_graph_section_bar")
+        section_layout = QtWidgets.QHBoxLayout(section_bar)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(6)
+        toolbar.addWidget(section_bar)
+        self._graph_section_bar = section_bar
+        self._graph_section_layout = section_layout
+
+        menu = QtWidgets.QMenu(self)
+        menu.setObjectName("mw_graph_settings_menu")
+        menu.setToolTipsVisible(True)
+        menu.setMinimumWidth(360)
+
+        action = QtWidgets.QWidgetAction(menu)
+        panel = QtWidgets.QWidget(menu)
+        panel.setObjectName("mw_script_settings_panel")
+        panel_layout = QtWidgets.QVBoxLayout(panel)
+        panel_layout.setContentsMargins(12, 12, 12, 12)
+        panel_layout.setSpacing(8)
+
+        scroll = QtWidgets.QScrollArea(panel)
+        scroll.setObjectName("mw_graph_settings_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setMinimumWidth(320)
+        panel_layout.addWidget(scroll, 1)
+        self._graph_settings_scroll = scroll
+
+        content = QtWidgets.QWidget(scroll)
+        content_layout = QtWidgets.QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+        scroll.setWidget(content)
+        self._graph_settings_content = content
+
+        self._plugin_settings_panel = panel
+        self._plugin_settings_container = None
+        self._plugin_settings_layout = None
+        self._plugin_settings_placeholder = None
+
+        try:
+            self._populate_graph_settings(content_layout)
+        except NotImplementedError:
+            pass
+
+        container = self._plugin_settings_container
+        layout = self._plugin_settings_layout
+        if container is None or layout is None:
+            container = QtWidgets.QFrame(content)
+            container.setObjectName("mw_plugin_settings_container")
+            layout = QtWidgets.QVBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(8)
+            content_layout.addWidget(container)
+            self._plugin_settings_container = container
+            self._plugin_settings_layout = layout
+        else:
+            container.setVisible(True)
+
+        placeholder = QtWidgets.QLabel("Select a script to configure graph settings.", container)
+        placeholder.setWordWrap(True)
+        placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        placeholder.setObjectName("mw_graph_settings_placeholder")
+        layout.addWidget(placeholder)
+        layout.addStretch(1)
+        self._plugin_settings_placeholder = placeholder
+
+        content_layout.addStretch(1)
+
+        action.setDefaultWidget(panel)
+        menu.addAction(action)
+        menu.aboutToShow.connect(self._handle_graph_menu_show)
+
+        self._graph_settings_menu = menu
+        self._graph_settings_action = action
+
+        self._refresh_graph_section_buttons(None)
+
+    def _refresh_graph_section_buttons(self, widget: QtWidgets.QWidget | None) -> None:
+        layout = self._graph_section_layout
+        menu = self._graph_settings_menu
+        if layout is None or menu is None:
+            return
+
+        self._graph_section_buttons = []
+        self._graph_settings_pending_anchor = widget
+
+        while layout.count():
+            item = layout.takeAt(0)
+            child = item.widget()
+            if child is not None:
+                child.deleteLater()
+
+        sections = self._discover_settings_sections(widget)
+        if not sections:
+            title = "Settings"
+            button = self._create_graph_section_button(title, None, menu)
+            button.setEnabled(widget is not None)
+            layout.addWidget(button)
+            self._graph_section_buttons = [button]
+            layout.addStretch(1)
+            return
+
+        buttons: list[QtWidgets.QToolButton] = []
+        for title, anchor in sections:
+            button = self._create_graph_section_button(title, anchor, menu)
+            layout.addWidget(button)
+            buttons.append(button)
+        layout.addStretch(1)
+        self._graph_section_buttons = buttons
+
+    def _discover_settings_sections(
+        self,
+        widget: QtWidgets.QWidget | None,
+    ) -> list[tuple[str, QtWidgets.QWidget | None]]:
+        if widget is None:
+            return []
+
+        sections: list[tuple[str, QtWidgets.QWidget]] = []
+
+        group_boxes = widget.findChildren(
+            QtWidgets.QGroupBox,
+            options=QtCore.Qt.FindChildOption.FindChildrenRecursively,
+        )
+        unique_boxes: list[QtWidgets.QGroupBox] = []
+        seen_ids: set[int] = set()
+        for box in group_boxes:
+            parent_box = box.parent()
+            if isinstance(parent_box, QtWidgets.QGroupBox):
+                continue
+            marker = id(box)
+            if marker in seen_ids:
+                continue
+            unique_boxes.append(box)
+            seen_ids.add(marker)
+        if unique_boxes:
+            sortable: list[tuple[int, str, QtWidgets.QWidget]] = []
+            for idx, box in enumerate(unique_boxes):
+                title = box.title().strip() or box.objectName().replace("_", " ").title() or f"Section {idx + 1}"
+                pos = box.mapTo(widget, QtCore.QPoint(0, 0)).y()
+                sortable.append((pos, title, box))
+            sortable.sort(key=lambda entry: entry[0])
+            sections.extend((title, anchor) for _, title, anchor in sortable)
+        else:
+            tabs = widget.findChildren(
+                QtWidgets.QTabWidget,
+                options=QtCore.Qt.FindChildOption.FindChildrenRecursively,
+            )
+            for tab_widget in tabs:
+                for index in range(tab_widget.count()):
+                    title = tab_widget.tabText(index).strip() or f"Tab {index + 1}"
+                    anchor = tab_widget.widget(index)
+                    if anchor is not None:
+                        sections.append((title, anchor))
+                if sections:
+                    break
+
+        if not sections:
+            return [("Settings", widget)]
+
+        return [("All", widget)] + sections
+
+    def _create_graph_section_button(
+        self,
+        title: str,
+        anchor: QtWidgets.QWidget | None,
+        menu: QtWidgets.QMenu,
+    ) -> QtWidgets.QToolButton:
+        button = QtWidgets.QToolButton(self)
+        button.setObjectName(f"mw_graph_section_{title.lower().replace(' ', '_')}")
+        button.setText(title)
+        button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
+        button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setMenu(menu)
+        button.setIconSize(self._toolbar_icon_size)
+        button.setMinimumHeight(self._toolbar_icon_size.height() + 6)
+        button.pressed.connect(lambda anchor=anchor: self._set_graph_settings_anchor(anchor))
+        return button
+
+    def _set_graph_settings_anchor(self, anchor: QtWidgets.QWidget | None) -> None:
+        self._graph_settings_pending_anchor = anchor
+
+    def _handle_graph_menu_show(self) -> None:
+        scroll = self._graph_settings_scroll
+        if scroll is None:
+            return
+        content = self._graph_settings_content
+        if content is None:
+            scroll.ensureVisible(0, 0, 0, 0)
+            return
+        anchor = self._graph_settings_pending_anchor
+        if anchor is None or not anchor.isVisible():
+            scroll.ensureVisible(0, 0, 0, 0)
+            return
+        top_left = anchor.mapTo(content, QtCore.QPoint(0, 0))
+        margin = 12
+        scroll.ensureVisible(top_left.x(), top_left.y(), margin, margin)
+
+    def _set_plugin_settings_widget(self, widget: QtWidgets.QWidget | None) -> None:
+        layout = self._plugin_settings_layout
+        container = self._plugin_settings_container
+        placeholder = self._plugin_settings_placeholder
+        if layout is None or container is None:
+            return
+
+        if self._active_settings_widget is not None:
+            layout.removeWidget(self._active_settings_widget)
+            self._active_settings_widget.setParent(None)
+            self._active_settings_widget = None
+
+        has_plugin = bool(getattr(self, "_current_plugin", None))
+        if widget is None:
+            message = (
+                "This script does not expose additional graph settings."
+                if has_plugin
+                else "Select a script to configure graph settings."
+            )
+            if isinstance(placeholder, QtWidgets.QLabel):
+                placeholder.setText(message)
+                placeholder.setVisible(True)
+            self._refresh_graph_section_buttons(None)
+            return
+
+        if widget.parent() is not container:
+            widget.setParent(container)
+        layout.insertWidget(0, widget)
+        widget.show()
+        self._active_settings_widget = widget
+        if isinstance(placeholder, QtWidgets.QWidget):
+            placeholder.setVisible(False)
+        self._refresh_graph_section_buttons(widget)
+
     def _setup_script_toolbar(self) -> None:
         """Install the default toolbar for script-specific controls."""
 
         toolbar = QtWidgets.QToolBar("Script", self)
         toolbar.setObjectName("mw_script_toolbar")
-        toolbar.setMovable(True)
-        toolbar.setFloatable(False)
-        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.setToolTip(toolbar.windowTitle())
+        self._configure_toolbar(toolbar)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._script_toolbar = toolbar
 
@@ -1707,13 +1950,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         generate_action.triggered.connect(self._generate_plots)
         self.plot_button = generate_action
 
+        self._init_graph_settings_menu(toolbar)
+
     def _setup_action_toolbar(self) -> None:
+        self.addToolBarBreak(QtCore.Qt.ToolBarArea.TopToolBarArea)
         toolbar = QtWidgets.QToolBar("Plot actions", self)
         toolbar.setObjectName("mw_action_toolbar")
-        toolbar.setMovable(True)
-        toolbar.setFloatable(False)
-        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.setToolTip(toolbar.windowTitle())
+        self._configure_toolbar(toolbar)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._action_toolbar = toolbar
 
@@ -1794,10 +2037,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         controls = self._format_controls
         toolbar = QtWidgets.QToolBar("Format", self)
         toolbar.setObjectName("mw_format_toolbar")
-        toolbar.setMovable(True)
-        toolbar.setFloatable(False)
+        self._configure_toolbar(toolbar)
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-        toolbar.setToolTip(toolbar.windowTitle())
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         controls.toolbar = toolbar
 
@@ -2779,6 +3020,27 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._assign_project_payload(sheet_item, ("worksheet", worksheet.key))
             workbook_item.addChild(sheet_item)
             self._worksheet_tree_items[worksheet.key] = sheet_item
+
+    def _append_log(self, message: str, *, level: Literal["info", "error"] = "info") -> None:
+        view = getattr(self, "log_view", None)
+        if isinstance(view, QtWidgets.QPlainTextEdit):
+            view.appendPlainText(message)
+            try:
+                view.ensureCursorVisible()
+            except Exception:
+                pass
+
+        logger = logging.getLogger("PyPlot")
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger.log(log_level, message)
+
+        dock = getattr(self, "log_dock", None)
+        view_visible = isinstance(view, QtWidgets.QPlainTextEdit) and view.isVisible()
+        dock_visible = isinstance(dock, QtWidgets.QDockWidget) and dock.isVisible()
+        if level == "error" and not (view_visible and dock_visible):
+            self._log_has_unread_errors = True
+        elif level != "error" and view_visible and dock_visible:
+            self._log_has_unread_errors = False
 
     def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:
         if self._data_tree_root is None:

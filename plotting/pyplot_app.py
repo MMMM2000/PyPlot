@@ -461,7 +461,9 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                 return
             except Exception:
                 pass
-        print(message)
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
+        logger.log(log_level, message)
 
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked() and cb.isEnabled()]
@@ -606,6 +608,15 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self.host.open_origin_button.setEnabled(has_data)
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
+        if self._summary_label is not None:
+            if not has_data:
+                self._summary_label.setText("Select temperature sensitivity files then click Load data.")
+            elif self._plot_tabs:
+                self._summary_label.clear()
+            else:
+                self._summary_label.setText(
+                    "Data loaded. Adjust settings and click Plot Temperature Sensitivity to generate graphs."
+                )
         self.host._update_project_actions()
 
     def export_txt(self) -> None:  # type: ignore[override]
@@ -778,7 +789,9 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                 return
             except Exception:
                 pass
-        print(message)
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
+        logger.log(log_level, message)
 
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked() and cb.isEnabled()]
@@ -861,9 +874,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             self.host._plugin_last_directories[self.name] = paths[0].parent
         self._register_workbooks(paths)
         if self._summary_label is not None:
-            names = ", ".join(path.name for path in paths)
             self._summary_label.setText(
-                f"Loaded {len(paths)} file(s): {names}\nClick Plot Temperature Sensitivity to generate graphs."
+                "Data loaded. Adjust settings and click Plot Temperature Sensitivity to generate graphs."
             )
         self._log(
             "Loaded {count} temperature sensitivity file(s): {names}".format(
@@ -1153,7 +1165,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 return
             except Exception:
                 pass
-        print(message)
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
+        logger.log(log_level, message)
 
     def _apply_settings_to_core(self) -> None:
         if isinstance(self._origin_mode_combo, QtWidgets.QComboBox):
@@ -1935,7 +1949,9 @@ class StressDependencePlugin(PyPlotPlugin):
                 return
             except Exception:
                 pass
-        print(message)
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
+        logger.log(log_level, message)
 
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
@@ -2434,7 +2450,9 @@ class StressSensitivityPlugin(PyPlotPlugin):
                 return
             except Exception:
                 pass
-        print(message)
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
+        logger.log(log_level, message)
 
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
@@ -2853,9 +2871,6 @@ class PyPlotWorkbench(PyPlotWindow):
         self._current_plugin: PyPlotPlugin | None = None
         self._current_plotter_name: str | None = None
         self._plotter_combo: QtWidgets.QComboBox | None = None
-        self._plugin_settings_container: QtWidgets.QWidget | None = None
-        self._plugin_settings_layout: QtWidgets.QVBoxLayout | None = None
-        self._plugin_settings_panel: QtWidgets.QWidget | None = None
         self._active_plugin_updater: Callable[[], None] | None = None
         self._initial_plotter = initial_plotter
         self._plotter_history: list[str] = self._load_plotter_history()
@@ -2939,15 +2954,13 @@ class PyPlotWorkbench(PyPlotWindow):
     def _setup_script_toolbar(self) -> None:  # type: ignore[override]
         toolbar = QtWidgets.QToolBar("Script", self)
         toolbar.setObjectName("mw_script_toolbar")
-        toolbar.setMovable(True)
-        toolbar.setFloatable(False)
-        toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        toolbar.setToolTip(toolbar.windowTitle())
+        self._configure_toolbar(toolbar)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._script_toolbar = toolbar
 
         script_label = QtWidgets.QLabel("Script:", toolbar)
         script_label.setContentsMargins(4, 0, 6, 0)
+        script_label.setMinimumHeight(self._toolbar_icon_size.height() + 4)
         toolbar.addWidget(script_label)
 
         combo = QtWidgets.QComboBox(toolbar)
@@ -2956,6 +2969,7 @@ class PyPlotWorkbench(PyPlotWindow):
         combo.setMinimumContentsLength(12)
         combo.setToolTip("Select a plotting script")
         combo.currentIndexChanged.connect(lambda _: self._apply_selected_plotter())
+        combo.setMinimumHeight(self._toolbar_icon_size.height() + 6)
         toolbar.addWidget(combo)
         self._plotter_combo = combo
         self._refresh_plotter_combo()
@@ -2971,6 +2985,8 @@ class PyPlotWorkbench(PyPlotWindow):
         generate_action.setEnabled(False)
         generate_action.triggered.connect(self._generate_plots)
         self.plot_button = generate_action
+
+        self._init_graph_settings_menu(toolbar)
 
     def _refresh_plotter_combo(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
@@ -3494,48 +3510,24 @@ class PyPlotWorkbench(PyPlotWindow):
             "PyPlot",
             "Origin export is not available for the selected script.",
         )
+
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         panel = layout.parentWidget()
         if isinstance(panel, QtWidgets.QWidget):
             panel.setObjectName("mw_script_settings_panel")
-            panel.setVisible(False)
             self._plugin_settings_panel = panel
 
-        container = QtWidgets.QFrame(self)
+        container = QtWidgets.QFrame(panel or self)
         container.setObjectName("mw_plugin_settings_container")
         container_layout = QtWidgets.QVBoxLayout(container)
         container_layout.setContentsMargins(0, 0, 0, 0)
         container_layout.setSpacing(8)
-        container.setVisible(False)
         layout.addWidget(container)
 
         self._plugin_settings_container = container
         self._plugin_settings_layout = container_layout
-
-    def _set_plugin_settings_widget(self, widget: QtWidgets.QWidget | None) -> None:
-        if self._plugin_settings_layout is None or self._plugin_settings_container is None:
-            return
-        layout = self._plugin_settings_layout
-        while layout.count():
-            item = layout.takeAt(0)
-            if item is None:
-                continue
-            child = item.widget()
-            if child is not None:
-                child.setParent(None)
-            del item
-        panel = self._plugin_settings_panel
-        if widget is None:
-            self._plugin_settings_container.setVisible(False)
-            if isinstance(panel, QtWidgets.QWidget):
-                panel.setVisible(False)
-        else:
-            layout.addWidget(widget)
-            self._plugin_settings_container.setVisible(True)
-            if isinstance(panel, QtWidgets.QWidget):
-                panel.setVisible(True)
 
     def _apply_selected_plotter(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
