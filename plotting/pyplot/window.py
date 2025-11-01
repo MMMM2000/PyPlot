@@ -96,6 +96,36 @@ class FormatToolbarControls:
     line_symbol_action: QtGui.QAction | None = None
 
 
+class _GraphSectionButton(QtWidgets.QToolButton):
+    """QToolButton that records which settings section the user wants to view."""
+
+    def __init__(
+        self,
+        anchor: QtWidgets.QWidget | None,
+        callback: Callable[[QtWidgets.QWidget | None], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._graph_section_anchor = anchor
+        self._graph_section_callback = callback
+
+    def _notify_anchor(self) -> None:
+        callback = self._graph_section_callback
+        if callable(callback):
+            try:
+                callback(self._graph_section_anchor)
+            except Exception:
+                pass
+
+    def showMenu(self) -> None:  # type: ignore[override]
+        self._notify_anchor()
+        super().showMenu()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        self._notify_anchor()
+        super().mousePressEvent(event)
+
+
 class _DockSwitcherWidget(QtWidgets.QWidget):
     """Vertical tab bar that mirrors dock visibility with hover-to-open behaviour."""
 
@@ -1673,7 +1703,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._graph_section_layout: QtWidgets.QHBoxLayout | None = None
         self._graph_section_buttons: list[QtWidgets.QToolButton] = []
         self._graph_settings_sections: list[tuple[str, QtWidgets.QWidget | None]] = []
-        self._graph_settings_hidden_widgets: list[QtWidgets.QWidget] = []
+        self._graph_settings_hidden_widgets: list[tuple[QtWidgets.QWidget, bool]] = []
         self._graph_settings_hidden_tabs: list[
             tuple[QtWidgets.QTabWidget, list[tuple[int, bool]], int]
         ] = []
@@ -2756,7 +2786,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         anchor: QtWidgets.QWidget | None,
         menu: QtWidgets.QMenu,
     ) -> QtWidgets.QToolButton:
-        button = QtWidgets.QToolButton(self)
+        button = _GraphSectionButton(anchor, self._set_graph_settings_anchor, self)
         button.setObjectName(f"mw_graph_section_{title.lower().replace(' ', '_')}")
         button.setText(title)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -2768,6 +2798,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return button
 
     def _set_graph_settings_anchor(self, anchor: QtWidgets.QWidget | None) -> None:
+        container = self._plugin_settings_container
+        if anchor is not None and isinstance(container, QtWidgets.QWidget):
+            root = self._section_root_widget(anchor, container)
+            anchor = root if root is not None else anchor
         self._graph_settings_pending_anchor = anchor
 
     def _handle_graph_menu_show(self) -> None:
@@ -2799,6 +2833,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         if anchor is container or anchor is self._active_settings_widget:
             return
+        if isinstance(anchor, QtWidgets.QWidget) and not anchor.isVisible():
+            anchor.setVisible(True)
         sections = list(self._graph_settings_sections)
         if not sections:
             return
@@ -2806,10 +2842,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if section_widget is None or section_widget is anchor:
                 continue
             root = self._section_root_widget(section_widget, container)
-            if root is None or not root.isVisible():
-                continue
-            root.setVisible(False)
-            self._graph_settings_hidden_widgets.append(root)
+            targets: tuple[QtWidgets.QWidget, ...]
+            if root is not None and root is not section_widget:
+                targets = (root, section_widget)
+            else:
+                targets = (section_widget,)
+            for target in targets:
+                if target is None or not isinstance(target, QtWidgets.QWidget):
+                    continue
+                visible = target.isVisible()
+                if not visible:
+                    continue
+                target.setVisible(False)
+                self._graph_settings_hidden_widgets.append((target, visible))
         tab_widget = self._find_tab_widget(anchor)
         if tab_widget is not None:
             tab_bar = tab_widget.tabBar()
@@ -2836,9 +2881,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _restore_graph_section_filter(self) -> None:
         if self._graph_settings_hidden_widgets:
-            for widget in self._graph_settings_hidden_widgets:
+            for widget, was_visible in self._graph_settings_hidden_widgets:
                 if widget is not None:
-                    widget.setVisible(True)
+                    widget.setVisible(was_visible)
         self._graph_settings_hidden_widgets.clear()
 
         if self._graph_settings_hidden_tabs:
@@ -2868,18 +2913,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         widget: QtWidgets.QWidget,
         container: QtWidgets.QWidget,
     ) -> QtWidgets.QWidget | None:
+        if not isinstance(widget, QtWidgets.QWidget):
+            return None
+
         current: QtWidgets.QWidget | None = widget
+        previous: QtWidgets.QWidget | None = widget
+
         while current is not None and current is not container:
             parent = current.parent()
-            if parent is container or parent is None:
+            if parent is None or not isinstance(parent, QtWidgets.QWidget):
                 break
-            if isinstance(parent, QtWidgets.QGroupBox):
-                current = parent
-                break
+            if parent is container:
+                return previous
+            previous = current
             current = cast(QtWidgets.QWidget, parent)
-        if current is container:
-            return widget
-        return current
+
+        return previous
 
     def _find_tab_widget(
         self, widget: QtWidgets.QWidget

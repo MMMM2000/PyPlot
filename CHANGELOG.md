@@ -1,4 +1,14 @@
 # Changelog
+## 2025-11-01 15:47 UTC
+
+- Prevented the VSM hysteresis plugin from crashing when the workbench build omits the Matplotlib pop-out action by guarding the legacy normalization helpers.
+- Ensured each Temperature Sensitivity toolbar button isolates its own settings group instead of showing the entire panel.
+
+## 2025-11-01 15:20 UTC
+
+- Relocated the VSM hysteresis workbench plugin into `plotting/plugins/` and split the shared plugin base classes so PyPlot loads the script via the new namespace package.
+- Pointed the launcher, VSM plotter, and microwire builder UI at `plotting.pyplot.*` modules directly to reduce reliance on the legacy compatibility wrappers.
+
 ## 2025-11-01 13:54 UTC
 
 - Repacked the PyPlot workbench into a dedicated package with compatibility wrappers and
