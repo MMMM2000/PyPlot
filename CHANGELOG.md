@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-01 13:31 UTC
+
+- Fixed the Microwire Data Builder launch crash by merging the table column
+  auto-fit sizing into a single helper so PyQt6 no longer raises
+  `AttributeError: 'super' object has no attribute '_auto_fit_columns'`.
+ 
 ## 2025-11-01 06:42 UTC
 
 - Moved As/Ms editing into the Current density tab, stacking the Matplotlib previews beside the workbook and recalculating densities from the recorded phase points so hover readouts stay available while you tune transitions.

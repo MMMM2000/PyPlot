@@ -3677,6 +3677,39 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             if target > 0:
                 table.setColumnWidth(idx, target)
 
+        header = table.horizontalHeader()
+        v_header = table.verticalHeader()
+        total_width = 0
+        try:
+            total_width = header.length()
+        except Exception:
+            total_width = 0
+        if v_header is not None:
+            total_width += v_header.width()
+        total_width += table.frameWidth() * 2
+        screen_rect = None
+        try:
+            window = self.window()
+            if isinstance(window, QtWidgets.QWidget):
+                screen = QtGui.QGuiApplication.screenAt(
+                    window.mapToGlobal(window.rect().center())
+                )
+                if screen is None:
+                    screen = QtGui.QGuiApplication.primaryScreen()
+                if screen is not None:
+                    screen_rect = screen.availableGeometry()
+        except Exception:
+            screen_rect = None
+        if screen_rect is not None:
+            max_width = max(480, screen_rect.width() - 220)
+            constrained = min(total_width, max_width)
+            table.setMinimumWidth(constrained)
+            table.setMaximumWidth(max_width)
+            splitter = self._table_splitter
+            if isinstance(splitter, QtWidgets.QSplitter):
+                remaining = max(screen_rect.width() - constrained, 320)
+                splitter.setSizes([constrained, remaining])
+
     def _update_source_button(self) -> None:
         has_sources = self.sources_list.count() > 0
         text = "Remove folder…" if has_sources else "Connect folder…"
@@ -4298,42 +4331,6 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.data_updated.emit()
         except Exception:
             pass
-
-    def _auto_fit_columns(self) -> None:  # type: ignore[override]
-        super()._auto_fit_columns()
-        table = self.table_view
-        if not isinstance(table, QtWidgets.QTableView):
-            return
-        header = table.horizontalHeader()
-        v_header = table.verticalHeader()
-        total_width = 0
-        try:
-            total_width = header.length()
-        except Exception:
-            total_width = 0
-        if v_header is not None:
-            total_width += v_header.width()
-        total_width += table.frameWidth() * 2
-        screen_rect = None
-        try:
-            window = self.window()
-            if isinstance(window, QtWidgets.QWidget):
-                screen = QtGui.QGuiApplication.screenAt(window.mapToGlobal(window.rect().center()))
-                if screen is None:
-                    screen = QtGui.QGuiApplication.primaryScreen()
-                if screen is not None:
-                    screen_rect = screen.availableGeometry()
-        except Exception:
-            screen_rect = None
-        if screen_rect is not None:
-            max_width = max(480, screen_rect.width() - 220)
-            constrained = min(total_width, max_width)
-            table.setMinimumWidth(constrained)
-            table.setMaximumWidth(max_width)
-            splitter = self._table_splitter
-            if isinstance(splitter, QtWidgets.QSplitter):
-                remaining = max(screen_rect.width() - constrained, 320)
-                splitter.setSizes([constrained, remaining])
 
     def _handle_worker_failed(self, exc: object) -> None:
         self._active_candidates = []
