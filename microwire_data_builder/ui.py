@@ -114,10 +114,9 @@ CURRENT_DENSITY_COLUMNS = [
     "Composition",
     "Microwire",
     MICROSCOPE_D_COLUMN,
-    "Area (mm^2)",
     ANNEALING_AS_COLUMN,
-    CURRENT_DENSITY_AS_DENSITY_COLUMN,
     ANNEALING_MS_COLUMN,
+    CURRENT_DENSITY_AS_DENSITY_COLUMN,
     CURRENT_DENSITY_MS_DENSITY_COLUMN,
     "Setpoints (mA)",
     "Sources",
@@ -2841,6 +2840,7 @@ def _select_high_low_pair(
 
 
 class _AnnealingPlotDisplay(QtWidgets.QWidget):
+    valuePicked = QtCore.pyqtSignal(float)
     """Render a single annealing plot with contextual details."""
 
     def __init__(
@@ -2854,6 +2854,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self._logger = logger
         self._canvas: FigureCanvasQTAgg | None = None
         self._motion_cid: Optional[int] = None
+        self._click_cid: Optional[int] = None
         self._cursor_units: str = "mA"
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -2889,7 +2890,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self.cursor_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        self.cursor_label.setStyleSheet("color: palette(mid); font-size: 11px;")
+        self.cursor_label.setStyleSheet("color: #f1f3f4; font-size: 11px;")
         layout.addWidget(self.cursor_label)
 
     def set_record(
@@ -2956,6 +2957,10 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             self._motion_cid = canvas.mpl_connect("motion_notify_event", self._handle_motion)
         except Exception:
             self._motion_cid = None
+        try:
+            self._click_cid = canvas.mpl_connect("button_press_event", self._handle_click)
+        except Exception:
+            self._click_cid = None
         self._cursor_units = "mA"
         self._update_cursor_label(None)
 
@@ -2966,6 +2971,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
     def _show_placeholder(self, message: str) -> None:
         if self._canvas is not None:
             self._disconnect_motion_handler()
+            self._disconnect_click_handler()
             self._stack.removeWidget(self._canvas)
             self._canvas.setParent(None)
             self._canvas.deleteLater()
@@ -2983,6 +2989,14 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                 pass
         self._motion_cid = None
 
+    def _disconnect_click_handler(self) -> None:
+        if self._canvas is not None and self._click_cid is not None:
+            try:
+                self._canvas.mpl_disconnect(self._click_cid)
+            except Exception:
+                pass
+        self._click_cid = None
+
     def _handle_motion(self, event: Any) -> None:
         if event is None or event.inaxes is None or event.xdata is None:
             self._update_cursor_label(None)
@@ -2993,6 +3007,21 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             self._update_cursor_label(None)
             return
         self._update_cursor_label(value)
+
+    def _handle_click(self, event: Any) -> None:
+        if event is None or not getattr(event, "dblclick", False):
+            return
+        if event.xdata is None:
+            return
+        try:
+            value = float(event.xdata)
+        except Exception:
+            return
+        self._update_cursor_label(value)
+        try:
+            self.valuePicked.emit(value)
+        except Exception:
+            pass
 
     def _update_cursor_label(self, value: Optional[float]) -> None:
         if not isinstance(value, (int, float)) or not math.isfinite(float(value)):
@@ -3055,6 +3084,26 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
             title,
             target_px=(target_width, target_height),
         )
+        try:
+            axes = figure.axes[0] if figure.axes else None
+        except Exception:
+            axes = None
+        if axes is not None:
+            try:
+                axes.set_title("")
+                axes.set_xlabel("")
+                axes.set_ylabel("")
+            except Exception:
+                pass
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    legend.remove()
+                except Exception:
+                    pass
         return figure
 
 
@@ -4250,6 +4299,42 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
 
+    def _auto_fit_columns(self) -> None:  # type: ignore[override]
+        super()._auto_fit_columns()
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        header = table.horizontalHeader()
+        v_header = table.verticalHeader()
+        total_width = 0
+        try:
+            total_width = header.length()
+        except Exception:
+            total_width = 0
+        if v_header is not None:
+            total_width += v_header.width()
+        total_width += table.frameWidth() * 2
+        screen_rect = None
+        try:
+            window = self.window()
+            if isinstance(window, QtWidgets.QWidget):
+                screen = QtGui.QGuiApplication.screenAt(window.mapToGlobal(window.rect().center()))
+                if screen is None:
+                    screen = QtGui.QGuiApplication.primaryScreen()
+                if screen is not None:
+                    screen_rect = screen.availableGeometry()
+        except Exception:
+            screen_rect = None
+        if screen_rect is not None:
+            max_width = max(480, screen_rect.width() - 220)
+            constrained = min(total_width, max_width)
+            table.setMinimumWidth(constrained)
+            table.setMaximumWidth(max_width)
+            splitter = self._table_splitter
+            if isinstance(splitter, QtWidgets.QSplitter):
+                remaining = max(screen_rect.width() - constrained, 320)
+                splitter.setSizes([constrained, remaining])
+
     def _handle_worker_failed(self, exc: object) -> None:
         self._active_candidates = []
         self._fail_progress()
@@ -4367,6 +4452,69 @@ class FabricationSection(MiniDatabaseSection):
         if not candidates:
             return super()._collect_candidates()
         return sorted(candidates.values())
+
+    def _update_status(self) -> None:  # type: ignore[override]
+        super()._update_status()
+        missing = self._missing_microwires()
+        if not missing:
+            return
+        base_message = self.status_label.text()
+        preview = ", ".join(missing[:3])
+        if len(missing) > 3:
+            preview += ", …"
+        message = f"{base_message} — Missing {len(missing)} annealing record(s): {preview}"
+        self.status_label.setText(message)
+        try:
+            self.status_changed.emit(message)
+        except Exception:
+            pass
+
+    def _missing_microwires(self) -> List[str]:
+        expected_map, _ = self._load_relevant_map()
+        expected: Set[Tuple[str, int, int]] = set()
+        for composition, draws in expected_map.items():
+            for draw, pieces in draws.items():
+                for piece in pieces:
+                    if piece is None:
+                        continue
+                    try:
+                        expected.add((str(composition), int(draw), int(piece)))
+                    except (TypeError, ValueError):
+                        continue
+        if not expected:
+            return []
+        present: Set[Tuple[str, int, int]] = set()
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if isinstance(frame, pd.DataFrame) and not frame.empty:
+            if "_group_key" in frame.columns:
+                for value in frame["_group_key"]:
+                    if value in (None, "", "None"):
+                        continue
+                    parts = str(value).split("|")
+                    if len(parts) != 3:
+                        continue
+                    comp = parts[0].strip()
+                    try:
+                        draw_val = int(parts[1])
+                        piece_val = int(parts[2])
+                    except ValueError:
+                        continue
+                    present.add((comp, draw_val, piece_val))
+            else:
+                for _, row in frame.iterrows():
+                    comp = str(row.get("Composition", "")).strip()
+                    microwire = str(row.get("Microwire", "")).strip()
+                    draw_piece = _microwire_tuple_from_label(microwire)
+                    if draw_piece is None:
+                        continue
+                    draw_val, piece_val = draw_piece
+                    present.add((comp, int(draw_val), int(piece_val)))
+        missing = [
+            f"{composition} {draw}/{piece}"
+            for composition, draw, piece in sorted(expected)
+            if (composition, draw, piece) not in present
+        ]
+        return missing
 
     @staticmethod
     def _normalise_int(value: object) -> Optional[int]:
@@ -5438,6 +5586,28 @@ class MicroscopeSection(MiniDatabaseSection):
             frame = pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
         else:
             frame = frame.copy()
+        if expected_keys:
+            allowed = {f"{composition}|{draw}|{piece}" for composition, draw, piece in expected_keys}
+            if "_key" in frame.columns:
+                try:
+                    mask = frame["_key"].astype(str).isin(allowed)
+                    frame = frame.loc[mask].reset_index(drop=True)
+                except Exception:
+                    pass
+            else:
+                filtered_rows: List[int] = []
+                for idx, row in frame.iterrows():
+                    composition = str(row.get("Composition", "")).strip()
+                    microwire_label = str(row.get("Microwire", "")).strip()
+                    wire_tuple = _microwire_tuple_from_label(microwire_label)
+                    if wire_tuple is None:
+                        continue
+                    draw, piece = wire_tuple
+                    key_str = f"{composition}|{int(draw)}|{int(piece)}"
+                    if key_str in allowed:
+                        filtered_rows.append(idx)
+                if filtered_rows:
+                    frame = frame.loc[filtered_rows].reset_index(drop=True)
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in frame.columns:
                 frame[column] = pd.Series([None] * len(frame))
@@ -6032,6 +6202,8 @@ class MicroscopeSection(MiniDatabaseSection):
             if key_tuple is None:
                 continue
             comp, draw, piece = key_tuple
+            if expected_keys and (comp, draw, piece) not in expected_keys:
+                continue
             key = f"{comp}|{draw}|{piece}"
             validated_entry = self._validated.get(key)
             if not isinstance(validated_entry, dict):
@@ -6136,6 +6308,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
 
 class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
+    valuePicked = QtCore.pyqtSignal(str, float)
     def __init__(self, logger: logging.Logger, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self._logger = logger
@@ -6155,6 +6328,8 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
         layout.addWidget(self._low_display, 1)
         layout.setStretch(1, 1)
         layout.setStretch(2, 1)
+        self._high_display.valuePicked.connect(lambda value: self.valuePicked.emit("As", value))
+        self._low_display.valuePicked.connect(lambda value: self.valuePicked.emit("Ms", value))
 
     def update_selection(
         self,
@@ -6245,11 +6420,16 @@ class CurrentDensitySection(QtWidgets.QWidget):
         table = QtWidgets.QTableView(splitter)
         table.setModel(self.model)
         table.setAlternatingRowColors(True)
-        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
         table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
         table.setSortingEnabled(True)
         table.setVerticalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
         table.setHorizontalScrollMode(QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel)
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.SelectedClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+        )
         header = table.horizontalHeader()
         if header is not None:
             header.setStretchLastSection(True)
@@ -6268,6 +6448,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         preview_panel = _CurrentDensityPreviewPanel(logger, splitter)
         splitter.addWidget(preview_panel)
         self._preview_panel = preview_panel
+        preview_panel.valuePicked.connect(self._apply_picked_value)
 
         if hasattr(self._annealing_section, "data_updated"):
             try:
@@ -6370,10 +6551,14 @@ class CurrentDensitySection(QtWidgets.QWidget):
         selection_model = table.selectionModel()
         if selection_model is None:
             return None
-        rows = selection_model.selectedRows()
-        if not rows:
-            return None
-        row_index = rows[0].row()
+        current_index = selection_model.currentIndex()
+        if current_index.isValid():
+            row_index = current_index.row()
+        else:
+            rows = selection_model.selectedRows()
+            if not rows:
+                return None
+            row_index = rows[0].row()
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or row_index < 0 or row_index >= len(frame.index):
             return None
@@ -6480,6 +6665,49 @@ class CurrentDensitySection(QtWidgets.QWidget):
         if updated and not setter_used:
             QtCore.QTimer.singleShot(0, self.refresh_data)
 
+    def _column_index_for_kind(self, kind: str) -> Optional[int]:
+        target_column = ANNEALING_AS_COLUMN if kind == "As" else ANNEALING_MS_COLUMN
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame):
+            return None
+        try:
+            return int(frame.columns.get_loc(target_column))
+        except Exception:
+            return None
+
+    def _apply_picked_value(self, kind: str, value: float) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        selection_model = table.selectionModel()
+        if selection_model is None:
+            return
+        column_index = self._column_index_for_kind(kind)
+        if column_index is None:
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        current_index = selection_model.currentIndex()
+        row = current_index.row() if current_index.isValid() else None
+        if row is None:
+            rows = selection_model.selectedRows()
+            if rows:
+                row = rows[0].row()
+        if row is None or row < 0 or row >= len(frame.index):
+            return
+        target_index = current_index if (current_index.isValid() and current_index.column() == column_index) else self.model.index(row, column_index)
+        if not target_index.isValid():
+            return
+        if not self.model.setData(target_index, float(value)):
+            return
+        try:
+            table.setCurrentIndex(target_index)
+            table.scrollTo(target_index, QtWidgets.QAbstractItemView.ScrollHint.EnsureVisible)
+        except Exception:
+            pass
+        self._update_preview()
+
     @staticmethod
     def _coerce_phase_value(value: Any) -> Optional[float]:
         if value is None:
@@ -6540,13 +6768,12 @@ class CurrentDensitySection(QtWidgets.QWidget):
         diameter_map = self._collect_microscope_data()
         setpoint_map = self._collect_setpoint_data()
         phase_map = self._collect_phase_points()
-        keys = sorted(
-            set(diameter_map.keys())
-            | set(setpoint_map.keys())
-            | set(phase_map.keys())
-        )
+        keys = sorted(set(setpoint_map.keys()) | set(phase_map.keys()))
         rows: List[Dict[str, Any]] = []
         all_sources: Set[str] = set()
+        if not keys:
+            columns = CURRENT_DENSITY_COLUMNS + ["_group_key"]
+            return pd.DataFrame(columns=columns)
         for composition, draw, piece in keys:
             micro_info = diameter_map.get((composition, draw, piece), {})
             setpoint_info = setpoint_map.get((composition, draw, piece), {})
@@ -6579,10 +6806,9 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     "Composition": composition_label,
                     "Microwire": microwire_label,
                     MICROSCOPE_D_COLUMN: diameter_um,
-                    "Area (mm^2)": area_mm2,
                     ANNEALING_AS_COLUMN: as_value,
-                    CURRENT_DENSITY_AS_DENSITY_COLUMN: as_density,
                     ANNEALING_MS_COLUMN: ms_value,
+                    CURRENT_DENSITY_AS_DENSITY_COLUMN: as_density,
                     CURRENT_DENSITY_MS_DENSITY_COLUMN: ms_density,
                     "Setpoints (mA)": self._format_setpoints(setpoints),
                     "Sources": self._summarise_sources(sources),
@@ -8398,6 +8624,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         self._last_output_dir = str(self._default_output_dir)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
+        self._clamp_active = False
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
@@ -8516,6 +8743,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.project_dock.setObjectName("builderProjectExplorerDock")
         self.project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.project_dock)
+        self.project_dock.setMinimumWidth(260)
+        self._primary_dock_widths[self.project_dock] = 320
 
         self.log_dock = QtWidgets.QDockWidget("Message Log", self)
         self.log_dock.setObjectName("builderMessageLogDock")
@@ -8709,10 +8938,56 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if dock.isFloating() or width <= 0:
             return
         try:
-            dock.resize(width, dock.height())
-            self._primary_dock_widths[dock] = width
+            screen = QtGui.QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
+            if screen is None:
+                screen = QtGui.QGuiApplication.primaryScreen()
+            available = screen.availableGeometry() if screen is not None else None
         except Exception:
-            pass
+            available = None
+        if available is not None:
+            width = max(160, min(width, available.width()))
+        try:
+            self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+        except Exception:
+            try:
+                dock.resize(width, dock.height())
+            except Exception:
+                pass
+        self._primary_dock_widths[dock] = width
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._clamp_to_available_geometry()
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        QtCore.QTimer.singleShot(0, self._clamp_to_available_geometry)
+
+    def _clamp_to_available_geometry(self) -> None:
+        if getattr(self, "_clamp_active", False):
+            return
+        try:
+            screen = QtGui.QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
+            if screen is None:
+                screen = QtGui.QGuiApplication.primaryScreen()
+        except Exception:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        available = screen.availableGeometry()
+        self._clamp_active = True
+        try:
+            frame = self.frameGeometry()
+            target_width = min(frame.width(), available.width())
+            target_height = min(frame.height(), available.height())
+            if target_width != frame.width() or target_height != frame.height():
+                self.resize(target_width, target_height)
+                frame = self.frameGeometry()
+            bounded_x = max(available.left(), min(frame.left(), available.right() - frame.width()))
+            bounded_y = max(available.top(), min(frame.top(), available.bottom() - frame.height()))
+            self.move(bounded_x, bounded_y)
+        finally:
+            self._clamp_active = False
 
     def _handle_ocr_debug_changed(self, enabled: bool) -> None:
         section = getattr(self, "microscope_section", None)

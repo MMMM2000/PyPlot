@@ -4,6 +4,9 @@
 - Moved As/Ms editing into the Current density tab, stacking the Matplotlib previews beside the workbook and recalculating densities from the recorded phase points so hover readouts stay available while you tune transitions.
 - Trimmed the Current annealing table back to composition plus graph thumbnails and dropped the legacy interactive picker button now that phase changes live in Current density.
 - Replaced direct `QtCore.QPointer` usage with a PyQt6-safe weak reference helper so the launcher stops crashing with `AttributeError: module 'PyQt6.QtCore' has no attribute 'QPointer'` at startup.
+- Added default-on draggable legends with new controls for symbol visibility, colour following, orientation, and inside/outside placement, plus a navigation toolbar offering zoom, pan, targeted rescale buttons, a bulk rescale dialog, and a dark graph toggle.
+- Streamlined Current density review by removing the area column, grouping As/Ms values together, stripping plot legends/titles, brightening the cursor readout, enabling true cell navigation, and allowing graph double-clicks to paste cursor values while keeping the Project Explorer dock from nudging the window off-screen.
+- Hooked temperature dependence “Load data” into the workbook registry so imported files populate the Project Explorer automatically.
 
 ## 2025-10-31 21:11 UTC
 

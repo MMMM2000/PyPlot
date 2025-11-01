@@ -526,6 +526,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                 "Select one or more temperature dependence files and click Load data."
             )
         self._log(f"Loaded {len(paths)} temperature dependence file(s).")
+        self._register_workbooks(paths)
         self.update_ui()
 
     def generate(self) -> None:  # type: ignore[override]
@@ -687,6 +688,92 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             f"Exported {exported} temperature sensitivity table(s) to {target}",
         )
         self._log(f"Exported {exported} temperature sensitivity table(s) to {target}.")
+
+
+    def _register_workbooks(self, paths: Iterable[Path]) -> None:
+        data = self._data
+        if data is None or "filename" not in data.columns:
+            return
+        host = self.host
+        grouped = data.groupby("filename", dropna=False)
+        active_keys: set[str] = set()
+        created: list[str] = []
+        meta_map = {
+            "temp": ("Temperature", "°C"),
+            "T1": ("T1", "µs"),
+            "T2": ("T2", "µs"),
+            "dT": ("T2–T1", "µs"),
+            "sum": ("T1+T2", "µs"),
+        }
+        columns_order = [
+            "line",
+            "temp",
+            "continuous",
+            "T1",
+            "T2",
+            "dT",
+            "sum",
+            "composition",
+            "sample",
+            "anneal",
+        ]
+        for path in paths:
+            file_name = path.name
+            if file_name not in grouped.groups:
+                continue
+            subset = grouped.get_group(file_name).copy().reset_index(drop=True)
+            available = [column for column in columns_order if column in subset.columns]
+            extras = [column for column in subset.columns if column not in available and column != "filename"]
+            frame = subset[available + extras] if available or extras else subset
+            key = self._workbook_keys.get(str(path))
+            if not key:
+                try:
+                    resolved = path.resolve()
+                except Exception:
+                    resolved = path
+                key = f"temperature_dependence::{resolved}"
+                self._workbook_keys[str(path)] = key
+            workbook = WorkbookData(
+                key=key,
+                name=f"{path.stem} (temperature)",
+                worksheets=[],
+                source=path,
+                folder=path.parent,
+            )
+            worksheet = host._create_worksheet_from_frame(workbook, "Temperature data", frame)
+            for column, (long_name, units) in meta_map.items():
+                meta = worksheet.columns.get(column)
+                if isinstance(meta, WorksheetColumnMeta):
+                    meta.long_name = long_name
+                    meta.units = units
+            workbook.worksheets = [worksheet.key]
+            host._register_imported_workbook(workbook, [worksheet])
+            active_keys.add(workbook.key)
+            created.append(path.name)
+        stale = self._managed_workbooks - active_keys
+        if stale:
+            self._remove_managed_workbooks(stale)
+        self._managed_workbooks = active_keys
+        if created or stale:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
+
+    def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
+        host = self.host
+        for key in keys:
+            workbook = host._workbooks.get(key)
+            if workbook is not None:
+                for sheet_key in list(workbook.worksheets):
+                    host._remove_worksheet(sheet_key)
+            host._workbooks.pop(key, None)
+            item = host._data_workbook_items.pop(key, None)
+            if item is not None:
+                parent = item.parent()
+                if parent is not None:
+                    index = parent.indexOfChild(item)
+                    if index >= 0:
+                        parent.takeChild(index)
+            self._managed_workbooks.discard(key)
 
 
 class TemperatureSensitivityPlugin(PyPlotPlugin):

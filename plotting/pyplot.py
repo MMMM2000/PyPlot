@@ -4,6 +4,7 @@ import datetime
 import logging
 import os
 import weakref
+import numpy as np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
@@ -26,6 +27,7 @@ from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
@@ -1122,6 +1124,11 @@ class LegendSettingsDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self._legend = legend
+        try:
+            original_text_colors = [text.get_color() for text in legend.get_texts()]
+        except Exception:
+            original_text_colors = []
+        setattr(legend, "_mw_text_original_colors", original_text_colors)
         self.setWindowTitle("Legend Settings")
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -1258,12 +1265,48 @@ class LegendSettingsDialog(QtWidgets.QDialog):
             self.marker_scale_spin.setValue(1.0)
         form.addRow("Marker scale", self.marker_scale_spin)
 
+        stored_symbol_setting = getattr(legend, "_mw_show_symbols", True)
+        self.symbol_checkbox = QtWidgets.QCheckBox("Show legend symbols", self)
+        self.symbol_checkbox.setChecked(bool(stored_symbol_setting))
+        form.addRow("", self.symbol_checkbox)
+
+        stored_follow_setting = getattr(legend, "_mw_text_follows_handles", False)
+        self.text_color_follow_checkbox = QtWidgets.QCheckBox("Text colour follows plots", self)
+        self.text_color_follow_checkbox.setChecked(bool(stored_follow_setting))
+        form.addRow("", self.text_color_follow_checkbox)
+
+        self.orientation_combo = QtWidgets.QComboBox(self)
+        self.orientation_combo.addItem("Auto", "auto")
+        self.orientation_combo.addItem("Horizontal", "horizontal")
+        self.orientation_combo.addItem("Vertical", "vertical")
+        stored_orientation = getattr(legend, "_mw_orientation", "auto")
+        orientation_index = self.orientation_combo.findData(stored_orientation)
+        if orientation_index < 0:
+            orientation_index = 0
+        self.orientation_combo.setCurrentIndex(orientation_index)
+        form.addRow("Orientation", self.orientation_combo)
+
+        self.placement_combo = QtWidgets.QComboBox(self)
+        self.placement_combo.addItem("Inside", "inside")
+        self.placement_combo.addItem("Outside (right)", "outside")
+        stored_placement = getattr(legend, "_mw_placement", None)
+        if stored_placement is None:
+            stored_placement = "outside" if getattr(legend, "_bbox_to_anchor", None) else "inside"
+        placement_index = self.placement_combo.findData(stored_placement)
+        if placement_index < 0:
+            placement_index = 0
+        self.placement_combo.setCurrentIndex(placement_index)
+        form.addRow("Placement", self.placement_combo)
+
         self.draggable_checkbox = QtWidgets.QCheckBox("Allow drag", self)
+        stored_draggable = getattr(legend, "_mw_draggable", None)
+        if stored_draggable is None:
+            stored_draggable = True
+        self.draggable_checkbox.setChecked(bool(stored_draggable))
         try:
-            draggable = legend.get_draggable()
-            self.draggable_checkbox.setChecked(bool(draggable))
+            legend.set_draggable(bool(stored_draggable))
         except Exception:
-            self.draggable_checkbox.setChecked(False)
+            pass
         form.addRow("", self.draggable_checkbox)
 
         button_box = QtWidgets.QDialogButtonBox(
@@ -1306,19 +1349,12 @@ class LegendSettingsDialog(QtWidgets.QDialog):
                 legend.get_title().set_fontsize(self.font_spin.value())
             except Exception:
                 pass
+        columns_value = self.columns_spin.value()
         try:
-            loc_value = self.location_combo.currentData()
-            legend.set_loc(loc_value)
+            legend.set_ncol(columns_value)
         except Exception:
             try:
-                legend._loc = Legend.codes.get(self.location_combo.currentData(), legend._loc)
-            except Exception:
-                pass
-        try:
-            legend.set_ncol(self.columns_spin.value())
-        except Exception:
-            try:
-                legend._ncol = self.columns_spin.value()
+                legend._ncol = columns_value
             except Exception:
                 pass
         try:
@@ -1353,8 +1389,143 @@ class LegendSettingsDialog(QtWidgets.QDialog):
             legend.set_markerscale(self.marker_scale_spin.value())
         except Exception:
             pass
+
+        handles: list[Any] = []
+        for attr in ("legendHandles", "legend_handles"):
+            value = getattr(legend, attr, None)
+            if value:
+                try:
+                    handles = list(value)
+                except Exception:
+                    handles = []
+                if handles:
+                    break
+        if not handles:
+            try:
+                handles = list(legend.legendHandles)
+            except Exception:
+                handles = []
         try:
-            legend.set_draggable(self.draggable_checkbox.isChecked())
+            texts = list(legend.get_texts())
+        except Exception:
+            texts = []
+
+        orientation = self.orientation_combo.currentData()
+        legend._mw_orientation = orientation
+        if orientation == "horizontal":
+            columns = max(1, len(handles) or len(texts))
+            try:
+                legend.set_ncol(columns)
+            except Exception:
+                try:
+                    legend._ncol = columns
+                except Exception:
+                    pass
+        elif orientation == "vertical":
+            try:
+                legend.set_ncol(1)
+            except Exception:
+                try:
+                    legend._ncol = 1
+                except Exception:
+                    pass
+
+        placement = self.placement_combo.currentData()
+        legend._mw_placement = placement
+        loc_value = self.location_combo.currentData()
+        axes = getattr(legend, "axes", None)
+        if placement == "outside" and axes is not None:
+            try:
+                legend.set_bbox_to_anchor((1.02, 1.0), transform=axes.transAxes)
+            except Exception:
+                try:
+                    legend._bbox_to_anchor = axes.transAxes
+                except Exception:
+                    pass
+            try:
+                legend.set_loc(loc_value or "upper left")
+            except Exception:
+                pass
+        else:
+            try:
+                legend.set_bbox_to_anchor(None)
+            except Exception:
+                legend._bbox_to_anchor = None
+            try:
+                legend.set_loc(loc_value)
+            except Exception:
+                try:
+                    legend._loc = Legend.codes.get(loc_value, legend._loc)
+                except Exception:
+                    pass
+
+        show_symbols = self.symbol_checkbox.isChecked()
+        legend._mw_show_symbols = show_symbols
+        for handle in handles:
+            original_alpha = getattr(handle, "_mw_original_alpha", None)
+            if original_alpha is None:
+                try:
+                    original_alpha = handle.get_alpha()
+                except Exception:
+                    original_alpha = None
+                if original_alpha is None:
+                    original_alpha = 1.0
+                setattr(handle, "_mw_original_alpha", float(original_alpha))
+            target_alpha = float(original_alpha) if show_symbols else 0.0
+            alpha_set = False
+            if hasattr(handle, "set_alpha"):
+                try:
+                    handle.set_alpha(target_alpha)
+                    alpha_set = True
+                except Exception:
+                    alpha_set = False
+            if not alpha_set and hasattr(handle, "set_visible"):
+                setter = getattr(handle, "set_visible", None)
+                if callable(setter):
+                    try:
+                        setter(show_symbols)
+                    except Exception:
+                        pass
+
+        follow_colors = self.text_color_follow_checkbox.isChecked()
+        legend._mw_text_follows_handles = follow_colors
+        originals = getattr(legend, "_mw_text_original_colors", [])
+        if follow_colors and handles and texts:
+            for text, handle in zip(texts, handles):
+                color = None
+                getter = getattr(handle, "get_color", None)
+                if callable(getter):
+                    try:
+                        color = getter()
+                    except Exception:
+                        color = None
+                if color is None:
+                    getter = getattr(handle, "get_facecolor", None)
+                    if callable(getter):
+                        try:
+                            color = getter()
+                        except Exception:
+                            color = None
+                        if isinstance(color, (list, tuple)) and color:
+                            color = color[0]
+                if isinstance(color, (list, tuple)) and len(color) >= 3:
+                    color = color[:3]
+                if color is not None:
+                    try:
+                        text.set_color(color)
+                    except Exception:
+                        pass
+        else:
+            for text, color in zip(texts, originals):
+                try:
+                    text.set_color(color)
+                except Exception:
+                    pass
+
+        draggable = self.draggable_checkbox.isChecked()
+        legend._mw_draggable = draggable
+        try:
+            legend.set_draggable(draggable)
         except Exception:
             pass
 
@@ -1427,6 +1598,18 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             tuple[QtWidgets.QWidget, tuple[str, float | str]],
             QtWidgets.QTreeWidgetItem,
         ] = {}
+        self._navigation_helpers: Dict[FigureCanvas, NavigationToolbar2QT] = {}
+        self._nav_mode: Optional[str] = None
+        self._nav_active_canvas: FigureCanvas | None = None
+        self._nav_toolbar: QtWidgets.QToolBar | None = None
+        self._zoom_action: QtGui.QAction | None = None
+        self._pan_action: QtGui.QAction | None = None
+        self._rescale_action: QtGui.QAction | None = None
+        self._rescale_x_action: QtGui.QAction | None = None
+        self._rescale_y_action: QtGui.QAction | None = None
+        self._rescale_all_action: QtGui.QAction | None = None
+        self._dark_mode_action: QtGui.QAction | None = None
+        self._dark_mode_enabled: bool = False
         self._temperature_tab_widgets: List[QtWidgets.QWidget] = []
         self._metrics_angle_tabs: List[QtWidgets.QWidget] = []
         self._metrics_temperature_tabs: List[QtWidgets.QWidget] = []
@@ -1438,6 +1621,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._worksheet_tabs_open: Dict[Hashable, QtWidgets.QWidget] = {}
         self._tab_to_worksheet_key: Dict[QtWidgets.QWidget, Hashable] = {}
         self._hidden_tabs: set[QtWidgets.QWidget] = set()
+        self._axes_theme_state: Dict[Any, Dict[str, Any]] = {}
         self._script_panel_container: QtWidgets.QWidget | None = None
         self._script_panel_layout: QtWidgets.QVBoxLayout | None = None
         self._data_sources_widget: QtWidgets.QWidget | None = None
@@ -2151,6 +2335,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         self._setup_script_toolbar()
         self._setup_action_toolbar()
+        self._setup_navigation_toolbar()
         self._setup_format_toolbar()
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
@@ -2775,13 +2960,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         import_action.triggered.connect(self._prompt_import_data)
         self.import_data_button = import_action
 
-        popout_action = toolbar.addAction("Open in Matplotlib")
-        popout_action.setEnabled(False)
-        popout_action.triggered.connect(self._open_matplotlib_window)
-        self.popout_button = popout_action
-
-        toolbar.addSeparator()
-
         save_action = toolbar.addAction("Save graph…")
         save_action.setEnabled(False)
         save_action.triggered.connect(self._save_current_graph)
@@ -2802,6 +2980,641 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         origin_action.triggered.connect(self._open_origin_prompt)
         self.open_origin_button = origin_action
 
+    def _setup_navigation_toolbar(self) -> None:
+        toolbar = QtWidgets.QToolBar("Navigation", self)
+        toolbar.setObjectName("mw_navigation_toolbar")
+        self._configure_toolbar(toolbar)
+        self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
+        self._nav_toolbar = toolbar
+
+        mode_group = QtGui.QActionGroup(toolbar)
+        mode_group.setExclusive(True)
+
+        zoom_action = toolbar.addAction("Zoom")
+        zoom_action.setCheckable(True)
+        zoom_action.setEnabled(False)
+        zoom_action.setToolTip("Drag a rectangle to zoom the current graph.")
+        zoom_action.triggered.connect(self._handle_zoom_triggered)
+        mode_group.addAction(zoom_action)
+        self._zoom_action = zoom_action
+
+        pan_action = toolbar.addAction("Pan")
+        pan_action.setCheckable(True)
+        pan_action.setEnabled(False)
+        pan_action.setToolTip("Drag to move around the current graph.")
+        pan_action.triggered.connect(self._handle_pan_triggered)
+        mode_group.addAction(pan_action)
+        self._pan_action = pan_action
+
+        toolbar.addSeparator()
+
+        rescale_action = toolbar.addAction("Rescale")
+        rescale_action.setEnabled(False)
+        rescale_action.setToolTip("Autoscale both axes for the current graph.")
+        rescale_action.triggered.connect(self._handle_rescale_both)
+        self._rescale_action = rescale_action
+
+        rescale_x_action = toolbar.addAction("Rescale X")
+        rescale_x_action.setEnabled(False)
+        rescale_x_action.setToolTip("Autoscale the X axis for the current graph.")
+        rescale_x_action.triggered.connect(self._handle_rescale_x)
+        self._rescale_x_action = rescale_x_action
+
+        rescale_y_action = toolbar.addAction("Rescale Y")
+        rescale_y_action.setEnabled(False)
+        rescale_y_action.setToolTip("Autoscale the Y axis for the current graph.")
+        rescale_y_action.triggered.connect(self._handle_rescale_y)
+        self._rescale_y_action = rescale_y_action
+
+        rescale_all_action = toolbar.addAction("Rescale all…")
+        rescale_all_action.setEnabled(False)
+        rescale_all_action.setToolTip("Rescale multiple graphs at once.")
+        rescale_all_action.triggered.connect(self._open_rescale_all_dialog)
+        self._rescale_all_action = rescale_all_action
+
+        toolbar.addSeparator()
+
+        dark_mode_action = toolbar.addAction("Dark graphs")
+        dark_mode_action.setCheckable(True)
+        dark_mode_action.setToolTip("Toggle a dark theme for all graphs.")
+        dark_mode_action.toggled.connect(self._handle_dark_mode_toggled)
+        self._dark_mode_action = dark_mode_action
+        self._update_navigation_enabled()
+
+    def _handle_zoom_triggered(self, checked: bool) -> None:
+        self._set_navigation_mode("zoom" if checked else None)
+
+    def _handle_pan_triggered(self, checked: bool) -> None:
+        self._set_navigation_mode("pan" if checked else None)
+
+    def _handle_rescale_both(self) -> None:
+        self._rescale_current_axes("both")
+
+    def _handle_rescale_x(self) -> None:
+        self._rescale_current_axes("x")
+
+    def _handle_rescale_y(self) -> None:
+        self._rescale_current_axes("y")
+
+    def _current_canvas(self) -> FigureCanvas | None:
+        tab_widget = getattr(self, "tab_widget", None)
+        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+            return None
+        tab = tab_widget.currentWidget()
+        if tab is None:
+            return None
+        return self._canvas_by_tab.get(tab)
+
+    def _current_axes(self) -> Any | None:
+        tab_widget = getattr(self, "tab_widget", None)
+        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+            return None
+        tab = tab_widget.currentWidget()
+        if tab is None:
+            return None
+        return self._axes_by_tab.get(tab)
+
+    def _set_navigation_mode(self, mode: Optional[str]) -> None:
+        if mode not in {"zoom", "pan"}:
+            mode = None
+        if mode == self._nav_mode and self._nav_active_canvas is self._current_canvas():
+            return
+        self._deactivate_navigation_mode()
+        if mode is None:
+            self._sync_navigation_buttons(None)
+            return
+        canvas = self._current_canvas()
+        if canvas is None:
+            self._sync_navigation_buttons(None)
+            return
+        helper = self._ensure_navigation_helper(canvas)
+        if helper is None:
+            self._sync_navigation_buttons(None)
+            return
+        try:
+            getattr(helper, mode)()
+        except Exception:
+            self._sync_navigation_buttons(None)
+            return
+        self._nav_mode = mode
+        self._nav_active_canvas = canvas
+        self._sync_navigation_buttons(mode)
+
+    def _deactivate_navigation_mode(self) -> None:
+        if self._nav_mode and self._nav_active_canvas is not None:
+            helper = self._navigation_helpers.get(self._nav_active_canvas)
+            if helper is not None:
+                try:
+                    getattr(helper, self._nav_mode)()
+                except Exception:
+                    pass
+        self._nav_mode = None
+        self._nav_active_canvas = None
+
+    def _sync_navigation_buttons(self, active: Optional[str]) -> None:
+        for action, name in ((self._zoom_action, "zoom"), (self._pan_action, "pan")):
+            if action is None:
+                continue
+            action.blockSignals(True)
+            action.setChecked(active == name)
+            action.blockSignals(False)
+
+    def _ensure_navigation_helper(self, canvas: FigureCanvas | None) -> NavigationToolbar2QT | None:
+        if canvas is None:
+            return None
+        helper = self._navigation_helpers.get(canvas)
+        if helper is None:
+            try:
+                helper = NavigationToolbar2QT(canvas, self)
+            except Exception:
+                return None
+            helper.hide()
+            self._navigation_helpers[canvas] = helper
+        return helper
+
+    def _update_navigation_enabled(self) -> None:
+        has_axes = bool(self._axes_by_tab)
+        current_axes_available = self._current_axes() is not None
+        if not current_axes_available:
+            self._set_navigation_mode(None)
+        for action in (
+            self._zoom_action,
+            self._pan_action,
+            self._rescale_action,
+            self._rescale_x_action,
+            self._rescale_y_action,
+        ):
+            if action is not None:
+                action.setEnabled(current_axes_available)
+        if self._rescale_all_action is not None:
+            self._rescale_all_action.setEnabled(has_axes)
+        if self._dark_mode_action is not None:
+            self._dark_mode_action.setEnabled(True)
+
+    def _rescale_current_axes(self, axis: str) -> None:
+        axes = self._current_axes()
+        if axes is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Rescale",
+                "Select a graph before rescaling.",
+            )
+            return
+        try:
+            axes.relim()
+            scalex = axis in {"both", "x"}
+            scaley = axis in {"both", "y"}
+            axes.autoscale_view(scalex=scalex, scaley=scaley)
+            canvas = getattr(axes, "figure", None)
+            if canvas is not None:
+                canvas = getattr(canvas, "canvas", None)
+            if canvas is not None:
+                try:
+                    canvas.draw_idle()
+                except Exception:
+                    canvas.draw()
+        except Exception:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Rescale",
+                "Failed to rescale the current graph.",
+            )
+
+    @staticmethod
+    def _coerce_numeric_array(values: Any) -> np.ndarray:
+        if values is None:
+            return np.asarray([], dtype=float)
+        try:
+            arr = np.asarray(values, dtype=float)
+        except Exception:
+            try:
+                arr = np.asarray(pd.to_numeric(values, errors="coerce"), dtype=float)
+            except Exception:
+                return np.asarray([], dtype=float)
+        arr = np.ravel(arr)
+        if arr.size == 0:
+            return arr
+        mask = np.isfinite(arr)
+        return arr[mask]
+
+    def _calculate_combined_limits(
+        self,
+        entries: Sequence[Dict[str, Any]],
+    ) -> tuple[Optional[float], Optional[float], Optional[float], Optional[float]]:
+        xmins: list[float] = []
+        xmaxs: list[float] = []
+        ymins: list[float] = []
+        ymaxs: list[float] = []
+
+        for entry in entries:
+            axes = entry.get("axes")
+            descriptor = entry.get("descriptor")
+            if descriptor is not None and isinstance(descriptor, TabDescriptor):
+                lines = getattr(descriptor, "lines", {})
+                for state in lines.values():
+                    x_arr = self._coerce_numeric_array(state.x_data())
+                    if x_arr.size:
+                        xmins.append(float(np.min(x_arr)))
+                        xmaxs.append(float(np.max(x_arr)))
+                    y_arr = self._coerce_numeric_array(state.y_data())
+                    if y_arr.size:
+                        ymins.append(float(np.min(y_arr)))
+                        ymaxs.append(float(np.max(y_arr)))
+            if axes is not None:
+                try:
+                    axis_lines = list(axes.get_lines())
+                except Exception:
+                    axis_lines = []
+                for line in axis_lines:
+                    x_arr = self._coerce_numeric_array(line.get_xdata())
+                    if x_arr.size:
+                        xmins.append(float(np.min(x_arr)))
+                        xmaxs.append(float(np.max(x_arr)))
+                    y_arr = self._coerce_numeric_array(line.get_ydata())
+                    if y_arr.size:
+                        ymins.append(float(np.min(y_arr)))
+                        ymaxs.append(float(np.max(y_arr)))
+
+        if not xmins and not xmaxs and not ymins and not ymaxs and entries:
+            # Fallback to current axes limits when no data points were detected.
+            for entry in entries:
+                axes = entry.get("axes")
+                if axes is None:
+                    continue
+                try:
+                    cur_xlim = axes.get_xlim()
+                    cur_ylim = axes.get_ylim()
+                except Exception:
+                    continue
+                if cur_xlim:
+                    xmins.append(float(cur_xlim[0]))
+                    xmaxs.append(float(cur_xlim[1]))
+                if cur_ylim:
+                    ymins.append(float(cur_ylim[0]))
+                    ymaxs.append(float(cur_ylim[1]))
+
+        xmin = float(min(xmins)) if xmins else None
+        xmax = float(max(xmaxs)) if xmaxs else None
+        ymin = float(min(ymins)) if ymins else None
+        ymax = float(max(ymaxs)) if ymaxs else None
+        return xmin, xmax, ymin, ymax
+
+    def _open_rescale_all_dialog(self) -> None:
+        entries: list[Dict[str, Any]] = []
+        for tab, axes in self._axes_by_tab.items():
+            if axes is None:
+                continue
+            descriptor = self._tab_descriptors.get(tab)
+            title = ""
+            if isinstance(descriptor, TabDescriptor):
+                title = descriptor.title or descriptor.root_label or ""
+            if not title:
+                try:
+                    title = axes.get_title()
+                except Exception:
+                    title = ""
+            if not title:
+                title = f"Graph {len(entries) + 1}"
+            entries.append({"tab": tab, "axes": axes, "descriptor": descriptor, "label": title})
+
+        if not entries:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Rescale all",
+                "No graphs are available to rescale.",
+            )
+            return
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Rescale graphs")
+        dialog.resize(420, 460)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        description = QtWidgets.QLabel(
+            "Select the graphs to include and choose whether to autoscale both axes or just the X/Y axis."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
+        list_widget = QtWidgets.QListWidget(dialog)
+        list_widget.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.NoSelection)
+        for entry in entries:
+            item = QtWidgets.QListWidgetItem(entry["label"])
+            flags = item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable | QtCore.Qt.ItemFlag.ItemIsEnabled
+            item.setFlags(flags)
+            item.setCheckState(QtCore.Qt.CheckState.Checked)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, entry)
+            list_widget.addItem(item)
+        layout.addWidget(list_widget, 1)
+
+        axes_group = QtWidgets.QGroupBox("Apply to axes", dialog)
+        axes_layout = QtWidgets.QHBoxLayout(axes_group)
+        axes_layout.setContentsMargins(8, 6, 8, 6)
+        apply_x = QtWidgets.QCheckBox("X axis", axes_group)
+        apply_x.setChecked(True)
+        apply_y = QtWidgets.QCheckBox("Y axis", axes_group)
+        apply_y.setChecked(True)
+        axes_layout.addWidget(apply_x)
+        axes_layout.addWidget(apply_y)
+        layout.addWidget(axes_group)
+
+        limits_group = QtWidgets.QGroupBox("Limits", dialog)
+        limits_layout = QtWidgets.QFormLayout(limits_group)
+        limits_layout.setContentsMargins(8, 6, 8, 6)
+        limits_layout.setSpacing(6)
+        x_min_edit = QtWidgets.QLineEdit(limits_group)
+        x_max_edit = QtWidgets.QLineEdit(limits_group)
+        y_min_edit = QtWidgets.QLineEdit(limits_group)
+        y_max_edit = QtWidgets.QLineEdit(limits_group)
+        limits_layout.addRow("X min", x_min_edit)
+        limits_layout.addRow("X max", x_max_edit)
+        limits_layout.addRow("Y min", y_min_edit)
+        limits_layout.addRow("Y max", y_max_edit)
+
+        auto_button = QtWidgets.QPushButton("Auto", limits_group)
+        auto_button.setToolTip("Fill the limits using combined data from the selected graphs.")
+        limits_layout.addRow("", auto_button)
+        layout.addWidget(limits_group)
+
+        def selected_entries() -> list[Dict[str, Any]]:
+            result: list[Dict[str, Any]] = []
+            for row in range(list_widget.count()):
+                item = list_widget.item(row)
+                if item is None:
+                    continue
+                if item.checkState() != QtCore.Qt.CheckState.Checked:
+                    continue
+                payload = item.data(QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(payload, dict):
+                    result.append(payload)
+            return result
+
+        def apply_auto_limits() -> None:
+            chosen = selected_entries()
+            xmin, xmax, ymin, ymax = self._calculate_combined_limits(chosen)
+            if xmin is not None and xmax is not None:
+                x_min_edit.setText(f"{xmin:.6g}")
+                x_max_edit.setText(f"{xmax:.6g}")
+            else:
+                x_min_edit.clear()
+                x_max_edit.clear()
+            if ymin is not None and ymax is not None:
+                y_min_edit.setText(f"{ymin:.6g}")
+                y_max_edit.setText(f"{ymax:.6g}")
+            else:
+                y_min_edit.clear()
+                y_max_edit.clear()
+
+        auto_button.clicked.connect(apply_auto_limits)
+        apply_auto_limits()
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            dialog,
+        )
+        layout.addWidget(button_box)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        targets = selected_entries()
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Rescale all",
+                "No graphs were selected for rescaling.",
+            )
+            return
+
+        apply_x_axis = apply_x.isChecked()
+        apply_y_axis = apply_y.isChecked()
+        if not apply_x_axis and not apply_y_axis:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Rescale all",
+                "Select at least one axis to rescale.",
+            )
+            return
+
+        def parse_value(widget: QtWidgets.QLineEdit) -> Optional[float]:
+            text = widget.text().strip()
+            if not text:
+                return None
+            try:
+                return float(text)
+            except ValueError:
+                return None
+
+        x_min_val = parse_value(x_min_edit)
+        x_max_val = parse_value(x_max_edit)
+        y_min_val = parse_value(y_min_edit)
+        y_max_val = parse_value(y_max_edit)
+
+        if apply_x_axis:
+            if x_min_val is None or x_max_val is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Rescale all",
+                    "Provide numeric X axis limits.",
+                )
+                return
+            if x_min_val >= x_max_val:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Rescale all",
+                    "X min must be less than X max.",
+                )
+                return
+        if apply_y_axis:
+            if y_min_val is None or y_max_val is None:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Rescale all",
+                    "Provide numeric Y axis limits.",
+                )
+                return
+            if y_min_val >= y_max_val:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Rescale all",
+                    "Y min must be less than Y max.",
+                )
+                return
+
+        canvases: set[FigureCanvas] = set()
+        for entry in targets:
+            axes = entry.get("axes")
+            if axes is None:
+                continue
+            try:
+                if apply_x_axis and x_min_val is not None and x_max_val is not None:
+                    axes.set_xlim(x_min_val, x_max_val)
+                if apply_y_axis and y_min_val is not None and y_max_val is not None:
+                    axes.set_ylim(y_min_val, y_max_val)
+            except Exception:
+                continue
+            fig = getattr(axes, "figure", None)
+            if fig is not None:
+                canvas = getattr(fig, "canvas", None)
+                if isinstance(canvas, FigureCanvas):
+                    canvases.add(canvas)
+        for canvas in canvases:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                canvas.draw()
+
+    def _handle_dark_mode_toggled(self, enabled: bool) -> None:
+        self._dark_mode_enabled = bool(enabled)
+        self._apply_dark_mode_to_all_axes()
+
+    def _apply_dark_mode_to_all_axes(self) -> None:
+        if not self._axes_by_tab:
+            return
+        canvases: set[FigureCanvas] = set()
+        for axes in set(filter(None, self._axes_by_tab.values())):
+            canvas = self._apply_dark_mode_to_axes(axes, self._dark_mode_enabled)
+            if isinstance(canvas, FigureCanvas):
+                canvases.add(canvas)
+        for canvas in canvases:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                canvas.draw()
+
+    def _apply_dark_mode_to_axes(self, axes: Any, enabled: bool) -> FigureCanvas | None:
+        if axes is None:
+            return None
+        figure = getattr(axes, "figure", None)
+        canvas = getattr(figure, "canvas", None) if figure is not None else None
+        state = self._axes_theme_state.setdefault(axes, {})
+
+        if enabled:
+            if "figure_face" not in state and figure is not None:
+                state["figure_face"] = figure.get_facecolor()
+            if "axes_face" not in state:
+                state["axes_face"] = axes.get_facecolor()
+            if "x_label_color" not in state:
+                state["x_label_color"] = axes.xaxis.label.get_color()
+            if "y_label_color" not in state:
+                state["y_label_color"] = axes.yaxis.label.get_color()
+            if "title_color" not in state:
+                title = axes.title
+                if title is not None:
+                    state["title_color"] = title.get_color()
+            if "spine_colors" not in state:
+                state["spine_colors"] = {name: spine.get_edgecolor() for name, spine in axes.spines.items()}
+            if "grid_color" not in state:
+                try:
+                    grid_lines = axes.get_xgridlines()
+                    if grid_lines:
+                        state["grid_color"] = grid_lines[0].get_color()
+                        state["grid_alpha"] = grid_lines[0].get_alpha()
+                except Exception:
+                    state.setdefault("grid_color", None)
+                    state.setdefault("grid_alpha", None)
+            legend = None
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None and "legend" not in state:
+                state["legend"] = {
+                    "frame_face": legend.get_frame().get_facecolor(),
+                    "frame_edge": legend.get_frame().get_edgecolor(),
+                    "text_colors": [text.get_color() for text in legend.get_texts()],
+                    "title_color": legend.get_title().get_color() if legend.get_title() else None,
+                }
+
+            dark_face = "#202124"
+            light_text = "#f1f3f4"
+            grid_color = "#4a4d52"
+
+            if figure is not None:
+                figure.patch.set_facecolor(dark_face)
+            axes.set_facecolor(dark_face)
+            for spine in axes.spines.values():
+                try:
+                    spine.set_color(light_text)
+                except Exception:
+                    pass
+            axes.tick_params(colors=light_text)
+            try:
+                axes.grid(True, color=grid_color, alpha=0.3)
+            except Exception:
+                pass
+            axes.xaxis.label.set_color(light_text)
+            axes.yaxis.label.set_color(light_text)
+            title = axes.title
+            if title is not None:
+                title.set_color(light_text)
+            for tick in axes.get_xticklabels() + axes.get_yticklabels():
+                tick.set_color(light_text)
+            if legend is not None:
+                try:
+                    legend.get_frame().set_facecolor(dark_face)
+                    legend.get_frame().set_edgecolor(light_text)
+                except Exception:
+                    pass
+                for text in legend.get_texts():
+                    text.set_color(light_text)
+                title_artist = legend.get_title()
+                if title_artist is not None:
+                    title_artist.set_color(light_text)
+        else:
+            if figure is not None and "figure_face" in state:
+                figure.patch.set_facecolor(state["figure_face"])
+            if "axes_face" in state:
+                axes.set_facecolor(state["axes_face"])
+            for name, spine in axes.spines.items():
+                colors = state.get("spine_colors", {})
+                if name in colors:
+                    try:
+                        spine.set_color(colors[name])
+                    except Exception:
+                        pass
+            axes.tick_params(colors=state.get("x_label_color", "#202020"))
+            axes.xaxis.label.set_color(state.get("x_label_color", "#202020"))
+            axes.yaxis.label.set_color(state.get("y_label_color", "#202020"))
+            title = axes.title
+            if title is not None:
+                title.set_color(state.get("title_color", "#202020"))
+            default_tick_color = state.get("x_label_color", "#202020")
+            for tick in axes.get_xticklabels() + axes.get_yticklabels():
+                tick.set_color(default_tick_color)
+            legend = None
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None and "legend" in state:
+                meta = state["legend"]
+                try:
+                    legend.get_frame().set_facecolor(meta.get("frame_face"))
+                    legend.get_frame().set_edgecolor(meta.get("frame_edge"))
+                except Exception:
+                    pass
+                text_colors = meta.get("text_colors", [])
+                for text, color in zip(legend.get_texts(), text_colors):
+                    text.set_color(color)
+                title_artist = legend.get_title()
+                if title_artist is not None and meta.get("title_color") is not None:
+                    title_artist.set_color(meta.get("title_color"))
+            original_grid_color = state.get("grid_color")
+            original_grid_alpha = state.get("grid_alpha")
+            if original_grid_color is not None:
+                try:
+                    axes.grid(True, color=original_grid_color)
+                    if original_grid_alpha is not None:
+                        for line in axes.get_xgridlines() + axes.get_ygridlines():
+                            line.set_alpha(original_grid_alpha)
+                except Exception:
+                    pass
+        return canvas
     def _prompt_import_data(self) -> None:
         files_action = getattr(self, "_import_files_action", None)
         folder_action = getattr(self, "_import_folder_action", None)
@@ -3080,6 +3893,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 )
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
+        if self._dark_mode_enabled:
+            self._apply_dark_mode_to_axes(axes, True)
+        self._update_navigation_enabled()
         if self.tab_widget.currentWidget() is tab:
             self._rebuild_object_manager_for_tab(tab)
         self._update_tab_buttons()
@@ -4315,9 +5131,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         *,
         allow_toggle: bool = True,
     ) -> None:
+        try:
+            flags = item.flags()
+        except RuntimeError:
+            return
         if allow_toggle:
-            if not item.flags() & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
-                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            if not flags & QtCore.Qt.ItemFlag.ItemIsUserCheckable:
+                item.setFlags(flags | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
             state = (
                 QtCore.Qt.CheckState.Checked
                 if visible
@@ -4526,6 +5346,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             except Exception:
                 legend = None
             if legend is not None:
+                try:
+                    if not hasattr(legend, "_mw_show_symbols"):
+                        legend._mw_show_symbols = True
+                    if not hasattr(legend, "_mw_text_follows_handles"):
+                        legend._mw_text_follows_handles = False
+                    if not hasattr(legend, "_mw_orientation"):
+                        legend._mw_orientation = "auto"
+                    if not hasattr(legend, "_mw_placement"):
+                        legend._mw_placement = "inside"
+                        legend.set_bbox_to_anchor(None)
+                    if not hasattr(legend, "_mw_draggable"):
+                        legend._mw_draggable = True
+                    if not getattr(legend, "get_draggable", lambda: True)():
+                        legend.set_draggable(True)
+                except Exception:
+                    pass
                 try:
                     legend_title = legend.get_title().get_text() if legend.get_title() else "Legend"
                 except Exception:
@@ -5126,6 +5962,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         descriptor = self._tab_descriptors.pop(tab, None)
         canvas = self._canvas_by_tab.pop(tab, None)
         axes = self._axes_by_tab.pop(tab, None)
+        if canvas is not None:
+            helper = self._navigation_helpers.pop(canvas, None)
+            if helper is not None:
+                helper.setParent(None)
+                helper.deleteLater()
+            if self._nav_active_canvas is canvas:
+                self._deactivate_navigation_mode()
         item = self._graph_tree_items.pop(tab, None)
         if item is not None:
             parent = item.parent()
@@ -5157,6 +6000,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
+        self._update_navigation_enabled()
         self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
         self._after_tab_removed(info)
         return info
@@ -5185,6 +6029,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._update_tab_buttons()
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
+        if self._dark_mode_enabled and info.axes is not None:
+            self._apply_dark_mode_to_axes(info.axes, True)
+        self._update_navigation_enabled()
         self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
         self._after_tab_restored(info)
 
@@ -5197,10 +6044,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     # ------------------------------------------------------------------ state helpers
     def _handle_current_tab_changed(self, index: int) -> None:
         tab = self.tab_widget.widget(index) if index >= 0 else None
+        self._set_navigation_mode(None)
         self._update_tab_buttons()
         self._focus_tree_on_tab(tab)
         self._rebuild_object_manager_for_tab(tab)
         self._update_worksheet_actions()
+        self._update_navigation_enabled()
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
