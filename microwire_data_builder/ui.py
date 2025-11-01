@@ -31,8 +31,8 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolb
 import matplotlib.pyplot as plt
 
 from plotting.current_annealing.core import plot_one as plot_annealing_curve
-from plotting.pyplot import _DockSwitcherWidget
-from plotting.python_console import PythonConsoleWidget
+from plotting.pyplot.window import _DockSwitcherWidget
+from plotting.pyplot.console import PythonConsoleWidget
 from plotting.utils import (
     ensure_app_theme,
     install_standard_menu,

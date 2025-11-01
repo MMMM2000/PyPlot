@@ -68,3 +68,4 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 - This repository is developed exclusively with Codex CLI sessions
   (`npm install -g @openai/codex`).
 - Detailed change history lives in `CHANGELOG.md`.
+- PyPlot workbench plugins now live under `plotting/plugins/`; add new plotters there so they can be loaded without growing `plotting/pyplot/app.py`.

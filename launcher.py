@@ -56,7 +56,7 @@ def _legacy_plotter_factories() -> Dict[str, LauncherFactory]:
 def launch_pyplot(initial: str | None = None) -> QtWidgets.QWidget | None:
     """Open the base plotter workbench, optionally selecting a script."""
 
-    from plotting.pyplot_app import main as pyplot_main
+    from plotting.pyplot.app import main as pyplot_main
 
     return pyplot_main(
         available_plotters=_legacy_plotter_factories(),
@@ -658,5 +658,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 

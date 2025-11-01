@@ -1,3 +1,11 @@
 """Plugin namespace for PyPlot."""
 
-__all__: list[str] = []
+from .base import PyPlotPlugin, ExternalPlotterPlugin, EmbeddedWidgetPlugin
+from .vsm_hysteresis import VSMHysteresisPlugin
+
+__all__ = [
+    "PyPlotPlugin",
+    "ExternalPlotterPlugin",
+    "EmbeddedWidgetPlugin",
+    "VSMHysteresisPlugin",
+]

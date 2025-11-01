@@ -20,7 +20,7 @@ from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
 
-from plotting.pyplot import (
+from plotting.pyplot.window import (
     PyPlotWindow,
     GraphLineState,
     GraphSelectionDialog,
@@ -3065,8 +3065,16 @@ class VSMPlotter(PyPlotWindow):
             and descriptor.lines
             and descriptor.kind in _NORMALIZABLE_TAB_KINDS
         )
-        self.normalize_button.setEnabled(can_normalize)
-        self.popout_button.setEnabled(can_popout)
+        if hasattr(self, "normalize_button"):
+            try:
+                self.normalize_button.setEnabled(can_normalize)
+            except Exception:
+                pass
+        if hasattr(self, "popout_button"):
+            try:
+                self.popout_button.setEnabled(can_popout)
+            except Exception:
+                pass
 
     def _handle_current_tab_changed(self, index: int) -> None:
         self._update_save_graph_enabled()
@@ -3130,7 +3138,11 @@ class VSMPlotter(PyPlotWindow):
         self.plot_button.setEnabled(False)
         self.export_button.setEnabled(False)
         self.open_origin_button.setEnabled(False)
-        self.popout_button.setEnabled(False)
+        if hasattr(self, "popout_button"):
+            try:
+                self.popout_button.setEnabled(False)
+            except Exception:
+                pass
         self.metrics_angle_button.setEnabled(False)
         self.metrics_temperature_button.setEnabled(False)
         self._update_metric_controls()
