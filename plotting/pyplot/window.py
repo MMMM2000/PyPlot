@@ -35,7 +35,7 @@ from matplotlib.text import Text
 from matplotlib import colors as mcolors
 import pandas as pd
 
-from plotting.python_console import PythonConsoleWidget
+from .console import PythonConsoleWidget
 from plotting.utils import install_standard_menu, developer_options
 
 
@@ -6380,6 +6380,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
 
 
 __all__ = [
+    "_DockSwitcherWidget",
     "PyPlotWindow",
     "GraphLineState",
     "GraphSelectionDialog",

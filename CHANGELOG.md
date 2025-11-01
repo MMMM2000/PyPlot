@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-01 13:54 UTC
+
+- Repacked the PyPlot workbench into a dedicated package with compatibility wrappers and
+  new plugin/shared/legacy namespaces so we can migrate scripts without breaking existing
+  imports or launcher integrations.
+
 ## 2025-11-01 13:31 UTC
 
 - Fixed the Microwire Data Builder launch crash by merging the table column
