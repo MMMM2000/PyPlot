@@ -1,4 +1,12 @@
 # Changelog
+## 2025-11-02 16:32 UTC
+
+- Fixed the PyPlot launcher crash by loading plugin assets lazily, correcting the default configuration lookup, and breaking the circular imports that blocked the VSM and stress workflows from initializing.
+- Keep the Message Log docked and defer its hover raise with a queued timer so opening it from the dock switcher no longer crashes on macOS.
+- Finished migrating the remaining embedded plugins into the `plotting/plugins/` namespace and moved the legacy GUI modules into `plotting/legacy/` shims, so every plugin now runs without touching the old entry points.
+- Removed the deprecated top-level packages `plotting.hsw_*`, `plotting.hysteresis_loops`, `plotting.maxion_continuous`, `plotting.pdf_plotter`, and `plotting.strain_3d_plot`; consumers should import from `plotting.plugins.*` while the reference code remains in `plotting/legacy/` for eventual deletion.
+- Moved the shared helper implementation into `plotting/shared/toolkit.py` and dropped the legacy `plotting.utils`/`plotting.common` wrappers, updating all imports to the shared namespace.
+
 ## 2025-11-02 09:45 UTC
 
 - Shifted the output-directory helpers (`prepare_output_dir`, last-dir tracking, download/sample defaults) into `plotting/shared/paths.py` and relocated the Origin session utilities to `plotting/shared/origin.py`, ensuring plugins share the same infrastructure while graph saving continues to flow through PyPlot’s Save Graph action.

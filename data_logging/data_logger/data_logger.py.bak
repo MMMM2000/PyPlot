@@ -15,7 +15,7 @@ from .logger_ui import UiMainWindow
 from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
 from .serial_port import serial_connection
 
-from plotting.utils import apply_system_theme
+from plotting.shared.toolkit import apply_system_theme
 
 # =============================================================================
 #                            USER CONFIGURATION
@@ -408,5 +408,4 @@ def main(log_dir: str | None = None) -> QtWidgets.QWidget:
 
 if __name__ == "__main__":
     main()
-
 

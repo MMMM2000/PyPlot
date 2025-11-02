@@ -31,7 +31,7 @@ from plotting.shared.paths import (
 )
 from plotting.shared.readability import apply_readability_fonts, set_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
-from plotting.utils import (
+from plotting.shared.toolkit import (
     save_figure,
     run_with_console,
     arrange_top_layout,

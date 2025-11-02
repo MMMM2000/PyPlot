@@ -15,7 +15,7 @@ def maybe_handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Return ``df`` with statistical outliers optionally removed."""
     if not CHECK_OUTLIERS:
         return df
-    from .temperature_sensitivity.core import handle_outliers
+    from plotting.temperature_sensitivity.core import handle_outliers
     return handle_outliers(df)
 
 
@@ -26,4 +26,3 @@ def maybe_handle_outliers_series(series: pd.Series, filename: str) -> pd.Series:
     df = pd.DataFrame({"sum": series, "filename": filename, "line": range(len(series))})
     df = maybe_handle_outliers(df)
     return df["sum"].reset_index(drop=True)
-

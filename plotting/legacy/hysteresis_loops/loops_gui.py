@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import sys
 import warnings
-from pathlib import Path
 
 from PyQt6 import QtWidgets
 
@@ -12,15 +10,11 @@ warnings.warn(
     DeprecationWarning,
 )
 
-if __package__ in (None, ""):
-    sys.path.append(str(Path(__file__).resolve().parents[2]))
-    from plotting.hysteresis_loops import core
-else:
-    from . import core
+from plotting.plugins.hysteresis_loops import core
 
 from plotting.shared.theme import ensure_app_theme
 from plotting.shared.readability import create_readability_group, sync_readability
-from plotting.utils import (
+from plotting.shared.toolkit import (
     create_file_widget,
     run_with_console,
     arrange_top_layout,

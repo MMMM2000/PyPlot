@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6 import QtWidgets
 
 from plotting.plugins.base import EmbeddedWidgetPlugin
-from plotting.pdf_plotter import pdf_gui
+from . import dialog
 
 
 class PdfPlotterPlugin(EmbeddedWidgetPlugin):
@@ -12,4 +12,4 @@ class PdfPlotterPlugin(EmbeddedWidgetPlugin):
 
     @staticmethod
     def _create_dialog() -> QtWidgets.QWidget:
-        return pdf_gui.PdfPlotterWindow()
+        return dialog.PdfPlotterWindow()

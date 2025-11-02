@@ -25,8 +25,8 @@ from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 import pandas as pd
 
-from plotting.python_console import PythonConsoleWidget
-from plotting.utils import install_standard_menu
+from plotting.pyplot.console import PythonConsoleWidget
+from plotting.shared.toolkit import install_standard_menu
 
 
 class _DockSwitcherWidget(QtWidgets.QWidget):

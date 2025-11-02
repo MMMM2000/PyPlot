@@ -1239,7 +1239,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """Render the finished temperature log to look like the plotting script."""
         try:
             from plotting.temperature_dependence import core as T
-            from plotting.common import maybe_handle_outliers
+            from plotting.shared.common import maybe_handle_outliers
         except Exception:
             return
         fn = self.ui.lineEdit_log_file.text().strip()
@@ -1307,8 +1307,8 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw_maxion_final(self) -> None:
         """Render the finished Maxion log to match the maxion plotting script."""
         try:
-            from plotting.maxion_continuous import core as M
-            from plotting.common import maybe_handle_outliers_series
+            from plotting.plugins.maxion_continuous import core as M
+            from plotting.shared.common import maybe_handle_outliers_series
         except Exception:
             return
         fn = self.ui.lineEdit_log_file.text().strip()

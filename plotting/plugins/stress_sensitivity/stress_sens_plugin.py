@@ -8,14 +8,8 @@ from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins._window import window_api
 from plotting.stress_sensitivity import core as sens_core
-from plotting.pyplot.window import (
-    WorksheetColumnMeta,
-    WorksheetData,
-    WorkbookData,
-    TabDescriptor,
-    create_toolbar_section,
-)
 
 
 class StressSensitivityPlugin(PyPlotPlugin):
@@ -53,7 +47,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        overview_section, overview_layout = create_toolbar_section("Overview", parent=container)
+        window_module = window_api()
+        overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
         summary = QtWidgets.QLabel(
             "Select stress sensitivity files, load them, then generate plots."
         )
@@ -75,7 +70,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        var_section, var_layout = create_toolbar_section("Variables to plot", parent=container)
+        window_module = window_api()
+        var_section, var_layout = window_module.create_toolbar_section("Variables to plot", parent=container)
         for key, label in sens_core.LABELS.items():
             checkbox = QtWidgets.QCheckBox(label, var_section)
             checkbox.setChecked(key in getattr(sens_core, "PLOT_VARS", []))
@@ -94,7 +90,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
             )
             return form
 
-        dep_section, dep_layout = create_toolbar_section(
+        dep_section, dep_layout = window_module.create_toolbar_section(
             "Stress dependence overlay",
             parent=container,
             layout_factory=_form_layout,
@@ -196,6 +192,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
             self.load_data()
         if self._data is None:
             return
+        window_module = window_api()
         config = self._apply_settings_to_core()
         dataframe = sens_core.maybe_handle_outliers(self._data.copy())
         grouped = list(
@@ -251,7 +248,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
                 tab_layout.addWidget(canvas)
                 ax = fig.axes[0] if fig.axes else None
                 title_text = ax.get_title() if ax else variable
-                descriptor = TabDescriptor(
+                descriptor = window_module.TabDescriptor(
                     kind="stress_sensitivity",
                     title=title_text,
                     root_label=f"{composition} {anneal}",

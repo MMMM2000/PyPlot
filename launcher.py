@@ -8,7 +8,7 @@ from typing import Any, Callable, Dict, Tuple, cast
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 
-from plotting import common
+from plotting.shared import common
 from plotting.shared.utils import install_standard_menu, developer_options
 from plotting.shared.theme import ensure_app_theme
 from plotting.pyplot.app import main as pyplot_main, PLUGIN_CLASS_REGISTRY

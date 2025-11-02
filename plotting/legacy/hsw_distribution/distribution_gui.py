@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import sys
 import warnings
-from pathlib import Path
 from typing import Any, Dict, List, Sequence, cast
 
 import matplotlib.pyplot as plt
@@ -17,21 +16,15 @@ warnings.warn(
     DeprecationWarning,
 )
 
-if __package__ in (None, ""):
-    from plotting.hsw_distribution import core as orig
-    from plotting.plugins.hsw_distribution import (
-        HswDistributionPlugin as PyPlotHswDistributionPlugin,
-    )
-else:
-    from . import core as orig
-    from ..plugins.hsw_distribution import (
-        HswDistributionPlugin as PyPlotHswDistributionPlugin,
-    )
+from plotting.plugins.hsw_distribution import (
+    HswDistributionPlugin as PyPlotHswDistributionPlugin,
+)
+from plotting.plugins.hsw_distribution import core as orig
 
 from plotting.shared.theme import ensure_app_theme
 from plotting.shared.utils import install_standard_menu, show_plots, run_with_console, arrange_top_layout
 from plotting.shared.paths import prepare_output_dir, get_last_output_dir, set_last_output_dir
-from plotting.utils import (
+from plotting.shared.toolkit import (
     restore_backend_choice,
     store_backend_choice,
     selected_backend,

@@ -19,7 +19,7 @@ from matplotlib.patches import Patch
 from matplotlib.colors import to_hex
 from matplotlib.collections import PathCollection
 from matplotlib.typing import ColorType
-from ..common import maybe_handle_outliers
+from plotting.shared.common import maybe_handle_outliers
 from matplotlib.figure import Figure
 
 # Ensure a font with broad Unicode coverage so arrows and micro symbols render
@@ -697,7 +697,6 @@ def main(files: List[str], backend: str = BACKEND) -> None:
             plt.close('all')
     else:
         plt.close('all')
-
 
 
 

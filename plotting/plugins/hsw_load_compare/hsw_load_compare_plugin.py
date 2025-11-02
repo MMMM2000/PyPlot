@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6 import QtWidgets
 
 from plotting.plugins.base import EmbeddedWidgetPlugin
-from plotting.hsw_load_compare import load_compare_gui
+from . import dialog
 
 
 class HswLoadComparePlugin(EmbeddedWidgetPlugin):
@@ -13,7 +13,7 @@ class HswLoadComparePlugin(EmbeddedWidgetPlugin):
     @staticmethod
     def _create_dialog() -> QtWidgets.QWidget:
         try:
-            load_compare_gui.orig.ProgressDialog = load_compare_gui.ProgressDialog
+            dialog.orig.ProgressDialog = dialog.ProgressDialog
         except Exception:
             pass
-        return load_compare_gui.SettingsDialog()
+        return dialog.SettingsDialog()

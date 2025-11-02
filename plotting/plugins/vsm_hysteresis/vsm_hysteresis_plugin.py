@@ -9,8 +9,7 @@ from typing import List
 from PyQt6 import QtCore, QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin
-from plotting.vsm_hysteresis_loops import VSMPlotter, _looks_like_vsm_name
-from plotting.pyplot.window import create_toolbar_section
+from plotting.plugins._window import window_api
 
 
 class VSMHysteresisPlugin(PyPlotPlugin):
@@ -25,6 +24,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         self._summary_label: QtWidgets.QLabel | None = None
         self._settings_loaded = False
         self._controls_connected = False
+        self._vsm_module: types.ModuleType | None = None
 
     # Lifecycle -----------------------------------------------------
     def activate(self) -> None:  # type: ignore[override]
@@ -59,6 +59,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        window_module = window_api()
         def _form_layout(parent: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
             form = QtWidgets.QFormLayout(parent)
             form.setContentsMargins(0, 0, 0, 0)
@@ -69,7 +70,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             )
             return form
 
-        axes_section, axes_layout = create_toolbar_section(
+        axes_section, axes_layout = window_module.create_toolbar_section(
             "Axes and filters",
             parent=container,
             layout_factory=_form_layout,
@@ -84,7 +85,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         axes_layout.addRow("Y axis:", host.y_axis_combo)
         layout.addWidget(axes_section)
 
-        appearance_section, appearance_layout = create_toolbar_section(
+        appearance_section, appearance_layout = window_module.create_toolbar_section(
             "Appearance",
             parent=container,
         )
@@ -109,7 +110,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         appearance_layout.addStretch(1)
         layout.addWidget(appearance_section)
 
-        overlay_section, overlay_layout = create_toolbar_section(
+        overlay_section, overlay_layout = window_module.create_toolbar_section(
             "Angle overlays",
             parent=container,
         )
@@ -131,7 +132,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         overlay_layout.addWidget(host.angle_overlay_button)
         layout.addWidget(overlay_section, 1)
 
-        metrics_section, metrics_layout = create_toolbar_section(
+        metrics_section, metrics_layout = window_module.create_toolbar_section(
             "Derived metrics",
             parent=container,
         )
@@ -150,6 +151,13 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         self._settings_widget = container
         self._controls_connected = False
         return container
+
+    def _vsm(self) -> types.ModuleType:
+        if self._vsm_module is None:
+            from plotting import vsm_hysteresis_loops as vsm_module
+
+            self._vsm_module = vsm_module
+        return self._vsm_module
 
     def _connect_control_signals(self) -> None:
         if self._controls_connected:
@@ -254,6 +262,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         if self._initialized:
             return
         host = self.host
+        vsm = self._vsm()
         self.settings_widget()
         host.logger = logging.getLogger("vsm_hysteresis_loops")
         host.logger.setLevel(logging.INFO)
@@ -287,10 +296,10 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host._last_source_dir = None
         host.last_export_path = None
         host._base_title = "VSM Hysteresis Loops"
-        host.PROJECT_EXTENSION = VSMPlotter.PROJECT_EXTENSION
-        host.PROJECT_VERSION = VSMPlotter.PROJECT_VERSION
-        host.PROJECT_CODE = VSMPlotter.PROJECT_CODE
-        host.PROJECT_SETTINGS_PREFIX = VSMPlotter.PROJECT_SETTINGS_PREFIX
+        host.PROJECT_EXTENSION = vsm.VSMPlotter.PROJECT_EXTENSION
+        host.PROJECT_VERSION = vsm.VSMPlotter.PROJECT_VERSION
+        host.PROJECT_CODE = vsm.VSMPlotter.PROJECT_CODE
+        host.PROJECT_SETTINGS_PREFIX = vsm.VSMPlotter.PROJECT_SETTINGS_PREFIX
 
         self._bind_methods()
         if hasattr(host, "_retabify_primary_docks"):
@@ -300,7 +309,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
                 host.logger.exception("Failed to retabify primary docks")
         self._connect_control_signals()
         if not self._menus_ready:
-            VSMPlotter._extend_menus(host, host.menuBar())
+            vsm.VSMPlotter._extend_menus(host, host.menuBar())
             self._menus_ready = True
 
         if not self._settings_loaded:
@@ -329,6 +338,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
     def _collect_imported_vsm_sources(self) -> List[Path]:
         host = self.host
+        vsm = self._vsm()
         worksheets = getattr(host, "_worksheets", {})
         if not isinstance(worksheets, dict) or not worksheets:
             return []
@@ -338,7 +348,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             source = getattr(worksheet, "source", None)
             if not isinstance(source, Path):
                 continue
-            if not _looks_like_vsm_name(source.name):
+            if not vsm._looks_like_vsm_name(source.name):
                 continue
             if source in seen:
                 continue
@@ -376,7 +386,8 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         host = self.host
         if getattr(host, "_vsm_methods_bound", False):
             return
-        for name, func in inspect.getmembers(VSMPlotter, inspect.isfunction):
+        vsm = self._vsm()
+        for name, func in inspect.getmembers(vsm.VSMPlotter, inspect.isfunction):
             if name in self._METHOD_EXCLUDES:
                 continue
             setattr(host, name, types.MethodType(func, host))

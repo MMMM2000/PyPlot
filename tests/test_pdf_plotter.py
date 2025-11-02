@@ -10,7 +10,7 @@ pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 from PyQt6 import QtWidgets
 from matplotlib.figure import Figure
 
-from plotting.pdf_plotter.pdf_gui import PdfPlotterWindow, parse_pdf_to_rows
+from plotting.plugins.pdf_plotter.dialog import PdfPlotterWindow, parse_pdf_to_rows
 
 
 def test_plot_creates_top_level_window():
@@ -35,4 +35,3 @@ def test_parse_handles_six_column_format():
     assert all(isinstance(value, float) for value in (t1, t2, force, strain))
     # Force column is distinct from the derived T2-T1 column
     assert not math.isclose(force, t2 - t1, rel_tol=1e-3)
-

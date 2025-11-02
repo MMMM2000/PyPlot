@@ -14,9 +14,10 @@ from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex
 from matplotlib.typing import ColorType
 from matplotlib.figure import Figure
+from matplotlib.axes import Axes
 
 from ..shared.config import load_config
-from ..common import maybe_handle_outliers
+from plotting.shared.common import maybe_handle_outliers
 from ..shared.utils import save_figure, show_plots
 from ..shared.origin import origin_session
 from ..shared.readability import apply_readability_fonts, apply_readability

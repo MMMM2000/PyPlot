@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import sys
 import warnings
-from pathlib import Path
 from typing import cast
 
 from PyQt6 import QtCore, QtWidgets
@@ -13,11 +11,7 @@ warnings.warn(
     DeprecationWarning,
 )
 
-if __package__ in (None, ""):
-    sys.path.append(str(Path(__file__).resolve().parents[2]))
-    from plotting.maxion_continuous import core as orig
-else:
-    from . import core as orig
+from plotting.plugins.maxion_continuous import core as orig
 
 from plotting.shared.theme import ensure_app_theme
 from plotting.shared.paths import (
@@ -26,7 +20,7 @@ from plotting.shared.paths import (
     set_last_output_dir,
 )
 from plotting.shared.readability import create_readability_group, sync_readability
-from plotting.utils import (
+from plotting.shared.toolkit import (
     create_file_widget,
     run_with_console,
     arrange_top_layout,

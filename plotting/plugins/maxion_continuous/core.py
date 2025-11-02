@@ -10,12 +10,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import is_color_like
 from matplotlib.figure import Figure
-from ..common import maybe_handle_outliers_series
-from ..shared.utils import save_figure, show_plots
-from ..shared.origin import origin_session
-from ..shared.readability import apply_readability_fonts, apply_readability
-from ..shared.backends import wants_matplotlib, wants_origin
-from ..shared.config import load_config
+from plotting.shared.common import maybe_handle_outliers_series
+from plotting.shared.utils import save_figure, show_plots
+from plotting.shared.origin import origin_session
+from plotting.shared.readability import apply_readability_fonts, apply_readability
+from plotting.shared.backends import wants_matplotlib, wants_origin
+from plotting.shared.config import load_config
 
 _CFG = load_config().get("maxion_continuous", {})
 

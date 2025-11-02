@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6 import QtWidgets
 
 from plotting.plugins.base import EmbeddedWidgetPlugin
-from plotting.hsw_distribution import distribution_gui
+from . import dialog
 
 
 class HswDistributionPlugin(EmbeddedWidgetPlugin):
@@ -12,4 +12,4 @@ class HswDistributionPlugin(EmbeddedWidgetPlugin):
 
     @staticmethod
     def _create_dialog() -> QtWidgets.QWidget:
-        return distribution_gui.SettingsDialog()
+        return dialog.SettingsDialog()

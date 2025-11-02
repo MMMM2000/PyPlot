@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins._window import window_api
 from plotting.current_annealing import core as anneal_core
-from plotting.pyplot.window import (
-    GraphLineState,
-    WorksheetColumnMeta,
-    WorksheetData,
-    WorkbookData,
-    TabDescriptor,
-    create_toolbar_section,
-)
+from plotting.shared.toolkit import format_annealing_title
+
+if TYPE_CHECKING:
+    from plotting.pyplot.window import (
+        GraphLineState,
+        WorksheetColumnMeta,
+        WorksheetData,
+        WorkbookData,
+        TabDescriptor,
+    )
 
 
 class CurrentAnnealingPlugin(PyPlotPlugin):
@@ -47,7 +52,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        overview_section, overview_layout = create_toolbar_section("Overview", parent=container)
+        window_module = window_api()
+        overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
         summary = QtWidgets.QLabel("Load current annealing files to plot traces or export to Origin.")
         summary.setWordWrap(True)
         overview_layout.addWidget(summary)
@@ -65,6 +71,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
+        window_module = window_api()
         def _form_layout(parent: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
             form = QtWidgets.QFormLayout(parent)
             form.setContentsMargins(0, 0, 0, 0)
@@ -75,7 +82,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             )
             return form
 
-        origin_section, origin_layout = create_toolbar_section(
+        origin_section, origin_layout = window_module.create_toolbar_section(
             "Origin export",
             parent=container,
             layout_factory=_form_layout,
@@ -135,6 +142,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self.load_data()
         if not self._data_by_file:
             return
+        window_module = window_api()
         self._apply_settings_to_core()
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
@@ -165,7 +173,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             if ax is not None:
                 for index, line in enumerate(ax.get_lines(), start=1):
                     label = line.get_label() or f"Series {index}"
-                    state = GraphLineState(
+                    state = window_module.GraphLineState(
                         key=(label, float(index)),
                         label=label,
                         line=line,
@@ -173,7 +181,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                         base_y=line.get_ydata(),
                     )
                     lines[state.key] = state
-            descriptor = TabDescriptor(
+            descriptor = window_module.TabDescriptor(
                 kind="current_annealing",
                 title=ax.get_title() if ax else title,
                 root_label=Path(path_str).name,
@@ -231,6 +239,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def _register_workbooks(self) -> None:
         host = self.host
+        window_module = window_api()
         created: list[str] = []
         for path_str, df in self._data_by_file.items():
             path = Path(path_str)
@@ -238,7 +247,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             if not key:
                 key = f"annealing::{path_str}"
                 self._workbook_keys[path_str] = key
-            workbook = WorkbookData(
+            workbook = window_module.WorkbookData(
                 key=key,
                 name=f"{path.stem} (annealing)",
                 worksheets=[],
@@ -250,11 +259,11 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 worksheet = host._create_worksheet_from_frame(workbook, sheet_name, frame)
                 columns = worksheet.columns
                 current_meta = columns.get("Current (mA)")
-                if isinstance(current_meta, WorksheetColumnMeta):
+                if isinstance(current_meta, window_module.WorksheetColumnMeta):
                     current_meta.units = "mA"
                     current_meta.long_name = "Current"
                 resistance_meta = columns.get("Resistance (Ω)")
-                if isinstance(resistance_meta, WorksheetColumnMeta):
+                if isinstance(resistance_meta, window_module.WorksheetColumnMeta):
                     resistance_meta.units = "Ω"
                     resistance_meta.long_name = "Resistance"
                 worksheet_objects.append(worksheet)

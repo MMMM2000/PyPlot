@@ -31,6 +31,8 @@ def load_config(path: str | None = None) -> Dict[str, Any]:
     # ``importlib.resources``.  This works both from a regular installation and
     # when the package has been bundled by tools like PyInstaller.
     package = __package__ or "plotting"
-    resource = resources.files(package).joinpath(_DEFAULT_CONFIG_NAME)
+    # configuration file lives alongside the ``plotting`` package root, not under ``plotting.shared``
+    package_root = package.split(".", 1)[0]
+    resource = resources.files(package_root).joinpath(_DEFAULT_CONFIG_NAME)
     with resource.open('r', encoding='utf-8') as fh:
         return json.load(fh)

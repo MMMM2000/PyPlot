@@ -16,7 +16,7 @@ def test_restore_backend_choice_fallback(monkeypatch: pytest.MonkeyPatch) -> Non
     except ImportError as exc:  # pragma: no cover - environment dependent
         pytest.skip(f"PyQt6 widgets unavailable: {exc}")
 
-    import plotting.utils as utils
+    from plotting.shared import toolkit as utils
 
     original = getattr(utils, "restore_backend_choice", None)
     if original is None:

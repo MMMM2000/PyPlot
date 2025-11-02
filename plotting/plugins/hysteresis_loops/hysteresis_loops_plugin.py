@@ -3,7 +3,7 @@ from __future__ import annotations
 from PyQt6 import QtWidgets
 
 from plotting.plugins.base import EmbeddedWidgetPlugin
-from plotting.hysteresis_loops import loops_gui
+from . import dialog
 
 
 class HysteresisLoopsPlugin(EmbeddedWidgetPlugin):
@@ -12,4 +12,4 @@ class HysteresisLoopsPlugin(EmbeddedWidgetPlugin):
 
     @staticmethod
     def _create_dialog() -> QtWidgets.QWidget:
-        return loops_gui.SettingsDialog()
+        return dialog.SettingsDialog()

@@ -7,7 +7,7 @@ from plotting.stress_dependence.core import (
     explain_metadata_failure,
 )
 from plotting.stress_sensitivity.core import parse_metadata as ss_parse
-from plotting.hsw_load_compare.core import parse_metadata as hl_parse
+from plotting.plugins.hsw_load_compare.core import parse_metadata as hl_parse
 from plotting.temperature_sensitivity.core import parse_metadata as ts_parse
 from plotting.temperature_dependence.core import parse_metadata as td_parse
 

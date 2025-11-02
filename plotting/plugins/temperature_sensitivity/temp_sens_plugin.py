@@ -1,22 +1,23 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TYPE_CHECKING
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins._window import window_api
 from plotting.temperature_sensitivity import core as temp_sens_core
-from plotting.pyplot.window import (
-    GraphLineState,
-    WorksheetColumnMeta,
-    WorksheetData,
-    WorkbookData,
-    TabDescriptor,
-    create_toolbar_section,
-)
+
+if TYPE_CHECKING:
+    from plotting.pyplot.window import (
+        GraphLineState,
+        WorksheetColumnMeta,
+        WorkbookData,
+        TabDescriptor,
+    )
 
 
 class TemperatureSensitivityPlugin(PyPlotPlugin):
@@ -55,7 +56,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        overview_section, overview_layout = create_toolbar_section("Overview", parent=container)
+        window_module = window_api()
+        overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
         summary = QtWidgets.QLabel("Select temperature sensitivity files then click Load data.")
         summary.setWordWrap(True)
         overview_layout.addWidget(summary)
@@ -75,7 +77,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        var_section, var_layout = create_toolbar_section("Variables to plot", parent=container)
+        window_module = window_api()
+        var_section, var_layout = window_module.create_toolbar_section("Variables to plot", parent=container)
         for key, label in temp_sens_core.TS_LABELS.items():
             checkbox = QtWidgets.QCheckBox(label, var_section)
             checkbox.setChecked(key in temp_sens_core.PLOT_VARS)
@@ -94,7 +97,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             )
             return form
 
-        baseline_section, baseline_layout = create_toolbar_section(
+        baseline_section, baseline_layout = window_module.create_toolbar_section(
             "Baseline options",
             parent=container,
             layout_factory=_form_layout,
@@ -118,7 +121,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         baseline_layout.addRow(include_box)
         layout.addWidget(baseline_section)
 
-        smoothing_section, smoothing_layout = create_toolbar_section(
+        smoothing_section, smoothing_layout = window_module.create_toolbar_section(
             "Smoothing",
             parent=container,
             layout_factory=_form_layout,
@@ -175,6 +178,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 
     def load_data(self) -> None:  # type: ignore[override]
         host = self.host
+        window_module = window_api()
 
         def _path_key(path: Path) -> str:
             try:
@@ -237,6 +241,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             self.load_data()
         if self._data is None:
             return
+        window_module = window_api()
         config = self._apply_settings_to_core()
         dataframe = temp_sens_core.maybe_handle_outliers(self._data.copy())
         clear = getattr(self.host, "_clear_tab_list", None)
@@ -293,7 +298,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     if ax is not None:
                         for index, line in enumerate(ax.get_lines(), start=1):
                             label = line.get_label() or f"Series {index}"
-                            state = GraphLineState(
+                            state = window_module.GraphLineState(
                                 key=(label, float(index)),
                                 label=label,
                                 line=line,
@@ -313,7 +318,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                             "composition": row0.get("composition", ""),
                             "anneal": row0.get("anneal", ""),
                         })
-                    descriptor = TabDescriptor(
+                    descriptor = window_module.TabDescriptor(
                         kind="temperature_sensitivity",
                         title=title,
                         root_label=tab_label,
@@ -382,7 +387,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     resolved = path
                 key = f"temperature_sensitivity::{resolved}"
                 self._workbook_keys[str(path)] = key
-            workbook = WorkbookData(
+            workbook = window_module.WorkbookData(
                 key=key,
                 name=f"{path.stem} (temperature)",
                 worksheets=[],
@@ -392,7 +397,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             worksheet = host._create_worksheet_from_frame(workbook, "Temperature data", frame)
             for column, (long_name, units) in meta_map.items():
                 meta = worksheet.columns.get(column)
-                if isinstance(meta, WorksheetColumnMeta):
+                if isinstance(meta, window_module.WorksheetColumnMeta):
                     meta.long_name = long_name
                     meta.units = units
             workbook.worksheets = [worksheet.key]

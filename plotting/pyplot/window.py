@@ -367,7 +367,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 pass
         dock.show()
         try:
-            dock.raise_()
+            QtCore.QTimer.singleShot(0, lambda d=dock: d.raise_())
         except Exception:
             pass
         if prefer_overlay and not persistent and dock.isFloating():
@@ -429,12 +429,12 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 self._syncing = False
                 self._collapse_timer.stop()
                 return
-            if self._expanded_index == index:
-                self._expanded_index = None
-            if self._pinned_index == index:
-                self._pinned_index = None
-            self._floating_indices.discard(index)
-            self._schedule_collapse()
+        if self._expanded_index == index:
+            self._expanded_index = None
+        if self._pinned_index == index:
+            self._pinned_index = None
+        self._floating_indices.discard(index)
+        self._schedule_collapse()
 
     def _collapse_all(self, *, exclude: int | None = None, keep: Iterable[int] | None = None) -> None:
         previous = self._syncing

@@ -6,7 +6,7 @@ from typing import Callable
 
 from PyQt6 import QtWidgets
 
-from plotting.utils import (
+from .toolkit import (
     arrange_top_layout,
     create_file_widget,
     developer_options,

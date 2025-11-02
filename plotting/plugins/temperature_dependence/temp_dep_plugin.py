@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, TYPE_CHECKING
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -9,13 +9,14 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin
 from plotting.temperature_dependence import core as temp_core
-from plotting.pyplot.window import (
-    WorksheetColumnMeta,
-    WorksheetData,
-    WorkbookData,
-    TabDescriptor,
-    create_toolbar_section,
-)
+from plotting.plugins._window import window_api
+
+if TYPE_CHECKING:
+    from plotting.pyplot.window import (
+        WorksheetColumnMeta,
+        WorkbookData,
+        TabDescriptor,
+    )
 
 
 class TemperatureDependencePlugin(PyPlotPlugin):
@@ -61,7 +62,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        overview_section, overview_layout = create_toolbar_section("Overview", parent=container)
+        window_module = window_api()
+        overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
         summary = QtWidgets.QLabel("Select temperature data files then click Load data.")
         summary.setWordWrap(True)
         summary.setObjectName("mw_temp_dep_overview_text")
@@ -84,7 +86,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        var_section, var_layout = create_toolbar_section("Variables to plot", parent=container)
+        window_module = window_api()
+        var_section, var_layout = window_module.create_toolbar_section("Variables to plot", parent=container)
         for key, label in self._VAR_LABELS.items():
             checkbox = QtWidgets.QCheckBox(label, var_section)
             checkbox.setChecked(key in temp_core.PLOT_VARS)
@@ -103,7 +106,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             )
             return form
 
-        processing_section, processing_layout = create_toolbar_section(
+        processing_section, processing_layout = window_module.create_toolbar_section(
             "Processing",
             parent=container,
             layout_factory=_form_layout,
@@ -178,6 +181,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self.load_data()
         if self._data is None:
             return
+        window_module = window_api()
         variables = self._apply_settings_to_core()
         dataframe = temp_core.maybe_handle_outliers(self._data.copy())
         clear = getattr(self.host, "_clear_tab_list", None)
@@ -207,7 +211,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             x_label = ax.get_xlabel() if ax else "Temperature"
             y_label = ax.get_ylabel() if ax else variable
             tab_label = temp_core.LABELS.get(variable, variable)
-            descriptor = TabDescriptor(
+            descriptor = window_module.TabDescriptor(
                 kind="temperature_dependence",
                 title=title,
                 root_label=tab_label,
@@ -339,6 +343,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         if data is None or "filename" not in data.columns:
             return
         host = self.host
+        window_module = window_api()
         grouped = data.groupby("filename", dropna=False)
         active_keys: set[str] = set()
         created: list[str] = []
@@ -377,7 +382,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                     resolved = path
                 key = f"temperature_dependence::{resolved}"
                 self._workbook_keys[str(path)] = key
-            workbook = WorkbookData(
+            workbook = window_module.WorkbookData(
                 key=key,
                 name=f"{path.stem} (temperature)",
                 worksheets=[],
@@ -387,7 +392,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             worksheet = host._create_worksheet_from_frame(workbook, "Temperature data", frame)
             for column, (long_name, units) in meta_map.items():
                 meta = worksheet.columns.get(column)
-                if isinstance(meta, WorksheetColumnMeta):
+                if isinstance(meta, window_module.WorksheetColumnMeta):
                     meta.long_name = long_name
                     meta.units = units
             workbook.worksheets = [worksheet.key]

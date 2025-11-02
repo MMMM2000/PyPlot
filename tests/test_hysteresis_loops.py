@@ -5,7 +5,7 @@ pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 import matplotlib
 matplotlib.use("Agg")
 
-from plotting.hysteresis_loops import core
+from plotting.plugins.hysteresis_loops import core
 
 
 def test_load_and_plot_hysteresis_loop():

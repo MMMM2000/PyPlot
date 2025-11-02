@@ -3401,7 +3401,7 @@ def _plot_measurement_matplotlib(
     matplotlib.rcParams["figure.max_open_warning"] = 0
 
     from plotting.current_annealing.core import plot_one
-    from plotting.utils import format_annealing_title
+    from plotting.shared.toolkit import format_annealing_title
 
     plot_dir.mkdir(parents=True, exist_ok=True)
     title = format_annealing_title(source.stem)
@@ -4830,6 +4830,5 @@ __all__ = [
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
 ]
-
 
 

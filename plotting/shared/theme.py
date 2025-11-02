@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from PyQt6 import QtWidgets
 
-from ..utils import apply_system_theme
+from .toolkit import apply_system_theme
 
 
 def ensure_app_theme(app: QtWidgets.QApplication) -> None:

@@ -1,15 +1,20 @@
-from PyQt6 import QtWidgets, QtGui, QtCore
+"""Shared toolkit functions for PyPlot."""
+
+from __future__ import annotations
+
 import os
 import sys
 import weakref
 import atexit
 from pathlib import Path
-from matplotlib.figure import Figure
 from typing import Any, Callable
+
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from PyQt6 import QtWidgets, QtGui, QtCore
 
 from app_help import show_help
-from plotting.shared.readability import (
+from .readability import (
     ReadabilityControls,
     apply_readability,
     apply_readability_fonts,
@@ -18,15 +23,15 @@ from plotting.shared.readability import (
     set_readability,
     sync_readability,
 )
-from plotting.shared.settings import get_settings
-from plotting.shared.paths import (
+from .settings import get_settings
+from .paths import (
     prepare_output_dir,
     get_last_output_dir,
     set_last_output_dir,
     download_dir,
     sample_dir,
 )
-from plotting.shared.origin import (
+from .origin import (
     origin_session,
     release_origin,
     schedule_origin_release,

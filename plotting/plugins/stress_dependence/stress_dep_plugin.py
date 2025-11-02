@@ -8,14 +8,8 @@ from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins._window import window_api
 from plotting.stress_dependence import core as stress_core
-from plotting.pyplot.window import (
-    WorksheetColumnMeta,
-    WorksheetData,
-    WorkbookData,
-    TabDescriptor,
-    create_toolbar_section,
-)
 
 
 class StressDependencePlugin(PyPlotPlugin):
@@ -62,7 +56,8 @@ class StressDependencePlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        overview_section, overview_layout = create_toolbar_section("Overview", parent=container)
+        window_module = window_api()
+        overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
         summary = QtWidgets.QLabel(
             "Select stress dependence files, load them, then generate plots."
         )
@@ -84,7 +79,8 @@ class StressDependencePlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
 
-        var_section, var_layout = create_toolbar_section("Variables to plot", parent=container)
+        window_module = window_api()
+        var_section, var_layout = window_module.create_toolbar_section("Variables to plot", parent=container)
         for key, label in self._VAR_LABELS.items():
             checkbox = QtWidgets.QCheckBox(label, var_section)
             checkbox.setChecked(key in getattr(stress_core, "PLOT_VARS", []))
@@ -93,7 +89,7 @@ class StressDependencePlugin(PyPlotPlugin):
         var_layout.addStretch(1)
         layout.addWidget(var_section)
 
-        baseline_section, baseline_layout = create_toolbar_section(
+        baseline_section, baseline_layout = window_module.create_toolbar_section(
             "Baseline",
             parent=container,
         )
@@ -121,7 +117,7 @@ class StressDependencePlugin(PyPlotPlugin):
             )
             return form
 
-        processed_section, processed_layout = create_toolbar_section(
+        processed_section, processed_layout = window_module.create_toolbar_section(
             "Processed curve",
             parent=container,
             layout_factory=_form_layout,
@@ -225,6 +221,7 @@ class StressDependencePlugin(PyPlotPlugin):
             self.load_data()
         if self._data is None:
             return
+        window_module = window_api()
         config = self._apply_settings_to_core()
         dataframe = stress_core.maybe_handle_outliers(self._data.copy())
         grouped = list(
@@ -280,7 +277,7 @@ class StressDependencePlugin(PyPlotPlugin):
                 tab_layout.addWidget(canvas)
                 ax = fig.axes[0] if fig.axes else None
                 tab_label = stress_core.LABELS.get(variable, variable)
-                descriptor = TabDescriptor(
+                descriptor = window_module.TabDescriptor(
                     kind="stress_dependence",
                     title=fig.axes[0].get_title() if fig.axes else tab_label,
                     root_label=f"{composition} {title} {anneal}",

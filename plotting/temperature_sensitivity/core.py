@@ -1126,7 +1126,7 @@ def plot_variable_origin(
         except Exception:
             pass
 
-from ..common import maybe_handle_outliers
+from plotting.shared.common import maybe_handle_outliers
 
 
 def export_group_to_txt(
@@ -1297,5 +1297,4 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
         plt.close('all')
     if wants_origin(backend):
         schedule_origin_release()
-
 
