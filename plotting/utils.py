@@ -3,7 +3,6 @@ import os
 import sys
 import weakref
 import atexit
-import sys
 from pathlib import Path
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -12,7 +11,7 @@ from matplotlib.collections import PathCollection
 from matplotlib.axes import Axes
 from matplotlib import colors as mcolors
 from contextlib import contextmanager
-from typing import Any, Callable, Iterator, Sequence, cast, Literal
+from typing import Any, Callable, Iterator, cast
 import matplotlib.pyplot as plt
 import datetime
 
@@ -22,74 +21,20 @@ from app_help import show_help
 _SUBSCRIPT_MAP = str.maketrans("0123456789", "₀₁₂₃₄₅₆₇₈₉")
 
 
-def _apply_standard_icon(
-    action: QtGui.QAction | None,
-    role: QtWidgets.QStyle.StandardPixmap | None,
-    style: QtWidgets.QStyle | None = None,
-) -> None:
-    """Assign a style-derived icon to an action when available."""
-
-    if action is None or role is None:
-        return
-    resolved_style: QtWidgets.QStyle | None = style
-    if resolved_style is None:
-        try:
-            parent = action.parent()
-        except Exception:
-            parent = None
-        if isinstance(parent, QtWidgets.QWidget):
-            try:
-                resolved_style = parent.style()
-            except Exception:
-                resolved_style = None
-    if resolved_style is None:
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            try:
-                resolved_style = app.style()
-            except Exception:
-                resolved_style = None
-    if resolved_style is None:
-        return
-    try:
-        icon = resolved_style.standardIcon(role)
-    except Exception:
-        icon = QtGui.QIcon()
-    if not icon.isNull():
-        try:
-            action.setIcon(icon)
-        except Exception:
-            pass
-
-
 @contextmanager
 def origin_session() -> Iterator[Any]:
-    """Return an Origin session that stays available for inspection."""
+    """Return an Origin session that is closed on exit."""
 
     import originpro as op  # lazy import
-
-    app = None
     try:
-        app = op.Application()  # type: ignore[attr-defined]
+        op.set_show()
     except Exception:
-        app = None
-
+        pass
     try:
-        if app is not None:
-            try:
-                app.Visible = 1  # type: ignore[attr-defined, assignment]
-            except Exception:
-                pass
-        else:
-            try:
-                op.set_show()
-            except Exception:
-                pass
         yield cast(Any, op)
     finally:
-        # Keep Origin running for the user; release is handled via ``schedule_origin_release``.
         try:
-            cast(Any, op).lt_exec("win -a;")
+            cast(Any, op).exit()
         except Exception:
             pass
 
@@ -240,289 +185,6 @@ def _apply_color_scheme(
             app.setPalette(_dark_palette(accent))
         else:
             app.setPalette(standard_palette)
-
-
-def _available_geometry(widget: QtWidgets.QWidget) -> QtCore.QRect | None:
-    """Return the available screen geometry for ``widget``."""
-
-    screen = getattr(widget, "screen", lambda: None)()
-    if screen is None:
-        app = QtWidgets.QApplication.instance()
-        if app is not None:
-            try:
-                screen = app.primaryScreen()
-            except Exception:
-                screen = None
-    if screen is None:
-        return None
-    try:
-        return screen.availableGeometry()
-    except Exception:
-        return None
-
-
-def _center_window(widget: QtWidgets.QWidget) -> None:
-    """Move ``widget`` to the centre of its current screen."""
-
-    if not isinstance(widget, QtWidgets.QWidget):
-        return
-    widget.showNormal()
-    available = _available_geometry(widget)
-    frame = widget.frameGeometry()
-    if available is None:
-        widget.move(max(0, frame.x()), max(0, frame.y()))
-        return
-
-    size = frame.size()
-    if size.width() <= 0 or size.height() <= 0:
-        hint = widget.sizeHint()
-        width = max(widget.minimumWidth(), hint.width(), 320)
-        height = max(widget.minimumHeight(), hint.height(), 240)
-        size.setWidth(width)
-        size.setHeight(height)
-        frame.setSize(size)
-
-    frame.moveCenter(available.center())
-    widget.move(frame.topLeft())
-
-
-def _fill_window(widget: QtWidgets.QWidget) -> None:
-    """Expand ``widget`` to fill the available screen geometry."""
-
-    if not isinstance(widget, QtWidgets.QWidget):
-        return
-    widget.showNormal()
-    available = _available_geometry(widget)
-    if available is None:
-        try:
-            widget.showMaximized()
-        except Exception:
-            pass
-        return
-    widget.setGeometry(available)
-
-
-def _activate_window(widget: QtWidgets.QWidget) -> None:
-    """Make ``widget`` the active, front-most window."""
-
-    if not isinstance(widget, QtWidgets.QWidget):
-        return
-    try:
-        widget.show()
-        widget.raise_()
-        widget.activateWindow()
-    except Exception:
-        pass
-
-
-def _visible_windows(exclude: QtWidgets.QWidget | None = None) -> list[QtWidgets.QWidget]:
-    """Return a list of visible top-level windows, ordered by title."""
-
-    app = QtWidgets.QApplication.instance()
-    if app is None:
-        return []
-    windows: list[QtWidgets.QWidget] = []
-    for widget in app.topLevelWidgets():
-        if not isinstance(widget, QtWidgets.QWidget):
-            continue
-        if not widget.isWindow():
-            continue
-        if exclude is not None and widget is exclude:
-            continue
-        try:
-            visible = widget.isVisible()
-        except Exception:
-            visible = False
-        if not visible:
-            continue
-        windows.append(widget)
-
-    def _sort_key(item: QtWidgets.QWidget) -> tuple[int, str, int]:
-        title = item.windowTitle() or item.objectName() or item.__class__.__name__
-        try:
-            active = QtWidgets.QApplication.activeWindow() is item
-        except Exception:
-            active = False
-        return (0 if active else 1, title.casefold(), id(item))
-
-    windows.sort(key=_sort_key)
-    return windows
-
-
-def _cycle_window(offset: int) -> None:
-    """Activate the next or previous window relative to the current one."""
-
-    windows = _visible_windows()
-    if not windows:
-        return
-
-    try:
-        active = QtWidgets.QApplication.activeWindow()
-    except Exception:
-        active = None
-
-    if active in windows:
-        index = windows.index(active)
-    else:
-        index = 0
-
-    target = windows[(index + offset) % len(windows)]
-    _activate_window(target)
-
-
-def _bring_all_to_front() -> None:
-    """Raise every visible window so they appear in front."""
-
-    for widget in _visible_windows():
-        _activate_window(widget)
-
-
-def _cascade_windows(windows: Sequence[QtWidgets.QWidget]) -> None:
-    targets = [widget for widget in windows if isinstance(widget, QtWidgets.QWidget)]
-    if not targets:
-        return
-    reference = None
-    for widget in targets:
-        reference = _available_geometry(widget)
-        if reference is not None:
-            break
-    if reference is None:
-        reference = QtCore.QRect(100, 100, 900, 600)
-    width = max(320, int(reference.width() * 0.6))
-    height = max(240, int(reference.height() * 0.6))
-    offset = 32
-    for index, widget in enumerate(targets):
-        try:
-            widget.showNormal()
-            widget.setGeometry(
-                reference.x() + offset * index,
-                reference.y() + offset * index,
-                width,
-                height,
-            )
-            _activate_window(widget)
-        except Exception:
-            continue
-
-
-def _tile_windows(windows: Sequence[QtWidgets.QWidget], *, orientation: Literal["vertical", "horizontal"]) -> None:
-    targets = [widget for widget in windows if isinstance(widget, QtWidgets.QWidget)]
-    if not targets:
-        return
-    reference = None
-    for widget in targets:
-        reference = _available_geometry(widget)
-        if reference is not None:
-            break
-    if reference is None:
-        reference = QtCore.QRect(100, 100, 900, 600)
-    count = len(targets)
-    if orientation == "vertical":
-        column_width = max(240, reference.width() // max(1, count))
-        for index, widget in enumerate(targets):
-            x = reference.x() + index * column_width
-            width = column_width
-            if index == count - 1:
-                width = reference.right() - x
-                if width <= 0:
-                    width = column_width
-            try:
-                widget.showNormal()
-                widget.setGeometry(x, reference.y(), width, reference.height())
-                _activate_window(widget)
-            except Exception:
-                continue
-    else:
-        row_height = max(200, reference.height() // max(1, count))
-        for index, widget in enumerate(targets):
-            y = reference.y() + index * row_height
-            height = row_height
-            if index == count - 1:
-                height = reference.bottom() - y
-                if height <= 0:
-                    height = row_height
-            try:
-                widget.showNormal()
-                widget.setGeometry(reference.x(), y, reference.width(), height)
-                _activate_window(widget)
-            except Exception:
-                continue
-
-
-def _show_move_resize_dialog(widget: QtWidgets.QWidget) -> None:
-    """Prompt for explicit geometry settings and apply them to ``widget``."""
-
-    if not isinstance(widget, QtWidgets.QWidget):
-        return
-
-    dialog = QtWidgets.QDialog(widget)
-    dialog.setWindowTitle("Move && Resize")
-    dialog.setModal(True)
-
-    layout = QtWidgets.QFormLayout(dialog)
-    layout.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-
-    geometry = widget.geometry()
-    available = _available_geometry(widget)
-
-    min_width = max(200, widget.minimumWidth())
-    min_height = max(200, widget.minimumHeight())
-    width_hint = widget.sizeHint().width() if widget.sizeHint().width() > 0 else min_width
-    height_hint = widget.sizeHint().height() if widget.sizeHint().height() > 0 else min_height
-
-    width_max = max(min_width, available.width() if available is not None else min_width * 4)
-    height_max = max(min_height, available.height() if available is not None else min_height * 4)
-
-    width_value = max(min_width, min(width_max, geometry.width() or width_hint))
-    height_value = max(min_height, min(height_max, geometry.height() or height_hint))
-
-    x_spin = QtWidgets.QSpinBox(dialog)
-    x_spin.setRange(-10000, 10000)
-    x_spin.setValue(geometry.x())
-    layout.addRow("X position", x_spin)
-
-    y_spin = QtWidgets.QSpinBox(dialog)
-    y_spin.setRange(-10000, 10000)
-    y_spin.setValue(geometry.y())
-    layout.addRow("Y position", y_spin)
-
-    width_spin = QtWidgets.QSpinBox(dialog)
-    width_spin.setRange(min_width, width_max)
-    width_spin.setValue(width_value)
-    layout.addRow("Width", width_spin)
-
-    height_spin = QtWidgets.QSpinBox(dialog)
-    height_spin.setRange(min_height, height_max)
-    height_spin.setValue(height_value)
-    layout.addRow("Height", height_spin)
-
-    button_box = QtWidgets.QDialogButtonBox(
-        QtWidgets.QDialogButtonBox.StandardButton.Ok
-        | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
-        parent=dialog,
-    )
-    layout.addRow(button_box)
-
-    button_box.accepted.connect(dialog.accept)
-    button_box.rejected.connect(dialog.reject)
-
-    if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
-        return
-
-    new_width = width_spin.value()
-    new_height = height_spin.value()
-    new_x = x_spin.value()
-    new_y = y_spin.value()
-
-    if available is not None:
-        new_width = min(new_width, available.width())
-        new_height = min(new_height, available.height())
-        new_x = max(available.left(), min(new_x, available.right() - new_width))
-        new_y = max(available.top(), min(new_y, available.bottom() - new_height))
-
-    widget.showNormal()
-    widget.setGeometry(QtCore.QRect(new_x, new_y, new_width, new_height))
-    _activate_window(widget)
 
 
 def apply_system_theme(app: QtWidgets.QApplication) -> None:
@@ -830,7 +492,6 @@ def create_file_widget(
     *,
     key: str | None = None,
     on_outlier_toggle: Callable[[bool, list[str]], bool | None] | None = None,
-    on_change: Callable[[list[str]], None] | None = None,
 ) -> tuple[list[str], QtWidgets.QWidget]:
     """Return a widget managing a list of input files and the backing list."""
 
@@ -852,14 +513,6 @@ def create_file_widget(
     prefs = _settings()
     dev_opts = developer_options()
     storage_key = f"{key}_remembered_files" if key else None
-
-    def _notify_change() -> None:
-        if on_change is None:
-            return
-        try:
-            on_change(list(files))
-        except Exception as exc:
-            print(f"file change callback failed: {exc}")
 
     def _refresh_items() -> None:
         file_list.clear()
@@ -896,7 +549,6 @@ def create_file_widget(
                 changed = True
         if changed or files:
             _refresh_items()
-            _notify_change()
 
     def add_files() -> None:
         new = select_files_or_folder(parent, ext, key=key)
@@ -908,7 +560,6 @@ def create_file_widget(
         if changed:
             _refresh_items()
             _store_files()
-            _notify_change()
 
     def remove_selected() -> None:
         removed = False
@@ -922,7 +573,6 @@ def create_file_widget(
         if removed:
             _refresh_items()
             _store_files()
-            _notify_change()
 
     def remove_all() -> None:
         if not files:
@@ -930,7 +580,6 @@ def create_file_widget(
         files.clear()
         _refresh_items()
         _store_files()
-        _notify_change()
 
     def open_item(item: QtWidgets.QListWidgetItem) -> None:
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(item.text()))
@@ -1015,7 +664,6 @@ def create_file_widget(
     layout.addWidget(file_list)
 
     _load_persisted_files()
-    _notify_change()
 
     def _toggle_keep_files(enabled: bool) -> None:
         if storage_key is None:
@@ -1169,252 +817,18 @@ def _ensure_menu_bar(target: QtWidgets.QWidget) -> QtWidgets.QMenuBar:
         if bar is None:
             bar = QtWidgets.QMenuBar(target)
             target.setMenuBar(bar)
-    else:
-        layout = target.layout()
-        if layout is None:
-            layout = QtWidgets.QVBoxLayout(target)
-            target.setLayout(layout)
+        return bar
 
-        bar = getattr(layout, "menuBar", lambda: None)()
-        if bar is None:
-            bar = QtWidgets.QMenuBar(target)
-            layout.setMenuBar(bar)
+    layout = target.layout()
+    if layout is None:
+        layout = QtWidgets.QVBoxLayout(target)
+        target.setLayout(layout)
 
-    if sys.platform == "darwin":
-        try:
-            bar.setNativeMenuBar(True)
-        except Exception:
-            pass
-
+    bar = getattr(layout, "menuBar", lambda: None)()
+    if bar is None:
+        bar = QtWidgets.QMenuBar(target)
+        layout.setMenuBar(bar)
     return bar
-
-
-class _WindowMenuManager(QtCore.QObject):
-    """Populate the shared Window menu with native-feeling actions."""
-
-    def __init__(self, menu: QtWidgets.QMenu, target: QtWidgets.QWidget) -> None:
-        super().__init__(menu)
-        self._menu = menu
-        self._target_ref = weakref.ref(target)
-        menu.aboutToShow.connect(self.rebuild)
-
-    def rebuild(self) -> None:
-        menu = self._menu
-        target = self._target_ref()
-        menu.clear()
-        if target is None:
-            placeholder = menu.addAction("No window")
-            if placeholder is not None:
-                placeholder.setEnabled(False)
-            return
-
-        style = getattr(target, "style", lambda: None)()
-        if style is None:
-            app = QtWidgets.QApplication.instance()
-            if app is not None:
-                style = app.style()
-
-        def _set_shortcut(
-            action: QtGui.QAction | None,
-            shortcut: QtGui.QKeySequence.StandardKey | str,
-        ) -> None:
-            if action is None:
-                return
-            try:
-                if isinstance(shortcut, QtGui.QKeySequence.StandardKey):
-                    action.setShortcut(QtGui.QKeySequence(shortcut))
-                else:
-                    action.setShortcut(QtGui.QKeySequence(shortcut))
-            except Exception:
-                pass
-
-        # Minimize ---------------------------------------------------------
-        minimize_action = menu.addAction("Minimize")
-        _apply_standard_icon(minimize_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMinButton, style)
-        try:
-            minimize_attr = getattr(QtGui.QKeySequence.StandardKey, "Minimize")
-        except AttributeError:
-            minimize_attr = None
-        except Exception:
-            minimize_attr = None
-        try:
-            unknown_key = getattr(QtGui.QKeySequence.StandardKey, "UnknownKey")
-        except AttributeError:
-            unknown_key = None
-        except Exception:
-            unknown_key = None
-        minimize_shortcut: QtGui.QKeySequence.StandardKey | str
-        if minimize_attr is None or minimize_attr == unknown_key:
-            minimize_shortcut = "Meta+M" if sys.platform == "darwin" else "Ctrl+M"
-        else:
-            minimize_shortcut = minimize_attr
-        _set_shortcut(minimize_action, minimize_shortcut)
-        if minimize_action is not None:
-            if hasattr(target, "showMinimized"):
-                minimize_action.triggered.connect(target.showMinimized)
-            else:
-                minimize_action.setEnabled(False)
-
-        # Zoom / Maximize --------------------------------------------------
-        zoom_label = "Zoom" if sys.platform == "darwin" else "Maximize"
-        zoom_action = menu.addAction(zoom_label)
-        _apply_standard_icon(zoom_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarMaxButton, style)
-        if zoom_action is not None:
-
-            def _toggle_zoom() -> None:
-                if not hasattr(target, "isMaximized"):
-                    zoom_action.setEnabled(False)
-                    return
-                try:
-                    if target.isMaximized():
-                        target.showNormal()
-                    else:
-                        target.showMaximized()
-                except Exception:
-                    pass
-
-            zoom_action.triggered.connect(_toggle_zoom)
-
-        # Fill -------------------------------------------------------------
-        fill_action = menu.addAction("Fill Screen")
-        _apply_standard_icon(fill_action, QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon, style)
-        if fill_action is not None:
-
-            def _fill_target() -> None:
-                _fill_window(target)
-
-            fill_action.triggered.connect(_fill_target)
-
-        # Center -----------------------------------------------------------
-        center_action = menu.addAction("Center on Screen")
-        _apply_standard_icon(center_action, QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton, style)
-        if center_action is not None:
-
-            def _center_target() -> None:
-                _center_window(target)
-
-            center_action.triggered.connect(_center_target)
-
-        # Move & Resize ----------------------------------------------------
-        move_action = menu.addAction("Move && Resize…")
-        _apply_standard_icon(move_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView, style)
-        if move_action is not None:
-
-            def _move_resize_target() -> None:
-                _show_move_resize_dialog(target)
-
-            move_action.triggered.connect(_move_resize_target)
-
-        # Full screen ------------------------------------------------------
-        full_screen_active = False
-        if hasattr(target, "isFullScreen"):
-            try:
-                full_screen_active = target.isFullScreen()
-            except Exception:
-                full_screen_active = False
-        full_screen_text = "Exit Full Screen" if full_screen_active else "Enter Full Screen"
-        full_screen_action = menu.addAction(full_screen_text)
-        _apply_standard_icon(full_screen_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton, style)
-        if full_screen_action is not None:
-            _set_shortcut(
-                full_screen_action,
-                QtGui.QKeySequence.StandardKey.FullScreen,
-            )
-
-            def _toggle_full_screen() -> None:
-                if not hasattr(target, "isFullScreen"):
-                    full_screen_action.setEnabled(False)
-                    return
-                try:
-                    if target.isFullScreen():
-                        target.showNormal()
-                    else:
-                        target.showFullScreen()
-                except Exception:
-                    pass
-                self.rebuild()
-
-            full_screen_action.triggered.connect(_toggle_full_screen)
-
-        # Navigation -------------------------------------------------------
-        menu.addSeparator()
-        next_action = menu.addAction("Next Window")
-        _apply_standard_icon(next_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowForward, style)
-        if next_action is not None:
-            _set_shortcut(
-                next_action,
-                QtGui.QKeySequence.StandardKey.NextChild,
-            )
-            next_action.triggered.connect(lambda: _cycle_window(+1))
-
-        prev_action = menu.addAction("Previous Window")
-        _apply_standard_icon(prev_action, QtWidgets.QStyle.StandardPixmap.SP_ArrowBack, style)
-        if prev_action is not None:
-            _set_shortcut(
-                prev_action,
-                QtGui.QKeySequence.StandardKey.PreviousChild,
-            )
-            prev_action.triggered.connect(lambda: _cycle_window(-1))
-
-        bring_action = menu.addAction("Bring All to Front")
-        _apply_standard_icon(bring_action, QtWidgets.QStyle.StandardPixmap.SP_BrowserReload, style)
-        if bring_action is not None:
-            bring_action.triggered.connect(_bring_all_to_front)
-
-        def _managed_windows() -> list[QtWidgets.QWidget]:
-            return [w for w in _visible_windows() if w is not target]
-
-        managed = _managed_windows()
-        cascade_action = menu.addAction("Cascade")
-        _apply_standard_icon(cascade_action, QtWidgets.QStyle.StandardPixmap.SP_FileDialogListView, style)
-        if cascade_action is not None:
-            cascade_action.setEnabled(bool(managed))
-            cascade_action.triggered.connect(lambda: _cascade_windows(_managed_windows()))
-
-        tile_vert_action = menu.addAction("Tile Vertically")
-        _apply_standard_icon(tile_vert_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarShadeButton, style)
-        if tile_vert_action is not None:
-            tile_vert_action.setEnabled(bool(managed))
-            tile_vert_action.triggered.connect(
-                lambda: _tile_windows(_managed_windows(), orientation="vertical")
-            )
-
-        tile_horiz_action = menu.addAction("Tile Horizontally")
-        _apply_standard_icon(tile_horiz_action, QtWidgets.QStyle.StandardPixmap.SP_TitleBarUnshadeButton, style)
-        if tile_horiz_action is not None:
-            tile_horiz_action.setEnabled(bool(managed))
-            tile_horiz_action.triggered.connect(
-                lambda: _tile_windows(_managed_windows(), orientation="horizontal")
-            )
-
-        # Window list ------------------------------------------------------
-        windows = _visible_windows()
-        menu.addSeparator()
-        if windows:
-            menu.addSection("Windows")
-            try:
-                active = QtWidgets.QApplication.activeWindow()
-            except Exception:
-                active = None
-            for widget in windows:
-                title = widget.windowTitle() or widget.objectName() or widget.__class__.__name__
-                entry = menu.addAction(title)
-                if entry is None:
-                    continue
-                icon = getattr(widget, "windowIcon", lambda: QtGui.QIcon())()
-                if icon is not None and not icon.isNull():
-                    entry.setIcon(icon)
-                entry.setCheckable(True)
-                entry.setChecked(widget is active)
-
-                def _activate_target(_: bool = False, w: QtWidgets.QWidget = widget) -> None:
-                    _activate_window(w)
-
-                entry.triggered.connect(_activate_target)
-        else:
-            placeholder = menu.addAction("No open windows")
-            if placeholder is not None:
-                placeholder.setEnabled(False)
 
 
 def install_standard_menu(
@@ -1425,9 +839,6 @@ def install_standard_menu(
     file_widget: QtWidgets.QWidget | None = None,
     splitter: QtWidgets.QSplitter | None = None,
     default_split_sizes: list[int] | tuple[int, int] | None = None,
-    open_file: Callable[[], None] | None = None,
-    open_folder: Callable[[], None] | None = None,
-    close_window: Callable[[], None] | None = None,
 ) -> QtWidgets.QMenuBar:
     """Attach the shared menu bar with theme, layout, and help entries."""
 
@@ -1444,239 +855,9 @@ def install_standard_menu(
     for action in to_remove:
         menu_bar.removeAction(action)
 
-    def _resolve_handler(
-        default: Callable[[], None] | None,
-        names: tuple[str, ...],
-    ) -> Callable[[], None] | None:
-        if callable(default):
-            return default
-        for name in names:
-            candidate = getattr(target, name, None)
-            if callable(candidate):
-                return candidate
-        return None
-
-    file_handler = _resolve_handler(
-        open_file,
-        (
-            "_open_files_from_menu",
-            "open_files",
-            "open_file",
-            "choose_files",
-            "choose_file",
-            "browse_files",
-            "browse_file",
-            "select_files",
-            "select_file",
-        ),
-    )
-    folder_handler = _resolve_handler(
-        open_folder,
-        (
-            "_open_folder_from_menu",
-            "open_folder",
-            "open_directory",
-            "open_dir",
-            "choose_folder",
-            "choose_directory",
-            "choose_dir",
-            "browse_folder",
-            "browse_directory",
-            "browse_dir",
-            "select_folder",
-            "select_directory",
-        ),
-    )
-
-    close_handler: Callable[[], None] | None = close_window if callable(close_window) else None
-    if close_handler is None:
-        candidate = getattr(target, "close", None)
-        close_handler = candidate if callable(candidate) else None
-
-    file_menu = QtWidgets.QMenu("&File", menu_bar)
-    file_menu.setObjectName("mw_shared_file")
-    first_action = menu_bar.actions()[0] if menu_bar.actions() else None
-    if first_action is not None:
-        menu_bar.insertMenu(first_action, file_menu)
-    else:
-        menu_bar.addMenu(file_menu)
-
-    open_file_action = file_menu.addAction("Open &File…")
-    if open_file_action is not None:
-        try:
-            open_file_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
-        except Exception:
-            pass
-        if file_handler is not None:
-            open_file_action.triggered.connect(file_handler)
-        else:
-            open_file_action.setEnabled(False)
-
-    open_folder_action = file_menu.addAction("Open F&older…")
-    if open_folder_action is not None:
-        shortcut = "Ctrl+Shift+O"
-        if sys.platform == "darwin":
-            shortcut = "Meta+Shift+O"
-        try:
-            open_folder_action.setShortcut(QtGui.QKeySequence(shortcut))
-        except Exception:
-            pass
-        if folder_handler is not None:
-            open_folder_action.triggered.connect(folder_handler)
-        else:
-            open_folder_action.setEnabled(False)
-
-    file_menu.addSeparator()
-
-    close_action = file_menu.addAction("&Close Window")
-    if close_action is not None:
-        try:
-            close_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Close))
-        except Exception:
-            pass
-        if close_handler is not None:
-            close_action.triggered.connect(close_handler)
-        else:
-            close_action.setEnabled(False)
-
-    quit_action = file_menu.addAction("&Quit")
-    if quit_action is not None:
-        try:
-            quit_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Quit))
-        except Exception:
-            pass
-        try:
-            quit_role = QtGui.QAction.MenuRole.QuitRole  # type: ignore[attr-defined]
-        except AttributeError:
-            quit_role = None
-        if quit_role is not None:
-            try:
-                quit_action.setMenuRole(quit_role)
-            except Exception:
-                pass
-
-        def _quit_application() -> None:
-            app = QtWidgets.QApplication.instance()
-            if app is not None:
-                app.quit()
-            else:  # pragma: no cover - fallback for embedded usage
-                sys.exit(0)
-
-        quit_action.triggered.connect(_quit_application)
-
-    edit_menu = QtWidgets.QMenu("Edit" if sys.platform == "darwin" else "&Edit", menu_bar)
-    edit_menu.setObjectName("mw_shared_edit")
-    menu_bar.addMenu(edit_menu)
-
-    def _focused_widget() -> QtWidgets.QWidget | None:
-        widget = QtWidgets.QApplication.focusWidget()
-        while widget is not None and not widget.isEnabled():
-            widget = widget.parentWidget()
-        return widget
-
-    edit_actions: list[tuple[QtGui.QAction, tuple[str, ...]]] = []
-
-    def _invoke_focus(methods: tuple[str, ...]) -> None:
-        widget = _focused_widget()
-        invoked = False
-        if widget is not None:
-            for name in methods:
-                target_method = getattr(widget, name, None)
-                if callable(target_method):
-                    try:
-                        target_method()
-                    except Exception:
-                        pass
-                    invoked = True
-                    break
-        if not invoked:
-            for name in methods:
-                fallback = getattr(target, name, None)
-                if callable(fallback):
-                    try:
-                        fallback()
-                    except Exception:
-                        pass
-                    break
-
-    def _add_edit_action(
-        label: str,
-        shortcut: QtGui.QKeySequence.StandardKey | str | None,
-        icon: QtWidgets.QStyle.StandardPixmap | None,
-        methods: tuple[str, ...],
-    ) -> None:
-        action = edit_menu.addAction(label)
-        if action is None:
-            return
-        if icon is not None:
-            _apply_standard_icon(action, icon)
-        if shortcut is not None:
-            try:
-                action.setShortcut(QtGui.QKeySequence(shortcut))
-            except Exception:
-                pass
-        action.triggered.connect(lambda checked=False, m=methods: _invoke_focus(m))
-        edit_actions.append((action, methods))
-
-    _add_edit_action(
-        "Undo",
-        QtGui.QKeySequence.StandardKey.Undo,
-        QtWidgets.QStyle.StandardPixmap.SP_ArrowBack,
-        ("undo",),
-    )
-    _add_edit_action(
-        "Redo",
-        QtGui.QKeySequence.StandardKey.Redo,
-        QtWidgets.QStyle.StandardPixmap.SP_ArrowForward,
-        ("redo",),
-    )
-    edit_menu.addSeparator()
-    _add_edit_action(
-        "Cut",
-        QtGui.QKeySequence.StandardKey.Cut,
-        QtWidgets.QStyle.StandardPixmap.SP_DialogResetButton,
-        ("cut",),
-    )
-    _add_edit_action(
-        "Copy",
-        QtGui.QKeySequence.StandardKey.Copy,
-        QtWidgets.QStyle.StandardPixmap.SP_FileDialogDetailedView,
-        ("copy",),
-    )
-    _add_edit_action(
-        "Paste",
-        QtGui.QKeySequence.StandardKey.Paste,
-        QtWidgets.QStyle.StandardPixmap.SP_DialogOpenButton,
-        ("paste",),
-    )
-    edit_menu.addSeparator()
-    _add_edit_action(
-        "Select All",
-        QtGui.QKeySequence.StandardKey.SelectAll,
-        QtWidgets.QStyle.StandardPixmap.SP_DialogYesButton,
-        ("selectAll",),
-    )
-
-    def _update_edit_actions() -> None:
-        widget = _focused_widget()
-        for action, methods in edit_actions:
-            enabled = False
-            current = widget
-            while current is not None and not enabled:
-                if current.isEnabled():
-                    for name in methods:
-                        candidate = getattr(current, name, None)
-                        if callable(candidate):
-                            enabled = True
-                            break
-                current = current.parentWidget()
-            action.setEnabled(enabled)
-
-    edit_menu.aboutToShow.connect(_update_edit_actions)
-    _update_edit_actions()
-
-    view_menu = QtWidgets.QMenu("&View", menu_bar)
-    menu_bar.addMenu(view_menu)
+    view_menu = menu_bar.addMenu("&View")
+    if view_menu is None:
+        return menu_bar
     view_menu.setObjectName("mw_shared_view")
     theme_submenu = theme_manager().create_theme_menu(view_menu)
     if isinstance(theme_submenu, QtWidgets.QMenu):
@@ -1728,42 +909,14 @@ def install_standard_menu(
         if reset_action is not None:
             reset_action.triggered.connect(_reset_layout)
 
-    window_title = "Window" if sys.platform == "darwin" else "&Window"
-    window_menu = QtWidgets.QMenu(window_title, menu_bar)
-    menu_bar.addMenu(window_menu)
-    window_menu.setObjectName("mw_shared_window")
-    if not window_menu.actions():
-        placeholder = window_menu.addAction("No windows available")
-        if placeholder is not None:
-            placeholder.setEnabled(False)
-    try:
-        window_role = QtGui.QAction.MenuRole.WindowRole  # type: ignore[attr-defined]
-    except AttributeError:
-        window_role = None
-    if window_role is not None:
-        try:
-            window_menu.menuAction().setMenuRole(window_role)
-        except Exception:
-            pass
-    if not hasattr(window_menu, "_mw_manager"):
-        window_menu._mw_manager = _WindowMenuManager(window_menu, target)  # type: ignore[attr-defined]
-
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
     menu_bar.addMenu(developer_menu)
 
-    help_menu = QtWidgets.QMenu("&Help", menu_bar)
-    menu_bar.addMenu(help_menu)
+    help_menu = menu_bar.addMenu("&Help")
+    if help_menu is None:
+        return menu_bar
     help_menu.setObjectName("mw_shared_help")
-    try:
-        help_role = QtGui.QAction.MenuRole.HelpMenuRole  # type: ignore[attr-defined]
-    except AttributeError:
-        help_role = None
-    if help_role is not None:
-        try:
-            help_menu.menuAction().setMenuRole(help_role)
-        except Exception:
-            pass
     if help_topic:
         help_action = help_menu.addAction("View Help")
         if help_action is not None:
@@ -1780,16 +933,6 @@ def install_standard_menu(
             help_action.triggered.connect(_show_help)
     else:
         help_menu.setEnabled(False)
-
-    _ensure_help_last(menu_bar)
-    if not hasattr(menu_bar, "_mw_help_order_sync"):
-        sync = _HelpMenuOrderSync(menu_bar)
-        menu_bar.installEventFilter(sync)
-        setattr(menu_bar, "_mw_help_order_sync", sync)
-    else:
-        helper = getattr(menu_bar, "_mw_help_order_sync")
-        if isinstance(helper, _HelpMenuOrderSync):
-            helper.sync_soon()
 
     return menu_bar
 
@@ -1815,52 +958,6 @@ class _VisibilitySync(QtCore.QObject):
         }:
             self._sync()
         return False
-
-
-def _ensure_help_last(menu_bar: QtWidgets.QMenuBar) -> None:
-    help_action: QtGui.QAction | None = None
-    for action in menu_bar.actions():
-        menu = action.menu()
-        if menu is not None and menu.objectName() == "mw_shared_help":
-            help_action = action
-    if help_action is None:
-        return
-    actions = menu_bar.actions()
-    if actions and actions[-1] is help_action:
-        return
-    menu_bar.removeAction(help_action)
-    menu_bar.addAction(help_action)
-
-
-class _HelpMenuOrderSync(QtCore.QObject):
-    """Keep the shared Help menu anchored to the far right."""
-
-    def __init__(self, menu_bar: QtWidgets.QMenuBar) -> None:
-        super().__init__(menu_bar)
-        self._menu_bar = menu_bar
-        self._pending = False
-
-    def eventFilter(
-        self, watched: QtCore.QObject | None, event: QtCore.QEvent | None
-    ) -> bool:  # noqa: D401
-        if watched is self._menu_bar and event is not None:
-            if event.type() in {
-                QtCore.QEvent.Type.ActionAdded,
-                QtCore.QEvent.Type.ActionRemoved,
-            }:
-                self.sync_soon()
-        return super().eventFilter(watched, event)
-
-    def sync_soon(self) -> None:
-        if self._pending:
-            return
-        self._pending = True
-
-        def _sync() -> None:
-            self._pending = False
-            _ensure_help_last(self._menu_bar)
-
-        QtCore.QTimer.singleShot(0, _sync)
 
 
 class _ThemeManager(QtCore.QObject):
@@ -1952,7 +1049,6 @@ class _DeveloperOptions(QtCore.QObject):
 
     keep_files_changed = QtCore.pyqtSignal(bool)
     experiments_visibility_changed = QtCore.pyqtSignal(bool)
-    ocr_debug_changed = QtCore.pyqtSignal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -1961,10 +1057,8 @@ class _DeveloperOptions(QtCore.QObject):
         self._show_experiments = self._read_bool(
             "developer_show_experiments", default=False
         )
-        self._ocr_debug = self._read_bool("developer_ocr_debug", default=False)
         self._keep_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
         self._experiment_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
-        self._ocr_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
 
     # ------------------------------------------------------------------ helpers
     def _read_bool(self, key: str, *, default: bool) -> bool:
@@ -1997,9 +1091,6 @@ class _DeveloperOptions(QtCore.QObject):
     def show_experiments(self) -> bool:
         return self._show_experiments
 
-    def ocr_debug(self) -> bool:
-        return self._ocr_debug
-
     def set_keep_files(self, enabled: bool) -> None:
         enabled = bool(enabled)
         if enabled == self._keep_files:
@@ -2018,17 +1109,8 @@ class _DeveloperOptions(QtCore.QObject):
         self._sync(self._experiment_actions, enabled)
         self.experiments_visibility_changed.emit(enabled)
 
-    def set_ocr_debug(self, enabled: bool) -> None:
-        enabled = bool(enabled)
-        if enabled == self._ocr_debug:
-            return
-        self._ocr_debug = enabled
-        self._settings.setValue("developer_ocr_debug", enabled)
-        self._sync(self._ocr_actions, enabled)
-        self.ocr_debug_changed.emit(enabled)
-
     def create_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
-        menu = QtWidgets.QMenu("&Develop", parent)
+        menu = QtWidgets.QMenu("&Developer", parent)
 
         keep_action = menu.addAction("Keep &File Selections")
         if keep_action is not None:
@@ -2046,14 +1128,6 @@ class _DeveloperOptions(QtCore.QObject):
             exp_action.toggled.connect(self.set_show_experiments)
             self._experiment_actions.append(weakref.ref(exp_action))
 
-        ocr_action = menu.addAction("Microscope &OCR debug mode")
-        if ocr_action is not None:
-            ocr_action.setObjectName("mw_ocr_debug")
-            ocr_action.setCheckable(True)
-            ocr_action.setChecked(self._ocr_debug)
-            ocr_action.toggled.connect(self.set_ocr_debug)
-            self._ocr_actions.append(weakref.ref(ocr_action))
-
         return menu
 
 
@@ -2069,27 +1143,14 @@ def developer_options() -> _DeveloperOptions:
     return _DEVELOPER_OPTIONS
 
 
-def ensure_app_theme(app: QtWidgets.QApplication | QtWidgets.QWidget) -> None:
-    """Apply the stored theme preference to ``app``.
-
-    Some call sites historically passed a top-level widget instead of the
-    QApplication instance. Guard against that by resolving the active
-    QApplication when a QWidget is supplied so we never try to treat a widget as
-    the application object.
-    """
-
-    if isinstance(app, QtWidgets.QWidget):
-        resolved = QtWidgets.QApplication.instance()
-        if resolved is None:
-            return
-        app = resolved
+def ensure_app_theme(app: QtWidgets.QApplication) -> None:
+    """Apply the stored theme preference to ``app``."""
 
     theme_manager().apply(app)
 
 
 class ReadabilityControls:
     def __init__(self) -> None:
-        self.enabled: QtWidgets.QCheckBox
         self.legend_show: QtWidgets.QCheckBox
         self.legend_size: QtWidgets.QSpinBox
         self.legend_orient: QtWidgets.QComboBox
@@ -2113,18 +1174,9 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     grp = QtWidgets.QGroupBox("Readability")
     lay = QtWidgets.QGridLayout(grp)
 
-    stored_toggle = s.value(
-        f"{key}_improve_readability",
-        getattr(orig_module, "IMPROVE_READABILITY", True),
-        type=bool,
-    )
-    improve_readability = bool(stored_toggle)
-    setattr(orig_module, "IMPROVE_READABILITY", improve_readability)
+    setattr(orig_module, "IMPROVE_READABILITY", True)
     if not hasattr(orig_module, "LEGEND_LOCATION"):
         setattr(orig_module, "LEGEND_LOCATION", "inside")
-
-    ctrl.enabled = QtWidgets.QCheckBox("Use readability overrides")
-    ctrl.enabled.setChecked(improve_readability)
 
     ctrl.legend_size = QtWidgets.QSpinBox()
     ctrl.legend_size.setRange(6, 72)
@@ -2189,36 +1241,26 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.title_show = QtWidgets.QCheckBox("Show")
     ctrl.title_show.setChecked(bool(s.value(f"{key}_show_title", getattr(orig_module, "SHOW_TITLE", True), type=bool)))
 
-    lay.addWidget(ctrl.enabled, 0, 0, 1, 3)
-
-    row = 1
-    lay.addWidget(QtWidgets.QLabel("Legend text size:"), row, 0)
-    lay.addWidget(ctrl.legend_size, row, 1)
-    lay.addWidget(ctrl.legend_show, row, 2)
-    row += 1
-    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), row, 0)
-    lay.addWidget(ctrl.legend_orient, row, 1, 1, 2)
-    row += 1
-    lay.addWidget(QtWidgets.QLabel("Legend location:"), row, 0)
-    lay.addWidget(ctrl.legend_loc, row, 1, 1, 2)
-    row += 1
-    lay.addWidget(ctrl.legend_color_match, row, 0, 1, 3)
-    row += 1
-    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), row, 0)
-    lay.addWidget(ctrl.legend_symbol_size, row, 1)
-    lay.addWidget(ctrl.legend_symbol, row, 2)
-    row += 1
-    lay.addWidget(QtWidgets.QLabel("Tick label size:"), row, 0)
-    lay.addWidget(ctrl.tick_size, row, 1)
-    lay.addWidget(ctrl.tick_show, row, 2)
-    row += 1
-    lay.addWidget(QtWidgets.QLabel("Axis label size:"), row, 0)
-    lay.addWidget(ctrl.axis_size, row, 1)
-    lay.addWidget(ctrl.axis_show, row, 2)
-    row += 1
-    lay.addWidget(QtWidgets.QLabel("Title size:"), row, 0)
-    lay.addWidget(ctrl.title_size, row, 1)
-    lay.addWidget(ctrl.title_show, row, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend text size:"), 0, 0)
+    lay.addWidget(ctrl.legend_size, 0, 1)
+    lay.addWidget(ctrl.legend_show, 0, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend orientation:"), 1, 0)
+    lay.addWidget(ctrl.legend_orient, 1, 1, 1, 2)
+    lay.addWidget(QtWidgets.QLabel("Legend location:"), 2, 0)
+    lay.addWidget(ctrl.legend_loc, 2, 1, 1, 2)
+    lay.addWidget(ctrl.legend_color_match, 3, 0, 1, 3)
+    lay.addWidget(QtWidgets.QLabel("Legend symbol size:"), 4, 0)
+    lay.addWidget(ctrl.legend_symbol_size, 4, 1)
+    lay.addWidget(ctrl.legend_symbol, 4, 2)
+    lay.addWidget(QtWidgets.QLabel("Tick label size:"), 5, 0)
+    lay.addWidget(ctrl.tick_size, 5, 1)
+    lay.addWidget(ctrl.tick_show, 5, 2)
+    lay.addWidget(QtWidgets.QLabel("Axis label size:"), 6, 0)
+    lay.addWidget(ctrl.axis_size, 6, 1)
+    lay.addWidget(ctrl.axis_show, 6, 2)
+    lay.addWidget(QtWidgets.QLabel("Title size:"), 7, 0)
+    lay.addWidget(ctrl.title_size, 7, 1)
+    lay.addWidget(ctrl.title_show, 7, 2)
 
     def _toggle_legend(checked: bool) -> None:
         ctrl.legend_size.setEnabled(checked)
@@ -2237,43 +1279,13 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
     ctrl.axis_show.toggled.connect(lambda checked: ctrl.axis_size.setEnabled(checked))
     ctrl.title_show.toggled.connect(lambda checked: ctrl.title_size.setEnabled(checked))
 
-    widgets_to_toggle: tuple[QtWidgets.QWidget, ...] = (
-        ctrl.legend_show,
-        ctrl.legend_size,
-        ctrl.legend_orient,
-        ctrl.legend_loc,
-        ctrl.legend_symbol,
-        ctrl.legend_symbol_size,
-        ctrl.legend_color_match,
-        ctrl.tick_show,
-        ctrl.tick_size,
-        ctrl.axis_show,
-        ctrl.axis_size,
-        ctrl.title_show,
-        ctrl.title_size,
-    )
-
-    def _apply_master_state(checked: bool) -> None:
-        for widget in widgets_to_toggle:
-            widget.setEnabled(checked)
-        if checked:
-            _toggle_legend(ctrl.legend_show.isChecked())
-            _toggle_symbol(ctrl.legend_symbol.isChecked())
-            ctrl.tick_size.setEnabled(ctrl.tick_show.isChecked())
-            ctrl.axis_size.setEnabled(ctrl.axis_show.isChecked())
-            ctrl.title_size.setEnabled(ctrl.title_show.isChecked())
-        else:
-            ctrl.legend_size.setEnabled(False)
-            ctrl.legend_orient.setEnabled(False)
-            ctrl.legend_loc.setEnabled(False)
-            ctrl.legend_symbol_size.setEnabled(False)
-            ctrl.legend_color_match.setEnabled(False)
-            ctrl.tick_size.setEnabled(False)
-            ctrl.axis_size.setEnabled(False)
-            ctrl.title_size.setEnabled(False)
-
-    ctrl.enabled.toggled.connect(_apply_master_state)
-    _apply_master_state(ctrl.enabled.isChecked())
+    _toggle_legend(ctrl.legend_show.isChecked())
+    _toggle_symbol(ctrl.legend_symbol.isChecked())
+    ctrl.legend_loc.setEnabled(ctrl.legend_show.isChecked())
+    ctrl.legend_color_match.setEnabled(ctrl.legend_show.isChecked())
+    ctrl.tick_size.setEnabled(ctrl.tick_show.isChecked())
+    ctrl.axis_size.setEnabled(ctrl.axis_show.isChecked())
+    ctrl.title_size.setEnabled(ctrl.title_show.isChecked())
 
     return ctrl, grp
 
@@ -2281,11 +1293,7 @@ def create_readability_group(key: str, orig_module) -> tuple[ReadabilityControls
 def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     """Copy readability UI state into ``orig_module`` and persist to settings."""
 
-    toggle = getattr(ctrl, "enabled", None)
-    if isinstance(toggle, QtWidgets.QAbstractButton):
-        orig_module.IMPROVE_READABILITY = toggle.isChecked()
-    else:
-        orig_module.IMPROVE_READABILITY = True
+    orig_module.IMPROVE_READABILITY = True
     orig_module.SHOW_LEGEND = ctrl.legend_show.isChecked()
     orig_module.LEGEND_SIZE = int(ctrl.legend_size.value())
     orig_module.LEGEND_ORIENTATION = ctrl.legend_orient.currentText().lower()
@@ -2301,7 +1309,6 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
     orig_module.SHOW_TITLE = ctrl.title_show.isChecked()
     orig_module.TITLE_SIZE = int(ctrl.title_size.value())
     s = _settings()
-    s.setValue(f"{key}_improve_readability", orig_module.IMPROVE_READABILITY)
     s.setValue(f"{key}_show_legend", orig_module.SHOW_LEGEND)
     s.setValue(f"{key}_legend_size", orig_module.LEGEND_SIZE)
     s.setValue(f"{key}_legend_orient", orig_module.LEGEND_ORIENTATION)
@@ -2319,9 +1326,6 @@ def sync_readability(key: str, ctrl: ReadabilityControls, orig_module) -> None:
 
 def apply_readability(ax: Axes, cfg: dict) -> None:
     """Apply common readability settings to ``ax`` using values from ``cfg``."""
-
-    if not cfg.get("IMPROVE_READABILITY", True):
-        return
 
     apply_readability_fonts(
         cfg.get("TITLE_SIZE", 22), cfg.get("TICK_SIZE", 18)
