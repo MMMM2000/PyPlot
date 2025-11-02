@@ -8,6 +8,9 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.temperature_dependence import core as orig
+    from plotting.plugins.temperature_dependence import (
+        TemperatureDependencePlugin as PyPlotTemperatureDependencePlugin,
+    )
     try:
         from plotting.utils import (
             ensure_app_theme,
@@ -44,6 +47,9 @@ if __package__ is None or __package__ == "":
         _restore_backend_choice = None  # type: ignore[assignment]
 else:
     from . import core as orig
+    from ..plugins.temperature_dependence import (
+        TemperatureDependencePlugin as PyPlotTemperatureDependencePlugin,
+    )
     try:
         from ..utils import (
             ensure_app_theme,
@@ -251,6 +257,7 @@ class ProgressDialog:
         self.cancelled = True
         self.dialog.close()
 
+
     def destroy(self) -> None:
         self.dialog.close()
 
@@ -269,6 +276,9 @@ def main() -> None:
         app.exec()
 
 
+# Backwards-compatibility: expose the PyPlot plugin class from the legacy module.
+TemperatureDependencePlugin = PyPlotTemperatureDependencePlugin
+
+
 if __name__ == "__main__":
     main()
-

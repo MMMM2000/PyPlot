@@ -82,6 +82,38 @@ def _deref_qpointer(pointer: Any) -> Optional[QtCore.QObject]:
     return pointer if isinstance(pointer, QtCore.QObject) else None
 
 
+TOOLBAR_SECTION_PROPERTY = "mw_toolbar_section_title"
+
+
+def create_toolbar_section(
+    title: str,
+    *,
+    parent: QtWidgets.QWidget | None = None,
+    layout_factory: Callable[[QtWidgets.QWidget], QtWidgets.QLayout] | None = None,
+) -> tuple[QtWidgets.QWidget, QtWidgets.QLayout]:
+    """Helper to build toolbar-native settings sections with consistent styling."""
+
+    section = QtWidgets.QFrame(parent)
+    section.setObjectName("mw_toolbar_section")
+    section.setProperty(TOOLBAR_SECTION_PROPERTY, title)
+    section.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+    section.setFrameShadow(QtWidgets.QFrame.Shadow.Plain)
+    section.setSizePolicy(
+        QtWidgets.QSizePolicy.Policy.Preferred,
+        QtWidgets.QSizePolicy.Policy.Maximum,
+    )
+
+    def _default_factory(widget: QtWidgets.QWidget) -> QtWidgets.QLayout:
+        layout = QtWidgets.QVBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        return layout
+
+    factory = layout_factory or _default_factory
+    layout = factory(section)
+    return section, layout
+
+
 @dataclass
 class FormatToolbarControls:
     toolbar: QtWidgets.QToolBar | None = None
@@ -106,6 +138,8 @@ class _GraphSectionState:
     layout_info: tuple[int, ...] = field(default_factory=tuple)
     detached: bool = False
     menu_layout: QtWidgets.QVBoxLayout | None = None
+    menu_panel: QtWidgets.QWidget | None = None
+    menu_scroll: QtWidgets.QScrollArea | None = None
 
 
 class _GraphSectionButton(QtWidgets.QToolButton):
@@ -2643,7 +2677,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         action = QtWidgets.QWidgetAction(menu)
         panel = QtWidgets.QWidget(menu)
-        panel.setObjectName("mw_script_settings_panel")
+        panel.setObjectName("mw_plugin_settings_panel")
         panel_layout = QtWidgets.QVBoxLayout(panel)
         panel_layout.setContentsMargins(12, 12, 12, 12)
         panel_layout.setSpacing(8)
@@ -2688,7 +2722,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         else:
             container.setVisible(True)
 
-        placeholder = QtWidgets.QLabel("Select a script to configure graph settings.", container)
+        placeholder = QtWidgets.QLabel("Select a plugin to configure graph settings.", container)
         placeholder.setWordWrap(True)
         placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         placeholder.setObjectName("mw_graph_settings_placeholder")
@@ -2755,13 +2789,34 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return []
 
         sections: list[tuple[str, QtWidgets.QWidget]] = []
+        seen_ids: set[int] = set()
+
+        toolbar_sections: list[tuple[int, str, QtWidgets.QWidget]] = []
+        for child in widget.findChildren(
+            QtWidgets.QWidget,
+            options=QtCore.Qt.FindChildOption.FindChildrenRecursively,
+        ):
+            title_prop = child.property(TOOLBAR_SECTION_PROPERTY)
+            if not isinstance(title_prop, str):
+                continue
+            title = title_prop.strip()
+            if not title:
+                continue
+            anchor = child
+            marker = id(anchor)
+            if marker in seen_ids:
+                continue
+            seen_ids.add(marker)
+            pos = anchor.mapTo(widget, QtCore.QPoint(0, 0)).y()
+            toolbar_sections.append((pos, title, anchor))
+        toolbar_sections.sort(key=lambda entry: entry[0])
+        sections.extend((title, anchor) for _, title, anchor in toolbar_sections)
 
         group_boxes = widget.findChildren(
             QtWidgets.QGroupBox,
             options=QtCore.Qt.FindChildOption.FindChildrenRecursively,
         )
         unique_boxes: list[QtWidgets.QGroupBox] = []
-        seen_ids: set[int] = set()
         for box in group_boxes:
             parent_box = box.parent()
             if isinstance(parent_box, QtWidgets.QGroupBox):
@@ -2857,6 +2912,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         content_layout.addStretch(1)
 
         state.menu_layout = holder_layout
+        state.menu_panel = panel
+        state.menu_scroll = scroll
 
         action.setDefaultWidget(panel)
         menu.addAction(action)
@@ -2877,6 +2934,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._clear_layout(layout)
         self._detach_graph_section_state(state, layout)
         layout.addStretch(1)
+        self._adjust_graph_section_panel(state)
 
     def _teardown_graph_section_menu(self, anchor: QtWidgets.QWidget | None) -> None:
         if anchor is None:
@@ -2887,6 +2945,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         layout = state.menu_layout
         if layout is not None:
             self._clear_layout(layout)
+        self._reset_graph_section_panel(state)
         self._restore_graph_section_state(state)
         if self._graph_settings_pending_anchor is anchor:
             self._graph_settings_pending_anchor = None
@@ -2902,6 +2961,75 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             child_layout = item.layout()
             if child_layout is not None:
                 child_layout.setParent(None)
+
+    def _adjust_graph_section_panel(self, state: _GraphSectionState) -> None:
+        panel = state.menu_panel
+        scroll = state.menu_scroll
+        layout = state.menu_layout
+        if panel is None or scroll is None or layout is None:
+            return
+
+        holder = layout.parentWidget()
+        if holder is not None:
+            holder.adjustSize()
+        panel.adjustSize()
+
+        holder_height = holder.sizeHint().height() if holder is not None else 0
+        panel_layout = panel.layout()
+        margins = (
+            panel_layout.contentsMargins()
+            if isinstance(panel_layout, QtWidgets.QLayout)
+            else QtCore.QMargins(0, 0, 0, 0)
+        )
+        frame_height = scroll.frameWidth() * 2
+        extra_padding = 6
+        spacing = panel_layout.spacing() if isinstance(panel_layout, QtWidgets.QLayout) else 0
+        desired_height = (
+            holder_height
+            + margins.top()
+            + margins.bottom()
+            + frame_height
+            + spacing
+            + extra_padding
+        )
+        desired_height = max(desired_height, panel.sizeHint().height())
+        desired_height = int(max(0, desired_height))
+
+        desired_width = panel.sizeHint().width()
+        if holder is not None:
+            desired_width = max(desired_width, holder.sizeHint().width() + margins.left() + margins.right())
+        panel.setMinimumWidth(desired_width)
+
+        max_height = self._maximum_section_height(panel)
+        if max_height is None or desired_height <= max_height:
+            scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            panel.setMinimumHeight(desired_height)
+            panel.setMaximumHeight(desired_height)
+        else:
+            scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+            panel.setMinimumHeight(0)
+            panel.setMaximumHeight(int(max_height))
+
+    def _reset_graph_section_panel(self, state: _GraphSectionState) -> None:
+        panel = state.menu_panel
+        scroll = state.menu_scroll
+        if panel is not None:
+            panel.setMinimumHeight(0)
+            panel.setMaximumHeight(16777215)
+        if scroll is not None:
+            scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
+    def _maximum_section_height(self, widget: QtWidgets.QWidget) -> int | None:
+        screen = widget.screen()
+        if screen is None:
+            screens = QtWidgets.QApplication.screens()
+            screen = screens[0] if screens else None
+        if screen is None:
+            return None
+        available = screen.availableGeometry()
+        margin = 120
+        max_height = max(240, available.height() - margin)
+        return max_height
 
     def _create_graph_section_state(self, anchor: QtWidgets.QWidget) -> _GraphSectionState:
         parent = anchor.parentWidget()
@@ -3160,9 +3288,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         has_plugin = bool(getattr(self, "_current_plugin", None))
         if widget is None:
             message = (
-                "This script does not expose additional graph settings."
+                "This plugin does not expose additional graph settings."
                 if has_plugin
-                else "Select a script to configure graph settings."
+                else "Select a plugin to configure graph settings."
             )
             if isinstance(placeholder, QtWidgets.QLabel):
                 placeholder.setText(message)
@@ -3180,10 +3308,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._refresh_graph_section_buttons(widget)
 
     def _setup_script_toolbar(self) -> None:
-        """Install the default toolbar for script-specific controls."""
+        """Install the default toolbar for plugin-specific controls."""
 
-        toolbar = QtWidgets.QToolBar("Script", self)
-        toolbar.setObjectName("mw_script_toolbar")
+        toolbar = QtWidgets.QToolBar("Plugin", self)
+        toolbar.setObjectName("mw_plugin_toolbar")
         self._configure_toolbar(toolbar)
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._script_toolbar = toolbar
