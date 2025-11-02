@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -93,18 +92,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         layout.addStretch(1)
         self._settings_widget = container
         return container
-
-    def _log(self, message: str, *, level: str = "info") -> None:
-        append = getattr(self.host, "_append_log", None)
-        if callable(append):
-            try:
-                append(message, level=level)
-                return
-            except Exception:
-                pass
-        log_level = logging.ERROR if level == "error" else logging.INFO
-        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
-        logger.log(log_level, message)
 
     def _apply_settings_to_core(self) -> None:
         if isinstance(self._origin_mode_combo, QtWidgets.QComboBox):

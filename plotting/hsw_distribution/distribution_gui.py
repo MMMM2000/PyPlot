@@ -1,89 +1,44 @@
 from __future__ import annotations
-import sys
-import os
-import pathlib
-from typing import List, Dict, Any, Sequence, cast
 
-from PyQt6 import QtWidgets, QtGui, QtCore
+import os
+import sys
+import warnings
+from pathlib import Path
+from typing import Any, Dict, List, Sequence, cast
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from PyQt6 import QtCore, QtGui, QtWidgets
 
-if __package__ is None or __package__ == "":
-    # When executed directly, ensure the repository root is on sys.path so the
-    # ``plotting`` package can be imported correctly.
-    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    try:
-        from plotting.utils import (
-            ensure_app_theme,
-            show_plots,
-            restore_backend_choice as _restore_backend_choice,
-            store_backend_choice,
-            selected_backend,
-            install_standard_menu,
-            create_file_widget,
-            run_with_console,
-            arrange_top_layout,
-        )
-    except ImportError:
-        from plotting.utils import (
-            ensure_app_theme,
-            show_plots,
-            store_backend_choice,
-            selected_backend,
-            install_standard_menu,
-            create_file_widget,
-            run_with_console,
-            arrange_top_layout,
-        )
-        _restore_backend_choice = None  # type: ignore[assignment]
-    from plotting.backends import wants_matplotlib, wants_origin
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.hsw_distribution instead.",
+    DeprecationWarning,
+)
+
+if __package__ in (None, ""):
+    from plotting.hsw_distribution import core as orig
+    from plotting.plugins.hsw_distribution import (
+        HswDistributionPlugin as PyPlotHswDistributionPlugin,
+    )
 else:
-    try:
-        from ..utils import (
-            ensure_app_theme,
-            show_plots,
-            restore_backend_choice as _restore_backend_choice,
-            store_backend_choice,
-            selected_backend,
-            install_standard_menu,
-            create_file_widget,
-            run_with_console,
-            arrange_top_layout,
-        )
-    except ImportError:
-        from ..utils import (
-            ensure_app_theme,
-            show_plots,
-            store_backend_choice,
-            selected_backend,
-            install_standard_menu,
-            create_file_widget,
-            run_with_console,
-            arrange_top_layout,
-        )
-        _restore_backend_choice = None  # type: ignore[assignment]
-    from ..backends import wants_matplotlib, wants_origin
+    from . import core as orig
+    from ..plugins.hsw_distribution import (
+        HswDistributionPlugin as PyPlotHswDistributionPlugin,
+    )
 
-
-if "_restore_backend_choice" not in globals() or _restore_backend_choice is None:  # type: ignore[name-defined]
-
-    def restore_backend_choice(
-        key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
-    ) -> str:
-        """Legacy fallback that selects ``default`` without persisting state."""
-
-        normalised = str(default or "matplotlib").lower()
-        values = [combo.itemText(idx).strip().lower() for idx in range(combo.count())]
-        if not values:
-            return normalised
-        if normalised not in values:
-            normalised = "matplotlib" if "matplotlib" in values else values[0]
-        combo.setCurrentIndex(values.index(normalised))
-        return normalised
-
-else:
-    restore_backend_choice = _restore_backend_choice  # type: ignore[assignment]
+from plotting.shared.theme import ensure_app_theme
+from plotting.shared.utils import install_standard_menu, show_plots, run_with_console, arrange_top_layout
+from plotting.shared.paths import prepare_output_dir, get_last_output_dir, set_last_output_dir
+from plotting.utils import (
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+    create_file_widget,
+)
+from plotting.shared.readability import create_readability_group, sync_readability
+from plotting.shared.backends import wants_matplotlib, wants_origin
 
 
 class SettingsDialog(QtWidgets.QDialog):

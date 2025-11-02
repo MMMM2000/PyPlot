@@ -39,6 +39,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Optional, Protocol, cast
+import warnings
+
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.emulators instead.",
+    DeprecationWarning,
+)
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QTextCursor
@@ -48,7 +55,7 @@ from PyQt6.QtWidgets import (
     QComboBox, QSpinBox, QTextEdit, QGroupBox, QHBoxLayout, QVBoxLayout,
     QCheckBox, QLineEdit, QFileDialog
 )
-from plotting.utils import ensure_app_theme, install_standard_menu
+from plotting.shared.utils import ensure_app_theme, install_standard_menu
 
 class SerialLike(Protocol):
     def close(self) -> None: ...

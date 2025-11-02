@@ -10,10 +10,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
 
-from ..config import load_config
-from ..common import maybe_handle_outliers
-from ..utils import save_figure, origin_session, show_plots, apply_readability_fonts, apply_readability
-from ..backends import wants_matplotlib, wants_origin
+from ..shared.config import load_config
+from ..shared.common import maybe_handle_outliers
+from ..shared.utils import save_figure, show_plots
+from ..shared.origin import origin_session
+from ..shared.readability import apply_readability_fonts, apply_readability
+from ..shared.backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("temperature_dependence", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())

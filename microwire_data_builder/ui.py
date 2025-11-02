@@ -33,7 +33,7 @@ import matplotlib.pyplot as plt
 from plotting.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot.window import _DockSwitcherWidget
 from plotting.pyplot.console import PythonConsoleWidget
-from plotting.utils import (
+from plotting.shared.utils import (
     ensure_app_theme,
     install_standard_menu,
     format_annealing_title,

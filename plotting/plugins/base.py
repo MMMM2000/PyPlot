@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Callable
+import logging
 
 from PyQt6 import QtCore, QtWidgets
 
@@ -108,6 +109,20 @@ class PyPlotPlugin:
             self.name,
             "Origin export is not available for this plotting script yet.",
         )
+
+    def _log(self, message: str, *, level: str = "info") -> None:
+        """Log helper that prefers the host console when available."""
+
+        append = getattr(self.host, "_append_log", None)
+        if callable(append):
+            try:
+                append(message, level=level)
+                return
+            except Exception:
+                pass
+        log_level = logging.ERROR if level == "error" else logging.INFO
+        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
+        logger.log(log_level, message)
 
 
 class ExternalPlotterPlugin(PyPlotPlugin):

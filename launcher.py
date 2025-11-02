@@ -9,7 +9,9 @@ from typing import Any, Callable, Dict, Tuple, cast
 from PyQt6 import QtWidgets, QtGui, QtCore
 
 from plotting import common
-from plotting.utils import ensure_app_theme, install_standard_menu, developer_options
+from plotting.shared.utils import install_standard_menu, developer_options
+from plotting.shared.theme import ensure_app_theme
+from plotting.pyplot.app import main as pyplot_main, PLUGIN_CLASS_REGISTRY
 from experiments import EXPERIMENTS
 
 
@@ -30,44 +32,16 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
     return factory
 
 
-LEGACY_PLOTTER_TARGETS: Dict[str, Tuple[str, str]] = {
-    "Stress Dependence": ("plotting.stress_dependence.stress_gui", "main"),
-    "Hsw Load Compare": ("plotting.hsw_load_compare.load_compare_gui", "main"),
-    "Maxion Continuous": ("plotting.maxion_continuous.maxion_gui", "main"),
-    "Hsw Distribution": ("plotting.hsw_distribution.distribution_gui", "main"),
-    "Strain 3D Plot": ("plotting.strain_3d_plot", "main"),
-    "Temperature Sensitivity": ("plotting.temperature_sensitivity.temp_gui", "main"),
-    "Temperature Dependence": ("plotting.temperature_dependence.temp_dep_gui", "main"),
-    "Stress Sensitivity": ("plotting.stress_sensitivity.sens_gui", "main"),
-    "Current Annealing": ("plotting.current_annealing.anneal_gui", "main"),
-    "PDF Plotter": ("plotting.pdf_plotter.pdf_gui", "main"),
-    "Hysteresis Loops": ("plotting.hysteresis_loops.loops_gui", "main"),
-    "VSM Hysteresis Loops": ("plotting.vsm_hysteresis_loops", "main"),
-}
-
-
-def _legacy_plotter_factories() -> Dict[str, LauncherFactory]:
-    factories: Dict[str, LauncherFactory] = {}
-    for name, (module, attr) in LEGACY_PLOTTER_TARGETS.items():
-        factories[name] = _lazy(module, attr)
-    return factories
-
-
 def launch_pyplot(initial: str | None = None) -> QtWidgets.QWidget | None:
     """Open the base plotter workbench, optionally selecting a script."""
 
-    from plotting.pyplot.app import main as pyplot_main
-
-    return pyplot_main(
-        available_plotters=_legacy_plotter_factories(),
-        initial_plotter=initial,
-    )
+    return pyplot_main(initial_plotter=initial)
 
 
-PLOTTERS: Dict[str, LauncherFactory] = {
-    "PyPlot": lambda: launch_pyplot(),
-}
-for _name in LEGACY_PLOTTER_TARGETS:
+PLUGIN_DISPLAY_NAMES = sorted(PLUGIN_CLASS_REGISTRY.keys())
+
+PLOTTERS: Dict[str, LauncherFactory] = {"PyPlot": lambda: launch_pyplot()}
+for _name in PLUGIN_DISPLAY_NAMES:
     PLOTTERS[_name] = (lambda n=_name: launch_pyplot(initial=n))
 
 LOGGERS: Dict[str, LauncherFactory] = {
@@ -658,4 +632,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

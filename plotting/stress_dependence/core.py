@@ -5,9 +5,10 @@ from typing import List, Dict, Any, Tuple, cast
 
 from PyQt6 import QtWidgets
 
-from ..config import load_config
-from ..utils import save_figure, show_plots, apply_readability_fonts, apply_readability
-from ..backends import wants_matplotlib, wants_origin
+from ..shared.config import load_config
+from ..shared.utils import save_figure, show_plots
+from ..shared.readability import apply_readability_fonts, apply_readability
+from ..shared.backends import wants_matplotlib, wants_origin
 
 import numpy as np
 import pandas as pd
@@ -696,7 +697,6 @@ def main(files: List[str], backend: str = BACKEND) -> None:
             plt.close('all')
     else:
         plt.close('all')
-
 
 
 

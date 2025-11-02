@@ -27,7 +27,7 @@ from functools import partial
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-from matplotlib.backends.backend_qtagg import NavigationToolbar2QT
+from matplotlib.backends.backend_qt import NavigationToolbar2QT
 from matplotlib.figure import Figure
 from matplotlib.legend import Legend
 from matplotlib.lines import Line2D
@@ -36,22 +36,55 @@ from matplotlib import colors as mcolors
 import pandas as pd
 
 from .console import PythonConsoleWidget
-from plotting.utils import install_standard_menu, developer_options
+from ..plugins.base import PyPlotPlugin
+from plotting.shared.utils import (
+    install_standard_menu,
+    developer_options,
+    save_figure,
+    show_plots,
+    create_file_widget,
+    prepare_output_dir,
+    get_last_output_dir,
+    set_last_output_dir,
+    run_with_console,
+    arrange_top_layout,
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+    restore_png_dpi,
+    store_png_dpi,
+    restore_combo_choice,
+    store_combo_choice,
+    format_annealing_title,
+)
+from plotting.shared.origin import (
+    origin_session,
+    schedule_origin_release,
+    release_origin,
+)
+from plotting.shared.readability import (
+    apply_readability,
+    apply_readability_fonts,
+    create_readability_group,
+    sync_readability,
+)
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
 
+PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
-def _make_qpointer(obj: QtCore.QObject):
+
+def _make_qpointer(obj: QtCore.QObject) -> PointerType:
     """Return a Qt QPointer when available, otherwise fall back to a weak reference."""
 
     pointer_cls = getattr(QtCore, "QPointer", None)
     if callable(pointer_cls):
         try:
-            return pointer_cls(obj)
+            return cast(PointerType, pointer_cls(obj))
         except Exception:
             pass
-    return weakref.ref(obj)
+    return cast(PointerType, weakref.ref(obj))
 
 
 def _deref_qpointer(pointer: Any) -> Optional[QtCore.QObject]:

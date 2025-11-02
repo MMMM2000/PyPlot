@@ -17,7 +17,7 @@ from .file_name_builder import FileNameBuilderWidget, InfoLineEdit
 from .serial_port import serial_connection
 from data_logging.naming_history import LineEditHistory
 
-from plotting.utils import ensure_app_theme, install_standard_menu
+from plotting.shared.utils import ensure_app_theme, install_standard_menu
 import random
 import pandas as pd
 import numpy as np

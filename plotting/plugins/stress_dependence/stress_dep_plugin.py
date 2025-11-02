@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -150,18 +149,6 @@ class StressDependencePlugin(PyPlotPlugin):
         return container
 
     # Behaviour -----------------------------------------------------
-    def _log(self, message: str, *, level: str = "info") -> None:
-        append = getattr(self.host, "_append_log", None)
-        if callable(append):
-            try:
-                append(message, level=level)
-                return
-            except Exception:
-                pass
-        log_level = logging.ERROR if level == "error" else logging.INFO
-        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
-        logger.log(log_level, message)
-
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
         return selected or ["sum"]
@@ -185,17 +172,14 @@ class StressDependencePlugin(PyPlotPlugin):
         if isinstance(self._ma_spin, QtWidgets.QSpinBox):
             stress_core.MA_WINDOW = int(self._ma_spin.value())
 
-        backend = getattr(stress_core, "BACKEND", "matplotlib") or "matplotlib"
-        stress_core.BACKEND = backend
-        stress_core.SHOW_PLOTS = bool(getattr(stress_core, "SHOW_PLOTS", True))
+        stress_core.BACKEND = "matplotlib"
+        stress_core.SHOW_PLOTS = False
         stress_core.SAVE_PLOTS = False
 
         return {
             "variables": variables,
             "save": False,
             "output_dir": "",
-            "backend": backend,
-            "show": stress_core.SHOW_PLOTS,
         }
 
     def load_data(self) -> None:  # type: ignore[override]
@@ -345,20 +329,6 @@ class StressDependencePlugin(PyPlotPlugin):
         else:
             self._log(f"Generated {plots_created} stress dependence plot(s).")
 
-        if config["backend"] in ("origin", "both"):
-            try:
-                stress_core.SHOW_PLOTS = False
-                stress_core.main(self._loaded_files, backend="origin")
-            except Exception as exc:
-                QtWidgets.QMessageBox.warning(
-                    self.host,
-                    self.name,
-                    f"Origin export failed:\n{exc}",
-                )
-                self._log(f"Origin export failed: {exc}", level="error")
-            else:
-                self._log("Sent stress dependence plots to Origin.")
-
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
@@ -391,11 +361,11 @@ class StressDependencePlugin(PyPlotPlugin):
                 "Load stress dependence data before exporting TXT files.",
             )
             return
-        config = self._apply_settings_to_core()
+        self._apply_settings_to_core()
         start_dir = (
             str(self._last_export_dir)
             if self._last_export_dir is not None
-            else config.get("output_dir")
+            else ""
             or ""
         )
         directory = QtWidgets.QFileDialog.getExistingDirectory(

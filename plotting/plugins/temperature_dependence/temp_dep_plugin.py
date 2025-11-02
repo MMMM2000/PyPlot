@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Iterable
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -133,23 +132,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         return container
 
     # ------------------------------------------------------------------ helpers
-    def _log(self, message: str, *, level: str = "info") -> None:
-        append = getattr(self.host, "_append_log", None)
-        if callable(append):
-            try:
-                append(message, level=level)
-                return
-            except Exception:
-                pass
-        log_level = logging.ERROR if level == "error" else logging.INFO
-        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
-        logger.log(log_level, message)
-
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked() and cb.isEnabled()]
         return selected or ["sum"]
 
-    def _apply_settings_to_core(self) -> dict[str, Any]:
+    def _apply_settings_to_core(self) -> list[str]:
         vars_selected = self._selected_variables()
         temp_core.PLOT_VARS = list(vars_selected)
         if self._mode_combo is not None:
@@ -161,11 +148,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         temp_core.SAVE_PLOTS = False
         temp_core.SHOW_PLOTS = False
         temp_core.BACKEND = "matplotlib"
-        return {
-            "variables": vars_selected,
-            "save": False,
-            "output_dir": "",
-        }
+        return vars_selected
 
     # ------------------------------------------------------------------ host actions
     def load_data(self) -> None:  # type: ignore[override]
@@ -195,7 +178,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self.load_data()
         if self._data is None:
             return
-        config = self._apply_settings_to_core()
+        variables = self._apply_settings_to_core()
         dataframe = temp_core.maybe_handle_outliers(self._data.copy())
         clear = getattr(self.host, "_clear_tab_list", None)
         if callable(clear):
@@ -207,9 +190,9 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
         plots_created = 0
-        for variable in config["variables"]:
+        for variable in variables:
             try:
-                fig, saved_name = temp_core.plot_variable(dataframe, variable, config["save"], config["output_dir"])
+                fig, _ = temp_core.plot_variable(dataframe, variable, False, "")
             except Exception as exc:
                 self._log(f"Failed to plot {variable}: {exc}", level="error")
                 continue
@@ -235,7 +218,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                 lines={},
                 metadata={
                     "variable": variable,
-                    "saved_path": saved_name if config["save"] else "",
+                    "saved_path": "",
                     "source_files": list(self._loaded_files),
                 },
             )
@@ -298,12 +281,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
                 "Load temperature dependence data before exporting TXT files.",
             )
             return
-        config = self._apply_settings_to_core()
+        self._apply_settings_to_core()
         start_dir = (
             str(self._last_export_dir)
             if self._last_export_dir is not None
-            else config.get("output_dir")
-            or ""
+            else ""
         )
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self.host,

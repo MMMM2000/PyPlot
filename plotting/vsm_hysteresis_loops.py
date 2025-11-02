@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+# IMPORTANT: Add this deprecation warning at the very top of the file before any other code.
+import warnings
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.vsm_hysteresis_loops instead.",
+    DeprecationWarning,
+)
+
 import json
 import logging
 import math
@@ -32,7 +40,8 @@ from plotting.pyplot.window import (
     WorksheetData,
     OBJECT_TREE_STATE_ROLE,
 )
-from plotting.utils import ensure_app_theme, origin_session, schedule_origin_release, format_annealing_title
+from plotting.shared.utils import ensure_app_theme, format_annealing_title
+from plotting.shared.origin import origin_session, schedule_origin_release
 
 HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")

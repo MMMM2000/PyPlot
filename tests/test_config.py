@@ -1,4 +1,4 @@
-from plotting import config
+from plotting.shared import config
 
 
 def test_load_default_config():

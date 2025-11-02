@@ -4,78 +4,50 @@ from __future__ import annotations
 import os
 import re
 import sys
+import warnings
 from typing import Any, Dict, Iterable, List, Tuple, cast
 
-from PyQt6 import QtCore, QtGui, QtWidgets
-
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
+from PyQt6 import QtCore, QtGui, QtWidgets
 from matplotlib.figure import Figure
+
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.pdf_plotter instead.",
+    DeprecationWarning,
+)
 
 try:  # optional dependency
     from pypdf import PdfReader
 except Exception:  # pragma: no cover
     PdfReader = None  # type: ignore
 
-try:
-    from ..utils import (
-        ensure_app_theme,
-        save_figure,
-        prepare_output_dir,
-        get_last_output_dir,
-        set_last_output_dir,
-        run_with_console,
-        arrange_top_layout,
-        set_readability,
-        apply_readability_fonts,
-        restore_backend_choice as _restore_backend_choice,
-        store_backend_choice,
-        selected_backend,
-        restore_png_dpi,
-        store_png_dpi,
-        create_file_widget,
-        show_plots,
-    )  # type: ignore
-except ImportError:
-    from ..utils import (  # type: ignore
-        ensure_app_theme,
-        save_figure,
-        prepare_output_dir,
-        get_last_output_dir,
-        set_last_output_dir,
-        run_with_console,
-        arrange_top_layout,
-        set_readability,
-        apply_readability_fonts,
-        store_backend_choice,
-        selected_backend,
-        restore_png_dpi,
-        store_png_dpi,
-        create_file_widget,
-        show_plots,
-    )
-    _restore_backend_choice = None  # type: ignore[assignment]
-from ..backends import wants_matplotlib, wants_origin
+from plotting.shared.theme import ensure_app_theme
+from plotting.shared.paths import (
+    prepare_output_dir,
+    get_last_output_dir,
+    set_last_output_dir,
+)
+from plotting.shared.readability import apply_readability_fonts, set_readability
+from plotting.shared.backends import wants_matplotlib, wants_origin
+from plotting.utils import (
+    save_figure,
+    run_with_console,
+    arrange_top_layout,
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+    restore_png_dpi,
+    store_png_dpi,
+    create_file_widget,
+    show_plots,
+    restore_combo_choice,
+    store_combo_choice,
+)
 
 
-if "_restore_backend_choice" not in globals() or _restore_backend_choice is None:  # type: ignore[name-defined]
 
-    def restore_backend_choice(
-        key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
-    ) -> str:
-        """Legacy fallback that selects ``default`` without persisting state."""
-
-        normalised = str(default or "matplotlib").lower()
-        values = [combo.itemText(idx).strip().lower() for idx in range(combo.count())]
-        if not values:
-            return normalised
-        if normalised not in values:
-            normalised = "matplotlib" if "matplotlib" in values else values[0]
-        combo.setCurrentIndex(values.index(normalised))
-        return normalised
-
-else:
-    restore_backend_choice = _restore_backend_choice  # type: ignore[assignment]
 
 NumberRow = Tuple[float, float, float, float]  # T1, T2, Force, Strain
 
@@ -918,4 +890,3 @@ if __name__ == "__main__":  # pragma: no cover - manual execution
     ensure_app_theme(app)
     _w = main()
     app.exec()
-

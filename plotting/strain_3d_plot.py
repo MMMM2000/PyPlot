@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.strain_3d_plot instead.",
+    DeprecationWarning,
+)
+
 import itertools
 import logging
 import re
@@ -15,13 +22,20 @@ from matplotlib import cm
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
-from plotting.backends import wants_matplotlib, wants_origin
-from plotting.utils import (
+from plotting.shared.backends import wants_matplotlib, wants_origin
+from plotting.shared.utils import (
     ensure_app_theme,
+    show_plots,
+    save_figure,
+    restore_backend_choice as _restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
     install_standard_menu,
-    origin_session,
-    schedule_origin_release,
+    create_file_widget,
+    run_with_console,
+    arrange_top_layout,
 )
+from plotting.shared.origin import origin_session, schedule_origin_release
 
 from microwire_data_builder.core import _parse_numeric, _parse_strain_float
 

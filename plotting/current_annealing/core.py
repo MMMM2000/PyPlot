@@ -14,15 +14,10 @@ from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
 
 from .burnthrough import trim_burnthrough_glitch
-from ..utils import (
-    apply_readability,
-    apply_readability_fonts,
-    format_annealing_title,
-    save_figure,
-    schedule_origin_release,
-    show_plots,
-)
-from ..backends import wants_matplotlib, wants_origin
+from ..shared.backends import wants_matplotlib, wants_origin
+from ..shared.utils import save_figure, show_plots, schedule_origin_release
+from ..shared.origin import origin_session
+from ..shared.readability import apply_readability_fonts, apply_readability
 
 # Defaults
 OUTPUT_DIR = os.getcwd()

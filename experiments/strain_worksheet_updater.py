@@ -10,7 +10,7 @@ import sys
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 
-from plotting.utils import ensure_app_theme, install_standard_menu
+from plotting.shared.utils import ensure_app_theme, install_standard_menu
 
 from microwire_data_builder.core import (
     STRAIN_COLUMN,

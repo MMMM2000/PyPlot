@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter, ImageOps, ImageQt
 from PyQt6 import QtCore, QtGui, QtWidgets
 
-from plotting.utils import ensure_app_theme
+from plotting.shared.utils import ensure_app_theme
 
 from microwire_data_builder.core import _extract_microscope_diameters, _normalise_microscope_text, _parse_microscope_candidates
 from microwire_data_builder.ocr import get_paddle_ocr

@@ -23,9 +23,13 @@ from .window import (
     TabDescriptor,
     create_toolbar_section,
 )
-from plotting.utils import (
+from PyQt6 import QtWidgets, QtCore
+
+from plotting.shared.utils import (
     ensure_app_theme,
-    format_annealing_title,
+    get_last_used_dir,
+    set_last_used_dir,
+    install_standard_menu,
 )
 from plotting.plugins import PyPlotPlugin, ExternalPlotterPlugin, EmbeddedWidgetPlugin
 from plotting.plugins.temperature_dependence import TemperatureDependencePlugin
@@ -39,6 +43,22 @@ from plotting.plugins.pdf_plotter import PdfPlotterPlugin
 from plotting.plugins.hysteresis_loops import HysteresisLoopsPlugin
 from plotting.plugins.hsw_distribution import HswDistributionPlugin
 from plotting.plugins.strain_3d_plot import Strain3DPlotPlugin
+from plotting.plugins.vsm_hysteresis import VSMHysteresisPlugin
+
+PLUGIN_CLASS_REGISTRY: Dict[str, type["PyPlotPlugin"]] = {
+    "VSM Hysteresis Loops": VSMHysteresisPlugin,
+    "Temperature Dependence": TemperatureDependencePlugin,
+    "Temperature Sensitivity": TemperatureSensitivityPlugin,
+    "Current Annealing": CurrentAnnealingPlugin,
+    "Stress Dependence": StressDependencePlugin,
+    "Stress Sensitivity": StressSensitivityPlugin,
+    "Hsw Load Compare": HswLoadComparePlugin,
+    "Maxion Continuous": MaxionContinuousPlugin,
+    "PDF Plotter": PdfPlotterPlugin,
+    "Hysteresis Loops": HysteresisLoopsPlugin,
+    "Hsw Distribution": HswDistributionPlugin,
+    "Strain 3D Plot": Strain3DPlotPlugin,
+}
 
 
 class PyPlotWorkbench(PyPlotWindow):
@@ -887,25 +907,13 @@ def main(
 ) -> QtWidgets.QWidget | None:
     """Entry-point used by the launcher."""
 
-    plugin_factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {}
-    plugin_classes: Dict[str, type[PyPlotPlugin]] = {
-        "VSM Hysteresis Loops": VSMHysteresisPlugin,
-        "Temperature Dependence": TemperatureDependencePlugin,
-        "Temperature Sensitivity": TemperatureSensitivityPlugin,
-        "Current Annealing": CurrentAnnealingPlugin,
-        "Stress Dependence": StressDependencePlugin,
-        "Stress Sensitivity": StressSensitivityPlugin,
-        "Hsw Load Compare": HswLoadComparePlugin,
-        "Maxion Continuous": MaxionContinuousPlugin,
-        "PDF Plotter": PdfPlotterPlugin,
-        "Hysteresis Loops": HysteresisLoopsPlugin,
-        "Hsw Distribution": HswDistributionPlugin,
-        "Strain 3D Plot": Strain3DPlotPlugin,
+    plugin_factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {
+        name: (lambda host, cls=cls, n=name: cls(host, n)) for name, cls in PLUGIN_CLASS_REGISTRY.items()
     }
     for name, launcher in sorted((available_plotters or {}).items()):
-        plugin_cls = plugin_classes.get(name)
+        plugin_cls = PLUGIN_CLASS_REGISTRY.get(name)
         if plugin_cls is not None:
-            plugin_factories[name] = lambda host, cls=plugin_cls, n=name: cls(host, n)
+            plugin_factories.setdefault(name, lambda host, cls=plugin_cls, n=name: cls(host, n))
         else:
             plugin_factories[name] = lambda host, l=launcher, n=name: ExternalPlotterPlugin(host, n, l)
 
@@ -926,6 +934,7 @@ __all__ = [
     "PyPlotPlugin",
     "ExternalPlotterPlugin",
     "EmbeddedWidgetPlugin",
+    "PLUGIN_CLASS_REGISTRY",
     "TemperatureDependencePlugin",
     "TemperatureSensitivityPlugin",
     "CurrentAnnealingPlugin",

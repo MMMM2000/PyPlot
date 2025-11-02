@@ -5,10 +5,17 @@ from typing import List, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
 from PyQt6 import QtWidgets
+import warnings
+
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.hysteresis_loops instead.",
+    DeprecationWarning,
+)
 
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
-    from plotting.utils import (
+    from plotting.shared.utils import (
         ensure_app_theme,
         create_file_widget,
         show_plots,
@@ -19,7 +26,7 @@ if __package__ is None or __package__ == "":
         arrange_top_layout,
     )
 else:
-    from ..utils import (
+    from ..shared.utils import (
         ensure_app_theme,
         create_file_widget,
         show_plots,

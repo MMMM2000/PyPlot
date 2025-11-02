@@ -6,9 +6,10 @@ from typing import Any, List, Tuple, Sequence
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from ..backends import wants_matplotlib, wants_origin
-from ..config import load_config
-from ..utils import show_plots, apply_readability_fonts, apply_readability
+from ..shared.backends import wants_matplotlib, wants_origin
+from ..shared.config import load_config
+from ..shared.utils import show_plots
+from ..shared.readability import apply_readability_fonts, apply_readability
 
 _CFG = load_config().get("hysteresis_loops", {})
 MODE = _CFG.get("MODE", "Combined")

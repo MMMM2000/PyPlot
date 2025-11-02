@@ -9,7 +9,8 @@ from typing import Iterable, Tuple
 
 from PyQt6 import QtCore, QtWidgets
 
-from plotting.utils import ensure_app_theme, install_standard_menu
+from plotting.shared.utils import install_standard_menu
+from plotting.shared.theme import ensure_app_theme
 
 
 COLUMN_HEADER = "Current (mA)\tVoltage (V)\tResistance (Ohm)"
@@ -263,4 +264,3 @@ def main() -> QtWidgets.QWidget | None:
 
 
 __all__ = ["main", "convert_file"]
-

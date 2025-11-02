@@ -22,7 +22,7 @@ except ImportError as exc:  # pragma: no cover - dependency missing
         "PaddleOCR is required for the PDF converter. Install the project dependencies first."
     ) from exc
 
-from plotting.utils import ensure_app_theme
+from plotting.shared.utils import ensure_app_theme
 
 
 LOGGER = logging.getLogger("paddleocr_vl_pdf")

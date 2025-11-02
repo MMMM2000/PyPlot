@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
@@ -123,18 +122,6 @@ class StressSensitivityPlugin(PyPlotPlugin):
         return container
 
     # Behaviour -----------------------------------------------------
-    def _log(self, message: str, *, level: str = "info") -> None:
-        append = getattr(self.host, "_append_log", None)
-        if callable(append):
-            try:
-                append(message, level=level)
-                return
-            except Exception:
-                pass
-        log_level = logging.ERROR if level == "error" else logging.INFO
-        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
-        logger.log(log_level, message)
-
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
         return selected or ["sum"]
@@ -154,9 +141,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         if isinstance(self._ma_spin, QtWidgets.QSpinBox):
             sens_core.MA_WINDOW = int(self._ma_spin.value())
 
-        backend = getattr(sens_core, "BACKEND", "matplotlib") or "matplotlib"
-        sens_core.BACKEND = backend
-        sens_core.SHOW_PLOTS = bool(getattr(sens_core, "SHOW_PLOTS", True))
+        sens_core.BACKEND = "matplotlib"
+        sens_core.SHOW_PLOTS = False
         sens_core.SAVE_PLOTS = False
 
         return {
@@ -313,21 +299,6 @@ class StressSensitivityPlugin(PyPlotPlugin):
         else:
             self._log(f"Generated {plots_created} stress sensitivity plot(s).")
 
-        backend = getattr(sens_core, "BACKEND", "matplotlib")
-        if backend in ("origin", "both"):
-            try:
-                sens_core.SHOW_PLOTS = False
-                sens_core.main(self._loaded_files, backend="origin")
-            except Exception as exc:
-                QtWidgets.QMessageBox.warning(
-                    self.host,
-                    self.name,
-                    f"Origin export failed:\n{exc}",
-                )
-                self._log(f"Origin export failed: {exc}", level="error")
-            else:
-                self._log("Sent stress sensitivity plots to Origin.")
-
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
@@ -360,12 +331,11 @@ class StressSensitivityPlugin(PyPlotPlugin):
                 "Load stress sensitivity data before exporting TXT files.",
             )
             return
-        config = self._apply_settings_to_core()
+        self._apply_settings_to_core()
         start_dir = (
             str(self._last_export_dir)
             if self._last_export_dir is not None
-            else config.get("output_dir")
-            or ""
+            else ""
         )
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self.host,

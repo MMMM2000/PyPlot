@@ -1,83 +1,33 @@
 from __future__ import annotations
 
 import sys
+import warnings
+from pathlib import Path
+
 from PyQt6 import QtWidgets
 
-import pathlib
+warnings.warn(
+    "This module is deprecated and will be removed in a future version. "
+    "Use plotting.plugins.hysteresis_loops instead.",
+    DeprecationWarning,
+)
 
-if __package__ is None or __package__ == "":
-    sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
+if __package__ in (None, ""):
+    sys.path.append(str(Path(__file__).resolve().parents[2]))
     from plotting.hysteresis_loops import core
-    try:
-        from plotting.utils import (
-            ensure_app_theme,
-            create_file_widget,
-            run_with_console,
-            create_readability_group,
-            sync_readability,
-            arrange_top_layout,
-            restore_backend_choice as _restore_backend_choice,
-            store_backend_choice,
-            selected_backend,
-        )
-    except ImportError:
-        from plotting.utils import (
-            ensure_app_theme,
-            create_file_widget,
-            run_with_console,
-            create_readability_group,
-            sync_readability,
-            arrange_top_layout,
-            store_backend_choice,
-            selected_backend,
-        )
-        _restore_backend_choice = None  # type: ignore[assignment]
 else:
     from . import core
-    try:
-        from ..utils import (
-            ensure_app_theme,
-            create_file_widget,
-            run_with_console,
-            create_readability_group,
-            sync_readability,
-            arrange_top_layout,
-            restore_backend_choice as _restore_backend_choice,
-            store_backend_choice,
-            selected_backend,
-        )
-    except ImportError:
-        from ..utils import (
-            ensure_app_theme,
-            create_file_widget,
-            run_with_console,
-            create_readability_group,
-            sync_readability,
-            arrange_top_layout,
-            store_backend_choice,
-            selected_backend,
-        )
-        _restore_backend_choice = None  # type: ignore[assignment]
 
-
-if "_restore_backend_choice" not in globals() or _restore_backend_choice is None:  # type: ignore[name-defined]
-
-    def restore_backend_choice(
-        key: str, combo: QtWidgets.QComboBox, default: str = "matplotlib"
-    ) -> str:
-        """Legacy fallback that selects ``default`` without persisting state."""
-
-        normalised = str(default or "matplotlib").lower()
-        values = [combo.itemText(idx).strip().lower() for idx in range(combo.count())]
-        if not values:
-            return normalised
-        if normalised not in values:
-            normalised = "matplotlib" if "matplotlib" in values else values[0]
-        combo.setCurrentIndex(values.index(normalised))
-        return normalised
-
-else:
-    restore_backend_choice = _restore_backend_choice  # type: ignore[assignment]
+from plotting.shared.theme import ensure_app_theme
+from plotting.shared.readability import create_readability_group, sync_readability
+from plotting.utils import (
+    create_file_widget,
+    run_with_console,
+    arrange_top_layout,
+    restore_backend_choice,
+    store_backend_choice,
+    selected_backend,
+)
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -160,4 +110,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

@@ -9,8 +9,10 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.figure import Figure
-from ..utils import save_figure, origin_session, show_plots, apply_readability_fonts, apply_readability
-from ..backends import wants_matplotlib, wants_origin
+from ..shared.backends import wants_matplotlib, wants_origin
+from ..shared.utils import save_figure, show_plots
+from ..shared.origin import origin_session
+from ..shared.readability import apply_readability_fonts, apply_readability
 
 # Defaults
 CORE_BINS = 50

@@ -3554,7 +3554,7 @@ def _plot_measurement_origin(
 ) -> Optional[OriginArtifact]:
     try:
         from plotting.current_annealing.core import plot_one_origin
-        from plotting.utils import format_annealing_title, schedule_origin_release
+        from plotting.shared.utils import format_annealing_title, schedule_origin_release
     except ImportError as exc:  # pragma: no cover - depends on optional module
         raise RuntimeError("originpro is not available") from exc
 

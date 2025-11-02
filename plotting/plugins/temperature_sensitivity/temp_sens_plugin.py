@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -140,18 +139,6 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         layout.addStretch(1)
         self._settings_widget = container
         return container
-
-    def _log(self, message: str, *, level: str = "info") -> None:
-        append = getattr(self.host, "_append_log", None)
-        if callable(append):
-            try:
-                append(message, level=level)
-                return
-            except Exception:
-                pass
-        log_level = logging.ERROR if level == "error" else logging.INFO
-        logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
-        logger.log(log_level, message)
 
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked() and cb.isEnabled()]

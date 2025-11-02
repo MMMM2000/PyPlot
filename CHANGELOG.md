@@ -1,4 +1,22 @@
 # Changelog
+## 2025-11-02 09:45 UTC
+
+- Shifted the output-directory helpers (`prepare_output_dir`, last-dir tracking, download/sample defaults) into `plotting/shared/paths.py` and relocated the Origin session utilities to `plotting/shared/origin.py`, ensuring plugins share the same infrastructure while graph saving continues to flow through PyPlot’s Save Graph action.
+- Finalised the shared helper migration by re-exporting the curated helper set from the new `plotting/shared/` modules (origin, paths, theme, developer, readability), so plugins consume the shared API while the legacy dialogs keep working.
+- Removed the legacy Qt entry points for the temperature/stress/current workflows (`*_gui.py` files), since PyPlot now hosts their UI panels directly.
+
+## 2025-11-02 09:18 UTC
+
+- Restored compatibility shims for `plotting.common` and `plotting.shared.utils` so the launcher and existing tooling keep working while the helper modules migrate into `plotting/shared/`.
+
+## 2025-11-02 09:05 UTC
+
+- Removed the per-plugin backend/save toggles from the temperature and stress workflows so they rely on PyPlot’s shared “Save graph…” and “Open in Origin…” actions, simplifying the plugin settings panels and avoiding redundant output directory prompts.
+
+## 2025-11-02 08:45 UTC
+
+- Centralised plugin logging through `PyPlotPlugin._log`, so every PyPlot workflow reports status to the workbench console consistently while trimming duplicated code across the migrated plugins.
+
 ## 2025-11-01 22:15 UTC
 
 - Ported every remaining PyPlot workflow into dedicated `plotting/plugins/<name>/..._plugin.py` packages, updating `PyPlotWorkbench` and the smoke test to load the new modules while leaving compatibility exports in the legacy GUIs.

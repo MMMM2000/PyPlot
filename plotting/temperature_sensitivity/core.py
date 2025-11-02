@@ -17,16 +17,12 @@ from matplotlib.colors import to_hex
 from matplotlib.figure import Figure
 from matplotlib.typing import ColorType
 
-from ..config import load_config
-from .. import common
-from ..utils import (
-    save_figure,
-    show_plots,
-    apply_readability_fonts,
-    apply_readability,
-    schedule_origin_release,
-)
-from ..backends import wants_matplotlib, wants_origin
+from ..shared.config import load_config
+from ..shared import common
+from ..shared.utils import save_figure, show_plots
+from ..shared.origin import schedule_origin_release
+from ..shared.readability import apply_readability_fonts, apply_readability
+from ..shared.backends import wants_matplotlib, wants_origin
 
 # Load default configuration
 _CFG = load_config().get("temperature_sensitivity", {})
@@ -1301,7 +1297,5 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
         plt.close('all')
     if wants_origin(backend):
         schedule_origin_release()
-
-
 
 

@@ -14,13 +14,13 @@ from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex
 from matplotlib.typing import ColorType
 from matplotlib.figure import Figure
-from matplotlib.axes import Axes
-from tqdm import tqdm
 
-from ..config import load_config
+from ..shared.config import load_config
 from ..common import maybe_handle_outliers
-from ..utils import save_figure, show_plots, apply_readability_fonts, apply_readability
-from ..backends import wants_matplotlib, wants_origin
+from ..shared.utils import save_figure, show_plots
+from ..shared.origin import origin_session
+from ..shared.readability import apply_readability_fonts, apply_readability
+from ..shared.backends import wants_matplotlib, wants_origin
 
 _CFG = load_config().get("stress_sensitivity", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
