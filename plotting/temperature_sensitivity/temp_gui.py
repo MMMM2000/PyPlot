@@ -8,6 +8,9 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.temperature_sensitivity import core as orig
+    from plotting.plugins.temperature_sensitivity import (
+        TemperatureSensitivityPlugin as PyPlotTemperatureSensitivityPlugin,
+    )
     try:
         from plotting.utils import (
             ensure_app_theme,
@@ -45,6 +48,9 @@ if __package__ is None or __package__ == "":
     from plotting.utils import release_origin
 else:
     from . import core as orig
+    from ..plugins.temperature_sensitivity import (
+        TemperatureSensitivityPlugin as PyPlotTemperatureSensitivityPlugin,
+    )
     try:
         from ..utils import (
             ensure_app_theme,
@@ -333,3 +339,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Backwards-compatibility: expose the PyPlot plugin class from the legacy module.
+TemperatureSensitivityPlugin = PyPlotTemperatureSensitivityPlugin
+
+

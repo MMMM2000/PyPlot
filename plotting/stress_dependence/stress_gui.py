@@ -10,6 +10,9 @@ import pathlib
 if __package__ is None or __package__ == "":
     sys.path.append(str(pathlib.Path(__file__).resolve().parents[2]))
     from plotting.stress_dependence import core as orig
+    from plotting.plugins.stress_dependence import (
+        StressDependencePlugin as PyPlotStressDependencePlugin,
+    )
     try:
         from plotting.utils import (
             ensure_app_theme,
@@ -46,6 +49,9 @@ if __package__ is None or __package__ == "":
         _restore_backend_choice = None  # type: ignore[assignment]
 else:
     from . import core as orig
+    from ..plugins.stress_dependence import (
+        StressDependencePlugin as PyPlotStressDependencePlugin,
+    )
     try:
         from ..utils import (
             ensure_app_theme,
@@ -283,4 +289,8 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+# Backwards-compatibility: expose the PyPlot plugin class from the legacy module.
+StressDependencePlugin = PyPlotStressDependencePlugin
+
 

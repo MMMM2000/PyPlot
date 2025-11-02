@@ -1,4 +1,18 @@
 # Changelog
+## 2025-11-01 22:15 UTC
+
+- Ported every remaining PyPlot workflow into dedicated `plotting/plugins/<name>/..._plugin.py` packages, updating `PyPlotWorkbench` and the smoke test to load the new modules while leaving compatibility exports in the legacy GUIs.
+- Renamed each plugin module to a descriptive `*_plugin.py` filename (e.g. `temp_dep_plugin.py`, `current_annealing_plugin.py`) so the tree no longer carries ambiguous `plugin.py` files and refreshed the migration tracker accordingly.
+
+## 2025-11-01 20:48 UTC
+
+- Removed plugin-specific export menus so Temperature Dependence, Stress Dependence, and Stress Sensitivity now lean on the shared “Save graph…” action, and aligned their panels with the streamlined toolbar UI.
+- Migrated the Temperature Dependence workflow into `plotting/plugins/temperature_dependence`, with `PyPlotWorkbench` now importing the plugin from its package and tests updated accordingly.
+
+## 2025-11-01 19:17 UTC
+
+- Rebuilt every plugin's toolbar menu so each section uses native controls, renamed the script toolbar and selector to "Plugin", and sorted the plugin picker by last opened to surface recently used workflows first.
+
 ## 2025-11-01 16:20 UTC
 
 - Rebuilt the PyPlot script toolbar menus so each button opens its own settings drop-down, keeping plugin controls directly in the toolbar.

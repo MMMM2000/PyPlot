@@ -8,8 +8,9 @@ from typing import List
 
 from PyQt6 import QtCore, QtWidgets
 
-from .base import PyPlotPlugin
+from plotting.plugins.base import PyPlotPlugin
 from plotting.vsm_hysteresis_loops import VSMPlotter, _looks_like_vsm_name
+from plotting.pyplot.window import create_toolbar_section
 
 
 class VSMHysteresisPlugin(PyPlotPlugin):
@@ -56,85 +57,94 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         container = QtWidgets.QWidget(host)
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
 
-        axes_group = QtWidgets.QGroupBox("Axes and filters", container)
-        axes_group.setFlat(True)
-        axes_form = QtWidgets.QFormLayout(axes_group)
-        axes_form.setContentsMargins(8, 8, 8, 8)
-        axes_form.setSpacing(6)
-        host.temperature_combo = QtWidgets.QComboBox(axes_group)
+        def _form_layout(parent: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
+            form = QtWidgets.QFormLayout(parent)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(8)
+            form.setVerticalSpacing(4)
+            form.setFieldGrowthPolicy(
+                QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
+            return form
+
+        axes_section, axes_layout = create_toolbar_section(
+            "Axes and filters",
+            parent=container,
+            layout_factory=_form_layout,
+        )
+        host.temperature_combo = QtWidgets.QComboBox(axes_section)
         host.temperature_combo.addItem("All temperatures", None)
-        axes_form.addRow("Temperature", host.temperature_combo)
+        axes_layout.addRow("Temperature:", host.temperature_combo)
 
-        host.x_axis_combo = QtWidgets.QComboBox(axes_group)
-        host.y_axis_combo = QtWidgets.QComboBox(axes_group)
-        axes_form.addRow("X axis", host.x_axis_combo)
-        axes_form.addRow("Y axis", host.y_axis_combo)
-        layout.addWidget(axes_group)
+        host.x_axis_combo = QtWidgets.QComboBox(axes_section)
+        host.y_axis_combo = QtWidgets.QComboBox(axes_section)
+        axes_layout.addRow("X axis:", host.x_axis_combo)
+        axes_layout.addRow("Y axis:", host.y_axis_combo)
+        layout.addWidget(axes_section)
 
-        appearance_group = QtWidgets.QGroupBox("Appearance", container)
-        appearance_group.setFlat(True)
-        appearance_layout = QtWidgets.QVBoxLayout(appearance_group)
-        appearance_layout.setContentsMargins(8, 8, 8, 8)
-        appearance_layout.setSpacing(6)
-        host.style_combo = QtWidgets.QComboBox(appearance_group)
+        appearance_section, appearance_layout = create_toolbar_section(
+            "Appearance",
+            parent=container,
+        )
+        host.style_combo = QtWidgets.QComboBox(appearance_section)
         host.style_combo.addItem("Line", "line")
         host.style_combo.addItem("Line + symbols", "line_markers")
-        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style", appearance_group))
+        appearance_layout.addWidget(QtWidgets.QLabel("Matplotlib style", appearance_section))
         appearance_layout.addWidget(host.style_combo)
 
-        host.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme", appearance_group)
+        host.dark_mode_checkbox = QtWidgets.QCheckBox("Dark plot theme", appearance_section)
         host.dark_mode_checkbox.setToolTip(
             "Render Matplotlib plots using a dark background theme."
         )
         appearance_layout.addWidget(host.dark_mode_checkbox)
 
-        host.field_direction_button = QtWidgets.QPushButton("Highlight field direction", appearance_group)
+        host.field_direction_button = QtWidgets.QPushButton("Highlight field direction", appearance_section)
         host.field_direction_button.setCheckable(True)
         host.field_direction_button.setToolTip(
             "Use solid lines for increasing magnetic field and dashed lines for decreasing segments."
         )
         appearance_layout.addWidget(host.field_direction_button)
-        layout.addWidget(appearance_group)
+        appearance_layout.addStretch(1)
+        layout.addWidget(appearance_section)
 
-        overlay_group = QtWidgets.QGroupBox("Angle overlays", container)
-        overlay_group.setFlat(True)
-        overlay_layout = QtWidgets.QVBoxLayout(overlay_group)
-        overlay_layout.setContentsMargins(8, 8, 8, 8)
-        overlay_layout.setSpacing(6)
-        host.angle_overlay_list = QtWidgets.QListWidget(overlay_group)
+        overlay_section, overlay_layout = create_toolbar_section(
+            "Angle overlays",
+            parent=container,
+        )
+        host.angle_overlay_list = QtWidgets.QListWidget(overlay_section)
         host.angle_overlay_list.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         overlay_layout.addWidget(host.angle_overlay_list, 1)
         overlay_hint = QtWidgets.QLabel(
             "Select rotations to compare across temperatures or when exporting overlays.",
-            overlay_group,
+            overlay_section,
         )
         overlay_hint.setWordWrap(True)
         overlay_layout.addWidget(overlay_hint)
         host.angle_overlay_button = QtWidgets.QPushButton(
-            "Plot selected angles across temperatures", overlay_group
+            "Plot selected angles across temperatures", overlay_section
         )
         host.angle_overlay_button.setEnabled(False)
         overlay_layout.addWidget(host.angle_overlay_button)
-        layout.addWidget(overlay_group, 1)
+        layout.addWidget(overlay_section, 1)
 
-        metrics_group = QtWidgets.QGroupBox("Derived metrics", container)
-        metrics_group.setFlat(True)
-        metrics_layout = QtWidgets.QVBoxLayout(metrics_group)
-        metrics_layout.setContentsMargins(8, 8, 8, 8)
-        metrics_layout.setSpacing(6)
-        host.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle", metrics_group)
+        metrics_section, metrics_layout = create_toolbar_section(
+            "Derived metrics",
+            parent=container,
+        )
+        host.metrics_angle_button = QtWidgets.QPushButton("Plot metrics vs angle", metrics_section)
         host.metrics_angle_button.setEnabled(False)
         metrics_layout.addWidget(host.metrics_angle_button)
         host.metrics_temperature_button = QtWidgets.QPushButton(
-            "Plot metrics vs temperature", metrics_group
+            "Plot metrics vs temperature", metrics_section
         )
         host.metrics_temperature_button.setEnabled(False)
         metrics_layout.addWidget(host.metrics_temperature_button)
-        layout.addWidget(metrics_group)
+        metrics_layout.addStretch(1)
+        layout.addWidget(metrics_section)
 
         layout.addStretch(1)
         self._settings_widget = container
