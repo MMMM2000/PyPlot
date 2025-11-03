@@ -4371,6 +4371,7 @@ class FabricationSection(MiniDatabaseSection):
         log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
+        self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
         self._hide_columns(["_source_paths", "_source_path"])
 
@@ -4768,6 +4769,7 @@ class AnnealingSection(MiniDatabaseSection):
         log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
+        self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         self._phase_points: Dict[str, Dict[str, float]] = {}
@@ -8690,13 +8692,24 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.sections["videos"] = self.video_section
 
         self._developer_options = developer_options()
-        try:
-            self._developer_options.ocr_debug_changed.connect(
-                self._handle_ocr_debug_changed
-            )
-        except Exception:
-            pass
-        self._handle_ocr_debug_changed(self._developer_options.ocr_debug())
+        self._ocr_debug_supported = all(
+            hasattr(self._developer_options, attr)
+            for attr in ("ocr_debug", "ocr_debug_changed")
+        )
+        if self._ocr_debug_supported:
+            try:
+                self._developer_options.ocr_debug_changed.connect(
+                    self._handle_ocr_debug_changed
+                )
+            except Exception:
+                self._ocr_debug_supported = False
+        initial_debug = False
+        if self._ocr_debug_supported:
+            try:
+                initial_debug = bool(self._developer_options.ocr_debug())
+            except Exception:
+                initial_debug = False
+        self._handle_ocr_debug_changed(initial_debug)
 
         self.strain_section = StrainSection(self.logger, _append_log)
         self.tab_widget.addTab(self.strain_section, "Strain")

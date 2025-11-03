@@ -1,4 +1,16 @@
 # Changelog
+## 2025-11-03 10:49 UTC
+
+- Fixed the Microwire Data Builder annealing section initialisation so the table splitter exists before the base class resizes columns, eliminating the `_table_splitter` AttributeError at launch.
+- Deferred the heavy PyPlot and experiments imports until the launcher placeholder is visible, so running `launcher.py` immediately displays a loading window instead of idling on a blank screen.
+- Added an OCR debug toggle to the developer menu so optional Microwire tooling can subscribe without attribute errors.
+- Unified the launcher titles/icons under "PyPlot Launcher" and drew an inline app icon so both the splash and main window brand consistently.
+- Keep the PyPlot splash visible until tools finish loading so the main window appears responsive once it opens.
+
+## 2025-11-03 10:14 UTC
+
+- Made the Microwire Data Builder UI load lazily so PyPlot plugins can import the core library without triggering circular imports, and include the original exception details when the UI dependencies are missing.
+
 ## 2025-11-02 16:32 UTC
 
 - Fixed the PyPlot launcher crash by loading plugin assets lazily, correcting the default configuration lookup, and breaking the circular imports that blocked the VSM and stress workflows from initializing.

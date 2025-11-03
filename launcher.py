@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 import os
 import time
+import logging
+from functools import lru_cache
 from importlib import import_module
 from typing import Any, Callable, Dict, Tuple, cast
 
@@ -11,8 +13,6 @@ from PyQt6 import QtWidgets, QtGui, QtCore
 from plotting.shared import common
 from plotting.shared.utils import install_standard_menu, developer_options
 from plotting.shared.theme import ensure_app_theme
-from plotting.pyplot.app import main as pyplot_main, PLUGIN_CLASS_REGISTRY
-from experiments import EXPERIMENTS
 
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
@@ -32,17 +32,87 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
     return factory
 
 
+LOGGER = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _load_pyplot_metadata() -> Tuple[LauncherFactory, Tuple[str, ...]]:
+    from plotting.pyplot.app import main as pyplot_main, PLUGIN_CLASS_REGISTRY
+
+    plugin_names = tuple(sorted(PLUGIN_CLASS_REGISTRY))
+    return cast(LauncherFactory, pyplot_main), plugin_names
+
+
+def _plotter_registry() -> Dict[str, LauncherFactory]:
+    pyplot_main, plugin_names = _load_pyplot_metadata()
+    registry: Dict[str, LauncherFactory] = {
+        "PyPlot": lambda: pyplot_main(initial_plotter=None)
+    }
+    for name in plugin_names:
+        registry[name] = (
+            lambda plotter_name=name: pyplot_main(initial_plotter=plotter_name)
+        )
+    return registry
+
+
+@lru_cache(maxsize=1)
+def _load_experiments_registry() -> Dict[str, LauncherFactory]:
+    try:
+        from experiments import EXPERIMENTS as experiments_map
+    except Exception as exc:
+        LOGGER.warning("Failed to load experiments module", exc_info=exc)
+        return {}
+    return dict(experiments_map)
+
+
+def _build_registry() -> dict[str, Dict[str, LauncherFactory]]:
+    registry: dict[str, Dict[str, LauncherFactory]] = {
+        "loggers": dict(LOGGERS),
+        "plotters": _plotter_registry(),
+        "emulators": dict(EMULATORS),
+    }
+    if BUILDERS:
+        registry["builders"] = dict(BUILDERS)
+    experiments = _load_experiments_registry()
+    if experiments:
+        registry["experiments"] = experiments
+    return registry
+
+
 def launch_pyplot(initial: str | None = None) -> QtWidgets.QWidget | None:
     """Open the base plotter workbench, optionally selecting a script."""
 
+    pyplot_main, _ = _load_pyplot_metadata()
     return pyplot_main(initial_plotter=initial)
 
 
-PLUGIN_DISPLAY_NAMES = sorted(PLUGIN_CLASS_REGISTRY.keys())
+def _create_launcher_icon() -> QtGui.QIcon:
+    """Return the shared launcher icon, generating it on first use."""
 
-PLOTTERS: Dict[str, LauncherFactory] = {"PyPlot": lambda: launch_pyplot()}
-for _name in PLUGIN_DISPLAY_NAMES:
-    PLOTTERS[_name] = (lambda n=_name: launch_pyplot(initial=n))
+    cached: QtGui.QIcon | None = getattr(_create_launcher_icon, "_cache", None)
+    if isinstance(cached, QtGui.QIcon):
+        return cached
+    size = 256
+    pixmap = QtGui.QPixmap(size, size)
+    pixmap.fill(QtCore.Qt.GlobalColor.transparent)
+    painter = QtGui.QPainter(pixmap)
+    painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+    background = QtGui.QColor("#1f2937")
+    painter.setBrush(background)
+    painter.setPen(QtCore.Qt.PenStyle.NoPen)
+    rect = pixmap.rect().adjusted(12, 12, -12, -12)
+    radius = size * 0.18
+    painter.drawRoundedRect(rect, radius, radius)
+    painter.setPen(QtGui.QPen(QtGui.QColor("#f9fafb")))
+    font = painter.font()
+    font.setBold(True)
+    font.setPointSize(88)
+    painter.setFont(font)
+    painter.drawText(rect, QtCore.Qt.AlignmentFlag.AlignCenter, "Py")
+    painter.end()
+    icon = QtGui.QIcon(pixmap)
+    setattr(_create_launcher_icon, "_cache", icon)
+    return icon
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
@@ -63,9 +133,12 @@ BUILDERS: Dict[str, LauncherFactory] = {
 
 
 class MasterLauncher(QtWidgets.QWidget):
+    ready = QtCore.pyqtSignal()
+
     def __init__(self) -> None:
         super().__init__()
-        self.setWindowTitle("Master Launcher")
+        self.setWindowTitle("PyPlot Launcher")
+        self.setWindowIcon(_create_launcher_icon())
         self.main_layout = QtWidgets.QVBoxLayout(self)
 
         # Ensure window bookkeeping exists even if later setup fails so the
@@ -75,6 +148,17 @@ class MasterLauncher(QtWidgets.QWidget):
         self._settings = QtCore.QSettings("MicrowireData", "Launcher")
         self.dev_opts = developer_options()
         self._closing = False
+        self._registry_loaded = False
+        placeholder_plotters: Dict[str, LauncherFactory] = {
+            "PyPlot": lambda: launch_pyplot(initial=None)
+        }
+        self._registry: dict[str, Dict[str, LauncherFactory]] = {
+            "loggers": dict(LOGGERS),
+            "plotters": placeholder_plotters,
+            "emulators": dict(EMULATORS),
+        }
+        if BUILDERS:
+            self._registry["builders"] = dict(BUILDERS)
 
         try:
             self.setAttribute(QtCore.Qt.WidgetAttribute.WA_QuitOnClose, False)
@@ -110,7 +194,7 @@ class MasterLauncher(QtWidgets.QWidget):
         self.tabs.addTab(self.log_tab, "Loggers")
         self.tabs.addTab(self.plot_tab, "Plotting")
         self.tabs.addTab(self.emu_tab, "Emulators")
-        if BUILDERS:
+        if self._registry.get("builders"):
             self.tabs.addTab(self.builder_tab, "Builders")
         self.exp_tab = QtWidgets.QWidget()
         self._experiments_index: int | None = None
@@ -135,32 +219,14 @@ class MasterLauncher(QtWidgets.QWidget):
         exp_layout = QtWidgets.QVBoxLayout(self.exp_tab)
         exp_layout.addWidget(self.exp_list)
 
-        self._registry: dict[str, Dict[str, LauncherFactory]] = {
-            "loggers": LOGGERS,
-            "plotters": PLOTTERS,
-            "emulators": EMULATORS,
-        }
-        if BUILDERS:
-            self._registry["builders"] = BUILDERS
-        if EXPERIMENTS:
-            self._registry["experiments"] = EXPERIMENTS
-
-        self._category_labels = {
-            "loggers": "Loggers",
-            "plotters": "Plotting",
-            "emulators": "Emulators",
-        }
-        if BUILDERS:
-            self._category_labels["builders"] = "Builders"
-        if "experiments" in self._registry:
-            self._category_labels["experiments"] = "Experiments"
+        self._update_category_labels()
 
         self._list_widgets = {
             "loggers": self.log_list,
             "plotters": self.plot_list,
             "emulators": self.emu_list,
         }
-        if BUILDERS:
+        if self._registry.get("builders"):
             self._list_widgets["builders"] = self.builder_list
         if "experiments" in self._registry:
             self._list_widgets["experiments"] = self.exp_list
@@ -176,15 +242,15 @@ class MasterLauncher(QtWidgets.QWidget):
         self.main_layout.addWidget(self.search_bar)
         self.main_layout.addWidget(self.tabs)
 
-        self._refresh_all_lists()
-        if self.dev_opts.show_experiments() and self.exp_list.count():
-            self._experiments_index = self.tabs.addTab(self.exp_tab, "Experiments")
+        self._set_lists_loading()
+        QtCore.QTimer.singleShot(0, self._load_registry_async)
         self.dev_opts.experiments_visibility_changed.connect(self._sync_experiments_tab)
         self.search_bar.textChanged.connect(self._apply_search_filter)
         self.tabs.currentChanged.connect(self._handle_tab_changed)
 
         self.run_button = QtWidgets.QPushButton("Run")
         self.run_button.clicked.connect(self.run_selected)
+        self.run_button.setEnabled(False)
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
@@ -201,6 +267,7 @@ class MasterLauncher(QtWidgets.QWidget):
         if sort_menu is None:
             sort_menu = QtWidgets.QMenu("&Sort", self)
             menu_bar.addMenu(sort_menu)
+        self._sort_menu = sort_menu
         self._install_sort_menu(sort_menu)
 
     def _close_launcher(self) -> None:
@@ -210,6 +277,56 @@ class MasterLauncher(QtWidgets.QWidget):
         # callback to return ``None``.  We call the underlying method but
         # intentionally drop the return value to keep the type contract tidy.
         self.close()
+
+    def _set_lists_loading(self) -> None:
+        for list_widget in self._list_widgets.values():
+            list_widget.clear()
+            list_widget.setEnabled(False)
+            placeholder = QtWidgets.QListWidgetItem("Loading...")
+            placeholder.setFlags(QtCore.Qt.ItemFlag.NoItemFlags)
+            list_widget.addItem(placeholder)
+
+    def _update_category_labels(self) -> None:
+        labels: dict[str, str] = {
+            "loggers": "Loggers",
+            "plotters": "Plotting",
+            "emulators": "Emulators",
+        }
+        if self._registry.get("builders"):
+            labels["builders"] = "Builders"
+        experiments = self._registry.get("experiments")
+        if experiments:
+            labels["experiments"] = "Experiments"
+        self._category_labels = labels
+
+    def _load_registry_async(self) -> None:
+        try:
+            registry = _build_registry()
+        except Exception as exc:  # pragma: no cover - unexpected import failure
+            LOGGER.exception("Failed to build launcher registry", exc_info=exc)
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Launcher error",
+                f"Failed to load tools:\n{exc}",
+            )
+            registry = None
+        else:
+            self._registry = registry
+            if "experiments" in registry:
+                self._list_widgets["experiments"] = self.exp_list
+            self._update_category_labels()
+            if hasattr(self, "_sort_menu"):
+                self._sort_menu.clear()
+                self._sort_groups.clear()
+                self._install_sort_menu(self._sort_menu)
+            for category in registry:
+                self._sort_modes.setdefault(category, "last_used")
+        finally:
+            self._registry_loaded = True
+            self.run_button.setEnabled(True)
+            self._apply_search_filter(self.search_bar.text())
+            self._sync_experiments_tab(self.dev_opts.show_experiments())
+            self.ready.emit()
 
     def _restore_launcher(self) -> None:
         if self._closing:
@@ -311,6 +428,7 @@ class MasterLauncher(QtWidgets.QWidget):
                 continue
             list_widget.addItem(name)
         list_widget.blockSignals(False)
+        list_widget.setEnabled(self._registry_loaded)
         if select_name:
             matches = list_widget.findItems(select_name, QtCore.Qt.MatchFlag.MatchExactly)
             if matches:
@@ -461,6 +579,8 @@ class MasterLauncher(QtWidgets.QWidget):
         return super().eventFilter(obj, event)
 
     def run_selected(self) -> None:
+        if not self._registry_loaded:
+            return
         category: str | None = None
         item: QtWidgets.QListWidgetItem | None
         if self.tabs.currentWidget() is self.log_tab:
@@ -604,11 +724,15 @@ def main() -> None:
 
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    app.setApplicationName("PyPlot Launcher")
     ensure_app_theme(app)
+    icon = _create_launcher_icon()
+    app.setWindowIcon(icon)
     placeholder = QtWidgets.QMainWindow()
+    placeholder.setWindowIcon(icon)
     placeholder.setWindowTitle("PyPlot Launcher")
     placeholder.resize(420, 260)
-    loading_label = QtWidgets.QLabel("Loading PyPlot Launcher…", placeholder)
+    loading_label = QtWidgets.QLabel("Loading PyPlot Launcher...", placeholder)
     loading_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
     loading_label.setStyleSheet("font-size: 16px; font-weight: 600;")
     placeholder.setCentralWidget(loading_label)
@@ -620,13 +744,25 @@ def main() -> None:
 
     launcher_holder: dict[str, MasterLauncher] = {}
 
-    def _launch() -> None:
+    def _create_launcher() -> None:
         window = MasterLauncher()
         launcher_holder["window"] = window
-        window.show()
-        placeholder.close()
 
-    QtCore.QTimer.singleShot(0, _launch)
+        def _show_when_ready() -> None:
+            window.ready.disconnect(_show_when_ready)
+            window.show()
+            placeholder.close()
+
+        window.ready.connect(_show_when_ready)
+
+    def _fallback_show() -> None:
+        window = launcher_holder.get("window")
+        if isinstance(window, MasterLauncher) and not window.isVisible():
+            window.show()
+            placeholder.close()
+
+    QtCore.QTimer.singleShot(0, _create_launcher)
+    QtCore.QTimer.singleShot(5000, _fallback_show)
     app.exec()
 
 
