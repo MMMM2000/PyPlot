@@ -1,2 +1,0 @@
-"""Current annealing plotting package."""
-

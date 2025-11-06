@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 import os
 
 import pytest
@@ -18,30 +17,26 @@ def test_restore_backend_choice_fallback(monkeypatch: pytest.MonkeyPatch) -> Non
 
     from plotting.shared import toolkit as utils
 
-    original = getattr(utils, "restore_backend_choice", None)
-    if original is None:
-        pytest.skip("restore_backend_choice helper not available")
-
     app = QtWidgets.QApplication.instance()
     owns_app = False
     if app is None:
         app = QtWidgets.QApplication([])
         owns_app = True
 
+    class _DummySettings:
+        def value(self, key: str, default: str, type=str) -> str:  # noqa: A003
+            return "invalid"
+
     try:
-        monkeypatch.delattr(utils, "restore_backend_choice", raising=True)
-        module = importlib.reload(importlib.import_module("plotting.stress_sensitivity.sens_gui"))
+        monkeypatch.setattr(utils, "_settings", lambda: _DummySettings())
 
         combo = QtWidgets.QComboBox()
         combo.addItems(["Matplotlib", "Origin", "Both"])
 
-        result = module.restore_backend_choice("legacy", combo, "origin")
+        result = utils.restore_backend_choice("legacy", combo, "origin")
 
         assert result == "origin"
         assert combo.currentIndex() == 1
     finally:
-        if original is not None:
-            setattr(utils, "restore_backend_choice", original)
-            importlib.reload(importlib.import_module("plotting.stress_sensitivity.sens_gui"))
         if owns_app and app is not None:
             app.quit()

@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-07 11:00 UTC
+
+- Deleted the `plotting/legacy/` compatibility package now that all downstream imports target `plotting.plugins.*`, and refreshed the migration docs and README to reflect the final layout.
+
+## 2025-11-07 10:45 UTC
+
 ## 2025-11-07 10:15 UTC
 
 - Relocated the temperature, stress, current annealing, and VSM plotting implementations into their plugin packages and replaced the legacy modules with deprecation shims so PyPlot and external tooling import the workflows from `plotting.plugins.*` while still supporting the old entry points.

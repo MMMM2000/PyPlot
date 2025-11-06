@@ -71,5 +71,5 @@ The build appears under `dist/launcher`; zip that folder when sharing the tools.
 - PyPlot workbench plugins now live under `plotting/plugins/`; add new plotters there so they can be loaded without growing `plotting/pyplot/app.py`.
 - Register new PyPlot plugins with the `@register_plugin("Display Name")` decorator found in
   `plotting/plugins/base.py`. The workbench and launcher discover plugin classes from the shared
-  registry automatically, while legacy standalone plotters can still be surfaced by handing their
-  launch functions to `plotting.pyplot.app.main()`.
+  registry automatically, while standalone plotters can still be surfaced by handing their launch
+  functions to `plotting.pyplot.app.main()`.

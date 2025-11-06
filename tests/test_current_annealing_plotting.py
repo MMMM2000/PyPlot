@@ -14,7 +14,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 
-anneal_core = importlib.import_module("plotting.current_annealing.core")
+anneal_core = importlib.import_module("plotting.plugins.current_annealing.core")
 
 
 def test_load_file_trims_burnthrough_point(tmp_path: Path) -> None:
