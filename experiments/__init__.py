@@ -2,20 +2,69 @@
 
 from __future__ import annotations
 
-from typing import Callable, Dict
+import logging
+from functools import lru_cache
+from importlib import import_module
+from typing import Callable, Dict, cast
 
 from PyQt6 import QtWidgets
 
-from . import strain_worksheet_updater
-from . import current_annealing_converter
-from . import ocr_debug
-from . import paddleocr_vl_pdf
 
-EXPERIMENTS: Dict[str, Callable[[], QtWidgets.QWidget | None]] = {
-    "Strain Worksheet Updater": strain_worksheet_updater.main,
-    "Current Annealing Unit Converter": current_annealing_converter.main,
-    "Microscope OCR Debug": ocr_debug.main,
-    "PaddleOCR-VL PDF Converter": paddleocr_vl_pdf.main,
+LOGGER = logging.getLogger(__name__)
+
+ExperimentFactory = Callable[..., QtWidgets.QWidget | None]
+
+
+def _notify_unavailable(name: str, exc: BaseException) -> None:
+    LOGGER.warning("Experiment %s is unavailable: %s", name, exc, exc_info=True)
+    parent: QtWidgets.QWidget | None = QtWidgets.QApplication.activeWindow()
+    QtWidgets.QMessageBox.critical(
+        parent,
+        "Experiment unavailable",
+        f"{name} could not be loaded:\n{exc}",
+    )
+
+
+@lru_cache(maxsize=None)
+def _resolve(module: str, attr: str = "main") -> ExperimentFactory:
+    module_obj = import_module(module)
+    target: object = module_obj
+    for segment in attr.split("."):
+        target = getattr(target, segment)
+    if not callable(target):
+        raise TypeError(f"{module}.{attr} is not callable")
+    return cast(ExperimentFactory, target)
+
+
+def _lazy(module: str, attr: str = "main", *, label: str | None = None) -> ExperimentFactory:
+    experiment_name = label or module.split(".")[-1]
+
+    def factory(*args: object, **kwargs: object) -> QtWidgets.QWidget | None:
+        try:
+            resolver = _resolve(module, attr)
+        except Exception as exc:  # pragma: no cover - dynamic dependency failures
+            _notify_unavailable(experiment_name, exc)
+            return None
+        try:
+            return resolver(*args, **kwargs)
+        except Exception as exc:
+            _notify_unavailable(experiment_name, exc)
+            return None
+
+    return factory
+
+
+EXPERIMENTS: Dict[str, ExperimentFactory] = {
+    "Strain Worksheet Updater": _lazy(
+        "experiments.strain_worksheet_updater", label="Strain Worksheet Updater"
+    ),
+    "Current Annealing Unit Converter": _lazy(
+        "experiments.current_annealing_converter", label="Current Annealing Unit Converter"
+    ),
+    "Microscope OCR Debug": _lazy("experiments.ocr_debug", label="Microscope OCR Debug"),
+    "PaddleOCR-VL PDF Converter": _lazy(
+        "experiments.paddleocr_vl_pdf", label="PaddleOCR-VL PDF Converter"
+    ),
 }
 
 __all__ = ["EXPERIMENTS"]

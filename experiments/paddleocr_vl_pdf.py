@@ -28,6 +28,14 @@ from plotting.shared.utils import ensure_app_theme
 LOGGER = logging.getLogger("paddleocr_vl_pdf")
 
 
+try:
+    _RESAMPLE_LANCZOS = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+except AttributeError:  # pragma: no cover - pillow<9.1 fallback
+    _RESAMPLE_LANCZOS = Image.LANCZOS  # type: ignore[attr-defined]
+
+_MAX_ANALYSIS_SIDE = 3600
+
+
 @dataclass
 class OverlayRegion:
     text: str
@@ -290,14 +298,32 @@ def convert_pdf(
             image_path = temp_dir / f"page_{page_number:04d}.png"
             pil_image.save(image_path, format="PNG")
 
-            summary_lines = _summarise_page(vl_engine, vl_mode, image_path, prompt)
+            analysis_path = image_path
+            analysis_image = pil_image
+            if max(pil_image.width, pil_image.height) > _MAX_ANALYSIS_SIDE:
+                analysis_image = pil_image.copy()
+                analysis_image.thumbnail(
+                    (_MAX_ANALYSIS_SIDE, _MAX_ANALYSIS_SIDE), _RESAMPLE_LANCZOS
+                )
+                analysis_path = temp_dir / f"page_{page_number:04d}_analysis.png"
+                analysis_image.save(analysis_path, format="PNG")
+                LOGGER.info(
+                    "Downscaled page %s for OCR: %sx%s → %sx%s",
+                    page_number,
+                    pil_image.width,
+                    pil_image.height,
+                    analysis_image.width,
+                    analysis_image.height,
+                )
+
+            summary_lines = _summarise_page(vl_engine, vl_mode, analysis_path, prompt)
             overlays = _extract_overlays(
                 classic_engine,
-                image_path,
+                analysis_path,
                 width,
                 height,
-                pil_image.width,
-                pil_image.height,
+                analysis_image.width,
+                analysis_image.height,
             )
 
             image_reader = ImageReader(pil_image) if include_images else None

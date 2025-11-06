@@ -10,6 +10,15 @@
 - Relocated the temperature, stress, current annealing, and VSM plotting implementations into their plugin packages and replaced the legacy modules with deprecation shims so PyPlot and external tooling import the workflows from `plotting.plugins.*` while still supporting the old entry points.
 - Pointed downstream helpers, docs, and regression tests at the plugin modules and added import smokes for the compatibility shims, confirming the plugin migration is complete end-to-end.
 
+## 2025-11-06 18:21 UTC
+
+- Kept the launcher’s Experiments tab visible by default and made optional prototypes resilient to import failures, surfacing a dialog when PaddleOCR-VL is missing instead of hiding the entire section.
+- Downscaled very large PDF rasterisations before passing them to PaddleOCR so the PaddleOCR-VL converter avoids the native segfault triggered around the 4000 px limit while still embedding full-resolution pages in the output PDF.
+
+## 2025-11-06 18:01 UTC
+
+- Deferred heavy plotting imports in the launcher so the placeholder window appears immediately and the main UI opens faster even on machines missing optional plotting dependencies.
+
 ## 2025-11-06 07:47 UTC
 
 - Documented the plugin registry workflow in the README and migration notes and added a regression test that confirms legacy launchers passed via `available_plotters` continue to appear through `ExternalPlotterPlugin`.

@@ -6,16 +6,25 @@ import time
 import logging
 from functools import lru_cache
 from importlib import import_module
-from typing import Any, Callable, Dict, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, cast, Protocol
 
 from PyQt6 import QtWidgets, QtGui, QtCore
 
-from plotting.shared import common
-from plotting.shared.utils import install_standard_menu, developer_options
-from plotting.shared.theme import ensure_app_theme
-
 
 LauncherFactory = Callable[..., QtWidgets.QWidget | None]
+
+if TYPE_CHECKING:
+    from plotting.shared import common as _common_module
+
+
+class _DeveloperOptionsProtocol(Protocol):
+    experiments_visibility_changed: QtCore.pyqtBoundSignal
+
+    def show_experiments(self) -> bool:
+        ...
+
+    def set_show_experiments(self, enabled: bool) -> None:
+        ...
 
 
 def _lazy(module: str, attr: str = "main") -> LauncherFactory:
@@ -33,6 +42,51 @@ def _lazy(module: str, attr: str = "main") -> LauncherFactory:
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=1)
+def _load_install_standard_menu() -> Callable[..., QtWidgets.QMenuBar]:
+    from plotting.shared.utils import install_standard_menu
+
+    return install_standard_menu
+
+
+@lru_cache(maxsize=1)
+def _load_developer_options() -> Callable[[], "_DeveloperOptionsProtocol"]:
+    module = import_module("plotting.shared.developer")
+    return cast(Callable[[], "_DeveloperOptionsProtocol"], getattr(module, "developer_options"))
+
+
+def _install_launcher_menu(*args: Any, **kwargs: Any) -> QtWidgets.QMenuBar:
+    install = _load_install_standard_menu()
+    return install(*args, **kwargs)
+
+
+def _reset_outlier_flags() -> None:
+    try:
+        common_module = cast(
+            "_common_module", import_module("plotting.shared.common")
+        )
+    except Exception:
+        LOGGER.debug("Unable to load plotting.shared.common", exc_info=True)
+        return
+    common_module.CHECK_OUTLIERS = False
+    common_module.AUTO_REMOVE_OUTLIERS = False
+
+
+def _schedule_theme_application(app: QtWidgets.QApplication) -> None:
+    def _apply_theme() -> None:
+        try:
+            from plotting.shared.theme import ensure_app_theme
+        except Exception:
+            LOGGER.debug("Unable to import plotting.shared.theme", exc_info=True)
+            return
+        try:
+            ensure_app_theme(app)
+        except Exception:
+            LOGGER.warning("Failed to apply app theme", exc_info=True)
+
+    QtCore.QTimer.singleShot(0, _apply_theme)
 
 
 @lru_cache(maxsize=1)
@@ -147,7 +201,8 @@ class MasterLauncher(QtWidgets.QWidget):
         self._open_windows: list[QtWidgets.QWidget] = []
 
         self._settings = QtCore.QSettings("MicrowireData", "Launcher")
-        self.dev_opts = developer_options()
+        dev_opts_factory = _load_developer_options()
+        self.dev_opts = dev_opts_factory()
         self._closing = False
         self._registry_loaded = False
         placeholder_plotters: Dict[str, LauncherFactory] = {
@@ -259,7 +314,7 @@ class MasterLauncher(QtWidgets.QWidget):
 
         self.main_layout.addLayout(button_row)
 
-        menu_bar = install_standard_menu(
+        menu_bar = _install_launcher_menu(
             self,
             help_topic="launcher",
             close_window=self._close_launcher,
@@ -633,8 +688,7 @@ class MasterLauncher(QtWidgets.QWidget):
                 f"No handler registered for {item_text}",
             )
             return
-        common.CHECK_OUTLIERS = False
-        common.AUTO_REMOVE_OUTLIERS = False
+        _reset_outlier_flags()
 
         app_instance = QtWidgets.QApplication.instance()
         assert isinstance(app_instance, QtWidgets.QApplication)
@@ -726,7 +780,7 @@ def main() -> None:
     app = QtWidgets.QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("PyPlot Launcher")
-    ensure_app_theme(app)
+    _schedule_theme_application(app)
     icon = _create_launcher_icon()
     app.setWindowIcon(icon)
     placeholder = QtWidgets.QMainWindow()

@@ -15,7 +15,7 @@ class _DeveloperOptions(QtCore.QObject):
         super().__init__()
         self._settings = QtCore.QSettings("microwire", "plotting")
         self._keep_files = bool(self._settings.value("developer_keep_files", False, type=bool))
-        self._show_experiments = bool(self._settings.value("developer_show_experiments", False, type=bool))
+        self._show_experiments = bool(self._settings.value("developer_show_experiments", True, type=bool))
         self._ocr_debug = bool(self._settings.value("developer_ocr_debug", False, type=bool))
         self._keep_actions: list[weakref.ReferenceType[QtWidgets.QAction]] = []
         self._experiment_actions: list[weakref.ReferenceType[QtWidgets.QAction]] = []
