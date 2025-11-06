@@ -1,4 +1,9 @@
 # Changelog
+## 2025-11-07 10:15 UTC
+
+- Relocated the temperature, stress, current annealing, and VSM plotting implementations into their plugin packages and replaced the legacy modules with deprecation shims so PyPlot and external tooling import the workflows from `plotting.plugins.*` while still supporting the old entry points.
+- Pointed downstream helpers, docs, and regression tests at the plugin modules and added import smokes for the compatibility shims, confirming the plugin migration is complete end-to-end.
+
 ## 2025-11-06 07:47 UTC
 
 - Documented the plugin registry workflow in the README and migration notes and added a regression test that confirms legacy launchers passed via `available_plotters` continue to appear through `ExternalPlotterPlugin`.

@@ -11,12 +11,12 @@
 ### 1.2 Active Plugins (wired through `PyPlotWorkbench`)
 | Plugin name | Source module(s) | Legacy entry points | Notes |
 |-------------|------------------|---------------------|-------|
-| Temperature Dependence | `plotting/plugins/temperature_dependence/temp_dep_plugin.py` + `plotting/temperature_dependence/core.py` | _Removed_ | TXT export still routed through legacy helper; GUI re-exports the plugin class. |
-| Temperature Sensitivity | `plotting/plugins/temperature_sensitivity/temp_sens_plugin.py` + `plotting/temperature_sensitivity/core.py` | _Removed_ | Legacy dialog now shims to the PyPlot plugin. |
-| Current Annealing | `plotting/plugins/current_annealing/current_annealing_plugin.py` + `plotting/current_annealing/core.py` | _Removed_ | Uses `format_annealing_title`; compatibility wrapper exports the plugin. |
-| Stress Dependence | `plotting/plugins/stress_dependence/stress_dep_plugin.py` + `plotting/stress_dependence/core.py` | _Removed_ | Legacy GUI still imports console helpers; now re-exports the plugin class. |
-| Stress Sensitivity | `plotting/plugins/stress_sensitivity/stress_sens_plugin.py` + `plotting/stress_sensitivity/core.py` | _Removed_ | Old GUI exposes the PyPlot plugin for downstream callers. |
-| VSM Hysteresis | `plotting/plugins/vsm_hysteresis/vsm_hysteresis_plugin.py` | `plotting/vsm_hysteresis_loops.py` | Already extracted into dedicated plugin module. |
+| Temperature Dependence | `plotting/plugins/temperature_dependence/{temp_dep_plugin.py, core.py}` | `plotting/temperature_dependence/core.py` (shim) | TXT export still routed through legacy helper; GUI re-exports the plugin class. |
+| Temperature Sensitivity | `plotting/plugins/temperature_sensitivity/{temp_sens_plugin.py, core.py}` | `plotting/temperature_sensitivity/core.py` (shim) | Legacy dialog now shims to the PyPlot plugin. |
+| Current Annealing | `plotting/plugins/current_annealing/{current_annealing_plugin.py, core.py, burnthrough.py}` | `plotting/current_annealing/{core.py, burnthrough.py}` (shim) | Uses `format_annealing_title`; compatibility wrappers re-export the plugin helpers. |
+| Stress Dependence | `plotting/plugins/stress_dependence/{stress_dep_plugin.py, core.py}` | `plotting/stress_dependence/core.py` (shim) | Legacy GUI still imports console helpers; compatibility package re-exports the plugin class. |
+| Stress Sensitivity | `plotting/plugins/stress_sensitivity/{stress_sens_plugin.py, core.py}` | `plotting/stress_sensitivity/core.py` (shim) | Old GUI exposes the PyPlot plugin for downstream callers. |
+| VSM Hysteresis | `plotting/plugins/vsm_hysteresis/{vsm_hysteresis_plugin.py, vsm_hysteresis_loops.py}` | `plotting/vsm_hysteresis_loops.py` (shim) | Plugin wraps the relocated `VSMPlotter`; stub preserves legacy import path. |
 | HSW Load Compare | `plotting/plugins/hsw_load_compare/{hsw_load_compare_plugin.py, core.py, dialog.py}` | Legacy scripts archived in `plotting/legacy/hsw_load_compare`. |
 | Maxion Continuous | `plotting/plugins/maxion_continuous/{maxion_continuous_plugin.py, core.py, dialog.py}` | Plugin owns the workflow; reference copies live under `plotting/legacy/maxion_continuous`. |
 | PDF Plotter | `plotting/plugins/pdf_plotter/{pdf_plotter_plugin.py, dialog.py}` | Plugin bundle contains the dialog; legacy GUI preserved in `plotting/legacy/pdf_plotter`. |
@@ -37,76 +37,57 @@
 - `plotting/default_config.json` – shared defaults.
 - Icons/QSS currently embedded inside legacy GUIs; no centralised resources folder yet.
 
-## 2. Proposed Unified Layout
+## 2. Unified Layout (Post-Migration)
 
 ```
 plotting/
   plugins/
+    current_annealing/
+      __init__.py
+      burnthrough.py
+      core.py
+      current_annealing_plugin.py
     temperature_dependence/
       __init__.py
+      core.py
       temp_dep_plugin.py
-      charts.py        # optional helpers
-      resources/       # icons, ui snippets
     temperature_sensitivity/
+      __init__.py
+      core.py
       temp_sens_plugin.py
-    current_annealing/
-      current_annealing_plugin.py
     stress_dependence/
+      __init__.py
+      core.py
       stress_dep_plugin.py
     stress_sensitivity/
+      __init__.py
+      core.py
       stress_sens_plugin.py
     vsm_hysteresis/
+      __init__.py
+      vsm_hysteresis_loops.py
       vsm_hysteresis_plugin.py
-    hsw_distribution/
-      __init__.py
-      hsw_distribution_plugin.py
-      dialog.py
-    hsw_load_compare/
-      __init__.py
-      hsw_load_compare_plugin.py
-      core.py
-      dialog.py
-    hysteresis_loops/
-      __init__.py
-      hysteresis_loops_plugin.py
-      core.py
-      dialog.py
-    maxion_continuous/
-      __init__.py
-      maxion_continuous_plugin.py
-      core.py
-      dialog.py
-    pdf_plotter/
-      __init__.py
-      pdf_plotter_plugin.py
-      dialog.py
-    strain_3d_plot/
-      __init__.py
-      strain_3d_plot_plugin.py
-      widget.py
+    ... (other plugins unchanged)
   shared/
-    __init__.py
-    utils.py
-    backends.py
-    config.py
-    resources/
+    ...
   pyplot/
-    __init__.py
-    window.py
-    app.py
-    console.py
-  archived/
-    temperature_dependence/
-      temp_dep_gui.py
-      README.md         # deprecation notice
-    ...                 # one folder per legacy GUI
+    ...
+  legacy/
+    ... (archived GUIs retained for reference)
+  compatibility shims
+    plotting/current_annealing/{core.py, burnthrough.py}
+    plotting/temperature_dependence/core.py
+    plotting/temperature_sensitivity/core.py
+    plotting/stress_dependence/core.py
+    plotting/stress_sensitivity/core.py
+    plotting/vsm_hysteresis_loops.py
 ```
 
-- Old modules re-export the new plugin classes until the archival phase completes.
-- `archived/` acts as a safety net so external imports do not break mid-migration.
-- No CLI tooling retained per request; PyPlot becomes the single entry point.
+- Compatibility shims emit `DeprecationWarning` while forwarding to the plugin implementations.
+- Legacy GUI code remains under `plotting/legacy/` until downstream consumers confirm the switch.
+- PyPlot remains the single entry point; CLI scripts are now wrappers over the plugin workbench.
 
 ## 3. Next Migration Actions
-1. Consolidate duplicated helper utilities (readability/formatting, backend preferences, resource loading) into `plotting/shared/` and repoint plugins away from the legacy dialogs.
-2. Add deprecation stubs and notices inside the archived GUI modules once consumers finish switching to the new packages.
+1. Monitor deprecation warnings and update downstream callers to the new plugin import paths.
+2. Continue consolidating shared helpers (readability/formatting, backend preferences) where duplication still exists across plugins.
 3. Expand automated coverage so plugin packages exercise load/plot/export flows (beyond the current toolbar smoke test).

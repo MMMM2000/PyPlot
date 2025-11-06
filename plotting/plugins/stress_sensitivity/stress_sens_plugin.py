@@ -9,7 +9,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
-from plotting.stress_sensitivity import core as sens_core
+from . import core as sens_core
 
 
 @register_plugin("Stress Sensitivity")

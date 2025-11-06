@@ -1238,7 +1238,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _draw_temp_final(self) -> None:
         """Render the finished temperature log to look like the plotting script."""
         try:
-            from plotting.temperature_dependence import core as T
+            from plotting.plugins.temperature_dependence import core as T
             from plotting.shared.common import maybe_handle_outliers
         except Exception:
             return

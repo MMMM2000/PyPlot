@@ -12,6 +12,7 @@ This document captures follow-up work required to complete the PyPlot plugin mig
 - Update developer docs to describe the final plugin API.
 - 2025-11-07: Converted every plugin to the shared registry decorator, updated the launcher to consume the dynamic catalog, and added smoke coverage that instantiates each registered plugin inside `PyPlotWorkbench`.
 - 2025-11-07: Documented the registry auto-discovery flow in `README.md` and `docs/pyplot_migration.md`, and added a regression test that ensures legacy launchers still appear via `available_plotters`.
+- 2025-11-07: Moved remaining plotting script implementations into their plugin packages and replaced the legacy modules with deprecation shims that forward to the new locations.
 
 ### 2. PyPlot "Export Workbooks to Origin"
 - Add a second action next to "Open in Origin" that reuses the workbook assembly pipeline but skips plot export calls.

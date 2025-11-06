@@ -3165,7 +3165,7 @@ def _load_annealing(
     df.loc[:, "I_mA"] = scaled_currents * 1_000.0
 
     try:
-        from plotting.current_annealing.burnthrough import trim_burnthrough_glitch
+        from plotting.plugins.current_annealing.burnthrough import trim_burnthrough_glitch
     except ImportError:
         return df
 
@@ -3400,7 +3400,7 @@ def _plot_measurement_matplotlib(
 
     matplotlib.rcParams["figure.max_open_warning"] = 0
 
-    from plotting.current_annealing.core import plot_one
+    from plotting.plugins.current_annealing.core import plot_one
     from plotting.shared.toolkit import format_annealing_title
 
     plot_dir.mkdir(parents=True, exist_ok=True)
@@ -3553,7 +3553,7 @@ def _plot_measurement_origin(
     log: Optional[logging.Logger] = None,
 ) -> Optional[OriginArtifact]:
     try:
-        from plotting.current_annealing.core import plot_one_origin
+        from plotting.plugins.current_annealing.core import plot_one_origin
         from plotting.shared.utils import format_annealing_title, schedule_origin_release
     except ImportError as exc:  # pragma: no cover - depends on optional module
         raise RuntimeError("originpro is not available") from exc

@@ -30,7 +30,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 import matplotlib.pyplot as plt
 
-from plotting.current_annealing.core import plot_one as plot_annealing_curve
+from plotting.plugins.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot.window import _DockSwitcherWidget
 from plotting.pyplot.console import PythonConsoleWidget
 from plotting.shared.utils import (

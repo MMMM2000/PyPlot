@@ -11,7 +11,13 @@ import sys
 import pandas as pd
 import pytest
 
-MODULE_PATH = Path(__file__).resolve().parent.parent / "plotting" / "vsm_hysteresis_loops.py"
+MODULE_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "plotting"
+    / "plugins"
+    / "vsm_hysteresis"
+    / "vsm_hysteresis_loops.py"
+)
 
 spec = importlib.util.spec_from_file_location("vsm_hysteresis_loops", MODULE_PATH)
 assert spec and spec.loader

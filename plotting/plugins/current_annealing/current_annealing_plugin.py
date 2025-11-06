@@ -9,7 +9,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
-from plotting.current_annealing import core as anneal_core
+from . import core as anneal_core
 from plotting.shared.toolkit import format_annealing_title
 
 if TYPE_CHECKING:

@@ -2,14 +2,14 @@ import pytest
 
 pytest.importorskip("PyQt6.QtWidgets", exc_type=ImportError)
 
-from plotting.stress_dependence.core import (
+from plotting.plugins.stress_dependence.core import (
     parse_metadata as sd_parse,
     explain_metadata_failure,
 )
-from plotting.stress_sensitivity.core import parse_metadata as ss_parse
+from plotting.plugins.stress_sensitivity.core import parse_metadata as ss_parse
 from plotting.plugins.hsw_load_compare.core import parse_metadata as hl_parse
-from plotting.temperature_sensitivity.core import parse_metadata as ts_parse
-from plotting.temperature_dependence.core import parse_metadata as td_parse
+from plotting.plugins.temperature_sensitivity.core import parse_metadata as ts_parse
+from plotting.plugins.temperature_dependence.core import parse_metadata as td_parse
 
 
 def test_parse_metadata_accepts_arbitrary_sample_number():

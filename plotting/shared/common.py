@@ -15,7 +15,7 @@ def maybe_handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     """Return ``df`` with statistical outliers optionally removed."""
     if not CHECK_OUTLIERS:
         return df
-    from plotting.temperature_sensitivity.core import handle_outliers
+    from plotting.plugins.temperature_sensitivity.core import handle_outliers
     return handle_outliers(df)
 
 

@@ -9,7 +9,7 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
-from plotting.stress_dependence import core as stress_core
+from . import core as stress_core
 
 
 @register_plugin("Stress Dependence")

@@ -155,7 +155,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
     def _vsm(self) -> types.ModuleType:
         if self._vsm_module is None:
-            from plotting import vsm_hysteresis_loops as vsm_module
+            from . import vsm_hysteresis_loops as vsm_module
 
             self._vsm_module = vsm_module
         return self._vsm_module
