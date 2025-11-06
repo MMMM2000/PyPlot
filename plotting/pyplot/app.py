@@ -10,7 +10,6 @@ from typing import Any, Callable, Dict, Iterable, List
 import logging
 
 from PyQt6 import QtCore, QtGui, QtWidgets
-from matplotlib.figure import Figure
 
 import pandas as pd
 
@@ -23,42 +22,27 @@ from .window import (
     TabDescriptor,
     create_toolbar_section,
 )
-from PyQt6 import QtWidgets, QtCore
-
 from plotting.shared.utils import (
     ensure_app_theme,
     get_last_used_dir,
     set_last_used_dir,
     install_standard_menu,
 )
-from plotting.plugins import PyPlotPlugin, ExternalPlotterPlugin, EmbeddedWidgetPlugin
-from plotting.plugins.temperature_dependence import TemperatureDependencePlugin
-from plotting.plugins.temperature_sensitivity import TemperatureSensitivityPlugin
-from plotting.plugins.current_annealing import CurrentAnnealingPlugin
-from plotting.plugins.stress_dependence import StressDependencePlugin
-from plotting.plugins.stress_sensitivity import StressSensitivityPlugin
-from plotting.plugins.hsw_load_compare import HswLoadComparePlugin
-from plotting.plugins.maxion_continuous import MaxionContinuousPlugin
-from plotting.plugins.pdf_plotter import PdfPlotterPlugin
-from plotting.plugins.hysteresis_loops import HysteresisLoopsPlugin
-from plotting.plugins.hsw_distribution import HswDistributionPlugin
-from plotting.plugins.strain_3d_plot import Strain3DPlotPlugin
-from plotting.plugins.vsm_hysteresis import VSMHysteresisPlugin
+from plotting.plugins import (
+    PyPlotPlugin,
+    ExternalPlotterPlugin,
+    EmbeddedWidgetPlugin,
+    builtin_plugin_registry,
+)
 
-PLUGIN_CLASS_REGISTRY: Dict[str, type["PyPlotPlugin"]] = {
-    "VSM Hysteresis Loops": VSMHysteresisPlugin,
-    "Temperature Dependence": TemperatureDependencePlugin,
-    "Temperature Sensitivity": TemperatureSensitivityPlugin,
-    "Current Annealing": CurrentAnnealingPlugin,
-    "Stress Dependence": StressDependencePlugin,
-    "Stress Sensitivity": StressSensitivityPlugin,
-    "Hsw Load Compare": HswLoadComparePlugin,
-    "Maxion Continuous": MaxionContinuousPlugin,
-    "PDF Plotter": PdfPlotterPlugin,
-    "Hysteresis Loops": HysteresisLoopsPlugin,
-    "Hsw Distribution": HswDistributionPlugin,
-    "Strain 3D Plot": Strain3DPlotPlugin,
-}
+
+def _builtin_plugin_factories() -> Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]]:
+    """Create factories for each registered built-in plugin class."""
+
+    factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {}
+    for name, cls in builtin_plugin_registry().items():
+        factories[name] = lambda host, cls=cls, n=name: cls(host, n)
+    return factories
 
 
 class PyPlotWorkbench(PyPlotWindow):
@@ -88,9 +72,12 @@ class PyPlotWorkbench(PyPlotWindow):
         self._last_directory: Path | None = None
         self._last_source_dir: Path | None = None
         self._selected_path_entries: List[Path] = []
+        combined_factories = _builtin_plugin_factories()
+        if plotters:
+            combined_factories.update(plotters)
         self._plugin_factories: Dict[
             str, Callable[["PyPlotWorkbench"], PyPlotPlugin]
-        ] = dict(sorted((plotters or {}).items()))
+        ] = dict(sorted(combined_factories.items()))
         self._plugin_instances: Dict[str, PyPlotPlugin] = {}
         self._current_plugin: PyPlotPlugin | None = None
         self._current_plotter_name: str | None = None
@@ -436,11 +423,19 @@ class PyPlotWorkbench(PyPlotWindow):
         self._update_action_states()
 
     def _update_action_states(self) -> None:
+        export_origin_action = getattr(self, "export_origin_button", None)
+        if isinstance(export_origin_action, QtGui.QAction):
+            export_origin_action.setEnabled(False)
+        outlier_action = getattr(self, "check_outliers_button", None)
+        if isinstance(outlier_action, QtGui.QAction):
+            outlier_action.setEnabled(False)
+
         if self._current_plugin is not None:
             try:
                 self._current_plugin.update_ui()
             except Exception:
                 pass
+            self._sync_shared_action_states()
             return
         if hasattr(self, "load_data_button"):
             self.load_data_button.setEnabled(False)
@@ -457,6 +452,7 @@ class PyPlotWorkbench(PyPlotWindow):
             self.export_button.setEnabled(False)
         if hasattr(self, "open_origin_button"):
             self.open_origin_button.setEnabled(False)
+        self._sync_shared_action_states()
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         super()._import_paths(paths)
@@ -629,6 +625,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._refresh_imported_data_summary()
         if self._refresh_import_action is not None:
             self._refresh_import_action.setEnabled(False)
+        self._sync_shared_action_states()
 
     def _portable_path(self, path: Path | None, base_path: Path | None) -> str | None:
         if path is None:
@@ -907,14 +904,9 @@ def main(
 ) -> QtWidgets.QWidget | None:
     """Entry-point used by the launcher."""
 
-    plugin_factories: Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]] = {
-        name: (lambda host, cls=cls, n=name: cls(host, n)) for name, cls in PLUGIN_CLASS_REGISTRY.items()
-    }
+    plugin_factories = _builtin_plugin_factories()
     for name, launcher in sorted((available_plotters or {}).items()):
-        plugin_cls = PLUGIN_CLASS_REGISTRY.get(name)
-        if plugin_cls is not None:
-            plugin_factories.setdefault(name, lambda host, cls=plugin_cls, n=name: cls(host, n))
-        else:
+        if name not in plugin_factories:
             plugin_factories[name] = lambda host, l=launcher, n=name: ExternalPlotterPlugin(host, n, l)
 
     app = QtWidgets.QApplication.instance()
@@ -934,19 +926,6 @@ __all__ = [
     "PyPlotPlugin",
     "ExternalPlotterPlugin",
     "EmbeddedWidgetPlugin",
-    "PLUGIN_CLASS_REGISTRY",
-    "TemperatureDependencePlugin",
-    "TemperatureSensitivityPlugin",
-    "CurrentAnnealingPlugin",
-    "VSMHysteresisPlugin",
-    "StressDependencePlugin",
-    "StressSensitivityPlugin",
-    "HswLoadComparePlugin",
-    "MaxionContinuousPlugin",
-    "PdfPlotterPlugin",
-    "HysteresisLoopsPlugin",
-    "HswDistributionPlugin",
-    "Strain3DPlotPlugin",
     "PyPlotWorkbench",
     "main",
 ]

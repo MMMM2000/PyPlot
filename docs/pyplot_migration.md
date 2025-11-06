@@ -24,6 +24,10 @@
 | HSW Distribution | `plotting/plugins/hsw_distribution/{hsw_distribution_plugin.py, dialog.py}` | Plugin is self-contained; historical GUI stored in `plotting/legacy/hsw_distribution`. |
 | Strain 3D Plot | `plotting/plugins/strain_3d_plot/{strain_3d_plot_plugin.py, widget.py}` | Plugin hosts the widget; the legacy script is in `plotting/legacy/strain_3d_plot.py`. |
 
+- All of the above modules register their `PyPlotPlugin` subclasses through the shared
+  `plotting.plugins.base.register_plugin` decorator. The workbench queries the registry at runtime,
+  and the launcher mirrors that list, so no manual wiring inside `plotting/pyplot/app.py` remains.
+
 ### 1.3 Legacy/Unplugged Components
 - `plotting/legacy/` – archived compatibility shims and historical GUIs retained for reference; the active code paths now live exclusively inside `plotting/plugins/`.
 - `plotting/pyplot.py`, `plotting/pyplot_app.py` – historical entry points preserved for reference.

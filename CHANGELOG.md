@@ -1,4 +1,18 @@
 # Changelog
+## 2025-11-06 07:47 UTC
+
+- Documented the plugin registry workflow in the README and migration notes and added a regression test that confirms legacy launchers passed via `available_plotters` continue to appear through `ExternalPlotterPlugin`.
+- Covered the Microwire Data Builder recent project menu wiring and partial project reloads with UI-focused tests so the blank-start behaviour and new file actions stay stable.
+ 
+## 2025-11-06 07:05 UTC
+
+- Added a shared “Export workbooks to Origin…” toolbar action in PyPlot that reuses the workbench’s worksheet registry to push fully annotated tables into Origin without generating graphs, including Origin-safe naming, column metadata, and axis role assignment for every plugin workflow.
+- Introduced a placeholder “Check outliers…” toolbar action so the upcoming outlier analysis flow already has a visible entry point while remaining disabled until worksheets are available.
+
+## 2025-11-06 06:55 UTC
+
+- Documented the outstanding PyPlot migration, Origin export, annealing logger, and Microwire Data Builder follow-up work in `docs/todo/pyplot_migration_todo.md` so the team can track progress across the pending feature requests.
+
 ## 2025-11-03 10:49 UTC
 
 - Fixed the Microwire Data Builder annealing section initialisation so the table splitter exists before the base class resizes columns, eliminating the `_table_splitter` AttributeError at launch.

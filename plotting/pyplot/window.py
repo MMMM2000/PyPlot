@@ -34,6 +34,7 @@ from matplotlib.lines import Line2D
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 
 from .console import PythonConsoleWidget
 from ..plugins.base import PyPlotPlugin
@@ -2329,6 +2330,273 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _open_origin_prompt(self) -> None:
         raise NotImplementedError
 
+    def _export_workbooks_to_origin(self) -> None:
+        workbooks: list[WorkbookData] = []
+        for workbook in self._workbooks.values():
+            worksheets = [self._worksheets.get(key) for key in workbook.worksheets]
+            if any(sheet is not None for sheet in worksheets):
+                workbooks.append(workbook)
+        if not workbooks:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export workbooks",
+                "No worksheets are available to export to Origin.",
+            )
+            return
+
+        try:
+            exported, errors = self._push_workbooks_to_origin(workbooks)
+        except ModuleNotFoundError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export workbooks",
+                "The OriginPro Python package is not available. Install it to export workbooks.",
+            )
+            return
+        except Exception as exc:  # pragma: no cover - GUI error path
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export workbooks",
+                f"Failed to export workbooks to Origin:\n{exc}",
+            )
+            self._append_log(f"Origin workbook export failed: {exc}", level="error")
+            return
+
+        if exported:
+            schedule_origin_release()
+            message = f"Exported {exported} worksheet{'s' if exported != 1 else ''} to Origin."
+            QtWidgets.QMessageBox.information(self, "Export workbooks", message)
+            self._append_log(message)
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export workbooks",
+                "No worksheets were exported to Origin.",
+            )
+
+        if errors:
+            details = "\n".join(errors)
+            self._append_log(
+                "Some worksheets could not be exported to Origin:\n" + details,
+                level="error",
+            )
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Export workbooks",
+                "Some worksheets could not be exported. Check the message log for details.",
+            )
+
+    def _push_workbooks_to_origin(
+        self, workbooks: Iterable[WorkbookData]
+    ) -> tuple[int, list[str]]:
+        errors: list[str] = []
+        exported = 0
+
+        with origin_session() as origin_any:
+            schedule_origin_release()
+            workbook_names: set[str] = set()
+            for workbook in workbooks:
+                worksheets = [self._worksheets.get(key) for key in workbook.worksheets]
+                worksheet_objs = [sheet for sheet in worksheets if sheet is not None]
+                if not worksheet_objs:
+                    continue
+
+                book_name = self._origin_unique_name(
+                    workbook_names,
+                    workbook.name,
+                    fallback="Workbook",
+                    limit=32,
+                )
+                try:
+                    book_obj = origin_any.new_book('w', lname=book_name)
+                except Exception as exc:  # pragma: no cover - depends on Origin runtime
+                    errors.append(f"{workbook.name}: {exc}")
+                    continue
+                if book_obj is None:
+                    errors.append(f"{workbook.name}: Origin did not return a workbook")
+                    continue
+
+                book = cast(Any, book_obj)
+                try:
+                    book.activate()
+                except Exception:
+                    pass
+                for attr, value in (("lname", book_name), ("name", book_name[:13])):
+                    try:
+                        setattr(book, attr, value)
+                    except Exception:
+                        pass
+
+                sheet_names: set[str] = set()
+                for index, worksheet in enumerate(worksheet_objs):
+                    sheet_name = self._origin_unique_name(
+                        sheet_names,
+                        worksheet.name,
+                        fallback="Sheet",
+                        limit=32,
+                    )
+                    sheet = None
+                    try:
+                        if index < len(book):
+                            sheet = book[index]
+                        else:
+                            add_sheet = getattr(book, "add_sheet", None)
+                            if callable(add_sheet):
+                                try:
+                                    sheet = add_sheet('w', lname=sheet_name)
+                                except TypeError:
+                                    sheet = add_sheet()
+                            if sheet is None:
+                                sheet = origin_any.new_sheet('w', lname=sheet_name)
+                    except Exception as exc:  # pragma: no cover - Origin runtime dependent
+                        errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
+                        continue
+
+                    if sheet is None:
+                        errors.append(
+                            f"{workbook.name}/{worksheet.name}: Unable to create worksheet"
+                        )
+                        continue
+
+                    try:
+                        sheet.name = sheet_name
+                    except Exception:
+                        pass
+
+                    frame = worksheet.dataframe
+                    try:
+                        sheet.from_df(frame)
+                    except Exception as exc:  # pragma: no cover - Origin runtime dependent
+                        errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
+                        continue
+
+                    roles = self._origin_axis_roles(frame)
+                    if roles:
+                        try:
+                            sheet.cols_axis(roles)
+                        except Exception:
+                            pass
+
+                    self._apply_origin_metadata(origin_any, sheet, worksheet)
+                    exported += 1
+
+        return exported, errors
+
+    def _apply_origin_metadata(
+        self,
+        origin_any: Any,
+        sheet: Any,
+        worksheet: WorksheetData,
+    ) -> None:
+        columns = list(worksheet.dataframe.columns)
+        if not columns:
+            return
+        try:
+            sheet.activate()
+        except Exception:
+            pass
+
+        for index, column in enumerate(columns):
+            meta = worksheet.columns.get(
+                column, WorksheetColumnMeta(long_name=str(column))
+            )
+            label = meta.long_name or str(column)
+            if label:
+                try:
+                    sheet.set_label(index, label)
+                except Exception:
+                    pass
+            if meta.comments:
+                try:
+                    sheet.set_comment(index, meta.comments)
+                except Exception:
+                    pass
+
+            for value, field in ((meta.units, "unit"), (meta.formula, "formula")):
+                if not value:
+                    continue
+                safe_value = self._escape_origin_text(str(value))
+                command = f"wks.col{index + 1}.{field}$=\"{safe_value}\";"
+                try:
+                    origin_any.lt_exec(command)
+                except Exception:
+                    continue
+
+    def _origin_axis_roles(self, frame: pd.DataFrame) -> str:
+        if frame is None or frame.empty:
+            return ""
+        roles: list[str] = []
+        x_assigned = False
+        for column in frame.columns:
+            series = frame[column]
+            numeric = False
+            try:
+                numeric = is_numeric_dtype(series)
+            except Exception:
+                numeric = False
+            if not x_assigned and numeric:
+                roles.append("X")
+                x_assigned = True
+            else:
+                roles.append("Y")
+        if not roles:
+            return ""
+        if not x_assigned:
+            roles[0] = "X"
+        return "".join(roles)
+
+    def _origin_unique_name(
+        self,
+        existing: set[str],
+        text: str,
+        *,
+        fallback: str,
+        limit: int,
+    ) -> str:
+        base = self._origin_safe_token(text, fallback=fallback)
+        base = base[:limit] or fallback
+        candidate = base
+        counter = 2
+        while candidate in existing:
+            suffix = f"_{counter}"
+            candidate = (base[: max(1, limit - len(suffix))] + suffix).strip()
+            if not candidate:
+                candidate = f"{fallback}_{counter}"
+            counter += 1
+        existing.add(candidate)
+        return candidate
+
+    @staticmethod
+    def _origin_safe_token(text: str, *, fallback: str) -> str:
+        cleaned = "".join(
+            ch for ch in str(text) if ch.isalnum() or ch in {"_", "-", " ", "(", ")"}
+        ).strip()
+        return cleaned or fallback
+
+    @staticmethod
+    def _escape_origin_text(text: str) -> str:
+        return str(text).replace("\"", "''")
+
+    def _sync_shared_action_states(self) -> None:
+        has_worksheets = any(
+            self._worksheets.get(key) is not None
+            for workbook in self._workbooks.values()
+            for key in workbook.worksheets
+        )
+        export_button = getattr(self, "export_origin_button", None)
+        if isinstance(export_button, QtGui.QAction):
+            export_button.setEnabled(has_worksheets)
+        outlier_button = getattr(self, "check_outliers_button", None)
+        if isinstance(outlier_button, QtGui.QAction):
+            outlier_button.setEnabled(has_worksheets)
+
+    def _show_check_outliers_placeholder(self) -> None:
+        QtWidgets.QMessageBox.information(
+            self,
+            "Check outliers",
+            "Outlier detection will be available in a future update.",
+        )
+
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         raise NotImplementedError
 
@@ -3392,6 +3660,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         origin_action.setEnabled(False)
         origin_action.triggered.connect(self._open_origin_prompt)
         self.open_origin_button = origin_action
+
+        export_workbooks_action = toolbar.addAction("Export workbooks to Origin…")
+        export_workbooks_action.setEnabled(False)
+        export_workbooks_action.triggered.connect(self._export_workbooks_to_origin)
+        self.export_origin_button = export_workbooks_action
+
+        check_outliers_action = toolbar.addAction("Check outliers…")
+        check_outliers_action.setEnabled(False)
+        check_outliers_action.triggered.connect(self._show_check_outliers_placeholder)
+        self.check_outliers_button = check_outliers_action
 
     def _setup_navigation_toolbar(self) -> None:
         toolbar = QtWidgets.QToolBar("Navigation", self)
@@ -5061,6 +5339,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             workbook_item.addChild(sheet_item)
             self._worksheet_tree_items[worksheet.key] = sheet_item
 
+        self._sync_shared_action_states()
+
     def _append_log(self, message: str, *, level: Literal["info", "error"] = "info") -> None:
         view = getattr(self, "log_view", None)
         if isinstance(view, QtWidgets.QPlainTextEdit):
@@ -5124,6 +5404,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     parent.takeChild(index)
         self._worksheets.pop(key, None)
         self._worksheet_models.pop(key, None)
+        self._sync_shared_action_states()
 
     def _refresh_imported_data_summary(self) -> None:
         for key, item in self._worksheet_tree_items.items():

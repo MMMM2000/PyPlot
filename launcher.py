@@ -37,9 +37,10 @@ LOGGER = logging.getLogger(__name__)
 
 @lru_cache(maxsize=1)
 def _load_pyplot_metadata() -> Tuple[LauncherFactory, Tuple[str, ...]]:
-    from plotting.pyplot.app import main as pyplot_main, PLUGIN_CLASS_REGISTRY
+    from plotting.pyplot.app import main as pyplot_main
+    from plotting.plugins import builtin_plugin_registry
 
-    plugin_names = tuple(sorted(PLUGIN_CLASS_REGISTRY))
+    plugin_names = tuple(sorted(builtin_plugin_registry()))
     return cast(LauncherFactory, pyplot_main), plugin_names
 
 

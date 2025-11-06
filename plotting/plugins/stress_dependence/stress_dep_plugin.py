@@ -7,11 +7,12 @@ import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from plotting.stress_dependence import core as stress_core
 
 
+@register_plugin("Stress Dependence")
 class StressDependencePlugin(PyPlotPlugin):
     """Port the stress dependence workflow into the shared PyPlot frame."""
 

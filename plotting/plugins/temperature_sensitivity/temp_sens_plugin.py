@@ -7,7 +7,7 @@ import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from plotting.temperature_sensitivity import core as temp_sens_core
 
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     )
 
 
+@register_plugin("Temperature Sensitivity")
 class TemperatureSensitivityPlugin(PyPlotPlugin):
     """Embed the temperature sensitivity workflow directly inside PyPlot."""
 

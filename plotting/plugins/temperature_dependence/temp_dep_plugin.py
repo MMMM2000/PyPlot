@@ -7,7 +7,7 @@ import pandas as pd
 from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
-from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.temperature_dependence import core as temp_core
 from plotting.plugins._window import window_api
 
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     )
 
 
+@register_plugin("Temperature Dependence")
 class TemperatureDependencePlugin(PyPlotPlugin):
     """Embed the temperature dependence workflow directly inside PyPlot."""
 

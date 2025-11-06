@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from typing import Callable
 import logging
+from typing import Callable, Dict, Iterable
 
 from PyQt6 import QtCore, QtWidgets
 
@@ -108,6 +108,17 @@ class PyPlotPlugin:
             self.host,
             self.name,
             "Origin export is not available for this plotting script yet.",
+        )
+
+    def export_origin_workbooks(self) -> None:
+        exporter = getattr(self.host, "_export_workbooks_to_origin", None)
+        if callable(exporter):
+            exporter()
+            return
+        QtWidgets.QMessageBox.information(
+            self.host,
+            self.name,
+            "Workbook export is not available for this plotting script yet.",
         )
 
     def _log(self, message: str, *, level: str = "info") -> None:
@@ -300,3 +311,47 @@ __all__ = [
     "ExternalPlotterPlugin",
     "EmbeddedWidgetPlugin",
 ]
+
+
+_PLUGIN_REGISTRY: Dict[str, type[PyPlotPlugin]] = {}
+
+
+def register_plugin(name: str) -> Callable[[type[PyPlotPlugin]], type[PyPlotPlugin]]:
+    """Decorator that registers ``PyPlotPlugin`` subclasses by display name."""
+
+    def decorator(cls: type[PyPlotPlugin]) -> type[PyPlotPlugin]:
+        if not issubclass(cls, PyPlotPlugin):
+            raise TypeError("Registered class must inherit from PyPlotPlugin")
+        _PLUGIN_REGISTRY[name] = cls
+        return cls
+
+    return decorator
+
+
+def get_plugin_registry() -> Dict[str, type[PyPlotPlugin]]:
+    """Return a copy of the registered plugin mapping sorted by name."""
+
+    return dict(sorted(_PLUGIN_REGISTRY.items(), key=lambda item: item[0].lower()))
+
+
+def iter_registered_plugins() -> Iterable[tuple[str, type[PyPlotPlugin]]]:
+    """Iterate over registered plugin entries in sorted order."""
+
+    for name, cls in get_plugin_registry().items():
+        yield name, cls
+
+
+def clear_plugin_registry() -> None:
+    """Reset the registry – primarily useful for tests."""
+
+    _PLUGIN_REGISTRY.clear()
+
+
+__all__.extend(
+    [
+        "register_plugin",
+        "get_plugin_registry",
+        "iter_registered_plugins",
+        "clear_plugin_registry",
+    ]
+)

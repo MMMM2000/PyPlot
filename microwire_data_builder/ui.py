@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, ClassVar, Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
@@ -63,6 +63,7 @@ from .core import (
     _normalise_output_name,
     _metadata_from_path,
     _microscope_key,
+    _microscope_category,
     _draw_key,
     _load_annealing,
     _resistance_sanity_check,
@@ -4174,6 +4175,24 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             self._dispatch_log(level, text)
 
+    def reset_to_blank(self) -> None:
+        """Clear all processed data and disconnect sources for a fresh start."""
+
+        self.data = MiniDatabaseData()
+        self.model.set_frame(pd.DataFrame())
+        self.sources_list.clear()
+        self._sync_sources()
+        self.store.clear_table()
+        self.store.save(self.data)
+        self._auto_fit_columns()
+        self._update_status()
+        self._reset_progress_ui()
+        self._update_open_sources_enabled()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
     def export_project_payload(self) -> Dict[str, Any]:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         columns = [str(col) for col in getattr(frame, "columns", [])]
@@ -4198,7 +4217,74 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             "rows": rows,
             "index": index_payload,
             "extra": extra_payload,
+            "sources": list(self.data.sources),
+            "processed": dict(self.data.processed),
         }
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:
+        """Restore section state from a project payload."""
+
+        if not isinstance(payload, Mapping):
+            self.reset_to_blank()
+            return
+
+        columns_payload = payload.get("columns")
+        if isinstance(columns_payload, (list, tuple)):
+            column_names = [str(column) for column in columns_payload]
+        else:
+            column_names = []
+        rows_payload = payload.get("rows")
+        if isinstance(rows_payload, (list, tuple)):
+            frame = pd.DataFrame(list(rows_payload), columns=column_names or None)
+        else:
+            frame = pd.DataFrame(columns=column_names)
+
+        index_payload = payload.get("index")
+        if isinstance(index_payload, list) and len(index_payload) == len(frame.index):
+            try:
+                frame.index = pd.Index(index_payload)
+            except Exception:
+                pass
+
+        extra_payload = payload.get("extra")
+        extra: Dict[str, Any]
+        if isinstance(extra_payload, Mapping):
+            extra = dict(extra_payload)
+        else:
+            extra = {}
+
+        sources_payload = payload.get("sources")
+        sources = (
+            [str(source) for source in sources_payload]
+            if isinstance(sources_payload, (list, tuple))
+            else []
+        )
+
+        processed_payload = payload.get("processed")
+        processed: Dict[str, float] = {}
+        if isinstance(processed_payload, Mapping):
+            for key, value in processed_payload.items():
+                try:
+                    processed[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+
+        self.data = MiniDatabaseData(sources=sources, processed=processed, table=frame, extra=extra)
+        self.model.set_frame(frame)
+        self.store.save(self.data)
+        self._populate_sources_list()
+        self._auto_fit_columns()
+        self._update_status()
+        self._update_open_sources_enabled()
+        self._reset_progress_ui()
+        try:
+            self.sources_changed.emit(list(sources))
+        except Exception:
+            pass
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
 
     def has_project_data(self) -> bool:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -5376,6 +5462,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
         self._expected_keys_current: Set[Tuple[str, int, int]] = set()
+        self._prepopulated_keys: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
 
@@ -5520,6 +5607,25 @@ class MicroscopeSection(MiniDatabaseSection):
         preview_layout.addLayout(button_row)
 
         return splitter
+
+    def reset_to_blank(self) -> None:  # type: ignore[override]
+        super().reset_to_blank()
+        self._overrides.clear()
+        self._ocr_cache.clear()
+        self._validated.clear()
+        self._prepopulated_keys.clear()
+        self._expected_keys_current = set()
+        self._pixmap_cache.clear()
+        self._missing_list.clear()
+        self._missing_summary_label.hide()
+        self._update_missing_summary()
+        self._update_review_buttons()
+
+    def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
+        pending = MiniDatabaseSection._pending_paths(self)
+        if pending:
+            return pending
+        return MiniDatabaseSection._collect_candidates(self)
 
     def _auto_fit_columns(self) -> None:  # type: ignore[override]
         super()._auto_fit_columns()
@@ -5759,6 +5865,8 @@ class MicroscopeSection(MiniDatabaseSection):
         missing_entries: List[Tuple[str, str]] = []
         missing_d = 0
         missing_D = 0
+        missing_core_images = 0
+        missing_glass_images = 0
         if not frame.empty and "_key" in frame.columns:
             for _, row in frame.iterrows():
                 key = str(row.get("_key", ""))
@@ -5773,12 +5881,18 @@ class MicroscopeSection(MiniDatabaseSection):
                 if not self._is_valid_diameter(D_value):
                     missing_D += 1
                     needs.append("D")
+                if not row.get("_core_image"):
+                    missing_core_images += 1
+                if not row.get("_glass_image"):
+                    missing_glass_images += 1
                 if needs:
                     label = f"{composition} {microwire} (missing {', '.join(needs)})".strip()
                     missing_entries.append((key, label))
         summary_parts = []
         summary_parts.append(f"Missing d: {missing_d}")
         summary_parts.append(f"Missing D: {missing_D}")
+        summary_parts.append(f"Missing core images: {missing_core_images}")
+        summary_parts.append(f"Missing glass images: {missing_glass_images}")
         summary_text = " | ".join(summary_parts)
         self._missing_summary_label.setText(summary_text)
         self._missing_summary_label.setVisible(True)
@@ -6157,6 +6271,72 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_hidden_columns()
         self._update_missing_summary()
         self._update_review_buttons()
+
+    def _prepopulate_image_refs(self, candidates: Iterable[Path]) -> None:
+        expected = self._expected_keys_current or self._expected_microwire_keys()
+        allowed = (
+            {f"{composition}|{draw}|{piece}" for composition, draw, piece in expected}
+            if expected
+            else None
+        )
+        grouped: Dict[str, Dict[str, Any]] = {}
+        for path in candidates:
+            key_tuple = _microscope_key(path)
+            if key_tuple is None:
+                continue
+            composition, draw, piece = key_tuple
+            key = f"{composition}|{draw}|{piece}"
+            if allowed is not None and key not in allowed:
+                continue
+            entry = grouped.setdefault(
+                key,
+                {
+                    "_key": key,
+                    "Composition": composition,
+                    "Microwire": _microwire_label(draw, piece),
+                    "_images": [],
+                },
+            )
+            images: List[str] = entry.setdefault("_images", [])  # type: ignore[assignment]
+            image_path = str(path)
+            if image_path not in images:
+                images.append(image_path)
+            category = _microscope_category(path)
+            if category == "core" and not entry.get("_core_image"):
+                entry["_core_image"] = image_path
+            elif category == "glass" and not entry.get("_glass_image"):
+                entry["_glass_image"] = image_path
+
+        for key, payload in grouped.items():
+            images_list = payload.get("_images", [])
+            if isinstance(images_list, list):
+                payload["_images"] = list(dict.fromkeys(images_list))
+            row = {
+                "Composition": payload.get("Composition", ""),
+                "Microwire": payload.get("Microwire", ""),
+                MICROSCOPE_D_COLUMN: None,
+                MICROSCOPE_CAP_D_COLUMN: None,
+                "d/D": None,
+                "Reviewed": False,
+                MICROSCOPE_IMAGE_COLUMNS[0]: None,
+                MICROSCOPE_IMAGE_COLUMNS[1]: None,
+                "_key": key,
+                "_core_image": payload.get("_core_image"),
+                "_glass_image": payload.get("_glass_image"),
+                "_images": payload.get("_images", []),
+            }
+            self._pixmap_cache.pop((key, MICROSCOPE_IMAGE_COLUMNS[0]), None)
+            self._pixmap_cache.pop((key, MICROSCOPE_IMAGE_COLUMNS[1]), None)
+            self._apply_partial_row(row)
+            self._prepopulated_keys.add(key)
+
+        if grouped:
+            self._update_missing_summary()
+
+    def _start_section_worker(self, candidates: List[Path]) -> None:  # type: ignore[override]
+        if candidates:
+            self._prepopulate_image_refs(candidates)
+        super()._start_section_worker(candidates)
 
     def process(
         self,
@@ -8624,6 +8804,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._last_output_dir = str(self._default_output_dir)
         self.settings = QtCore.QSettings("MicrowireLab", "MicrowireDataBuilder")
         self._clamp_active = False
+        self._recent_projects: List[str] = []
+        self._recent_projects_menu: QtWidgets.QMenu | None = None
+        self._load_recent_projects_setting()
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
@@ -8814,6 +8997,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)
         self._update_project_actions()
+        for section in self.sections.values():
+            if isinstance(section, MiniDatabaseSection):
+                section.reset_to_blank()
         self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
         self._retabify_primary_docks()
 
@@ -9057,6 +9243,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
         file_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_file")
         if file_menu is None:
             return
+        open_action = QtGui.QAction("Open Project…", self)
+        try:
+            open_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
+        except Exception:
+            pass
+        open_action.triggered.connect(self._open_project)
+
+        recent_menu = QtWidgets.QMenu("Recent Projects", file_menu)
+        recent_menu.setObjectName("mw_builder_recent_projects")
+        self._recent_projects_menu = recent_menu
+        self._update_recent_projects_menu()
+
         save_action = QtGui.QAction("Save Project", self)
         try:
             save_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Save))
@@ -9083,7 +9281,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
             file_menu.insertAction(insert_before, save_as_action)
             file_menu.insertAction(insert_before, save_action)
             file_menu.insertSeparator(insert_before)
+            file_menu.insertMenu(insert_before, recent_menu)
+            file_menu.insertAction(insert_before, open_action)
         else:
+            file_menu.addAction(open_action)
+            file_menu.addMenu(recent_menu)
             file_menu.addSeparator()
             file_menu.addAction(save_action)
             file_menu.addAction(save_as_action)
@@ -9194,6 +9396,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             return
         self._project_path = target
         self._remember_project_directory(target.parent)
+        self._remember_recent_project(target)
         self._update_project_actions()
         self.logger.info("Project saved to %s", target)
         QtWidgets.QMessageBox.information(
@@ -9201,6 +9404,154 @@ class BuilderWindow(QtWidgets.QMainWindow):
             "Save Project",
             f"Project saved to {target}",
         )
+
+    def _load_recent_projects_setting(self) -> None:
+        raw = self.settings.value(self._project_settings_key("recent"), "[]")
+        entries: List[str]
+        if isinstance(raw, str):
+            try:
+                decoded = json.loads(raw)
+                entries = [str(item) for item in decoded if isinstance(item, str)]
+            except json.JSONDecodeError:
+                entries = []
+        elif isinstance(raw, (list, tuple)):
+            entries = [str(item) for item in raw if isinstance(item, str)]
+        else:
+            entries = []
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for entry in entries:
+            candidate = str(entry).strip()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                ordered.append(candidate)
+        self._recent_projects = ordered[:8]
+
+    def _save_recent_projects_setting(self) -> None:
+        try:
+            payload = json.dumps(self._recent_projects[:8], ensure_ascii=False)
+        except (TypeError, ValueError):
+            payload = "[]"
+        self.settings.setValue(self._project_settings_key("recent"), payload)
+
+    def _clear_recent_projects(self) -> None:
+        self._recent_projects = []
+        self._save_recent_projects_setting()
+        self._update_recent_projects_menu()
+
+    def _remember_recent_project(self, path: Path) -> None:
+        try:
+            resolved = str(path.resolve())
+        except Exception:
+            resolved = str(path)
+        self._recent_projects = [entry for entry in self._recent_projects if entry != resolved]
+        self._recent_projects.insert(0, resolved)
+        self._recent_projects = self._recent_projects[:8]
+        self._save_recent_projects_setting()
+        self._update_recent_projects_menu()
+
+    def _update_recent_projects_menu(self) -> None:
+        menu = self._recent_projects_menu
+        if not isinstance(menu, QtWidgets.QMenu):
+            return
+        menu.clear()
+        if not self._recent_projects:
+            placeholder = menu.addAction("No recent projects")
+            placeholder.setEnabled(False)
+            return
+        for entry in self._recent_projects:
+            display = Path(entry).name or entry
+            action = menu.addAction(display)
+            action.setToolTip(entry)
+            action.triggered.connect(partial(self._open_recent_project, entry))
+        menu.addSeparator()
+        clear_action = menu.addAction("Clear list")
+        clear_action.triggered.connect(self._clear_recent_projects)
+
+    def _open_recent_project(self, entry: str) -> None:
+        candidate = Path(entry)
+        if not candidate.exists():
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open Project",
+                f"The project file {entry} could not be found. It has been removed from the recent list.",
+            )
+            self._recent_projects = [item for item in self._recent_projects if item != entry]
+            self._save_recent_projects_setting()
+            self._update_recent_projects_menu()
+            return
+        self._load_project_from_path(candidate)
+
+    def _open_project(self) -> None:
+        start_dir = self._project_dialog_start_directory()
+        filters = f"Microwire Project (*{self.PROJECT_EXTENSION});;All files (*)"
+        path_str, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Open Project",
+            str(start_dir),
+            filters,
+        )
+        if not path_str:
+            return
+        target = Path(path_str)
+        self._load_project_from_path(target)
+
+    def _load_project_from_path(self, target: Path) -> None:
+        try:
+            payload = json.loads(target.read_text(encoding="utf-8"))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                f"Failed to read project file:\n{exc}",
+            )
+            return
+
+        if payload.get("kind") != self.PROJECT_KIND:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open Project",
+                "The selected file is not a Microwire Data Builder project.",
+            )
+            return
+
+        sections_payload = payload.get("sections", {})
+        if not isinstance(sections_payload, Mapping):
+            sections_payload = {}
+
+        for key, section in self.sections.items():
+            if isinstance(section, MiniDatabaseSection):
+                section.reset_to_blank()
+                section_payload = sections_payload.get(key)
+                try:
+                    section.import_project_payload(section_payload or {})
+                except Exception as exc:
+                    self.logger.error("Failed to load section %s from project: %s", key, exc)
+
+        self._project_path = target
+        self._remember_project_directory(target.parent)
+        self._remember_recent_project(target)
+        self._refresh_sections_after_project_load()
+        self._update_project_actions()
+        self.logger.info("Project loaded from %s", target)
+        QtWidgets.QMessageBox.information(
+            self,
+            "Open Project",
+            f"Loaded project from {target}",
+        )
+
+    def _refresh_sections_after_project_load(self) -> None:
+        for key, section in self.sections.items():
+            status_text = ""
+            status_label = getattr(section, "status_label", None)
+            if isinstance(status_label, QtWidgets.QLabel):
+                status_text = status_label.text()
+            self._handle_section_status_changed(key, status_text)
+            sources: Iterable[str] = []
+            if isinstance(section, MiniDatabaseSection):
+                sources = section.data.sources
+            self._handle_section_sources_changed(key, sources)
+        self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
 
     def _remember_project_directory(self, directory: Path) -> None:
         try:

@@ -8,10 +8,11 @@ from typing import List
 
 from PyQt6 import QtCore, QtWidgets
 
-from plotting.plugins.base import PyPlotPlugin
+from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 
 
+@register_plugin("VSM Hysteresis Loops")
 class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import inspect
 from pathlib import Path
 
@@ -12,6 +13,9 @@ import sys
 import pandas as pd
 import numpy as np
 import pytest
+from PyQt6 import QtGui, QtWidgets
+
+from microwire_data_builder.ui import BuilderWindow, MicroscopeSection
 
 CORE_PATH = Path(__file__).resolve().parent.parent / "microwire_data_builder" / "core.py"
 
@@ -34,6 +38,13 @@ FabricationIndex = core.FabricationIndex
 _merged_header_row = core._merged_header_row
 _parse_piece_rows = core._parse_piece_rows
 _extract_microscope_diameters = core._extract_microscope_diameters
+
+
+def _ensure_qapp() -> QtWidgets.QApplication:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv[:1])
+    return app
 
 
 def test_paddle_candidate_kwargs_include_ascii_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -196,6 +207,35 @@ def test_canonical_dimension_field_filters_non_diameter_columns() -> None:
     assert _canonical_dimension_field("core_diameter_um") == "d_um"
     assert _canonical_dimension_field("glass_diameter_um_raw") == "D_um"
     assert _canonical_dimension_field("ratio_d_core_to_D_glass") == "d_over_D"
+
+
+def test_microscope_prepopulate_images(tmp_path: Path) -> None:
+    app = QtWidgets.QApplication.instance()
+    if app is None:
+        app = QtWidgets.QApplication(sys.argv[:1])
+
+    section = MicroscopeSection(logging.getLogger("test"), lambda *_: None)
+    section.reset_to_blank()
+    section._expected_keys_current = {("Ni50Fe25Ga25", 3, 4)}
+
+    core_path = tmp_path / "Ni50Fe25Ga25 3_4 core.jpg"
+    glass_path = tmp_path / "Ni50Fe25Ga25 3_4 glass.jpg"
+    other_path = tmp_path / "Ni50Fe25Ga25 3_4 overview.jpg"
+    for path in (core_path, glass_path, other_path):
+        path.write_bytes(b"")
+
+    section._prepopulate_image_refs([core_path, glass_path, other_path])
+
+    frame = section.data.table
+    assert not frame.empty
+    row = frame.iloc[0]
+    assert row["_core_image"] == str(core_path)
+    assert row["_glass_image"] == str(glass_path)
+    images = row["_images"]
+    assert isinstance(images, list)
+    assert str(core_path) in images
+    assert str(glass_path) in images
+    assert str(other_path) in images
 
 
 def test_safe_plot_stem_removes_path_separators() -> None:
@@ -745,3 +785,96 @@ def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
     assert columns[figure_idx + 1] == "Figure — low mA"
     assert columns[figure_idx + 2] == core.STRAIN_COLUMN
     assert updated_excel[core.STRAIN_COLUMN].iloc[0] == "6.250%"
+
+
+def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    try:
+        menu = window.findChild(QtWidgets.QMenu, "mw_builder_recent_projects")
+        assert isinstance(menu, QtWidgets.QMenu)
+
+        actions = menu.actions()
+        assert actions, "expected placeholder action for empty recent list"
+        assert actions[0].text() == "No recent projects"
+        assert not actions[0].isEnabled()
+
+        project_path = tmp_path / "example.pydpj"
+        project_path.write_text("{}", encoding="utf-8")
+        window._remember_recent_project(project_path)
+        QtWidgets.QApplication.processEvents()
+
+        entries = [action.text() for action in menu.actions()]
+        assert any(project_path.stem in entry for entry in entries)
+        assert window._recent_projects and str(project_path) == window._recent_projects[0]
+
+        clear_action = next(
+            (action for action in menu.actions() if action.text() == "Clear list"),
+            None,
+        )
+        assert isinstance(clear_action, QtGui.QAction)
+        clear_action.trigger()
+        QtWidgets.QApplication.processEvents()
+
+        assert window._recent_projects == []
+        refreshed_actions = menu.actions()
+        assert refreshed_actions and refreshed_actions[0].text() == "No recent projects"
+    finally:
+        window.close()
+
+
+def test_load_project_handles_missing_sections(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    try:
+        monkeypatch.setattr(
+            QtWidgets.QMessageBox,
+            "information",
+            lambda *args, **kwargs: QtWidgets.QMessageBox.StandardButton.Ok,
+        )
+        project_path = tmp_path / "partial_project.pydpj"
+        fabrication_source = str(tmp_path / "fabrication.xlsx")
+        payload = {
+            "kind": window.PROJECT_KIND,
+            "version": window.PROJECT_VERSION,
+            "sections": {
+                "fabrication": {
+                    "sources": [fabrication_source],
+                    "columns": ["col_a", "col_b"],
+                    "rows": [["alpha", "beta"]],
+                }
+            },
+        }
+        project_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        window._load_project_from_path(project_path)
+        QtWidgets.QApplication.processEvents()
+
+        assert window._project_path == project_path
+        assert window._recent_projects and str(project_path) == window._recent_projects[0]
+
+        fabrication_section = window.sections.get("fabrication")
+        assert fabrication_section is not None
+        assert getattr(fabrication_section.data, "sources", []) == [fabrication_source]
+
+        project_tree = getattr(window, "project_tree", None)
+        assert isinstance(project_tree, QtWidgets.QTreeWidget)
+        fabrication_item = None
+        for index in range(project_tree.topLevelItemCount()):
+            item = project_tree.topLevelItem(index)
+            if item.text(0) == getattr(fabrication_section, "section_title", "Fabrication"):
+                fabrication_item = item
+                break
+        assert fabrication_item is not None
+        child_sources = [fabrication_item.child(i).text(1) for i in range(fabrication_item.childCount())]
+        assert fabrication_source in child_sources
+
+        for key, section in window.sections.items():
+            if key == "fabrication":
+                continue
+            sources = getattr(getattr(section, "data", object()), "sources", [])
+            assert list(sources) in ([], [fabrication_source])
+    finally:
+        window.close()
