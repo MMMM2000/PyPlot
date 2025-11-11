@@ -33,7 +33,8 @@ try:
 except AttributeError:  # pragma: no cover - pillow<9.1 fallback
     _RESAMPLE_LANCZOS = Image.LANCZOS  # type: ignore[attr-defined]
 
-_MAX_ANALYSIS_SIDE = 3600
+_MAX_ANALYSIS_SIDE = 2200
+_MIN_ANALYSIS_SIDE = 48
 
 
 @dataclass
@@ -127,7 +128,7 @@ def _initialise_classic_engine() -> PaddleOCR:
     return PaddleOCR(
         use_doc_orientation_classify=False,
         use_doc_unwarping=False,
-        text_det_limit_side_len=4000,
+        text_det_limit_side_len=_MAX_ANALYSIS_SIDE,
         use_textline_orientation=False,
         return_word_box=True,
     )
@@ -256,6 +257,41 @@ class ConversionCancelled(Exception):
     """Raised when the PDF conversion is cancelled by the user."""
 
 
+def _prepare_analysis_image(
+    pil_image: Image.Image, original_path: Path, temp_dir: Path, page_number: int
+) -> tuple[Path, Image.Image]:
+    """Return a resized copy of ``pil_image`` suitable for Paddle OCR."""
+
+    analysis_image = pil_image
+    analysis_changed = False
+    max_dim = max(pil_image.width, pil_image.height)
+    if max_dim > _MAX_ANALYSIS_SIDE:
+        scale = _MAX_ANALYSIS_SIDE / float(max_dim)
+        new_width = max(_MIN_ANALYSIS_SIDE, int(round(pil_image.width * scale)))
+        new_height = max(_MIN_ANALYSIS_SIDE, int(round(pil_image.height * scale)))
+        analysis_image = pil_image.resize((new_width, new_height), _RESAMPLE_LANCZOS)
+        analysis_changed = True
+        LOGGER.info(
+            "Downscaled page %s for OCR: %sx%s → %sx%s",
+            page_number,
+            pil_image.width,
+            pil_image.height,
+            analysis_image.width,
+            analysis_image.height,
+        )
+    if analysis_image.mode not in {"RGB", "L"}:
+        analysis_image = analysis_image.convert("RGB")
+        analysis_changed = True
+
+    if analysis_changed:
+        analysis_path = temp_dir / f"page_{page_number:04d}_analysis.png"
+        analysis_image.save(analysis_path, format="PNG")
+    else:
+        analysis_path = original_path
+
+    return analysis_path, analysis_image
+
+
 def convert_pdf(
     input_path: Path,
     output_path: Path,
@@ -298,23 +334,9 @@ def convert_pdf(
             image_path = temp_dir / f"page_{page_number:04d}.png"
             pil_image.save(image_path, format="PNG")
 
-            analysis_path = image_path
-            analysis_image = pil_image
-            if max(pil_image.width, pil_image.height) > _MAX_ANALYSIS_SIDE:
-                analysis_image = pil_image.copy()
-                analysis_image.thumbnail(
-                    (_MAX_ANALYSIS_SIDE, _MAX_ANALYSIS_SIDE), _RESAMPLE_LANCZOS
-                )
-                analysis_path = temp_dir / f"page_{page_number:04d}_analysis.png"
-                analysis_image.save(analysis_path, format="PNG")
-                LOGGER.info(
-                    "Downscaled page %s for OCR: %sx%s → %sx%s",
-                    page_number,
-                    pil_image.width,
-                    pil_image.height,
-                    analysis_image.width,
-                    analysis_image.height,
-                )
+            analysis_path, analysis_image = _prepare_analysis_image(
+                pil_image, image_path, temp_dir, page_number
+            )
 
             summary_lines = _summarise_page(vl_engine, vl_mode, analysis_path, prompt)
             overlays = _extract_overlays(
