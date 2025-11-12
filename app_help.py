@@ -205,10 +205,10 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "VSM hysteresis loops",
         "body": dedent(
             """
-            ### Load data
+            ### Generate workbooks
             1. Use **Browse files…** or **Browse folder…** to point at your Lakeshore
                `VSM-Hys-Data` exports. Selected items load immediately and populate every dock—no
-               extra **Load data** step required.
+               extra **Generate workbooks** step required.
             2. Tune the X/Y axis selectors in the **Graph Settings** dock. Your axis choices,
                backend preference, plot style, dark-theme toggle, and normalise-endpoints option are
                remembered across sessions.

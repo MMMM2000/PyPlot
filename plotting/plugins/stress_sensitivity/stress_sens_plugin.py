@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, Iterable
 
 import pandas as pd
 from PyQt6 import QtCore, QtWidgets
@@ -30,6 +30,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
         self._last_export_dir: Path | None = None
+        self._workbook_keys: Dict[str, str] = {}
+        self._managed_workbooks: set[str] = set()
     # Lifecycle -----------------------------------------------------
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(True)
@@ -162,6 +164,102 @@ class StressSensitivityPlugin(PyPlotPlugin):
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
 
+    def _register_workbooks(self, paths: list[Path]) -> None:
+        data = self._data
+        if data is None or "filename" not in data.columns:
+            return
+        host = self.host
+        window_module = window_api()
+        grouped = data.groupby("filename", dropna=False)
+        active_keys: set[str] = set()
+        meta_map = {
+            "line": ("Line", ""),
+            "load": ("Load", "g"),
+            "dir": ("Direction", ""),
+            "T1": ("T1", "µs"),
+            "T2": ("T2", "µs"),
+            "dT": ("T2-T1", "µs"),
+            "sum": ("T1+T2", "µs"),
+            "sample": ("Sample", ""),
+            "sample_end": ("Sample end", ""),
+            "composition": ("Composition", ""),
+            "title": ("Title", ""),
+            "anneal": ("Anneal", ""),
+            "filename": ("Filename", ""),
+        }
+        for path in paths:
+            file_name = path.name
+            if file_name not in grouped.groups:
+                continue
+            subset = grouped.get_group(file_name).copy().reset_index(drop=True)
+            columns = [
+                "line",
+                "load",
+                "dir",
+                "T1",
+                "T2",
+                "dT",
+                "sum",
+                "continuous",
+                "composition",
+                "title",
+                "anneal",
+                "sample",
+                "sample_end",
+                "filename",
+            ]
+            available = [column for column in columns if column in subset.columns]
+            extra = [column for column in subset.columns if column not in available and column != "filename"]
+            frame = subset[available + extra] if available or extra else subset
+            key = self._workbook_keys.get(str(path))
+            if not key:
+                try:
+                    resolved = path.resolve()
+                except Exception:
+                    resolved = path
+                key = f"stress_sensitivity::{resolved}"
+                self._workbook_keys[str(path)] = key
+            workbook = window_module.WorkbookData(
+                key=key,
+                name=f"{path.stem} (stress sensitivity)",
+                worksheets=[],
+                source=path,
+                folder=path.parent,
+            )
+            worksheet = host._create_worksheet_from_frame(workbook, "Stress sensitivity", frame)
+            for column, (long_name, units) in meta_map.items():
+                meta = worksheet.columns.get(column)
+                if isinstance(meta, window_module.WorksheetColumnMeta):
+                    meta.long_name = long_name
+                    meta.units = units
+            workbook.worksheets = [worksheet.key]
+            host._register_imported_workbook(workbook, [worksheet])
+            active_keys.add(workbook.key)
+        stale = self._managed_workbooks - active_keys
+        if stale:
+            self._remove_managed_workbooks(stale)
+        self._managed_workbooks = active_keys
+        if active_keys:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
+
+    def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
+        host = self.host
+        for key in keys:
+            workbook = host._workbooks.get(key)
+            if workbook is not None:
+                for sheet_key in list(workbook.worksheets):
+                    host._remove_worksheet(sheet_key)
+            host._workbooks.pop(key, None)
+            item = host._data_workbook_items.pop(key, None)
+            if item is not None:
+                parent = item.parent()
+                if parent is not None:
+                    index = parent.indexOfChild(item)
+                    if index >= 0:
+                        parent.takeChild(index)
+            self._managed_workbooks.discard(key)
+
     # Host actions --------------------------------------------------
     def load_data(self) -> None:  # type: ignore[override]
         paths = self.host.ensure_data_selection(self)
@@ -181,6 +279,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
+        self._register_workbooks(paths)
         if self._summary_label is not None:
             self._summary_label.setText(
                 "Click Generate plots to review stress sensitivity summaries."
@@ -287,7 +386,10 @@ class StressSensitivityPlugin(PyPlotPlugin):
             )
             return
 
-        self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+        first_tab = self._plot_tabs[0]
+        index = self.host.tab_widget.indexOf(first_tab)
+        if index >= 0:
+            self.host.tab_widget.setCurrentIndex(index)
         if self._summary_label is not None:
             self._summary_label.setText(
                 f"Generated {plots_created} stress sensitivity plot(s)."

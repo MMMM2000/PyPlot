@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from pathlib import Path
@@ -103,6 +104,8 @@ LABELS = {
 
 _EXPORT_ORDER = ("T1", "T2", "dT", "sum")
 
+logger = logging.getLogger("PyPlot.stress_sensitivity")
+
 
 def _sanitise_stem(*parts: str) -> str:
     stem = "_".join(part.strip().replace(" ", "_") for part in parts if part)
@@ -128,7 +131,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
     for fn in files:
         md = parse_metadata(Path(fn).stem)
         if md is None:
-            print(f"Skipping {fn}")
+            logger.warning(f"Skipping {fn}")
             continue
         df = pd.read_csv(
             fn,
@@ -658,7 +661,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     total = len(groups) * len(PLOT_VARS)
     do_show = SHOW_PLOTS and wants_matplotlib(backend) and (total <= MAX_SHOW)
     if SHOW_PLOTS and wants_matplotlib(backend) and not do_show:
-        print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
+        logger.warning(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
     plots: List[Tuple[Figure, str]] = []
@@ -674,7 +677,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
                 try:
                     plot_samples_origin(grp, var, include_dep=INCLUDE_DEPENDENCE, med_window=MED_WINDOW, ma_window=MA_WINDOW)
                 except Exception as e:
-                    print(f"Origin plot failed: {e}")
+                        logger.error(f"Origin plot failed: {e}")
             if progress:
                 progress.update()
         if progress and getattr(progress, 'cancelled', False):
@@ -683,7 +686,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         progress.destroy()
     elif progress and getattr(progress, 'cancelled', False):
         plt.close('all')
-        print('Cancelled.')
+        logger.info('Cancelled.')
         return
 
     if wants_matplotlib(backend):

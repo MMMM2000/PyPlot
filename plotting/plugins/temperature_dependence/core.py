@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, cast
@@ -45,6 +46,8 @@ TITLE_SIZE = int(_CFG.get("TITLE_SIZE", 22))
 SHOW_TICK_LABELS = bool(_CFG.get("SHOW_TICK_LABELS", True))
 SHOW_AXIS_LABELS = bool(_CFG.get("SHOW_AXIS_LABELS", True))
 SHOW_TITLE = bool(_CFG.get("SHOW_TITLE", True))
+
+logger = logging.getLogger("PyPlot.temperature_dependence")
 
 RAW_COLORS = {25: "#45A1D6", 100: "#F09C67"}
 OVERALL_COLOR = "#6B6B6B"
@@ -126,7 +129,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
     for fn in files:
         md = parse_metadata(Path(fn).stem)
         if md is None:
-            print(f"Skipping {fn}")
+            logger.warning(f"Skipping {fn}")
             continue
         if md["continuous"]:
             df = pd.read_csv(
@@ -384,18 +387,18 @@ def main(files: List[str], backend: str = BACKEND) -> None:
             try:
                 plot_variable_origin(data, var)
             except Exception as e:
-                print(f"Origin plot failed: {e}")
+                logger.error(f"Origin plot failed: {e}")
         if progress:
             progress.update()
     if progress and not getattr(progress, "cancelled", False):
         progress.destroy()
     elif progress and getattr(progress, "cancelled", False):
         plt.close("all")
-        print("Cancelled.")
+        logger.info("Cancelled.")
         return
     if wants_matplotlib(backend) and SHOW_PLOTS:
         show_plots()
     else:
         plt.close("all")
 
-    print("Done.")
+    logger.info("Done.")

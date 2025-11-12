@@ -1,4 +1,8 @@
 # Changelog
+## 2025-11-12 10:34 UTC
+
+- Refined the Temperature Sensitivity Origin export so speed mode is turned off, the title is bold, 22 pt, and centered, the numeric X ticks are hidden in favor of bold 18 pt “2/1”, “2/2”, … labels placed just above the axis, the legend text adopts the plot colors automatically, and each delta annotation is re-added only once higher up so it never stacks on the raw points.
+
 ## 2025-11-11 14:54 UTC
 
 - Restored the dock switcher side buttons for Project Explorer, Message Log, and Object Manager while keeping the panels pinned by default, and reverted the toolbar styling to use native Windows/macOS button chrome so clickable items feel familiar again.

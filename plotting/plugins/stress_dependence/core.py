@@ -1,4 +1,5 @@
-﻿import os
+﻿import logging
+import os
 import re
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, cast
@@ -38,6 +39,8 @@ PLOT_VARS = [
 BASELINE_MODE = str(_CFG.get("BASELINE_MODE", "first"))  # 'first' or 'min'
 RAW_COLORS = {"a": "#45A1D6", "b": "#F09C67"}
 RAW_MARKER = "o"
+
+logger = logging.getLogger("PyPlot.stress_dependence")
 RAW_MARKER_SIZE = 0.3
 RAW_ALPHA = 1.0
 MEAN_COLORS = {"a":"#00306E","b":"#965308"}
@@ -216,7 +219,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
         md = parse_metadata(stem)
         if md is None:
             reason = explain_metadata_failure(stem)
-            print(f"Skipping {fn}: {reason}")
+            logger.warning(f"Skipping {fn}: {reason}")
             continue
         df = pd.read_csv(
             fn,
@@ -265,8 +268,9 @@ def plot_variable(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> 
     means['y'] = means[var] - base
 
     if PRINT_COUNTS:
-        print(f"\nCounts for {var}, {comp} {title} {samp} {anneal}:")
-        print(df.groupby(['dir','load']).size().unstack(fill_value=0))
+        logger.info(f"\nCounts for {var}, {comp} {title} {samp} {anneal}:")
+        counts = df.groupby(['dir','load']).size().unstack(fill_value=0)
+        logger.info("\n%s", counts.to_string())
 
     fig, ax = plt.subplots(figsize=(9, 5))
     ax.scatter(
@@ -663,7 +667,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
     total = len(groups) * len(PLOT_VARS)
     do_show = SHOW_PLOTS and wants_matplotlib(backend) and (total <= MAX_SHOW)
     if SHOW_PLOTS and wants_matplotlib(backend) and not do_show:
-        print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
+        logger.warning(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
     plots: List[Tuple[Figure, str]] = []
@@ -678,7 +682,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
                 try:
                     plot_variable_origin(grp, var)
                 except Exception as e:
-                    print(f"Origin plot failed: {e}")
+                        logger.error(f"Origin plot failed: {e}")
             if progress:
                 progress.update()
         if progress and getattr(progress, 'cancelled', False):
@@ -687,7 +691,7 @@ def main(files: List[str], backend: str = BACKEND) -> None:
         progress.destroy()
     elif progress and getattr(progress, 'cancelled', False):
         plt.close('all')
-        print('Cancelled.')
+        logger.info('Cancelled.')
         return
 
     if wants_matplotlib(backend):

@@ -208,7 +208,11 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._loaded_files:
-            QtWidgets.QMessageBox.information(self.host, self.name, "Load data before exporting to Origin.")
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Generate workbooks before exporting to Origin.",
+            )
             return
         try:
             self._apply_settings_to_core()

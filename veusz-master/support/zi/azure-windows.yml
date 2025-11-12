@@ -1,0 +1,51 @@
+# Windows pipeline
+
+variables:
+  name: 'Windows_x64'
+  architecture: 'x64'
+  qt_version: '5.12.6'
+  qt_spec: 'msvc2017_64'
+  qt_aqt_spec: 'win64_msvc2017_64'
+  vc_redist_url: 'https://go.microsoft.com/fwlink/?LinkId=746572'
+  vc_redist_file_name: 'vc_redist.x64.exe'
+  vc_vars: 'vcvars64.bat'
+
+trigger:
+- master
+
+pool:
+  vmImage: 'vs2017-win2016'
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.7'
+    addToPath: true
+    architecture: 'x64'
+
+- script: |
+    python -m pip install --upgrade pip
+    pip install aqtinstall
+    mkdir C:\Qt
+    python -m aqt install -O c:\Qt ${{ variables.qt_version }} windows desktop ${{ variables.qt_aqt_spec }} -m qtsvg
+    dir C:\Qt\${{ variables.qt_version }}\${{ variables.qt_spec }}\bin
+  displayName: 'Install Qt'
+
+- script: |
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\VC\Auxiliary\Build\${{ variables.vc_vars }}"
+    set PATH=C:\Qt\${{ variables.qt_version }}\${{ variables.qt_spec }}\bin;%PATH%
+    pip install PyQt5 sip numpy h5py astropy
+  displayName: 'Install Python dependencies'
+
+- script: |
+    call "C:\Program Files (x86)\Microsoft Visual Studio\2017\Enterprise\VC\Auxiliary\Build\${{ variables.vc_vars }}"
+    set PATH=C:\Qt\${{ variables.qt_version }}\${{ variables.qt_spec }}\bin;%PATH%
+    python setup.py build_ext --inplace
+  displayName: 'Build'
+
+- script: |
+    set QT_QPA_PLATFORM=minimal
+    set VEUSZ_RESOURCE_DIR=%cd%
+    set PYTHONPATH=%cd%
+    python tests/runselftest.py
+  displayName: 'tests'

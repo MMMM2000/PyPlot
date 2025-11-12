@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from pathlib import Path
@@ -81,6 +82,8 @@ TS_LABELS = {
 
 _EXPORT_ORDER = tuple(TS_LABELS.keys())
 
+logger = logging.getLogger("PyPlot.temperature_sensitivity")
+
 
 def _sanitise_stem(*parts: str) -> str:
     stem = "_".join(part.strip().replace(" ", "_") for part in parts if part)
@@ -95,6 +98,34 @@ def _format_temp_label(temp: float | int) -> str:
     except Exception:
         return str(temp)
     return f"{int(value)}" if value.is_integer() else f"{value:g}"
+
+
+def _disable_origin_speed_mode(layer: Any) -> None:
+    """Attempt to turn off Origin's speed mode indicator."""
+
+    if layer is None:
+        return
+
+    attempts = (
+        ("SetSpeedMode", False),
+        ("setSpeedMode", False),
+        ("set_speed_mode", False),
+        ("speedMode", False),
+        ("speed_mode", False),
+    )
+    for attr, value in attempts:
+        setter = getattr(layer, attr, None)
+        if callable(setter):
+            try:
+                setter(value)
+                return
+            except Exception:
+                continue
+        try:
+            setattr(layer, attr, value)
+            return
+        except Exception:
+            continue
 
 FNAME_RE = re.compile(
     r"^(?P<composition>.+?)\s+"
@@ -147,7 +178,7 @@ class ProgressDialog:
             return
         if self.count >= self._next or self.count == self.total:
             pct = (self.count / self.total) * 100
-            print(f"Progress: {self.count}/{self.total} ({pct:.0f}%)")
+            logger.info(f"Progress: {self.count}/{self.total} ({pct:.0f}%)")
             self._next = min(self.total, self.count + self._step)
 
     def destroy(self) -> None:
@@ -210,7 +241,7 @@ def load_data(files: List[str]) -> pd.DataFrame:
     for fn in files:
         md = parse_metadata(Path(fn).stem)
         if md is None:
-            print(f"Skipping {fn}")
+            logger.warning(f"Skipping {fn}")
             continue
         df = pd.read_csv(
             fn,
@@ -342,7 +373,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
             progress.destroy()
             progress = None
         plt.close('all')
-        print("Outlier detection cancelled.")
+        logger.info("Outlier detection cancelled.")
         return df
     finally:
         if progress:
@@ -353,7 +384,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
     files = ", ".join(sorted(out_df["filename"].unique()))
 
     if common.AUTO_REMOVE_OUTLIERS:
-        print(f"Automatically removing outliers from {files}.")
+        logger.info(f"Automatically removing outliers from {files}.")
         return df.drop(out_df.index)
 
     app = QtWidgets.QApplication.instance()
@@ -376,7 +407,7 @@ def handle_outliers(df: pd.DataFrame) -> pd.DataFrame:
         figs.append(fig)
 
     if app is None:
-        print(f"Removing outliers from {files}.")
+        logger.info(f"Removing outliers from {files}.")
         plt.close("all")
         return df.drop(out_df.index)
 
@@ -753,7 +784,7 @@ def plot_variable_origin(
     delta_pad = max(0.04 * y_range, 0.4)
     title_gap = max(0.06 * y_range, 0.5)
     plot_top = y_max + delta_pad + title_gap
-    title_level = y_max + delta_pad + 0.6 * title_gap
+    title_level = plot_top + max(0.02 * y_range, 0.5)
 
     cont_samples = set(cont['sample']) if include_cont else set()
     means['plot_x'] = means['sample_idx']
@@ -791,6 +822,8 @@ def plot_variable_origin(
     delta_labels: list[tuple[float, float, str]] = []
     pivot = means.pivot(index='sample_idx', columns='temp', values=var)
     if 25 in pivot.columns and 100 in pivot.columns:
+        label_ceiling = plot_top - max(0.15 * title_gap, 0.4)
+        max_label_height = plot_top - max(0.05 * title_gap, 0.2)
         for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
             idx_value = _as_float(idx)
             val_25 = _as_float(row[25])
@@ -801,7 +834,9 @@ def plot_variable_origin(
             has_cont = (sample in cont_samples) if sample is not None else False
             delta = val_100 - val_25
             extra = delta_pad if has_cont else max(delta_pad * 0.5, 0.3)
-            y_top = val_100 + extra
+            base_y = val_100 + extra + max(0.05 * y_range, 0.5)
+            y_top = max(base_y, label_ceiling)
+            y_top = min(y_top, max_label_height)
             x_pos = mean_positions.get((idx_value, 100.0), idx_value)
             delta_labels.append((x_pos, y_top, f"{delta:.1f}"))
 
@@ -839,7 +874,7 @@ def plot_variable_origin(
     if gl is None:
         return
 
-    legend_entries: list[str] = []
+    _disable_origin_speed_mode(gl)
 
     for temp in sorted(raw['temp'].dropna().unique()):
         sub = raw[raw['temp'] == temp]
@@ -873,8 +908,6 @@ def plot_variable_origin(
             p.legend = legend_label
         except Exception:
             pass
-        legend_entries.append(legend_label)
-
     for temp in sorted(means['temp'].dropna().unique()):
         sub = means[means['temp'] == temp]
         if sub.empty:
@@ -913,8 +946,6 @@ def plot_variable_origin(
             p.legend = legend_label
         except Exception:
             pass
-        legend_entries.append(legend_label)
-
     cont_label = f"25-100C med {med_window} mwa {ma_window}"
     cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
@@ -932,6 +963,7 @@ def plot_variable_origin(
         try:
             p.color = 'black'
             p.line_width = 1
+            p.symbol_size = 1
             if cont_label_added:
                 try:
                     p.legend = ''
@@ -949,8 +981,6 @@ def plot_variable_origin(
                 cont_label_added = True
         except Exception:
             pass
-        legend_entries.append(cont_label if cont_label_added and idx == 1 else "")
-
     try:
         gl.rescale()
     except Exception:
@@ -958,6 +988,7 @@ def plot_variable_origin(
 
     try:
         gp.activate()
+        op.lt_exec('legend -o; legend.textcolor=1;')
     except Exception:
         pass
 
@@ -971,11 +1002,11 @@ def plot_variable_origin(
         y_axis = None
 
     base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
-    label_gap = min(max(0.12 * y_range, 0.5), y_range * 0.4)
-    label_extra = min(max(0.05 * y_range, 0.3), y_range * 0.2)
-    tick_level = y_min - label_gap
-    label_bottom = tick_level - label_extra
+    tick_gap = min(max(0.08 * y_range, 0.35), y_range * 0.25)
+    label_extra = min(max(0.03 * y_range, 0.25), y_range * 0.15)
     axis_bottom = y_min - base_pad
+    tick_level = y_min - tick_gap
+    label_bottom = tick_level - label_extra
 
     try:
         if x_axis is not None:
@@ -1000,32 +1031,10 @@ def plot_variable_origin(
         pass
 
     try:
-        gl.set_int('legend.update', 0)
-        gl.set_int('legend.box', 0)
-        gl.set_int('legend.just', 1)
+        gl.set_int('legend.box', 1)
+        gl.set_int('legend.update', 1)
     except Exception:
         pass
-
-    legend_text = "\\n".join([entry for entry in legend_entries if entry])
-    try:
-        legend = gl.label('Legend')
-    except Exception:
-        legend = None
-    if legend is not None:
-        try:
-            legend.text = legend_text
-        except Exception:
-            pass
-        try:
-            legend_loc = str(globals().get("LEGEND_LOCATION", "inside")).lower()
-            if legend_loc in {"outside_right", "outside", "outside right"}:
-                legend.set_float('x1', 1.02)
-                legend.set_float('y1', 0.5)
-            else:
-                legend.set_float('x1', 0.18)
-                legend.set_float('y1', 0.88)
-        except Exception:
-            pass
 
     try:
         gl.set_int('x.top', 0)
@@ -1061,18 +1070,26 @@ def plot_variable_origin(
             label = None
         if label is None:
             continue
-        try:
-            label.name = f'py_xtick{idx}'
-            label.set_int('attach', 0)
             try:
-                label.set_int('horzalign', 1)
+                label.name = f'py_xtick{idx}'
+                label.set_int('attach', 0)
+                try:
+                    label.set_int('horzalign', 1)
+                except Exception:
+                    pass
+                try:
+                    label.set_int('vertalign', 0)
+                except Exception:
+                    pass
+                try:
+                    label.set_int('fontweight', 700)
+                except Exception:
+                    pass
+                try:
+                    label.set_int('fontheight', max(TICK_SIZE, 18))
+                except Exception:
+                    pass
             except Exception:
-                pass
-            try:
-                label.set_int('vertalign', 0)
-            except Exception:
-                pass
-        except Exception:
             pass
         manual_labels_added = True
     if manual_labels_added and y_axis is not None:
@@ -1081,7 +1098,8 @@ def plot_variable_origin(
         except Exception:
             pass
 
-    for idx in range(1, len(delta_labels) + 1):
+    max_deltas = max(len(delta_labels), len(samples))
+    for idx in range(1, max_deltas + 1):
         try:
             gl.remove_label(f'py_delta{idx}')
         except Exception:
@@ -1102,6 +1120,14 @@ def plot_variable_origin(
                 pass
             try:
                 label.set_int('vertalign', 0)
+            except Exception:
+                pass
+            try:
+                label.set_int('fontweight', 700)
+            except Exception:
+                pass
+            try:
+                label.set_int('fontheight', max(TICK_SIZE - 2, 14))
             except Exception:
                 pass
         except Exception:
@@ -1136,6 +1162,14 @@ def plot_variable_origin(
                 pass
             try:
                 manual_title.set_int('vertalign', 0)
+            except Exception:
+                pass
+            try:
+                manual_title.set_int('fontweight', 700)
+            except Exception:
+                pass
+            try:
+                manual_title.set_int('fontheight', TITLE_SIZE)
             except Exception:
                 pass
         except Exception:
@@ -1245,7 +1279,7 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
     apply_readability_fonts()
     if preprocessed_data is not None:
         data = preprocessed_data.copy(deep=True)
-        print("Using results from the immediate outlier check.")
+        logger.info("Using results from the immediate outlier check.")
     else:
         data = load_data(files)
         data = maybe_handle_outliers(data)
@@ -1254,7 +1288,7 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
     total = len(groups) * len(PLOT_VARS) * len(modes)
     do_show = SHOW_PLOTS and wants_matplotlib(backend) and (total <= MAX_SHOW)
     if SHOW_PLOTS and wants_matplotlib(backend) and not do_show:
-        print(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
+        logger.warning(f"Too many plots ({total}); only saving to '{OUTPUT_DIR}'.")
 
     progress = ProgressDialog(total) if total else None
     plots: List[Tuple[Figure, str]] = []
@@ -1289,7 +1323,7 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
                             ma_window=MA_WINDOW,
                         )
                     except Exception as e:
-                        print(f"Origin plot failed: {e}")
+                        logger.error(f"Origin plot failed: {e}")
                 if progress:
                     progress.update()
             if progress and getattr(progress, 'cancelled', False):
@@ -1300,7 +1334,7 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
         progress.destroy()
     elif progress and getattr(progress, 'cancelled', False):
         plt.close('all')
-        print("Cancelled.")
+        logger.info("Cancelled.")
         return
 
     if wants_matplotlib(backend):
@@ -1312,4 +1346,3 @@ def main(files: List[str], backend: str = BACKEND, preprocessed_data: pd.DataFra
         plt.close('all')
     if wants_origin(backend):
         schedule_origin_release()
-

@@ -65,7 +65,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
         window_module = window_api()
         overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
-        summary = QtWidgets.QLabel("Select temperature data files then click Load data.")
+        summary = QtWidgets.QLabel("Select temperature data files then click Generate workbooks.")
         summary.setWordWrap(True)
         summary.setObjectName("mw_temp_dep_overview_text")
         overview_layout.addWidget(summary)
@@ -171,7 +171,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self.host._plugin_last_directories[self.name] = paths[0].parent
         if self._summary_label is not None and not self._summary_label.text().strip():
             self._summary_label.setText(
-                "Select one or more temperature dependence files and click Load data."
+                "Select one or more temperature dependence files and click Generate workbooks."
             )
         self._log(f"Loaded {len(paths)} temperature dependence file(s).")
         self._register_workbooks(paths)
@@ -238,7 +238,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._loaded_files:
-            QtWidgets.QMessageBox.information(self.host, self.name, "Load data before exporting to Origin.")
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Generate workbooks before exporting to Origin.",
+            )
             return
         try:
             self._apply_settings_to_core()
@@ -267,7 +271,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
         if self._summary_label is not None:
             if not has_data:
-                self._summary_label.setText("Select temperature dependence files then click Load data.")
+                self._summary_label.setText("Select temperature dependence files then click Generate workbooks.")
             elif self._plot_tabs:
                 self._summary_label.clear()
             else:

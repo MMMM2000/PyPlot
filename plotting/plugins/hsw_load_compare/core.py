@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 from pathlib import Path
@@ -36,6 +37,8 @@ TITLE_SIZE = 22
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
+
+logger = logging.getLogger("PyPlot.hsw_load_compare")
 
 ProgressDialog: type[object] | None = None
 
@@ -159,7 +162,7 @@ def main(files: List[str], cfg: Dict[str, Any]):
     for p in files:
         md, raw, filtered, mask = load_file(p)
         if md is None:
-            print(f"Skipping {p}")
+            logger.warning(f"Skipping {p}")
             continue
         records.append((md, raw, filtered, mask))
     if not records:

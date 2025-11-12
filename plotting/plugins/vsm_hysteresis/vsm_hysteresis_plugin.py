@@ -43,7 +43,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         summary = QtWidgets.QLabel(
-            "Select one or more VSM hysteresis files and click Load data."
+            "Select one or more VSM hysteresis files and click Generate workbooks."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -245,7 +245,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         has_paths = bool(host._selected_paths())
         if self._summary_label is not None and not has_paths:
             self._summary_label.setText(
-                "Select one or more VSM hysteresis files and click Load data."
+                "Select one or more VSM hysteresis files and click Generate workbooks."
             )
         if hasattr(host, "plot_button"):
             host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))

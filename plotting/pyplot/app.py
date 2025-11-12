@@ -195,7 +195,7 @@ class PyPlotWorkbench(PyPlotWindow):
 
         toolbar.addSeparator()
 
-        load_action = toolbar.addAction("Load data")
+        load_action = toolbar.addAction("Generate workbooks")
         load_action.setEnabled(False)
         load_action.triggered.connect(self._load_data)
         self.load_data_button = load_action

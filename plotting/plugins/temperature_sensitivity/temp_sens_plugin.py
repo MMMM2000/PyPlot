@@ -70,7 +70,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 
         window_module = window_api()
         overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
-        summary = QtWidgets.QLabel("Select temperature sensitivity files then click Load data.")
+        summary = QtWidgets.QLabel("Select temperature sensitivity files then click Generate workbooks.")
         summary.setWordWrap(True)
         overview_layout.addWidget(summary)
         overview_layout.addStretch(1)
@@ -447,7 +447,11 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._loaded_files:
-            QtWidgets.QMessageBox.information(self.host, self.name, "Load data before exporting to Origin.")
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Generate workbooks before exporting to Origin.",
+            )
             return
         try:
             self._apply_settings_to_core()

@@ -1,0 +1,34 @@
+#
+# The Delaunay triangulation filter is an adjunct to the support for
+# concave hulls.  It can be used on its own either for original use
+# in 2D plots or as a way to generate a triangular tessellation for
+# a 3D surface defined by a scattered set of points as shown here.
+#
+
+if (!strstrt(GPVAL_COMPILE_OPTIONS, "+CHI_SHAPES")) {
+    print "Your copy of gnuplot was not built with support for chi shapes"
+} else {
+    set style fill solid border lc "black"
+    unset colorbox
+    set palette viridis
+    set xyplane 0
+    set isotropic
+    set view 60,127, 1.55
+    set border 15
+    set tics format ""
+    unset ztics
+    set grid x y
+
+    set multiplot layout 1,2
+
+    set pm3d lighting primary 0.5 spec 0.2 spec2 0.3
+    splot 'hemisphr.dat' using 1:2:3 delaunay with polygons fc palette z title "pm3d lighting"
+
+    set pm3d nolighting
+    splot 'hemisphr.dat' using 1:2:3 delaunay with polygons fc palette z title "no lighting model"
+
+    unset multiplot
+}
+
+pause -1 "<cr> to continue"
+reset

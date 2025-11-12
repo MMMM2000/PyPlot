@@ -1,0 +1,368 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN"
+  "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg width="531.4px" height="531.4px" version="1.1"
+    xmlns="http://www.w3.org/2000/svg"
+    xmlns:xlink="http://www.w3.org/1999/xlink">
+<desc>Veusz output document</desc>
+<defs>
+<clipPath id="c0">
+<path d="m0,0l531.4,0l0,531.4l-531.4,0l0,-531.4"/>
+</clipPath>
+<clipPath id="c1">
+<path d="m60.2,7l464.1,0l0,464.1l-464.1,0l0,-464.1"/>
+</clipPath>
+</defs>
+<g stroke-linejoin="bevel" stroke-linecap="square" stroke="#000000" fill-rule="evenodd">
+<g clip-path="url(#c0)">
+<g fill="#ffffff" stroke-width="0.6">
+<path d="m60.2,7l464.1,0l0,464.1l-464.1,0l0,-464.1"/>
+</g>
+</g>
+<g clip-path="url(#c1)">
+<g fill="#ffffff" stroke="#ffffff" stroke-width="1">
+<path d="m60.2,432.3l38.9,0l0,38.9l-38.9,0l0,-38.9"/>
+</g>
+<g fill="#ffff71" stroke="#ffff71" stroke-width="1">
+<path d="m99.1,432.3l49.2,0l0,38.9l-49.2,0l0,-38.9"/>
+</g>
+<g fill="#fffb00" stroke="#fffb00" stroke-width="1">
+<path d="m148.4,432.3l49.3,0l0,38.9l-49.3,0l0,-38.9"/>
+</g>
+<g fill="#ffa100" stroke="#ffa100" stroke-width="1">
+<path d="m197.8,432.3l49.2,0l0,38.9l-49.2,0l0,-38.9"/>
+</g>
+<g fill="#ff6d00" stroke="#ff6d00" stroke-width="1">
+<path d="m247,432.3l31.1,0l0,38.9l-31.1,0l0,-38.9"/>
+<path d="m278.2,432.3l49.3,0l0,38.9l-49.3,0l0,-38.9"/>
+</g>
+<g fill="#ff9400" stroke="#ff9400" stroke-width="1">
+<path d="m327.6,432.3l67.3,0l0,38.9l-67.3,0l0,-38.9"/>
+</g>
+<g fill="#ffe800" stroke="#ffe800" stroke-width="1">
+<path d="m394.9,432.3l49.2,0l0,38.9l-49.2,0l0,-38.9"/>
+</g>
+<g fill="#ffff5d" stroke="#ffff5d" stroke-width="1">
+<path d="m444.2,432.3l49.3,0l0,38.9l-49.3,0l0,-38.9"/>
+</g>
+<g fill="#ffffe5" stroke="#ffffe5" stroke-width="1">
+<path d="m493.6,432.3l30.7,0l0,38.9l-30.7,0l0,-38.9"/>
+</g>
+<g fill="#ffff71" stroke="#ffff71" stroke-width="1">
+<path d="m60.2,383l38.9,0l0,49.2l-38.9,0l0,-49.2"/>
+</g>
+<g fill="#ffce00" stroke="#ffce00" stroke-width="1">
+<path d="m99.1,383l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff4600" stroke="#ff4600" stroke-width="1">
+<path d="m148.4,383l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ff0028" stroke="#ff0028" stroke-width="1">
+<path d="m197.8,383l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff0069" stroke="#ff0069" stroke-width="1">
+<path d="m247,383l31.1,0l0,49.2l-31.1,0l0,-49.2"/>
+</g>
+<g fill="#ff006f" stroke="#ff006f" stroke-width="1">
+<path d="m278.2,383l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ff0035" stroke="#ff0035" stroke-width="1">
+<path d="m327.6,383l67.3,0l0,49.2l-67.3,0l0,-49.2"/>
+</g>
+<g fill="#ff2c00" stroke="#ff2c00" stroke-width="1">
+<path d="m394.9,383l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ffb400" stroke="#ffb400" stroke-width="1">
+<path d="m444.2,383l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ffff57" stroke="#ffff57" stroke-width="1">
+<path d="m493.6,383l30.7,0l0,49.2l-30.7,0l0,-49.2"/>
+</g>
+<g fill="#fffb00" stroke="#fffb00" stroke-width="1">
+<path d="m60.2,333.6l38.9,0l0,49.3l-38.9,0l0,-49.3"/>
+</g>
+<g fill="#ff4600" stroke="#ff4600" stroke-width="1">
+<path d="m99.1,333.6l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#ff0062" stroke="#ff0062" stroke-width="1">
+<path d="m148.4,333.6l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ff00ea" stroke="#ff00ea" stroke-width="1">
+<path d="m197.8,333.6l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#c639c6" stroke="#c639c6" stroke-width="1">
+<path d="m247,333.6l31.1,0l0,49.3l-31.1,0l0,-49.3"/>
+</g>
+<g fill="#b946b9" stroke="#b946b9" stroke-width="1">
+<path d="m278.2,333.6l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ff00fe" stroke="#ff00fe" stroke-width="1">
+<path d="m327.6,333.6l67.3,0l0,49.3l-67.3,0l0,-49.3"/>
+</g>
+<g fill="#ff007c" stroke="#ff007c" stroke-width="1">
+<path d="m394.9,333.6l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#ff2600" stroke="#ff2600" stroke-width="1">
+<path d="m444.2,333.6l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ffd400" stroke="#ffd400" stroke-width="1">
+<path d="m493.6,333.6l30.7,0l0,49.3l-30.7,0l0,-49.3"/>
+</g>
+<g fill="#ffa100" stroke="#ffa100" stroke-width="1">
+<path d="m60.2,284.4l38.9,0l0,49.2l-38.9,0l0,-49.2"/>
+</g>
+<g fill="#ff0028" stroke="#ff0028" stroke-width="1">
+<path d="m99.1,284.4l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff00ea" stroke="#ff00ea" stroke-width="1">
+<path d="m148.4,284.4l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#6b946b" stroke="#6b946b" stroke-width="1">
+<path d="m197.8,284.4l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#00f600" stroke="#00f600" stroke-width="1">
+<path d="m247,284.4l31.1,0l0,49.2l-31.1,0l0,-49.2"/>
+</g>
+<g fill="#00e900" stroke="#00e900" stroke-width="1">
+<path d="m278.2,284.4l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#52ad52" stroke="#52ad52" stroke-width="1">
+<path d="m327.6,284.4l67.3,0l0,49.2l-67.3,0l0,-49.2"/>
+</g>
+<g fill="#f30cf3" stroke="#f30cf3" stroke-width="1">
+<path d="m394.9,284.4l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff004f" stroke="#ff004f" stroke-width="1">
+<path d="m444.2,284.4l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ff7a00" stroke="#ff7a00" stroke-width="1">
+<path d="m493.6,284.4l30.7,0l0,49.2l-30.7,0l0,-49.2"/>
+</g>
+<g fill="#ff6d00" stroke="#ff6d00" stroke-width="1">
+<path d="m60.2,235.1l38.9,0l0,49.2l-38.9,0l0,-49.2"/>
+</g>
+<g fill="#ff0069" stroke="#ff0069" stroke-width="1">
+<path d="m99.1,235.1l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#c639c6" stroke="#c639c6" stroke-width="1">
+<path d="m148.4,235.1l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#00f600" stroke="#00f600" stroke-width="1">
+<path d="m197.8,235.1l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#003a00" stroke="#003a00" stroke-width="1">
+<path d="m247,235.1l31.1,0l0,49.2l-31.1,0l0,-49.2"/>
+</g>
+<g fill="#002000" stroke="#002000" stroke-width="1">
+<path d="m278.2,235.1l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#00cf00" stroke="#00cf00" stroke-width="1">
+<path d="m327.6,235.1l67.3,0l0,49.2l-67.3,0l0,-49.2"/>
+</g>
+<g fill="#9f609f" stroke="#9f609f" stroke-width="1">
+<path d="m394.9,235.1l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff0090" stroke="#ff0090" stroke-width="1">
+<path d="m444.2,235.1l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ff4600" stroke="#ff4600" stroke-width="1">
+<path d="m493.6,235.1l30.7,0l0,49.2l-30.7,0l0,-49.2"/>
+</g>
+<g fill="#ff6d00" stroke="#ff6d00" stroke-width="1">
+<path d="m60.2,185.7l38.9,0l0,49.3l-38.9,0l0,-49.3"/>
+</g>
+<g fill="#ff006f" stroke="#ff006f" stroke-width="1">
+<path d="m99.1,185.7l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#b946b9" stroke="#b946b9" stroke-width="1">
+<path d="m148.4,185.7l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#00e900" stroke="#00e900" stroke-width="1">
+<path d="m197.8,185.7l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#002000" stroke="#002000" stroke-width="1">
+<path d="m247,185.7l31.1,0l0,49.3l-31.1,0l0,-49.3"/>
+</g>
+<g fill="#000000" stroke-width="1">
+<path d="m278.2,185.7l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#00c200" stroke="#00c200" stroke-width="1">
+<path d="m327.6,185.7l67.3,0l0,49.3l-67.3,0l0,-49.3"/>
+</g>
+<g fill="#926d92" stroke="#926d92" stroke-width="1">
+<path d="m394.9,185.7l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#ff0096" stroke="#ff0096" stroke-width="1">
+<path d="m444.2,185.7l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ff4600" stroke="#ff4600" stroke-width="1">
+<path d="m493.6,185.7l30.7,0l0,49.3l-30.7,0l0,-49.3"/>
+</g>
+<g fill="#ff9400" stroke="#ff9400" stroke-width="1">
+<path d="m60.2,136.5l38.9,0l0,49.2l-38.9,0l0,-49.2"/>
+</g>
+<g fill="#ff0035" stroke="#ff0035" stroke-width="1">
+<path d="m99.1,136.5l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff00fe" stroke="#ff00fe" stroke-width="1">
+<path d="m148.4,136.5l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#52ad52" stroke="#52ad52" stroke-width="1">
+<path d="m197.8,136.5l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#00cf00" stroke="#00cf00" stroke-width="1">
+<path d="m247,136.5l31.1,0l0,49.2l-31.1,0l0,-49.2"/>
+</g>
+<g fill="#00c200" stroke="#00c200" stroke-width="1">
+<path d="m278.2,136.5l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#31ce31" stroke="#31ce31" stroke-width="1">
+<path d="m327.6,136.5l67.3,0l0,49.2l-67.3,0l0,-49.2"/>
+</g>
+<g fill="#e01fe0" stroke="#e01fe0" stroke-width="1">
+<path d="m394.9,136.5l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff005c" stroke="#ff005c" stroke-width="1">
+<path d="m444.2,136.5l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ff6d00" stroke="#ff6d00" stroke-width="1">
+<path d="m493.6,136.5l30.7,0l0,49.2l-30.7,0l0,-49.2"/>
+</g>
+<g fill="#ffe800" stroke="#ffe800" stroke-width="1">
+<path d="m60.2,87.2l38.9,0l0,49.2l-38.9,0l0,-49.2"/>
+</g>
+<g fill="#ff2c00" stroke="#ff2c00" stroke-width="1">
+<path d="m99.1,87.2l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff007c" stroke="#ff007c" stroke-width="1">
+<path d="m148.4,87.2l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#f30cf3" stroke="#f30cf3" stroke-width="1">
+<path d="m197.8,87.2l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#9f609f" stroke="#9f609f" stroke-width="1">
+<path d="m247,87.2l31.1,0l0,49.2l-31.1,0l0,-49.2"/>
+</g>
+<g fill="#926d92" stroke="#926d92" stroke-width="1">
+<path d="m278.2,87.2l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#e01fe0" stroke="#e01fe0" stroke-width="1">
+<path d="m327.6,87.2l67.3,0l0,49.2l-67.3,0l0,-49.2"/>
+</g>
+<g fill="#ff0096" stroke="#ff0096" stroke-width="1">
+<path d="m394.9,87.2l49.2,0l0,49.2l-49.2,0l0,-49.2"/>
+</g>
+<g fill="#ff0c00" stroke="#ff0c00" stroke-width="1">
+<path d="m444.2,87.2l49.3,0l0,49.2l-49.3,0l0,-49.2"/>
+</g>
+<g fill="#ffc700" stroke="#ffc700" stroke-width="1">
+<path d="m493.6,87.2l30.7,0l0,49.2l-30.7,0l0,-49.2"/>
+</g>
+<g fill="#ffff5d" stroke="#ffff5d" stroke-width="1">
+<path d="m60.2,37.8l38.9,0l0,49.3l-38.9,0l0,-49.3"/>
+</g>
+<g fill="#ffb400" stroke="#ffb400" stroke-width="1">
+<path d="m99.1,37.8l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#ff2600" stroke="#ff2600" stroke-width="1">
+<path d="m148.4,37.8l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ff004f" stroke="#ff004f" stroke-width="1">
+<path d="m197.8,37.8l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#ff0090" stroke="#ff0090" stroke-width="1">
+<path d="m247,37.8l31.1,0l0,49.3l-31.1,0l0,-49.3"/>
+</g>
+<g fill="#ff0096" stroke="#ff0096" stroke-width="1">
+<path d="m278.2,37.8l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ff005c" stroke="#ff005c" stroke-width="1">
+<path d="m327.6,37.8l67.3,0l0,49.3l-67.3,0l0,-49.3"/>
+</g>
+<g fill="#ff0c00" stroke="#ff0c00" stroke-width="1">
+<path d="m394.9,37.8l49.2,0l0,49.3l-49.2,0l0,-49.3"/>
+</g>
+<g fill="#ff9a00" stroke="#ff9a00" stroke-width="1">
+<path d="m444.2,37.8l49.3,0l0,49.3l-49.3,0l0,-49.3"/>
+</g>
+<g fill="#ffff3d" stroke="#ffff3d" stroke-width="1">
+<path d="m493.6,37.8l30.7,0l0,49.3l-30.7,0l0,-49.3"/>
+</g>
+<g fill="#ffffe5" stroke="#ffffe5" stroke-width="1">
+<path d="m60.2,7l38.9,0l0,30.7l-38.9,0l0,-30.7"/>
+</g>
+<g fill="#ffff57" stroke="#ffff57" stroke-width="1">
+<path d="m99.1,7l49.2,0l0,30.7l-49.2,0l0,-30.7"/>
+</g>
+<g fill="#ffd400" stroke="#ffd400" stroke-width="1">
+<path d="m148.4,7l49.3,0l0,30.7l-49.3,0l0,-30.7"/>
+</g>
+<g fill="#ff7a00" stroke="#ff7a00" stroke-width="1">
+<path d="m197.8,7l49.2,0l0,30.7l-49.2,0l0,-30.7"/>
+</g>
+<g fill="#ff4600" stroke="#ff4600" stroke-width="1">
+<path d="m247,7l31.1,0l0,30.7l-31.1,0l0,-30.7"/>
+<path d="m278.2,7l49.3,0l0,30.7l-49.3,0l0,-30.7"/>
+</g>
+<g fill="#ff6d00" stroke="#ff6d00" stroke-width="1">
+<path d="m327.6,7l67.3,0l0,30.7l-67.3,0l0,-30.7"/>
+</g>
+<g fill="#ffc700" stroke="#ffc700" stroke-width="1">
+<path d="m394.9,7l49.2,0l0,30.7l-49.2,0l0,-30.7"/>
+</g>
+<g fill="#ffff3d" stroke="#ffff3d" stroke-width="1">
+<path d="m444.2,7l49.3,0l0,30.7l-49.3,0l0,-30.7"/>
+</g>
+<g fill="#ffffcb" stroke="#ffffcb" stroke-width="1">
+<path d="m493.6,7l30.7,0l0,30.7l-30.7,0l0,-30.7"/>
+</g>
+<g fill="none" stroke-width="1.2">
+<polyline fill="none" points="271.6,297 234.4,259.8 229.6,210.4 270.1,161.1 271.6,159.2 284.8,154.8 309.3,161.1 370.3,199.1 376.6,210.4 372.2,259.8 370.3,261.2 284.8,301.8 271.6,297"/>
+<polyline fill="none" points="222.4,323.2 208.2,309 182.4,259.8 178.3,210.4 202.1,161.1 222.4,129.7 267,111.9 271.6,108.1 284.8,104.1 324.4,111.9 370.3,123.5 407.9,161.1 419.5,191 427.3,210.4 423.3,259.8 419.5,264.4 401.7,309 370.3,329.3 284.8,353.1 271.6,349 222.4,323.2"/>
+<polyline fill="none" points="222.4,380.8 187.3,358.3 173.1,344.1 150.6,309 131.4,259.8 129.1,210.4 146.6,161.1 173.1,112.8 174.8,111.9 222.4,72.1 262.4,62.5 271.6,57.1 284.8,55.3 332,62.5 370.3,69.1 419.5,102.2 429.2,111.9 462.3,161.1 468.9,186.6 476.1,210.4 474.3,259.8 468.9,269 459.3,309 419.5,356.6 418.6,358.3 370.3,384.7 284.8,402.3 271.6,400 222.4,380.8"/>
+<polyline fill="none" points="518.2,270.7 511.6,309 486.4,358.3 468.9,371 438.7,407.7 419.5,415.7 370.3,437.2 284.8,449.4 271.6,449.2 222.4,433.8 173.1,410.6 169.2,407.7 123.7,362.2 120.8,358.3 97.6,309 82.2,259.8 82,210.4 94.2,161.1 115.7,111.9 123.7,92.7 160.4,62.5 173.1,45 222.4,19.8 260.7,13.2"/>
+<polyline fill="none" points="518.2,186.6 514,161.1 492.8,111.9 468.9,81.8 449.6,62.5 419.5,38.6 370.3,17.4 332,13.2"/>
+<polyline fill="none" points="157.7,456.9 123.7,430.9 100.5,407.7 74.5,373.7"/>
+<polyline fill="none" points="451.8,456.9 468.9,437.8 508.1,407.7 518.2,386.3"/>
+<polyline fill="none" points="74.5,79.6 93.6,62.5 123.7,23.3 145.1,13.2"/>
+<polyline fill="none" points="518.2,68.2 514.2,62.5 468.9,17.2 463.2,13.2"/>
+</g>
+</g>
+<g clip-path="url(#c0)">
+<g fill="none" stroke-linecap="butt" stroke-width="0.6">
+<path d="M60.2,471.2l0,-464.1"/>
+<path d="M60.2,471.2l3.7,0M60.2,463.6l3.7,0M60.2,412.4l3.7,0M60.2,386.3l3.7,0M60.2,367.8l3.7,0M60.2,353.5l3.7,0M60.2,341.8l3.7,0M60.2,331.9l3.7,0M60.2,323.3l3.7,0M60.2,315.7l3.7,0M60.2,264.4l3.7,0M60.2,238.4l3.7,0M60.2,219.9l3.7,0M60.2,205.6l3.7,0M60.2,193.9l3.7,0M60.2,184l3.7,0M60.2,175.4l3.7,0M60.2,167.8l3.7,0M60.2,116.5l3.7,0M60.2,90.5l3.7,0M60.2,72l3.7,0M60.2,57.7l3.7,0M60.2,46l3.7,0M60.2,36.1l3.7,0M60.2,27.5l3.7,0M60.2,19.9l3.7,0"/>
+<path d="M60.2,456.9l7.5,0M60.2,309l7.5,0M60.2,161.1l7.5,0M60.2,13.2l7.5,0"/>
+</g>
+<g fill="none" stroke-width="1">
+<g transform="matrix(0 -1 1 0 12.9 291.6)">
+<text x="0" y="0" font-size="14pt" fill="#000000">Y coordinate</text>
+</g>
+<text x="47.9" y="465.6" font-size="14pt" fill="#000000">1</text>
+<text x="39.2" y="317.7" font-size="14pt" fill="#000000">10</text>
+<text x="30.4" y="169.8" font-size="14pt" fill="#000000">100</text>
+<text x="21.7" y="21.9" font-size="14pt" fill="#000000">1000</text>
+</g>
+<g fill="none" stroke-linecap="butt" stroke-width="0.6">
+<path d="M524.4,471.2l0,-464.1"/>
+<path d="M524.4,471.2l-3.7,0M524.4,463.6l-3.7,0M524.4,412.4l-3.7,0M524.4,386.3l-3.7,0M524.4,367.8l-3.7,0M524.4,353.5l-3.7,0M524.4,341.8l-3.7,0M524.4,331.9l-3.7,0M524.4,323.3l-3.7,0M524.4,315.7l-3.7,0M524.4,264.4l-3.7,0M524.4,238.4l-3.7,0M524.4,219.9l-3.7,0M524.4,205.6l-3.7,0M524.4,193.9l-3.7,0M524.4,184l-3.7,0M524.4,175.4l-3.7,0M524.4,167.8l-3.7,0M524.4,116.5l-3.7,0M524.4,90.5l-3.7,0M524.4,72l-3.7,0M524.4,57.7l-3.7,0M524.4,46l-3.7,0M524.4,36.1l-3.7,0M524.4,27.5l-3.7,0M524.4,19.9l-3.7,0"/>
+<path d="M524.4,456.9l-7.5,0M524.4,309l-7.5,0M524.4,161.1l-7.5,0M524.4,13.2l-7.5,0"/>
+<path d="M60.2,471.2l464.1,0"/>
+<path d="M60.2,471.2l0,-3.7M67.8,471.2l0,-3.7M119,471.2l0,-3.7M145.1,471.2l0,-3.7M163.6,471.2l0,-3.7M177.9,471.2l0,-3.7M189.6,471.2l0,-3.7M199.5,471.2l0,-3.7M208.1,471.2l0,-3.7M215.7,471.2l0,-3.7M267,471.2l0,-3.7M293,471.2l0,-3.7M311.5,471.2l0,-3.7M325.8,471.2l0,-3.7M337.5,471.2l0,-3.7M347.4,471.2l0,-3.7M356,471.2l0,-3.7M363.6,471.2l0,-3.7M414.9,471.2l0,-3.7M440.9,471.2l0,-3.7M459.4,471.2l0,-3.7M473.7,471.2l0,-3.7M485.4,471.2l0,-3.7M495.3,471.2l0,-3.7M503.9,471.2l0,-3.7M511.5,471.2l0,-3.7"/>
+<path d="M74.5,471.2l0,-7.5M222.4,471.2l0,-7.5M370.3,471.2l0,-7.5M518.2,471.2l0,-7.5"/>
+</g>
+<g fill="none" stroke-width="1">
+<text x="239.8" y="485.2" font-size="14pt" fill="#000000">X coordinate</text>
+<text x="70.1" y="476.5" font-size="14pt" fill="#000000">1</text>
+<text x="213.7" y="476.5" font-size="14pt" fill="#000000">10</text>
+<text x="357.2" y="476.5" font-size="14pt" fill="#000000">100</text>
+<text x="496.4" y="476.5" font-size="14pt" fill="#000000">1000</text>
+</g>
+<g fill="none" stroke-linecap="butt" stroke-width="0.6">
+<path d="M60.2,7l464.1,0"/>
+<path d="M60.2,7l0,3.7M67.8,7l0,3.7M119,7l0,3.7M145.1,7l0,3.7M163.6,7l0,3.7M177.9,7l0,3.7M189.6,7l0,3.7M199.5,7l0,3.7M208.1,7l0,3.7M215.7,7l0,3.7M267,7l0,3.7M293,7l0,3.7M311.5,7l0,3.7M325.8,7l0,3.7M337.5,7l0,3.7M347.4,7l0,3.7M356,7l0,3.7M363.6,7l0,3.7M414.9,7l0,3.7M440.9,7l0,3.7M459.4,7l0,3.7M473.7,7l0,3.7M485.4,7l0,3.7M495.3,7l0,3.7M503.9,7l0,3.7M511.5,7l0,3.7"/>
+<path d="M74.5,7l0,7.5M222.4,7l0,7.5M370.3,7l0,7.5M518.2,7l0,7.5"/>
+</g>
+</g>
+</g>
+</svg>

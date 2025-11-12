@@ -1,0 +1,159 @@
+# Implementation of the old classic game "Nibbles" in gnuplot
+# This demo (ab)uses the following features of gnuplot:
+# * the "bind" command to allow user input
+# * arrays and function blocks
+# * flow control keywords (do, while, if)
+# * objects (rectangles and circles)
+# * complex numbers (to store coordinates)
+
+# set up plot area
+reset
+unset tics
+unset key
+set title "N I B B L E S" font ":Bold,20"
+
+foo = rand(time(1))
+undefine foo
+
+xmin = ymin = 0
+xmax = 40
+ymax = 30
+
+set xr [xmin:xmax]
+set yr [ymin:ymax]
+
+# initialize parameters and variables
+len = 8
+
+pause = 0.002
+wait = 30
+
+iter = 0
+
+score = 0
+
+locked = 0
+
+alive = 1
+
+# initialize directions and assign keybindings
+# once the direction was changed by the user,
+# further changes are not allowed until the change is effected
+# to avoid crashing into ourselves
+right = { 1,  0}
+left  = {-1,  0}
+up    = { 0,  1}
+down  = { 0, -1}
+
+bind "Right"  "dir = locked || (dir == left)  ? dir : right; locked = 1"
+bind "Left"   "dir = locked || (dir == right) ? dir : left;  locked = 1"
+bind "Up"     "dir = locked || (dir == down)  ? dir : up;    locked = 1"
+bind "Down"   "dir = locked || (dir == up)    ? dir : down;  locked = 1"
+
+bind "Escape"      "alive = 0"
+bind "KP_Add"      "wait = wait > 1 ? wait - 1 : 1"
+bind "KP_Subtract" "wait = wait + 1"
+
+# initialize the snake
+dir = left
+head = xmax/2 + ymax/2 * {0,1}
+collision(p) = (real(p)<xmin) || (real(p)>=xmax) || \
+               (imag(p)<ymin) || (imag(p)>=ymax) || \
+               ((sum[i = 1:len] ((coll[i] == p) ? 1 : 0) > 0))
+
+# maximum length of the snake is half the number of cells
+maxcoll = (xmax - xmin + 1) * (ymax - ymin + 1) / 2
+array coll[maxcoll]
+do for [i=1:maxcoll] {
+	coll[i] = 0
+}
+do for [i=0:len-1] {
+	local ix = int(real(head) - real(dir)*i)
+	local iy = int(imag(head) - imag(dir)*i)
+	set obj 1000+(len-i-1) rect from ix, iy rto 1, 1 fc rgb "black" fs solid
+	coll[i + 1] = head - dir*i
+}
+
+# initialize the "cherry"
+function $set_cherry() << EOF
+	cherry = int(rand(0)*xmax) + int(rand(0)*ymax) * I
+	while (collision(cherry)) {
+		cherry = int(rand(0)*xmax) + int(rand(0)*ymax) * I
+	}
+	set obj 2000 circle at real(cherry)+0.5, imag(cherry)+0.5 radius 0.4 fc rgb 'red' fs solid
+EOF
+
+evaluate $set_cherry()
+
+# print score
+function $set_score() << EOF
+	set label 2 "SCORE: ".score at 1, 1 font ",20"
+EOF
+
+evaluate $set_score()
+
+# and finally show the initial state
+plot -1
+
+# now the main loop
+while (alive) {
+	# adjustable wait loop
+	do for [i=1:wait] {
+		pause pause
+	}
+
+	# update the head pointer
+	head = head + dir
+
+	local ix = int(real(head))
+	local iy = int(imag(head))
+
+	# if the new position of the snake's head collides
+	# with its body or the walls, exit
+	if (collision(head)) {
+		set label 1 "G A M E   O V E R !" at xmax/2, ymax/2 font ":Bold,20" center
+		alive = 0
+	}
+
+	# if the snake got the cherry, we have to reposition the cherry,
+	# arrange the snake's body to grow,
+	# update the score counter
+	# and decrease the wait time (thus making the game faster)
+	if (head == cherry) {
+		evaluate $set_cherry()
+
+		score = score + 1
+		evaluate $set_score()
+
+		coll[len + 1] = 0
+		len = len + 1
+		wait = (sqrt(5*score)-int(sqrt(5*score)) == 0) ? wait - 1 : wait
+		wait = wait > 1 ? wait : 1
+	}
+
+	# advance the snake
+	# note how we redefine the rectangle that corresponds to the tail
+	if (alive) {
+		set obj 1000+iter rect from ix, iy rto 1, 1 fc rgb "black" fs solid
+		coll[iter + 1] = head
+	}
+
+	iter = (iter >= len - 1) ? 0 : iter + 1
+
+	# now that the snake is updated, allow change of direction again
+	locked = 0
+
+	# and finally show the new state
+	replot
+}
+
+undefine xmin xmax ymin ymax
+undefine len pause wait iter score locked alive
+undefine left right up down
+undefine dir head maxcoll coll cherry
+
+undefine $set_cherry $set_score
+
+reset bind
+reset
+

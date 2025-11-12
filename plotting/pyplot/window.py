@@ -115,6 +115,48 @@ def _deref_qpointer(pointer: Any) -> Optional[QtCore.QObject]:
     return pointer if isinstance(pointer, QtCore.QObject) else None
 
 
+class _MessageLogHandler(logging.Handler):
+    """Logging handler that forwards PyPlot messages into the workspace log view."""
+
+    def __init__(self, window: "PyPlotWindow") -> None:
+        super().__init__()
+        self._window_ref = weakref.ref(window)
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record: logging.LogRecord) -> None:
+        window = self._window_ref()
+        if window is None:
+            return
+        name = getattr(record, "name", "")
+        if not name.startswith("PyPlot"):
+            return
+        level = "error" if record.levelno >= logging.ERROR else "info"
+        message = self.format(record)
+        try:
+            window._append_log(message, level=level)
+        except Exception:
+            pass
+
+
+class _LogViewWatcher(QtCore.QObject):
+    """Event filter that clears the log alert when the message log gains focus."""
+
+    def __init__(self, callback: Callable[[], None]) -> None:
+        super().__init__()
+        self._callback = callback
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if event.type() in (
+            QtCore.QEvent.Type.Show,
+            QtCore.QEvent.Type.FocusIn,
+        ):
+            try:
+                self._callback()
+            except Exception:
+                pass
+        return False
+
+
 TOOLBAR_SECTION_PROPERTY = "mw_toolbar_section_title"
 
 
@@ -216,6 +258,8 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         *,
         side: Literal["left", "right"],
         parent: QtWidgets.QWidget | None = None,
+        settings: QtCore.QSettings | None = None,
+        pinned_setting_key: str | None = None,
     ) -> None:
         super().__init__(parent)
         self._docks = list(docks)
@@ -266,8 +310,16 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._collapse_timer.setSingleShot(True)
         self._collapse_timer.timeout.connect(self._collapse_if_outside)
 
+        self._settings = settings
+        self._pinned_setting_key = pinned_setting_key
+        self._cached_pinned_name: str | None = self._load_cached_pinned_name()
+        self._dock_index_map: Dict[QtWidgets.QDockWidget, int] = {}
+        self._default_tab_colors: Dict[int, QtGui.QColor] = {}
+
         for idx, dock in enumerate(self._docks):
             tab_index = self._tab_bar.addTab(dock.windowTitle())
+            self._dock_index_map[dock] = tab_index
+            self._default_tab_colors[tab_index] = self._tab_bar.tabTextColor(tab_index)
             dock.windowTitleChanged.connect(
                 lambda title, ti=tab_index: self._tab_bar.setTabText(ti, title)
             )
@@ -278,7 +330,19 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 lambda floating, ti=tab_index, d=dock: self._handle_top_level_change(ti, floating, d)
             )
             dock.installEventFilter(self)
-            self._dock_widths[dock] = max(dock.sizeHint().width(), 220)
+            base_width = dock.sizeHint().width()
+            stored_width = 0
+            main_window = self._main_window()
+            if isinstance(main_window, QtWidgets.QMainWindow) and hasattr(
+                main_window, "_primary_dock_widths"
+            ):
+                try:
+                    stored_width = main_window._primary_dock_widths.get(  # type: ignore[attr-defined]
+                        dock, 0
+                    )
+                except Exception:
+                    stored_width = 0
+            self._dock_widths[dock] = max(base_width, stored_width, 220)
             dock.hide()
 
         self._tab_bar.currentChanged.connect(self._activate_index)
@@ -296,10 +360,10 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                     index = self._tab_index_from_event(event)
                     if index >= 0:
                         if self._pinned_index == index:
-                            self._pinned_index = None
+                            self._update_pinned_index(None)
                             self._collapse_all()
                         else:
-                            self._pinned_index = index
+                            self._update_pinned_index(index)
                             self._activate_index(index)
                             self._tab_bar.setCurrentIndex(index)
                         return True
@@ -472,7 +536,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if not valid:
             return
         # Keep the first dock pinned so it stays visible until toggled off.
-        self._pinned_index = valid[0]
+        self._update_pinned_index(valid[0], persist=False)
         keep: set[int] = set(valid)
         for index in valid:
             dock = self._docks[index]
@@ -484,6 +548,55 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                     self._apply_dock_width(dock, width)
         self._expanded_index = valid[0]
         self._collapse_all(keep=keep)
+
+    def _load_cached_pinned_name(self) -> str | None:
+        if not isinstance(self._settings, QtCore.QSettings) or not self._pinned_setting_key:
+            return None
+        stored = self._settings.value(self._pinned_setting_key, "")
+        if stored is None:
+            return None
+        text = str(stored).strip()
+        return text or None
+
+    def _update_pinned_index(self, index: int | None, *, persist: bool = True) -> None:
+        if self._pinned_index == index:
+            return
+        self._pinned_index = index
+        if persist:
+            self._save_pinned_state()
+
+    def _save_pinned_state(self) -> None:
+        if not isinstance(self._settings, QtCore.QSettings) or not self._pinned_setting_key:
+            return
+        name: str | None = None
+        if self._pinned_index is not None and 0 <= self._pinned_index < len(self._docks):
+            candidate = self._docks[self._pinned_index]
+            obj_name = candidate.objectName()
+            if isinstance(obj_name, str) and obj_name.strip():
+                name = obj_name.strip()
+        try:
+            if name:
+                self._settings.setValue(self._pinned_setting_key, name)
+            else:
+                self._settings.remove(self._pinned_setting_key)
+        except Exception:
+            pass
+
+    def apply_cached_pinned_state(self) -> None:
+        cached = self._cached_pinned_name
+        if not cached:
+            return
+        self._cached_pinned_name = None
+        for idx, dock in enumerate(self._docks):
+            if dock.objectName() != cached:
+                continue
+            self._update_pinned_index(idx, persist=False)
+            try:
+                self._tab_bar.setCurrentIndex(idx)
+            except Exception:
+                pass
+            self._activate_index(idx)
+            break
 
     def _schedule_collapse(self) -> None:
         if self._collapse_timer.isActive() or self._floating_indices:
@@ -567,6 +680,19 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
     def mark_tabbed(self, dock: QtWidgets.QDockWidget) -> None:
         if isinstance(dock, QtWidgets.QDockWidget):
             self._tabbed_docks.add(dock)
+
+    def set_tab_alert(self, dock: QtWidgets.QDockWidget | None, enabled: bool) -> None:
+        if dock is None:
+            return
+        index = self._dock_index_map.get(dock)
+        if index is None:
+            return
+        if enabled:
+            self._tab_bar.setTabTextColor(index, QtGui.QColor("#b3261e"))
+            return
+        default = self._default_tab_colors.get(index)
+        if default is not None:
+            self._tab_bar.setTabTextColor(index, default)
 
     def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
         if dock.isFloating() or width <= 0:
@@ -1741,6 +1867,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._worksheets: Dict[Hashable, WorksheetData] = {}
         self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
         self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._log_alert_enabled: bool = False
+        self._left_dock_switcher_widget: _DockSwitcherWidget | None = None
+        self._log_view_watcher: _LogViewWatcher | None = None
         self._last_import_sources: List[str] = []
         self._restoring_imports = False
         self._data_menu: QtWidgets.QMenu | None = None
@@ -1768,6 +1897,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             "projectExplorerDock": "project_dock_visible",
             "objectManagerDock": "object_dock_visible",
         }
+        self._primary_dock_width_keys = {
+            "projectExplorerDock": "project_dock_width",
+            "objectManagerDock": "object_dock_width",
+            "messageLogDock": "log_dock_width",
+        }
+        self._dock_switcher_pinned_keys = {
+            "left": "left_dock_pinned",
+            "right": "right_dock_pinned",
+        }
+        self._message_log_handler = _MessageLogHandler(self)
+        logging.getLogger().addHandler(self._message_log_handler)
         self._project_dirty = False
         self._session_has_imports = False
         self._undo_action: QtGui.QAction | None = None
@@ -2687,6 +2827,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, log_dock)
         log_dock.hide()
         self.log_dock = log_dock
+        log_dock.visibilityChanged.connect(
+            lambda visible: self._clear_log_alert() if visible else None
+        )
+        self._log_view_watcher = _LogViewWatcher(self._clear_log_alert)
+        self.log_view.installEventFilter(self._log_view_watcher)
 
         self.object_tree = QtWidgets.QTreeWidget()
         self.object_tree.setHeaderLabels(["Object Manager"])
@@ -3649,7 +3794,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._script_toolbar = toolbar
 
-        load_action = toolbar.addAction("Load data")
+        load_action = toolbar.addAction("Generate workbooks")
         load_action.setEnabled(False)
         load_action.triggered.connect(self._load_data)
         self.load_data_button = load_action
@@ -5395,17 +5540,43 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 pass
 
-        logger = logging.getLogger("PyPlot")
-        log_level = logging.ERROR if level == "error" else logging.INFO
-        logger.log(log_level, message)
-
         dock = getattr(self, "log_dock", None)
         view_visible = isinstance(view, QtWidgets.QPlainTextEdit) and view.isVisible()
         dock_visible = isinstance(dock, QtWidgets.QDockWidget) and dock.isVisible()
-        if level == "error" and not (view_visible and dock_visible):
+
+        lowered = message.lower()
+        effective_level = level
+        if "skip" in lowered and effective_level != "error":
+            effective_level = "error"
+
+        if effective_level == "error" and not (view_visible and dock_visible):
             self._log_has_unread_errors = True
-        elif level != "error" and view_visible and dock_visible:
+        elif view_visible and dock_visible:
             self._log_has_unread_errors = False
+
+        self._set_log_alert(self._log_has_unread_errors)
+
+    def _set_log_alert(self, enabled: bool) -> None:
+        if self._log_alert_enabled == enabled:
+            return
+        self._log_alert_enabled = enabled
+        dock = getattr(self, "log_dock", None)
+        if isinstance(dock, QtWidgets.QDockWidget):
+            try:
+                dock.setStyleSheet("color: #b3261e; font-weight: 600;" if enabled else "")
+            except Exception:
+                pass
+        switcher = getattr(self, "_left_dock_switcher_widget", None)
+        if isinstance(switcher, _DockSwitcherWidget):
+            switcher.set_tab_alert(dock, enabled)
+
+    def _clear_log_alert(self) -> None:
+        if not getattr(self, "log_dock", None):
+            return
+        if not self._log_has_unread_errors and not self._log_alert_enabled:
+            return
+        self._log_has_unread_errors = False
+        self._set_log_alert(False)
 
     def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:
         if self._data_tree_root is None:
@@ -5598,6 +5769,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not self._confirm_close_with_unsaved_data():
             event.ignore()
             return
+        handler = getattr(self, "_message_log_handler", None)
+        if isinstance(handler, logging.Handler):
+            try:
+                logging.getLogger().removeHandler(handler)
+            except Exception:
+                pass
+        self._store_side_panel_state()
         super().closeEvent(event)
 
     def _confirm_close_with_unsaved_data(self) -> bool:
@@ -5668,7 +5846,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         panel.setFeatures(QtWidgets.QDockWidget.DockWidgetFeature.NoDockWidgetFeatures)
         panel.setTitleBarWidget(QtWidgets.QWidget(panel))
 
-        switcher = _DockSwitcherWidget(docks, side=side, parent=panel)
+        pinned_suffix = self._dock_switcher_pinned_keys.get(side)
+        pinned_key = self._project_settings_key(pinned_suffix) if pinned_suffix else None
+        switcher = _DockSwitcherWidget(
+            docks,
+            side=side,
+            parent=panel,
+            settings=getattr(self, "settings", None),
+            pinned_setting_key=pinned_key,
+        )
         panel.setWidget(switcher)
         panel.setMinimumWidth(switcher.sizeHint().width())
         panel.setMaximumWidth(switcher.sizeHint().width())
@@ -5678,6 +5864,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 switcher.set_initial_visible(initial_visible)
             except Exception:
                 pass
+
+        try:
+            switcher.apply_cached_pinned_state()
+        except Exception:
+            pass
 
         area = (
             QtCore.Qt.DockWidgetArea.LeftDockWidgetArea
@@ -5690,35 +5881,69 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self.splitDockWidget(panel, reference, QtCore.Qt.Orientation.Horizontal)
         except Exception:
             pass
+        if side == "left":
+            self._left_dock_switcher_widget = switcher
         return panel
 
     def _apply_initial_dock_sizes(self) -> None:
-        project = getattr(self, "project_dock", None)
-        if isinstance(project, QtWidgets.QDockWidget):
-            width = max(project.sizeHint().width(), 320)
+        self._apply_initial_primary_dock_size(getattr(self, "project_dock", None), 320)
+        self._apply_initial_primary_dock_size(getattr(self, "object_dock", None), 320)
+        log_dock = getattr(self, "log_dock", None)
+        if isinstance(log_dock, QtWidgets.QDockWidget):
+            width = self._load_primary_dock_width(log_dock)
+            if width is None or width <= 0:
+                width = max(log_dock.sizeHint().width(), 220)
+            self._primary_dock_widths[log_dock] = width
+
+    def _apply_initial_primary_dock_size(
+        self, dock: QtWidgets.QDockWidget | None, default_width: int
+    ) -> None:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return
+        width = self._load_primary_dock_width(dock)
+        if width is None or width <= 0:
+            width = max(dock.sizeHint().width(), default_width)
+        self._primary_dock_widths[dock] = width
+        try:
+            self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
+        except Exception:
             try:
-                self.resizeDocks([project], [width], QtCore.Qt.Orientation.Horizontal)
+                dock.resize(width, dock.height())
             except Exception:
-                try:
-                    project.resize(width, project.height())
-                except Exception:
-                    pass
-        obj_dock = getattr(self, "object_dock", None)
-        if isinstance(obj_dock, QtWidgets.QDockWidget):
-            width = max(obj_dock.sizeHint().width(), 320)
-            try:
-                self.resizeDocks([obj_dock], [width], QtCore.Qt.Orientation.Horizontal)
-            except Exception:
-                try:
-                    obj_dock.resize(width, obj_dock.height())
-                except Exception:
-                    pass
+                pass
+
+    def _load_primary_dock_width(self, dock: QtWidgets.QDockWidget | None) -> int | None:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return None
+        key = self._primary_dock_width_key(dock)
+        if key is None or not isinstance(self.settings, QtCore.QSettings):
+            return None
+        stored = self.settings.value(key, "")
+        if stored is None:
+            return None
+        try:
+            width = int(float(str(stored).strip()))
+        except Exception:
+            return None
+        if width <= 0:
+            return None
+        self._primary_dock_widths[dock] = width
+        return width
 
     def _primary_dock_visibility_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
         if not isinstance(dock, QtWidgets.QDockWidget):
             return None
         name = dock.objectName()
         suffix = self._primary_dock_visibility_keys.get(name)
+        if not suffix:
+            return None
+        return self._project_settings_key(suffix)
+
+    def _primary_dock_width_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return None
+        name = dock.objectName()
+        suffix = self._primary_dock_width_keys.get(name)
         if not suffix:
             return None
         return self._project_settings_key(suffix)
@@ -5742,6 +5967,37 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         try:
             self.settings.setValue(key, "true" if visible else "false")
+        except Exception:
+            pass
+
+    def _remember_primary_dock_width(self, dock: QtWidgets.QDockWidget | None) -> None:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return
+        key = self._primary_dock_width_key(dock)
+        if key is None or not isinstance(self.settings, QtCore.QSettings):
+            return
+        width = dock.width()
+        if width <= 0:
+            width = self._primary_dock_widths.get(dock, 0)
+        if width <= 0:
+            return
+        self._primary_dock_widths[dock] = width
+        try:
+            self.settings.setValue(key, width)
+        except Exception:
+            pass
+
+    def _store_side_panel_state(self) -> None:
+        if not isinstance(self.settings, QtCore.QSettings):
+            return
+        for dock in (
+            getattr(self, "project_dock", None),
+            getattr(self, "log_dock", None),
+            getattr(self, "object_dock", None),
+        ):
+            self._remember_primary_dock_width(dock)
+        try:
+            self.settings.sync()
         except Exception:
             pass
 
