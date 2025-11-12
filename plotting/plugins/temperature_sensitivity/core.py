@@ -1070,26 +1070,26 @@ def plot_variable_origin(
             label = None
         if label is None:
             continue
+        try:
+            label.name = f'py_xtick{idx}'
+            label.set_int('attach', 0)
             try:
-                label.name = f'py_xtick{idx}'
-                label.set_int('attach', 0)
-                try:
-                    label.set_int('horzalign', 1)
-                except Exception:
-                    pass
-                try:
-                    label.set_int('vertalign', 0)
-                except Exception:
-                    pass
-                try:
-                    label.set_int('fontweight', 700)
-                except Exception:
-                    pass
-                try:
-                    label.set_int('fontheight', max(TICK_SIZE, 18))
-                except Exception:
-                    pass
+                label.set_int('horzalign', 1)
             except Exception:
+                pass
+            try:
+                label.set_int('vertalign', 0)
+            except Exception:
+                pass
+            try:
+                label.set_int('fontweight', 700)
+            except Exception:
+                pass
+            try:
+                label.set_int('fontheight', max(TICK_SIZE, 18))
+            except Exception:
+                pass
+        except Exception:
             pass
         manual_labels_added = True
     if manual_labels_added and y_axis is not None:

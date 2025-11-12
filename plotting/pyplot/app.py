@@ -402,6 +402,10 @@ class PyPlotWorkbench(PyPlotWindow):
                 title,
                 "Import data through the toolbar before loading it in this plugin.",
             )
+            try:
+                self._prompt_import_data()
+            except Exception:
+                pass
         return []
 
     def _load_data(self) -> None:

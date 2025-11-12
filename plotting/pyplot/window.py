@@ -5952,6 +5952,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         key = self._primary_dock_visibility_key(dock)
         if key is None:
             return True
+        name = dock.objectName() if isinstance(dock, QtWidgets.QDockWidget) else ""
+        if name in {"projectExplorerDock", "objectManagerDock"}:
+            return True
         value = self.settings.value(key, "")
         if isinstance(value, str):
             return value.lower() not in {"0", "false", "no"}

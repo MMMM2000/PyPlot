@@ -1,4 +1,9 @@
 # Changelog
+## 2025-11-12 12:00 UTC
+
+- Made the Project Explorer and Object Manager docks show (and stay pinned) whenever PyPlot or any plugin starts, and now the Generate workbooks action opens the import menu/keeps the label so the workflow leads straight into file selection whenever no imports exist.
+- Expanded the temperature-sensitivity tab canvas so the Matplotlib plot fills the tab, surfaced the strain_3d helper module for the pytest scaffold, and documented what Veusz and Gnuplot teach us about reusable plotting patterns and dataset plumbing.
+
 ## 2025-11-12 10:34 UTC
 
 - Refined the Temperature Sensitivity Origin export so speed mode is turned off, the title is bold, 22 pt, and centered, the numeric X ticks are hidden in favor of bold 18 pt “2/1”, “2/2”, … labels placed just above the axis, the legend text adopts the plot colors automatically, and each delta annotation is re-added only once higher up so it never stacks on the raw points.
