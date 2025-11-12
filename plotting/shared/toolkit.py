@@ -397,6 +397,7 @@ def create_file_widget(
     *,
     key: str | None = None,
     on_outlier_toggle: Callable[[bool, list[str]], bool | None] | None = None,
+    on_change: Callable[[list[str]], None] | None = None,
 ) -> tuple[list[str], QtWidgets.QWidget]:
     """Return a widget managing a list of input files and the backing list."""
 
@@ -419,6 +420,13 @@ def create_file_widget(
     dev_opts = developer_options()
     storage_key = f"{key}_remembered_files" if key else None
 
+    def _notify_change() -> None:
+        if callable(on_change):
+            try:
+                on_change(list(files))
+            except Exception:
+                pass
+
     def _refresh_items() -> None:
         file_list.clear()
         for path in files:
@@ -427,6 +435,7 @@ def create_file_widget(
                 item.setForeground(QtGui.QColor("#c0392b"))
                 item.setToolTip("File could not be found on disk")
             file_list.addItem(item)
+        _notify_change()
 
     def _store_files() -> None:
         if storage_key is None:
@@ -777,29 +786,6 @@ def install_standard_menu(
             files_action.setChecked(file_widget.isVisible())
             files_action.toggled.connect(file_widget.setVisible)
 
-    if console is not None:
-        view_menu.addSeparator()
-        console_action = view_menu.addAction("Show &Console")
-        if console_action is not None:
-            console_action.setCheckable(True)
-            console_action.setChecked(console.isVisible())
-
-            def _set_console_visible(checked: bool) -> None:
-                console.setVisible(checked)
-
-            console_action.toggled.connect(_set_console_visible)
-
-            def _sync_console() -> None:
-                state = console.isVisible()
-                if console_action.isChecked() != state:
-                    console_action.blockSignals(True)
-                    console_action.setChecked(state)
-                    console_action.blockSignals(False)
-
-            sync_filter = _VisibilitySync(console_action, _sync_console)
-            console.installEventFilter(sync_filter)
-            setattr(console, "_mw_visibility_sync", sync_filter)
-
     if splitter is not None and default_split_sizes:
         view_menu.addSeparator()
 
@@ -840,31 +826,6 @@ def install_standard_menu(
         help_menu.setEnabled(False)
 
     return menu_bar
-
-
-class _VisibilitySync(QtCore.QObject):
-    """Synchronise a checkable action with a widget's visibility."""
-
-    def __init__(self, action: QtGui.QAction, sync: Callable[[], None]):
-        super().__init__(action.parent())
-        self._action = action
-        self._sync = sync
-
-    def eventFilter(
-        self,
-        a0: QtCore.QObject | None,
-        a1: QtCore.QEvent | None,
-    ) -> bool:  # noqa: D401
-        if a1 is not None and a1.type() in {
-            QtCore.QEvent.Type.Show,
-            QtCore.QEvent.Type.Hide,
-            QtCore.QEvent.Type.ShowToParent,
-            QtCore.QEvent.Type.HideToParent,
-        }:
-            self._sync()
-        return False
-
-
 class _ThemeManager(QtCore.QObject):
     """Coordinate theme changes across every window."""
 

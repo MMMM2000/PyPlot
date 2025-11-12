@@ -17,6 +17,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
     """PyPlot plugin wrapper around :class:`VSMPlotter`."""
 
     _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
+    requires_imported_data = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -242,8 +243,6 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         self._ensure_initialized()
         host = self.host
         has_paths = bool(host._selected_paths())
-        if hasattr(host, "load_data_button"):
-            host.load_data_button.setEnabled(True)
         if self._summary_label is not None and not has_paths:
             self._summary_label.setText(
                 "Select one or more VSM hysteresis files and click Load data."

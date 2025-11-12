@@ -36,7 +36,6 @@ from matplotlib import colors as mcolors
 import pandas as pd
 from pandas.api.types import is_numeric_dtype
 
-from .console import PythonConsoleWidget
 from ..plugins.base import PyPlotPlugin
 from plotting.shared.utils import (
     install_standard_menu,
@@ -1765,6 +1764,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         self.graph_dock: QtWidgets.QDockWidget | None = None
         self.graph_panel: QtWidgets.QWidget | None = None
+        self._primary_dock_visibility_keys = {
+            "projectExplorerDock": "project_dock_visible",
+            "objectManagerDock": "object_dock_visible",
+        }
+        self._project_dirty = False
+        self._session_has_imports = False
+        self._undo_action: QtGui.QAction | None = None
+        self._redo_action: QtGui.QAction | None = None
 
         icon_extent = self.style().pixelMetric(QtWidgets.QStyle.PixelMetric.PM_ToolBarIconSize)
         if icon_extent <= 0:
@@ -1797,6 +1804,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._update_project_actions()
         developer_options().keep_files_changed.connect(self._handle_keep_files_changed)
         QtCore.QTimer.singleShot(0, self._restore_persisted_imports)
+        self._apply_toolbar_style_hint()
+        self._update_history_actions()
 
     # ------------------------------------------------------------------ abstract hooks
     def _handle_manual_path_entry(self) -> None:
@@ -2683,12 +2692,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.object_tree.setHeaderLabels(["Object Manager"])
         self.object_tree.setColumnCount(1)
         self.object_tree.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.SingleSelection
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
         )
         self.object_tree.itemChanged.connect(self._dispatch_object_item_changed)
-        self.object_tree.currentItemChanged.connect(
-            self._handle_object_selection_changed
-        )
+        selection_model = self.object_tree.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._handle_object_selection_changed)
         self.object_tree.itemDoubleClicked.connect(self._handle_object_item_double_click)
         self.object_tree.itemActivated.connect(self._handle_object_item_double_click)
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
@@ -2701,15 +2710,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         graph_panel: QtWidgets.QWidget | None = None
         self.graph_dock = None
         self.graph_panel = None
-
-        self.console_widget = PythonConsoleWidget(self)
-        self.console_widget.set_environment({"window": self, "pd": pd})
-        self.console_widget.executed.connect(self._handle_console_execution)
-        console_dock = self._create_dock_widget("Python Console", "pythonConsoleDock")
-        console_dock.setWidget(self.console_widget)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, console_dock)
-        console_dock.hide()
-        self.console_dock = console_dock
 
         self._setup_script_toolbar()
         self._setup_action_toolbar()
@@ -2745,6 +2745,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._dock_switcher_panels.append(None)
 
         QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
+        QtCore.QTimer.singleShot(0, self._restore_primary_dock_states)
+        QtCore.QTimer.singleShot(0, self._ensure_primary_docks_pinned)
 
         for tracked in (project_dock, log_dock, graph_dock, object_dock):
             if tracked is None:
@@ -2780,18 +2782,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             graph_panel=graph_panel,
         )
         self._retabify_primary_docks()
-        view_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_view")
-        if view_menu is not None and hasattr(self, "console_dock"):
-            view_menu.addSeparator()
-            console_action = view_menu.addAction("Python Console")
-            if console_action is not None:
-                console_action.setCheckable(True)
-                console_action.setChecked(self.console_dock.isVisible())
-                console_action.toggled.connect(self.console_dock.setVisible)
-                self.console_dock.visibilityChanged.connect(
-                    lambda visible, action=console_action: self._sync_console_action(action, visible)
-                )
-
     def _setup_project_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
         """Attach shared project actions (open/save) to the File menu."""
 
@@ -2953,6 +2943,48 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         toolbar.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
         toolbar.setToolTip(toolbar.windowTitle())
         toolbar.setIconSize(self._toolbar_icon_size)
+        toolbar.setProperty("mwPrimaryToolbar", True)
+
+    def _apply_toolbar_style_hint(self) -> None:
+        """Ensure clickable toolbar buttons stand out without deviating from native themes."""
+
+        rules = """
+QToolBar[mwPrimaryToolbar="true"] QToolButton {
+    border: 1px solid transparent;
+    border-radius: 4px;
+    padding: 3px 10px;
+}
+QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled {
+    border-color: #2563eb;
+    color: #f9fafb;
+    background-image: qlineargradient(
+        spread:pad,
+        x1:0,
+        y1:0,
+        x2:0,
+        y2:1,
+        stop:0 rgba(79, 70, 229, 200),
+        stop:1 rgba(37, 99, 235, 220)
+    );
+}
+QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
+    border-color: transparent;
+    color: #9ca3af;
+    background: transparent;
+}
+"""
+        current = self.styleSheet() or ""
+        if rules.strip() in current:
+            return
+        self.setStyleSheet(f"{current}\n{rules}" if current else rules)
+
+    def _update_history_actions(self) -> None:
+        undo_enabled = self._history.can_undo()
+        redo_enabled = self._history.can_redo()
+        if isinstance(self._undo_action, QtGui.QAction):
+            self._undo_action.setEnabled(undo_enabled)
+        if isinstance(self._redo_action, QtGui.QAction):
+            self._redo_action.setEnabled(redo_enabled)
 
     def _init_graph_settings_menu(self, toolbar: QtWidgets.QToolBar) -> None:
         """Embed the graph settings container inside the provided toolbar."""
@@ -4590,6 +4622,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if self.tab_widget.currentWidget() is tab:
             self._rebuild_object_manager_for_tab(tab)
         self._update_tab_buttons()
+        self._mark_project_dirty()
 
     def _ensure_graph_tree_item(
         self, tab: QtWidgets.QWidget, descriptor: TabDescriptor
@@ -4827,6 +4860,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _reset_project_state(self) -> None:
         """Clear session data prior to loading a project."""
 
+        self._clear_project_dirty()
+        self._session_has_imports = False
+        self._history.clear()
+        self._update_history_actions()
+
     def _after_project_loaded(self, path: Path, payload: Dict[str, Any]) -> None:
         """Hook for subclasses after a project has been applied."""
 
@@ -4914,6 +4952,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._remember_recent_project(target)
         self._after_project_saved(target, payload)
         self._update_project_actions()
+        self._clear_project_dirty()
 
     def _load_project_from_path(self, path: Path) -> None:
         try:
@@ -4974,6 +5013,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._remember_recent_project(path)
         self._after_project_loaded(path, payload)
         self._update_project_actions()
+        self._clear_project_dirty()
 
     # ------------------------------------------------------------------ data import helpers
     def _import_data_from_files(self) -> None:
@@ -5092,6 +5132,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._remember_import_directory(provided_paths[0])
                 self._last_import_sources = [str(path) for path in provided_paths]
                 self._persist_import_sources(provided_paths)
+            self._session_has_imports = True
+            self._mark_project_dirty()
         if self._refresh_import_action is not None:
             self._refresh_import_action.setEnabled(bool(self._worksheets))
 
@@ -5340,6 +5382,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._worksheet_tree_items[worksheet.key] = sheet_item
 
         self._sync_shared_action_states()
+        if worksheets:
+            self._mark_project_dirty()
+            self._session_has_imports = True
 
     def _append_log(self, message: str, *, level: Literal["info", "error"] = "info") -> None:
         view = getattr(self, "log_view", None)
@@ -5405,6 +5450,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._worksheets.pop(key, None)
         self._worksheet_models.pop(key, None)
         self._sync_shared_action_states()
+        self._mark_project_dirty()
 
     def _refresh_imported_data_summary(self) -> None:
         for key, item in self._worksheet_tree_items.items():
@@ -5458,7 +5504,61 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _extend_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
         """Allow subclasses to customise the main menu."""
-        _ = menu_bar  # appease linters until subclasses override
+
+        edit_menu = None
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if menu is not None and menu.objectName() == "mw_shared_edit":
+                edit_menu = menu
+                break
+        if edit_menu is None:
+            edit_menu = QtWidgets.QMenu("&Edit", menu_bar)
+            edit_menu.setObjectName("mw_shared_edit")
+            menu_bar.addMenu(edit_menu)
+        self._install_history_actions(edit_menu)
+        self._reorder_shared_menus(menu_bar)
+
+    def _reorder_shared_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        desired = [
+            "mw_shared_file",
+            "mw_shared_edit",
+            "mw_shared_view",
+            "mw_shared_developer",
+            "mw_shared_help",
+            "mw_shared_data",
+        ]
+        actions: dict[str, QtGui.QAction] = {}
+        for action in list(menu_bar.actions()):
+            menu = action.menu()
+            if menu is not None:
+                name = menu.objectName()
+                if name in desired:
+                    actions[name] = action
+                    menu_bar.removeAction(action)
+        for name in desired:
+            action = actions.get(name)
+            if action is not None:
+                menu_bar.addAction(action)
+
+    def _install_history_actions(self, edit_menu: QtWidgets.QMenu) -> None:
+        undo_action = edit_menu.addAction("Undo")
+        redo_action = edit_menu.addAction("Redo")
+        if undo_action is not None:
+            try:
+                undo_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Undo))
+            except Exception:
+                pass
+            undo_action.triggered.connect(self.undo)
+            undo_action.setEnabled(False)
+            self._undo_action = undo_action
+        if redo_action is not None:
+            try:
+                redo_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Redo))
+            except Exception:
+                pass
+            redo_action.triggered.connect(self.redo)
+            redo_action.setEnabled(False)
+            self._redo_action = redo_action
 
     def _after_base_ui_created(
         self,
@@ -5493,6 +5593,50 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             ext = f".{ext}"
         date_stamp = datetime.date.today().strftime("%Y-%m-%d")
         return f"{prefix} {date_stamp}{ext}"
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if not self._confirm_close_with_unsaved_data():
+            event.ignore()
+            return
+        super().closeEvent(event)
+
+    def _confirm_close_with_unsaved_data(self) -> bool:
+        if not self._project_dirty or not self._has_project_data_to_save():
+            return True
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Close PyPlot window?")
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        dialog.setText("Save this PyPlot session before closing?")
+        dialog.setInformativeText(
+            "Choose “Save project” to keep your current imports, or close without saving to discard them."
+        )
+        save_button = dialog.addButton("Save project", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
+        discard_button = dialog.addButton(
+            "Close without saving", QtWidgets.QMessageBox.ButtonRole.DestructiveRole
+        )
+        dialog.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(save_button)
+        dialog.exec()
+        clicked = dialog.clickedButton()
+        if clicked is save_button:
+            return self._save_before_close()
+        if clicked is discard_button:
+            return True
+        return False
+
+    def _save_before_close(self) -> bool:
+        previous_dirty = self._project_dirty
+        self._save_project()
+        # If saving failed or was cancelled, the dirty flag stays True.
+        if previous_dirty and self._project_dirty:
+            return False
+        return True
+
+    def _mark_project_dirty(self) -> None:
+        self._project_dirty = True
+
+    def _clear_project_dirty(self) -> None:
+        self._project_dirty = False
 
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
@@ -5570,6 +5714,76 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
+    def _primary_dock_visibility_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return None
+        name = dock.objectName()
+        suffix = self._primary_dock_visibility_keys.get(name)
+        if not suffix:
+            return None
+        return self._project_settings_key(suffix)
+
+    def _primary_dock_should_show(self, dock: QtWidgets.QDockWidget | None) -> bool:
+        key = self._primary_dock_visibility_key(dock)
+        if key is None:
+            return True
+        value = self.settings.value(key, "")
+        if isinstance(value, str):
+            return value.lower() not in {"0", "false", "no"}
+        if isinstance(value, (int, float, bool)):
+            return bool(value)
+        return True
+
+    def _remember_primary_dock_state(
+        self, dock: QtWidgets.QDockWidget | None, *, visible: bool
+    ) -> None:
+        key = self._primary_dock_visibility_key(dock)
+        if key is None:
+            return
+        try:
+            self.settings.setValue(key, "true" if visible else "false")
+        except Exception:
+            pass
+
+    def _restore_primary_dock_states(self) -> None:
+        for dock in (getattr(self, "project_dock", None), getattr(self, "object_dock", None)):
+            if not isinstance(dock, QtWidgets.QDockWidget):
+                continue
+            should_show = self._primary_dock_should_show(dock)
+            try:
+                dock.setFloating(False)
+            except Exception:
+                pass
+            if should_show:
+                try:
+                    dock.show()
+                except Exception:
+                    pass
+            else:
+                try:
+                    dock.hide()
+                except Exception:
+                    pass
+            self._remember_primary_dock_state(dock, visible=should_show)
+
+    def _ensure_primary_docks_pinned(self) -> None:
+        """Keep the primary explorers docked when they are supposed to be visible."""
+        for dock in (getattr(self, "project_dock", None), getattr(self, "object_dock", None)):
+            if not isinstance(dock, QtWidgets.QDockWidget):
+                continue
+            if not self._primary_dock_should_show(dock):
+                continue
+            try:
+                if dock.isFloating():
+                    dock.setFloating(False)
+            except Exception:
+                pass
+            try:
+                dock.show()
+                dock.raise_()
+            except Exception:
+                pass
+
     def _handle_primary_dock_location_change(
         self,
         dock: QtWidgets.QDockWidget,
@@ -5590,6 +5804,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         _ = dock
         self._queue_retabify_primary_docks()
+        self._remember_primary_dock_state(dock, visible=dock.isVisible())
 
     def _queue_retabify_primary_docks(self) -> None:
         if getattr(self, "_retabify_pending", False):
@@ -5738,21 +5953,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 pass
 
         QtCore.QTimer.singleShot(0, _resize)
-
-    def _handle_console_execution(self, code: str, result: object) -> None:
-        if not hasattr(self, "log_view") or self.log_view is None:
-            return
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        self.log_view.appendPlainText(f"[{timestamp}] >>> {code}")
-        if result is not None:
-            self.log_view.appendPlainText(repr(result))
-
-    def _sync_console_action(self, action: QtGui.QAction, visible: bool) -> None:
-        if action.isChecked() == visible:
-            return
-        action.blockSignals(True)
-        action.setChecked(visible)
-        action.blockSignals(False)
 
     # ------------------------------------------------------------------ menu helpers
     def _open_files_from_menu(self) -> None:
@@ -6102,15 +6302,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._object_tree_updating = False
         tree.blockSignals(False)
 
-    def _handle_object_selection_changed(
-        self,
-        current: QtWidgets.QTreeWidgetItem | None,
-        previous: QtWidgets.QTreeWidgetItem | None,
-    ) -> None:
-        _ = previous
-        selection: tuple[str, Any] | None = None
-        if isinstance(current, QtWidgets.QTreeWidgetItem):
-            data = current.data(0, QtCore.Qt.ItemDataRole.UserRole)
+    def _handle_object_selection_changed(self, *_: Any) -> None:
+        tree = getattr(self, "object_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            self._set_format_selection(None)
+            return
+        text_targets: list[Text] = []
+        line_target: Line2D | None = None
+        for item in tree.selectedItems():
+            data = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
             kind: str | None = None
             target: Any | None = None
             if isinstance(data, dict):
@@ -6120,16 +6320,25 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 kind = cast(str, data[0])
                 target = data[1]
             if kind == "text" and isinstance(target, Text):
-                selection = ("text", target)
+                text_targets.append(target)
             elif kind == "line" and isinstance(target, Line2D):
-                selection = ("line", target)
-        self._set_format_selection(selection)
+                line_target = target
+        if text_targets:
+            self._set_format_selection(("text", tuple(text_targets)))
+        elif line_target is not None:
+            self._set_format_selection(("line", line_target))
+        else:
+            self._set_format_selection(None)
 
     def _set_format_selection(self, selection: tuple[str, Any] | None) -> None:
         if selection is not None:
             kind, target = selection
-            if kind == "text" and not isinstance(target, Text):
-                selection = None
+            if kind == "text":
+                texts = tuple(target or ())
+                if not texts or not all(isinstance(entry, Text) for entry in texts):
+                    selection = None
+                else:
+                    selection = ("text", texts)
             elif kind == "line" and not isinstance(target, Line2D):
                 selection = None
         self._format_selection = selection
@@ -6170,65 +6379,70 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         action.setEnabled(False)
                 self._set_color_button_state(None, None)
                 return
-            kind, target = selection
-            if kind == "text" and isinstance(target, Text):
-                if size_spin is not None:
-                    size_spin.blockSignals(True)
-                    try:
-                        size_spin.setValue(int(round(float(target.get_fontsize()))))
-                    except Exception:
-                        pass
-                    size_spin.blockSignals(False)
-                    size_spin.setEnabled(True)
-                if bold_action is not None:
-                    bold_action.blockSignals(True)
-                    bold_action.setChecked(self._text_is_bold(target))
-                    bold_action.blockSignals(False)
-                    bold_action.setEnabled(True)
-                if italic_action is not None:
-                    italic_action.blockSignals(True)
-                    italic_action.setChecked(self._text_is_italic(target))
-                    italic_action.blockSignals(False)
-                    italic_action.setEnabled(True)
-                if underline_action is not None:
-                    underline_action.blockSignals(True)
-                    underline = False
-                    try:
-                        underline = bool(target.get_underline())
-                    except Exception:
+            kind = selection[0]
+            if kind == "text":
+                texts = selection[1]
+                text = texts[0] if isinstance(texts, tuple) and texts else None
+                if text is not None:
+                    if size_spin is not None:
+                        size_spin.blockSignals(True)
+                        try:
+                            size_spin.setValue(int(round(float(text.get_fontsize()))))
+                        except Exception:
+                            pass
+                        size_spin.blockSignals(False)
+                        size_spin.setEnabled(True)
+                    if bold_action is not None:
+                        bold_action.blockSignals(True)
+                        bold_action.setChecked(self._text_is_bold(text))
+                        bold_action.blockSignals(False)
+                        bold_action.setEnabled(True)
+                    if italic_action is not None:
+                        italic_action.blockSignals(True)
+                        italic_action.setChecked(self._text_is_italic(text))
+                        italic_action.blockSignals(False)
+                        italic_action.setEnabled(True)
+                    if underline_action is not None:
+                        underline_action.blockSignals(True)
                         underline = False
-                    underline_action.setChecked(underline)
-                    underline_action.blockSignals(False)
-                    underline_action.setEnabled(True)
-                for action, _ in line_actions:
-                    if action is not None:
+                        try:
+                            underline = bool(text.get_underline())
+                        except Exception:
+                            underline = False
+                        underline_action.setChecked(underline)
+                        underline_action.blockSignals(False)
+                        underline_action.setEnabled(True)
+                    for action, _ in line_actions:
+                        if action is not None:
+                            action.blockSignals(True)
+                            action.setChecked(False)
+                            action.blockSignals(False)
+                            action.setEnabled(False)
+                    self._set_color_button_state("text", self._qcolor_from_mpl(text.get_color()))
+                    return
+            elif kind == "line":
+                target = selection[1]
+                if isinstance(target, Line2D):
+                    if size_spin is not None:
+                        size_spin.blockSignals(True)
+                        size_spin.setEnabled(False)
+                        size_spin.blockSignals(False)
+                    for action in (bold_action, italic_action, underline_action):
+                        if action is not None:
+                            action.blockSignals(True)
+                            action.setChecked(False)
+                            action.blockSignals(False)
+                            action.setEnabled(False)
+                    style_key = self._line_style_key(target)
+                    for action, key in line_actions:
+                        if action is None:
+                            continue
                         action.blockSignals(True)
-                        action.setChecked(False)
+                        action.setEnabled(True)
+                        action.setChecked(style_key == key)
                         action.blockSignals(False)
-                        action.setEnabled(False)
-                self._set_color_button_state("text", self._qcolor_from_mpl(target.get_color()))
-                return
-            if kind == "line" and isinstance(target, Line2D):
-                if size_spin is not None:
-                    size_spin.blockSignals(True)
-                    size_spin.setEnabled(False)
-                    size_spin.blockSignals(False)
-                for action in (bold_action, italic_action, underline_action):
-                    if action is not None:
-                        action.blockSignals(True)
-                        action.setChecked(False)
-                        action.blockSignals(False)
-                        action.setEnabled(False)
-                style_key = self._line_style_key(target)
-                for action, key in line_actions:
-                    if action is None:
-                        continue
-                    action.blockSignals(True)
-                    action.setEnabled(True)
-                    action.setChecked(style_key == key)
-                    action.blockSignals(False)
-                self._set_color_button_state("line", self._qcolor_from_mpl(target.get_color()))
-                return
+                    self._set_color_button_state("line", self._qcolor_from_mpl(target.get_color()))
+                    return
             if size_spin is not None:
                 size_spin.blockSignals(True)
                 size_spin.setEnabled(False)
@@ -6288,12 +6502,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         selection = self._format_selection
         if not selection or selection[0] != "text":
             return
-        text = selection[1]
-        try:
-            text.set_fontsize(value)
-        except Exception:
-            return
-        self._redraw_artist(text)
+        texts = selection[1]
+        for text in texts:
+            try:
+                text.set_fontsize(value)
+            except Exception:
+                continue
+            self._redraw_artist(text)
         self._update_format_toolbar_state()
 
     def _apply_text_bold(self, checked: bool) -> None:
@@ -6302,12 +6517,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         selection = self._format_selection
         if not selection or selection[0] != "text":
             return
-        text = selection[1]
-        try:
-            text.set_fontweight("bold" if checked else "normal")
-        except Exception:
-            return
-        self._redraw_artist(text)
+        texts = selection[1]
+        for text in texts:
+            try:
+                text.set_fontweight("bold" if checked else "normal")
+            except Exception:
+                continue
+            self._redraw_artist(text)
         self._update_format_toolbar_state()
 
     def _apply_text_italic(self, checked: bool) -> None:
@@ -6316,12 +6532,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         selection = self._format_selection
         if not selection or selection[0] != "text":
             return
-        text = selection[1]
-        try:
-            text.set_fontstyle("italic" if checked else "normal")
-        except Exception:
-            return
-        self._redraw_artist(text)
+        texts = selection[1]
+        for text in texts:
+            try:
+                text.set_fontstyle("italic" if checked else "normal")
+            except Exception:
+                continue
+            self._redraw_artist(text)
         self._update_format_toolbar_state()
 
     def _apply_text_underline(self, checked: bool) -> None:
@@ -6330,12 +6547,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         selection = self._format_selection
         if not selection or selection[0] != "text":
             return
-        text = selection[1]
-        try:
-            text.set_underline(bool(checked))
-        except Exception:
-            return
-        self._redraw_artist(text)
+        texts = selection[1]
+        for text in texts:
+            try:
+                text.set_underline(bool(checked))
+            except Exception:
+                continue
+            self._redraw_artist(text)
         self._update_format_toolbar_state()
 
     def _choose_format_color(self) -> None:
@@ -6345,8 +6563,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if selection is None:
             return
         role, target = selection
-        if role == "text" and isinstance(target, Text):
-            initial = self._qcolor_from_mpl(target.get_color())
+        initial = None
+        if role == "text":
+            texts = target if isinstance(target, tuple) else (target,)
+            first_text = texts[0] if texts else None
+            if isinstance(first_text, Text):
+                initial = self._qcolor_from_mpl(first_text.get_color())
         elif role == "line" and isinstance(target, Line2D):
             initial = self._qcolor_from_mpl(target.get_color())
         else:
@@ -6355,11 +6577,22 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not color.isValid():
             return
         mpl_color = self._mpl_color_from_qcolor(color)
-        try:
-            target.set_color(mpl_color)
-        except Exception:
-            return
-        self._redraw_artist(target)
+        if role == "text":
+            texts = target if isinstance(target, tuple) else (target,)
+            for text in texts:
+                if not isinstance(text, Text):
+                    continue
+                try:
+                    text.set_color(mpl_color)
+                except Exception:
+                    continue
+                self._redraw_artist(text)
+        elif role == "line" and isinstance(target, Line2D):
+            try:
+                target.set_color(mpl_color)
+            except Exception:
+                return
+            self._redraw_artist(target)
         self._update_format_toolbar_state()
 
     def _apply_line_style(self, style: str, checked: bool) -> None:
@@ -6538,14 +6771,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if self._history.is_replaying:
             return
         self._history.record(description, undo, redo)
+        self._update_history_actions()
 
     def undo(self) -> None:
         self._history.undo()
         self._update_tab_buttons()
+        self._update_history_actions()
 
     def redo(self) -> None:
         self._history.redo()
         self._update_tab_buttons()
+        self._update_history_actions()
 
     def _update_tab_buttons(self) -> None:
         tab_bar = getattr(self.tab_widget, "tabBar", lambda: None)()

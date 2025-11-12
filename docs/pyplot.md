@@ -1,0 +1,44 @@
+# PyPlot Overview
+
+PyPlot provides the common desktop workbench: file import, worksheet management, graph tooling, Origin export, and project save/restore all live here so plug-ins only need to supply their domain-specific panels and load/generate logic. This page tracks those shared capabilities and points to the plug-ins that build on them.
+
+## Workbench Basics
+
+- **Project Explorer** lists imported workbooks, worksheets, and generated graphs. Every plug-in uses the same tree so you can keep one set of worksheets available while switching tools.
+- **Object Manager** mirrors the current Matplotlib tab (axes, lines, legends, annotations) and lets you tweak selections via the toolbar actions.
+- **Toolbars** (Plugin, Plot actions, Navigation, Format) live at the top. Enabled actions now show a subtle highlight so you can immediately see what is clickable; disabled items stay muted.
+- **Dock switchers** sit on the left/right edges so you can collapse/restore the Project Explorer, Message Log, and Object Manager without losing their placement.
+- **Undo/Redo** are exposed on the Edit menu (Ctrl+Z / Ctrl+Y). They track tab changes, worksheet tabs, and other session actions.
+- **Saving** uses `.pypj` project files. When a session contains imported data or generated worksheets PyPlot prompts you to save, discard, or cancel if you try to close the window.
+
+## Built-in Plug-ins
+
+| Plug-in name            | Module                                                | Notes |
+|-------------------------|-------------------------------------------------------|-------|
+| Temperature Sensitivity | `plotting.plugins.temperature_sensitivity`            | Imports the TSV/CSV/Origin-like files used for T1/T2 analysis. Auto-loads data after import and creates worksheets annotated with units. |
+| Temperature Dependence  | `plotting.plugins.temperature_dependence`             | Generates per-variable Matplotlib plots from the temperature dependence CSV set. |
+| Stress Sensitivity      | `plotting.plugins.stress_sensitivity`                 | Combines stress sweeps and overlays key metrics. |
+| Stress Dependence       | `plotting.plugins.stress_dependence`                  | Converts TXT exports into worksheets + line graphs. |
+| Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. |
+| VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. |
+| Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
+
+Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Providing `requires_imported_data = True` ensures the shared UI disables “Load data” until files are imported.
+
+## Importing Data
+
+1. Use the **Import data…** button (or the Data menu) to select files/folders.
+2. Supported formats: CSV/TSV/TXT/XLS/XLSX/XLSM/JSON/VSM `.vsm-hys-data`. Plug-ins can add their own loaders (see `PyPlotPlugin.load_data` implementations).
+3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Otherwise “Load data” remains available for manual runs.
+4. All worksheets live under `Imported Data` → `<folder>` → `<workbook>` so every plug-in can reuse them (export to Origin, duplicate, edit columns, etc.).
+
+## Logs
+
+- The **Message Log** dock records plug-in output, path skips, and Origin export diagnostics. Toggle it via the dock switcher on the left edge whenever you need to inspect warnings.
+
+## Extending / Debugging
+
+- Shared UI helpers live in `plotting/pyplot/window.py` so plug-ins can reuse the same worksheet/graph machinery without reimplementing it.
+- Use `docs/todo/pyplot_migration_todo.md` for open work. Update this `pyplot.md` file when you add major features or new plug-ins so other developers can discover them quickly.
+
+Feel free to expand these sections with screenshots, plugin-specific quirks, or Origin export caveats as the toolset grows.

@@ -1,4 +1,30 @@
 # Changelog
+## 2025-11-11 14:54 UTC
+
+- Restored the dock switcher side buttons for Project Explorer, Message Log, and Object Manager while keeping the panels pinned by default, and reverted the toolbar styling to use native Windows/macOS button chrome so clickable items feel familiar again.
+- Project Explorer and Object Manager now stay pinned (and their visibility is remembered between restarts); the toolbars use the native "Run"-style chrome for enabled actions while disabled commands present as plain text, and the menu bar was reordered to File → Edit → View → Developer → Help → Data.
+- Object Manager accepts extended selections, so the format toolbar can adjust font weight/size/underline across multiple text objects at once.
+- Added Matplotlib layout fixes to the Temperature Sensitivity plots (wider plotting area, outside legend, readable tick labels) and documented the PyPlot workflows/plug-ins in `docs/pyplot.md`.
+- Limited automatic “Load data” triggers to real user imports (not restored sessions) so old files no longer cause spurious “Skipping …” logs, and ensured plug-in workbooks mark the session dirty for the new close-save prompt.
+- Removed the legacy “Show Console”/“Python Console” menu entries and the Python console dock entirely—use the dock buttons for the Message Log instead.
+- Temperature Sensitivity now filters selected files before loading, auto-expands the Imported Data tree when workbooks are created, and treats invalid filenames as informational warnings instead of plotting stale data; units are wrapped in brackets so the metadata reads `[°C]`, and the PDF plug-in's file picker now retains its change notifications.
+
+## 2025-11-11 11:55 UTC
+
+- Locked the Project Explorer and Object Manager docks in place by disabling the auto-hide switcher so the side panels stay visible whenever PyPlot opens a plugin window.
+- Centralised toolbar state handling so disabled actions are now visibly greyed out, the Load data button only enables once files are imported, and Temperature Sensitivity automatically loads/registers data immediately after import.
+- Added a plugin-switch prompt that lets you spawn a new PyPlot window for the selected plugin (with or without the current imports) instead of silently reusing the existing session, preventing plugin-specific workbooks from bleeding across workflows.
+- Added save/close safeguards: PyPlot now tracks dirty sessions, prompts to save/discard/cancel on close, and exposes Undo/Redo (with shortcuts) so toolbar and menu states reflect the current history.
+- Styled the primary toolbars so enabled buttons show a visible border while disabled entries remain muted, making it obvious which commands are clickable at a glance.
+- Fixed Temperature Sensitivity workbook registration (missing `window_module`) and ensured automatic loads only fire after a real import, eliminating phantom “Load data” clicks before importing.
+- Tightened the Load data guard so it only enables when real worksheets exist and fixed the Temperature Sensitivity workbook registration crash (missing `window_module`) when clicking Load data without any imports.
+
+## 2025-11-11 10:58 UTC
+
+- Keep the Project Explorer and Object Manager docks pinned and visible whenever a PyPlot workbench or plugin window launches so the supporting tool panels are always available by default.
+- Reworked the Load data workflow to depend on imported files, gate the toolbar action until data exists, create workbooks from those sources, and drop the automatic Data‑menu popup so plugins (e.g., Temperature Sensitivity) just consume the selected inputs.
+- Verified that the Origin/Open and TXT export helpers still route through the shared workbench APIs so every plugin stays wired to “Open in Origin”, “Export workbooks to Origin”, and “Export TXT…”.
+
 ## 2025-11-07 11:00 UTC
 
 - Deleted the `plotting/legacy/` compatibility package now that all downstream imports target `plotting.plugins.*`, and refreshed the migration docs and README to reflect the final layout.

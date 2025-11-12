@@ -252,8 +252,6 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = self._data is not None
-        if hasattr(self.host, "load_data_button"):
-            self.host.load_data_button.setEnabled(True)
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data)
             self.host.plot_button.setText("Plot Temperature Dependence")

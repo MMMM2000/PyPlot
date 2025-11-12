@@ -3,13 +3,15 @@ from __future__ import annotations
 import logging
 from typing import Callable, Dict, Iterable
 
-from PyQt6 import QtCore, QtWidgets
+from PyQt6 import QtCore, QtGui, QtWidgets
 
 
 class PyPlotPlugin:
     """Base plugin contract for PyPlot script integrations."""
 
     requires_imported_data: bool = False
+    exposes_load_data: bool = True
+    auto_load_on_import: bool = False
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         self.host = host
@@ -208,8 +210,6 @@ class ExternalPlotterPlugin(PyPlotPlugin):
         self._launch()
 
     def update_ui(self) -> None:
-        if hasattr(self.host, "load_data_button"):
-            self.host.load_data_button.setEnabled(False)
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(False)
         if hasattr(self.host, "save_graph_button"):
@@ -226,6 +226,8 @@ class ExternalPlotterPlugin(PyPlotPlugin):
 
 class EmbeddedWidgetPlugin(PyPlotPlugin):
     """Embed a legacy dialog or widget directly inside the PyPlot workbench."""
+
+    exposes_load_data = False
 
     def __init__(
         self,
@@ -300,9 +302,9 @@ class EmbeddedWidgetPlugin(PyPlotPlugin):
             "popout_button",
         ):
             widget = getattr(self.host, attr, None)
-            if isinstance(widget, QtWidgets.QAbstractButton):
+            if isinstance(widget, (QtWidgets.QWidget, QtGui.QAction)):
                 widget.setEnabled(False)
-                if attr == "plot_button":
+                if attr == "plot_button" and hasattr(widget, "setText"):
                     widget.setText("Generate")
 
 

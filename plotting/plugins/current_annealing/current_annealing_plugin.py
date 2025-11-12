@@ -222,8 +222,6 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
-        if hasattr(self.host, "load_data_button"):
-            self.host.load_data_button.setEnabled(True)
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data)
         if hasattr(self.host, "save_graph_button"):

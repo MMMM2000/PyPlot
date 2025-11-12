@@ -438,10 +438,12 @@ def plot_variable(
     y_max = max(s.max() for s in all_y)
     y_range = y_max - y_min if y_max != y_min else 1.0
     delta_offset = 0.05 * y_range
-    plot_top = y_max + 0.08 * y_range
+    y_padding = 0.3 * y_range
+    plot_top = y_max + 0.12 * y_range
     title_level = plot_top - 0.02 * y_range
 
-    fig, ax = plt.subplots(figsize=(9, 5))
+    fig, ax = plt.subplots(figsize=(11.5, 6.0))
+    fig.subplots_adjust(left=0.12, right=0.78, top=0.9, bottom=0.28)
     legend_done: set[str] = set()
     for temp in sorted(raw['temp'].unique()):
         sub = raw[raw['temp'] == temp]
@@ -649,20 +651,33 @@ def plot_variable(
     ax.grid(True)
 
     legend_kwargs = _legend_kwargs_from_location(str(globals().get("LEGEND_LOCATION", "inside")))
-    legend = ax.legend(**legend_kwargs)
+    legend = ax.legend(
+        loc="center left",
+        bbox_to_anchor=(1.02, 0.5),
+        borderaxespad=0.0,
+        frameon=False,
+    )
     _colorize_legend(legend, adjust_sizes=True)
     _apply_symbol_visibility(legend)
+    for text in legend.get_texts():
+        try:
+            text.setFontSize(9)
+        except Exception:
+            pass
 
     apply_readability(ax, globals())
     updated = ax.get_legend()
     _apply_symbol_visibility(updated)
     _colorize_legend(updated)
 
-    final_loc = str(globals().get("LEGEND_LOCATION", "inside") or "inside").strip().lower()
-    if final_loc in {"outside_right", "outside", "outside right"}:
-        fig.tight_layout(rect=(0.0, 0.0, 0.8, 1.0))
-    else:
-        fig.tight_layout()
+    ax.margins(x=0.02)
+    ax.set_ylim(y_min - y_padding, y_max + y_padding)
+    ax.set_xlim(0.5, len(samples) + 0.5)
+    tick_positions = list(range(1, len(samples) + 1))
+    ax.set_xticks(tick_positions)
+    ax.set_xticklabels(display_samples, rotation=28, ha="right")
+    ax.tick_params(axis="x", labelsize=10)
+    ax.tick_params(axis="y", labelsize=10)
     fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)

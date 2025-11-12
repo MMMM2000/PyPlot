@@ -378,8 +378,6 @@ class StressSensitivityPlugin(PyPlotPlugin):
         has_data = self._data is not None
         has_files = bool(self._loaded_files)
         has_plots = bool(self._plot_tabs)
-        if hasattr(self.host, "load_data_button"):
-            self.host.load_data_button.setEnabled(True)
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data)
             self.host.plot_button.setText("Generate Stress Sensitivity")

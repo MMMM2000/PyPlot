@@ -35,6 +35,8 @@ from plotting.plugins import (
     builtin_plugin_registry,
 )
 
+LOGGER = logging.getLogger(__name__)
+
 
 def _builtin_plugin_factories() -> Dict[str, Callable[["PyPlotWorkbench"], PyPlotPlugin]]:
     """Create factories for each registered built-in plugin class."""
@@ -393,15 +395,12 @@ class PyPlotWorkbench(PyPlotWindow):
                 self._sync_selected_paths_with_imports()
                 return [path for path in self._selected_paths() if path.is_file()]
 
-        if self._show_data_menu():
-            return []
-
         if warn_on_missing:
             title = plugin.name if isinstance(plugin, PyPlotPlugin) else "PyPlot"
             QtWidgets.QMessageBox.information(
                 self,
                 title,
-                "Import data via the Data menu before loading it in this plugin.",
+                "Import data through the toolbar before loading it in this plugin.",
             )
         return []
 
@@ -436,6 +435,7 @@ class PyPlotWorkbench(PyPlotWindow):
             except Exception:
                 pass
             self._sync_shared_action_states()
+            self._enforce_load_data_availability()
             return
         if hasattr(self, "load_data_button"):
             self.load_data_button.setEnabled(False)
@@ -453,6 +453,30 @@ class PyPlotWorkbench(PyPlotWindow):
         if hasattr(self, "open_origin_button"):
             self.open_origin_button.setEnabled(False)
         self._sync_shared_action_states()
+        self._enforce_load_data_availability()
+
+    def _has_imported_data(self) -> bool:
+        if getattr(self, "_session_has_imports", False):
+            return True
+        worksheets = getattr(self, "_worksheets", None)
+        return bool(worksheets)
+
+    def _enforce_load_data_availability(self) -> None:
+        button = getattr(self, "load_data_button", None)
+        if not isinstance(button, QtGui.QAction):
+            return
+        plugin = self._current_plugin
+        if plugin is None:
+            button.setEnabled(False)
+            return
+        if not getattr(plugin, "exposes_load_data", True):
+            button.setEnabled(False)
+            return
+        requires_data = bool(getattr(plugin, "requires_imported_data", False))
+        if requires_data:
+            button.setEnabled(self._has_imported_data())
+            return
+        button.setEnabled(True)
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         super()._import_paths(paths)
@@ -461,6 +485,21 @@ class PyPlotWorkbench(PyPlotWindow):
             self._plugin_last_directories[self._current_plotter_name] = self._last_directory
             payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
             self.settings.setValue("plugin_last_dirs", json.dumps(payload))
+        auto_loader = (
+            self._current_plugin
+            if self._current_plugin is not None
+            and getattr(self._current_plugin, "auto_load_on_import", False)
+            else None
+        )
+        should_auto_load = (
+            auto_loader is not None
+            and not getattr(self, "_restoring_imports", False)
+        )
+        if should_auto_load:
+            try:
+                auto_loader.load_data()
+            except Exception:
+                LOGGER.warning("Automatic data load failed for %s", self._current_plotter_name, exc_info=True)
         self._update_action_states()
         self._update_project_actions()
         self.settings.setValue("sources", self.path_edit.text())
@@ -626,6 +665,8 @@ class PyPlotWorkbench(PyPlotWindow):
         if self._refresh_import_action is not None:
             self._refresh_import_action.setEnabled(False)
         self._sync_shared_action_states()
+        self._session_has_imports = False
+        self._clear_project_dirty()
 
     def _portable_path(self, path: Path | None, base_path: Path | None) -> str | None:
         if path is None:
@@ -759,6 +800,17 @@ class PyPlotWorkbench(PyPlotWindow):
     def _apply_selected_plotter(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
         name = combo.currentData() if combo is not None else None
+        current_name = self._current_plotter_name
+        if (
+            name
+            and current_name
+            and name != current_name
+            and self._current_plugin is not None
+        ):
+            handled = self._prompt_plugin_window_choice(name)
+            self._restore_plotter_combo_selection()
+            if handled:
+                return
         if not name:
             if self._current_plugin is not None:
                 self._current_plugin.deactivate()
@@ -802,13 +854,91 @@ class PyPlotWorkbench(PyPlotWindow):
         self._update_window_title()
         self._update_action_states()
 
-    def _create_new_pyplot_window(self) -> None:
+    def _create_new_pyplot_window(
+        self,
+        checked: bool = False,
+        *,
+        initial: str | None = None,
+        imported_paths: Iterable[Path] | None = None,
+    ) -> PyPlotWorkbench | None:
+        _ = checked
         factories = dict(self._plugin_factories)
-        initial = self._current_plotter_name
-        window = PyPlotWorkbench(plotters=factories, initial_plotter=initial)
+        target = initial if initial is not None else self._current_plotter_name
+        window = PyPlotWorkbench(plotters=factories, initial_plotter=target)
         window.show()
+        self._register_spawned_window(window)
+        if imported_paths:
+            paths: list[Path] = []
+            for source in imported_paths:
+                try:
+                    candidate = Path(source)
+                except Exception:
+                    continue
+                if candidate.exists():
+                    paths.append(candidate)
+            if paths:
+                QtCore.QTimer.singleShot(0, lambda w=window, pts=paths: w._import_paths(pts))
+        return window
+
+    def _register_spawned_window(self, window: "PyPlotWorkbench") -> None:
         self._spawned_windows.append(window)
-        window.destroyed.connect(lambda *_w, ref=window: self._spawned_windows.remove(ref) if ref in self._spawned_windows else None)
+        window.destroyed.connect(
+            lambda *_w, ref=window: self._spawned_windows.remove(ref)
+            if ref in self._spawned_windows
+            else None
+        )
+
+    def _restore_plotter_combo_selection(self) -> None:
+        combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
+        if combo is None:
+            return
+        combo.blockSignals(True)
+        target = self._current_plotter_name
+        if target:
+            index = combo.findData(target)
+            if index < 0:
+                index = 0
+            combo.setCurrentIndex(index)
+        else:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _prompt_plugin_window_choice(self, target: str) -> bool:
+        if self._current_plugin is None:
+            return False
+        message = QtWidgets.QMessageBox(self)
+        message.setWindowTitle("Open plugin in new window?")
+        message.setIcon(QtWidgets.QMessageBox.Icon.Question)
+        message.setText(f"Open {target} in a new PyPlot window?")
+        message.setInformativeText(
+            "Choose whether to bring the currently imported files into the new window."
+        )
+        keep_button = message.addButton(
+            "New window (keep imports)",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        discard_button = message.addButton(
+            "New window (empty)",
+            QtWidgets.QMessageBox.ButtonRole.ActionRole,
+        )
+        cancel_button = message.addButton(
+            QtWidgets.QMessageBox.StandardButton.Cancel
+        )
+        message.setDefaultButton(cancel_button)
+        message.exec()
+        clicked = message.clickedButton()
+        if clicked is keep_button:
+            self._open_plugin_in_new_window(target, include_imports=True)
+        elif clicked is discard_button:
+            self._open_plugin_in_new_window(target, include_imports=False)
+        return True
+
+    def _open_plugin_in_new_window(self, target: str, *, include_imports: bool) -> None:
+        paths = self._selected_paths() if include_imports else []
+        self._create_new_pyplot_window(
+            initial=target,
+            imported_paths=paths if paths else None,
+        )
 
     def _apply_path_text(self, text: str) -> None:
         paths = [Path(entry) for entry in self._iter_path_entries(text)]

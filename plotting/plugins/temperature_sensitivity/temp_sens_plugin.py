@@ -11,6 +11,16 @@ from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from . import core as temp_sens_core
 
+def _format_units(units: str | None) -> str | None:
+    if not units:
+        return None
+    value = str(units).strip()
+    if not value:
+        return None
+    if value.startswith("[") and value.endswith("]"):
+        return value
+    return f"[{value}]"
+
 if TYPE_CHECKING:
     from plotting.pyplot.window import (
         GraphLineState,
@@ -25,6 +35,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
     """Embed the temperature sensitivity workflow directly inside PyPlot."""
 
     requires_imported_data = True
+    auto_load_on_import = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -181,40 +192,34 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         host = self.host
         window_module = window_api()
 
-        def _path_key(path: Path) -> str:
-            try:
-                return str(path.resolve())
-            except Exception:
-                return str(path)
-
-        selected_paths: list[Path] = []
-        if hasattr(host, "_selected_paths"):
-            try:
-                selected_paths = [path for path in host._selected_paths() if path.is_file()]
-            except Exception:
-                selected_paths = []
-
-        pending_sources = {_path_key(path) for path in selected_paths}
-        imported_sources: set[str] = set()
-        workbooks = getattr(host, "_workbooks", {})
-        if isinstance(workbooks, dict):
-            for workbook in workbooks.values():
-                source = getattr(workbook, "source", None)
-                if isinstance(source, Path):
-                    imported_sources.add(_path_key(source))
-
-        if not imported_sources or (pending_sources and pending_sources - imported_sources):
-            opener = getattr(host, "_show_data_menu", None)
-            if callable(opener) and opener():
-                self._log(
-                    "Open the Data menu to import temperature sensitivity files, then click Load data again."
-                )
-                return
-
         paths = host.ensure_data_selection(self, warn_on_missing=True)
         if not paths:
             return
-        string_paths = [str(path) for path in paths]
+        valid_paths: list[Path] = []
+        skipped: list[str] = []
+        for path in paths:
+            if temp_sens_core.parse_metadata(path.stem) is None:
+                skipped.append(path.name)
+                continue
+            valid_paths.append(path)
+        if skipped:
+            self._log(
+                "Ignoring files that do not follow the temperature sensitivity naming pattern:\n"
+                + ", ".join(skipped)
+            )
+        if not valid_paths:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "None of the selected files match the temperature sensitivity format.",
+            )
+            return
+        if hasattr(host, "_commit_selected_paths"):
+            try:
+                host._commit_selected_paths(valid_paths)  # type: ignore[attr-defined]
+            except Exception:
+                pass
+        string_paths = [str(path) for path in valid_paths]
         try:
             self._data = temp_sens_core.load_data(string_paths)
         except Exception as exc:
@@ -222,17 +227,17 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             self._data = None
             return
         self._loaded_files = string_paths
-        if paths:
-            self.host._plugin_last_directories[self.name] = paths[0].parent
-        self._register_workbooks(paths)
+        if valid_paths:
+            self.host._plugin_last_directories[self.name] = valid_paths[0].parent
+        self._register_workbooks(valid_paths)
         if self._summary_label is not None:
             self._summary_label.setText(
                 "Data loaded. Adjust settings and click Plot Temperature Sensitivity to generate graphs."
             )
         self._log(
             "Loaded {count} temperature sensitivity file(s): {names}".format(
-                count=len(paths),
-                names=", ".join(path.name for path in paths),
+                count=len(valid_paths),
+                names=", ".join(path.name for path in valid_paths),
             )
         )
         self.update_ui()
@@ -347,6 +352,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         if data is None:
             return
         host = self.host
+        window_module = window_api()
         active_keys: set[str] = set()
         created: list[str] = []
         if "filename" not in data.columns:
@@ -400,11 +406,20 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                 meta = worksheet.columns.get(column)
                 if isinstance(meta, window_module.WorksheetColumnMeta):
                     meta.long_name = long_name
-                    meta.units = units
+                    meta.units = _format_units(units)
             workbook.worksheets = [worksheet.key]
             host._register_imported_workbook(workbook, [worksheet])
             active_keys.add(workbook.key)
             created.append(path.name)
+            try:
+                root = host._ensure_data_root()
+                if root is not None:
+                    root.setExpanded(True)
+                node = host._data_workbook_items.get(workbook.key)
+                if node is not None:
+                    node.setExpanded(True)
+            except Exception:
+                pass
         stale = self._managed_workbooks - active_keys
         if stale:
             self._remove_managed_workbooks(stale)
@@ -446,8 +461,6 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = self._data is not None
-        if hasattr(self.host, "load_data_button"):
-            self.host.load_data_button.setEnabled(True)
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data)
             self.host.plot_button.setText("Plot Temperature Sensitivity")
@@ -459,7 +472,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                 self._summary_label.setVisible(True)
                 if not has_data:
                     self._summary_label.setText(
-                        "Select temperature sensitivity files then click Load data."
+                        "Import temperature sensitivity files to load them automatically."
                     )
                 elif not self._summary_label.text().strip():
                     self._summary_label.setText(
