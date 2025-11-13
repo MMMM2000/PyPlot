@@ -655,7 +655,6 @@ def _register_workbooks(self, config: dict[str, Any]) -> None:
         host._refresh_imported_data_summary()
         host._sync_selected_paths_with_imports()
 
-
     def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
         host = self.host
         for key in keys:

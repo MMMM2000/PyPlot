@@ -4,6 +4,8 @@
 - Temperature Sensitivity now creates one annotated workbook per plotted graph (raw jittered points, mean markers, continuous traces, and annotation positions) while Origin exports center the bold title at the top, hide the numeric X ticks in favor of the custom sample labels, and collapse their staging workbooks after plotting to leave only the graphs visible.
 - Stress Sensitivity adopts the same workflow: the plug-in consolidates each graph's processed data into a dedicated workbook with units metadata, the Matplotlib tabs use a sensible minimum canvas size, and the shared core exposes the export table helper so TXT exports and workbooks stay in sync.
 - Added a lightweight test environment (`.venv`) with PyQt6/matplotlib/numpy/pandas/tqdm available so the targeted pytest modules (config, filename parsing, current annealing, etc.) can run headlessly; the full suite still aborts in `tests/test_pyplot_plugins.py` because Qt terminates with signal 6 when instantiating the full PyPlot workbench in this headless CI shell.
+- Fixed the indentation regression that accidentally nested `update_ui`/Origin-export helpers inside the workbook builder, restoring the Temperature Sensitivity plugin’s toolbar state updates, and wired the PyPlot workbench to update the launcher’s “last used” timestamps so the launcher’s Plotting tab always reflects the most recently opened plugin even if it was launched from inside PyPlot.
+- Added a no-op `PyPlotPlugin.update_ui()` implementation so legacy or partially loaded plug-ins never crash the launcher when it refreshes toolbar state before those classes override the method.
 
 ## 2025-11-12 13:32 UTC
 

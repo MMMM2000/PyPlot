@@ -8,6 +8,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List
 import logging
+import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -248,6 +249,11 @@ class PyPlotWorkbench(PyPlotWindow):
         history.extend(entry for entry in self._plotter_history if entry != name)
         self._plotter_history = history[:20]
         self._save_plotter_history()
+        try:
+            launcher_settings = QtCore.QSettings("MicrowireData", "Launcher")
+            launcher_settings.setValue(f"last_used/plotters/{name}", time.time())
+        except Exception:
+            pass
         self._refresh_plotter_combo()
 
     def _select_initial_plotter(self) -> None:

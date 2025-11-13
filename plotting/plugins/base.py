@@ -123,6 +123,12 @@ class PyPlotPlugin:
             "Workbook export is not available for this plotting script yet.",
         )
 
+    def update_ui(self) -> None:
+        """Optional hook for plugins to refresh toolbar/button state."""
+        # Default implementation keeps legacy plugins working even if PyPlot
+        # asks them to refresh before they override the method.
+        return
+
     def _log(self, message: str, *, level: str = "info") -> None:
         """Log helper that prefers the host console when available."""
 
