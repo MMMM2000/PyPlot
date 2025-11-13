@@ -1,10 +1,15 @@
 # Changelog
-## 2025-11-12 12:00 UTC
+## 2025-11-12 13:32 UTC
+
+- Pinned the dock switchers for the primary panels so Project Explorer/Object Manager remain open even after the hover-collapse logic runs, keeping the “Generate workbooks” button ready for imports and the temperature-sensitivity tab stretched while Origin helpers continue to target the bundled SDK.
+- Made the Veusz selftests import the local `veusz-master` checkout so the full pytest run can exercise those suites without a global Veusz install.
+
+## 2025-11-12 12:27 UTC
+
+- Forced the Project Explorer/Object Manager docks to always stay visible when PyPlot starts, kept the Generate workbooks button clickable even before imports so it can summon the data menu, expanded the temperature-sensitivity canvas by stretching/minimum-size the figure, and now the shared Origin helpers punt to the bundled `origin_ext_python/originpro-main` tree before anything else.
 
 - Made the Project Explorer and Object Manager docks show (and stay pinned) whenever PyPlot or any plugin starts, and now the Generate workbooks action opens the import menu/keeps the label so the workflow leads straight into file selection whenever no imports exist.
 - Expanded the temperature-sensitivity tab canvas so the Matplotlib plot fills the tab, surfaced the strain_3d helper module for the pytest scaffold, and documented what Veusz and Gnuplot teach us about reusable plotting patterns and dataset plumbing.
-
-## 2025-11-12 10:34 UTC
 
 - Refined the Temperature Sensitivity Origin export so speed mode is turned off, the title is bold, 22 pt, and centered, the numeric X ticks are hidden in favor of bold 18 pt “2/1”, “2/2”, … labels placed just above the axis, the legend text adopts the plot colors automatically, and each delta annotation is re-added only once higher up so it never stacks on the raw points.
 

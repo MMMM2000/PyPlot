@@ -13,3 +13,7 @@
 ## Testing and Verification
 - After dependency changes, sanity-check imports for key modules (PyQt6, matplotlib, numpy, pandas, plotly, opencv-python if used).
 - Re-run smoke scripts such as `launcher.py` when practical, or note when they were not run.
+
+## Origin Integration
+- Prefer the shipped `origin_ext_python/originpro-main` tree (or configure `PYTHONPATH` to include an Origin Python SDK) whenever touching Origin exports or automation helpers.
+- Consult the OriginLab Python documentation at https://docs.originlab.com/originpro/index.html for missing APIs or behavior samples before adding duplicate logic.

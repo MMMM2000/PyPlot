@@ -5622,10 +5622,20 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_review_buttons()
 
     def _collect_candidates(self) -> List[Path]:  # type: ignore[override]
-        pending = MiniDatabaseSection._pending_paths(self)
+        base = MiniDatabaseSection._collect_candidates(self)
+        pending: List[Path] = []
+        processed = self.data.processed
+        for path in base:
+            key = str(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if float(processed.get(key, -1.0)) != float(mtime):
+                pending.append(path)
         if pending:
             return pending
-        return MiniDatabaseSection._collect_candidates(self)
+        return base
 
     def _auto_fit_columns(self) -> None:  # type: ignore[override]
         super()._auto_fit_columns()

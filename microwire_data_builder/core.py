@@ -11,11 +11,14 @@ import math
 import os
 import re
 import shutil
+import tempfile
 import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Set, Tuple, cast
+from xml.etree import ElementTree as ET
+from zipfile import ZipFile
 
 import numpy as np
 import pandas as pd
@@ -76,32 +79,32 @@ ORIGIN_DIR_NAME = "origin_objects"
 class BuildCancelledError(Exception):
     """Raised when a build is cancelled by the caller."""
 
-MICRO_SIGN = "Âµ"
+MICRO_SIGN = "µ"
 MICROSCOPE_RESIZE_TARGET = 2200
 FOCUS_ROI_LIMIT = 3
 
 OUTPUT_COLUMNS = [
     "Composition",
     "Microwire",
-    "d (Âµm)",
-    "D (Âµm)",
+    "d (µm)",
+    "D (µm)",
     "d/D",
-    "Figure â€” 1000 mA",
-    "Figure â€” low mA",
+    "Figure — 1000 mA",
+    "Figure — low mA",
     "As (mA)",
     "Ms (mA)",
     "Strain",
     "Length (m)",
     "Production datetime",
     "Mass (g)",
-    "Resistance (Î©)",
-    "Temperature (Â°C)",
+    "Resistance (Ω)",
+    "Temperature (°C)",
     "Winding speed (m/min)",
     "Glass feeding (mm/min)",
     "Underpressure",
     "Notes",
-    "Figure â€” 1000 mA (Origin)",
-    "Figure â€” low mA (Origin)",
+    "Figure — 1000 mA (Origin)",
+    "Figure — low mA (Origin)",
     "Low mA value (mA)",
     "File 1000 mA",
     "File low mA",
@@ -112,13 +115,13 @@ GLASS_DIAMETER_COLUMN = OUTPUT_COLUMNS[3]
 DIAMETER_RATIO_COLUMN = OUTPUT_COLUMNS[4]
 
 MICROSCOPE_IMAGE_COLUMNS = (
-    "d (Âµm) image",
-    "D (Âµm) image",
+    "d (µm) image",
+    "D (µm) image",
 )
 
 FIGURE_COLUMNS = (
-    "Figure â€” 1000 mA",
-    "Figure â€” low mA",
+    "Figure — 1000 mA",
+    "Figure — low mA",
 )
 
 STRAIN_COLUMN = "Strain"
@@ -298,6 +301,7 @@ def _normalise_figsize(value: Sequence[float] | Tuple[float, float] | None) -> T
     return (max(0.5, width_f), max(0.5, height_f))
 
 EXCEL_EMBED_DPI = 96.0
+EMU_PER_INCH = 914400
 
 
 def _normalise_dpi(value: object) -> Tuple[float, float]:
@@ -370,6 +374,52 @@ def _column_width_from_pixels(pixels: float) -> float:
 def _excel_column_width(width_in: float) -> float:
     pixels = max(width_in * EXCEL_EMBED_DPI, 1.0)
     return max(_column_width_from_pixels(pixels), 8.43)
+
+
+def _adjust_drawing_ext_dimensions(
+    excel_path: Path,
+    figure_size: Tuple[float, float],
+    log: logging.Logger,
+) -> None:
+    """Update the drawing CX/CY extents so the width matches the requested figure size."""
+
+    if not excel_path.exists():
+        return
+    width_in, height_in = figure_size
+    width_emu = int(round(width_in * EMU_PER_INCH))
+    height_emu = int(round(height_in * EMU_PER_INCH))
+    temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+    temp_file.close()
+    temp_path = Path(temp_file.name)
+    try:
+        with ZipFile(excel_path, "r") as source, ZipFile(temp_path, "w") as target:
+            for info in source.infolist():
+                data = source.read(info.filename)
+                if info.filename.startswith("xl/drawings/") and info.filename.endswith(".xml"):
+                    try:
+                        tree = ET.fromstring(data)
+                    except ET.ParseError:
+                        pass
+                    else:
+                        updated = False
+                        for namespace in (
+                            "http://schemas.openxmlformats.org/drawingml/2006/main",
+                            "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing",
+                        ):
+                            for ext in tree.findall(f".//{{{namespace}}}ext"):
+                                ext.set("cx", str(width_emu))
+                                ext.set("cy", str(height_emu))
+                                updated = True
+                        if updated:
+                            data = ET.tostring(tree, encoding="utf-8")
+                target.writestr(info, data)
+        os.replace(temp_path, excel_path)
+    except Exception as exc:
+        log.warning("Failed to adjust drawing metadata for %s: %s", excel_path, exc)
+        try:
+            temp_path.unlink()
+        except Exception:
+            pass
 
 
 @dataclass
@@ -3798,10 +3848,14 @@ def _embed_plots_in_excel_openpyxl(
                 worksheet.add_image(image, cell_reference)
 
                 if row_height_pts > 0:
-                    worksheet.row_dimensions[row_number].height = row_height_pts
+                    row_dim = worksheet.row_dimensions[row_number]
+                    row_dim.height = row_height_pts
+                    row_dim.customHeight = True
 
                 if column_width_chars > 0:
-                    worksheet.column_dimensions[column_letter].width = column_width_chars
+                    col_dim = worksheet.column_dimensions[column_letter]
+                    col_dim.width = column_width_chars
+                    col_dim.customWidth = True
 
                 inserted = True
 
@@ -3846,15 +3900,17 @@ def _embed_plots_in_excel_openpyxl(
                 if height_px:
                     height_in = height_px / (dpi_y or EXCEL_EMBED_DPI)
                     required_height = _excel_row_height(height_in)
-                    existing = worksheet.row_dimensions[row_number].height or 0.0
-                    worksheet.row_dimensions[row_number].height = max(existing, required_height)
+                    row_dim = worksheet.row_dimensions[row_number]
+                    existing = row_dim.height or 0.0
+                    row_dim.height = max(existing, required_height)
+                    row_dim.customHeight = True
                 if width_px:
                     width_in = width_px / (dpi_x or EXCEL_EMBED_DPI)
                     required_width = _excel_column_width(width_in)
-                    existing_width = worksheet.column_dimensions[column_letter].width or 0.0
-                    worksheet.column_dimensions[column_letter].width = max(
-                        existing_width, required_width
-                    )
+                    col_dim = worksheet.column_dimensions[column_letter]
+                    existing_width = col_dim.width or 0.0
+                    col_dim.width = max(existing_width, required_width)
+                    col_dim.customWidth = True
                 inserted = True
 
         if highlight_map:
@@ -3880,6 +3936,7 @@ def _embed_plots_in_excel_openpyxl(
 
         if inserted:
             workbook.save(excel_path)
+            _adjust_drawing_ext_dimensions(excel_path, figure_size, log)
     finally:
         workbook.close()
 
@@ -3918,7 +3975,7 @@ def _embed_assets_with_xlsxwriter(
     figure_columns = [column for column in FIGURE_COLUMNS if column in dataframe.columns]
     origin_columns = [
         column
-        for column in ("Figure â€” 1000 mA (Origin)", "Figure â€” low mA (Origin)")
+    for column in ("Figure — 1000 mA (Origin)", "Figure — low mA (Origin)")
         if column in dataframe.columns
     ]
     microscope_columns = [
@@ -4228,12 +4285,12 @@ def build_database(
     microscope_image_columns: Tuple[str, ...] = ()
     if include_crops:
         microscope_image_columns = MICROSCOPE_IMAGE_COLUMNS
-        if "d (Âµm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[0] not in output_columns:
-            d_index = output_columns.index("d (Âµm)")
-            output_columns.insert(d_index + 1, MICROSCOPE_IMAGE_COLUMNS[0])
-        if "D (Âµm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[1] not in output_columns:
-            D_index = output_columns.index("D (Âµm)")
-            output_columns.insert(D_index + 1, MICROSCOPE_IMAGE_COLUMNS[1])
+    if "d (µm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[0] not in output_columns:
+        d_index = output_columns.index("d (µm)")
+        output_columns.insert(d_index + 1, MICROSCOPE_IMAGE_COLUMNS[0])
+    if "D (µm)" in output_columns and MICROSCOPE_IMAGE_COLUMNS[1] not in output_columns:
+        D_index = output_columns.index("D (µm)")
+        output_columns.insert(D_index + 1, MICROSCOPE_IMAGE_COLUMNS[1])
 
     raw_backends = tuple(config.plot_backends) if config.plot_backends else ()
     cleaned_backends = []
@@ -4430,14 +4487,14 @@ def build_database(
         row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
         row["Microwire"] = _microwire_label(draw_x, piece_y)
-        row["d (Âµm)"] = None
-        row["D (Âµm)"] = None
+        row["d (µm)"] = None
+        row["D (µm)"] = None
         row[ratio_column] = None
         row["Length (m)"] = _value_for_output(piece_info, "length_m")
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
-        row["Resistance (Î©)"] = _value_for_output(draw_info, "fabrication_resistance_ohm")
-        row["Temperature (Â°C)"] = _value_for_output(draw_info, "fabrication_temperature_c")
+        row["Resistance (Ω)"] = _value_for_output(draw_info, "fabrication_resistance_ohm")
+        row["Temperature (°C)"] = _value_for_output(draw_info, "fabrication_temperature_c")
         row["Winding speed (m/min)"] = _value_for_output(draw_info, "winding_speed_m_per_min")
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
@@ -4451,8 +4508,8 @@ def build_database(
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None
-        d_numeric = _parse_numeric(row["d (Âµm)"])
-        D_numeric = _parse_numeric(row["D (Âµm)"])
+        d_numeric = _parse_numeric(row["d (µm)"])
+        D_numeric = _parse_numeric(row["D (µm)"])
         ratio_numeric = _parse_numeric(row[ratio_column])
         microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
@@ -4523,12 +4580,12 @@ def build_database(
         if video_data is None:
             video_data = video_index.get((composition, draw_x, None))
         if video_data:
-            temp_numeric = _parse_numeric(row["Temperature (Â°C)"])
+            temp_numeric = _parse_numeric(row["Temperature (°C)"])
             if temp_numeric is None:
                 temp = video_data.temperature()
                 if temp is not None:
-                    row["Temperature (Â°C)"] = temp
-                    row_highlights.add("Temperature (Â°C)")
+                    row["Temperature (°C)"] = temp
+                    row_highlights.add("Temperature (°C)")
             under_numeric = _parse_numeric(row["Underpressure"])
             if under_numeric is None:
                 under_value = video_data.underpressure()
@@ -4596,7 +4653,7 @@ def build_database(
                         cached = None
                 if cached is not None:
                     figure_name = Path(cached).name
-                    row["Figure â€” 1000 mA"] = figure_name
+                    row["Figure — 1000 mA"] = figure_name
                     plot_name_to_path.setdefault(figure_name, cached)
                     if figure_name not in plot_records:
                         plot_records.append(figure_name)
@@ -4616,7 +4673,7 @@ def build_database(
                         cached = None
                 if cached is not None:
                     figure_name = Path(cached).name
-                    row["Figure â€” low mA"] = figure_name
+                    row["Figure — low mA"] = figure_name
                     plot_name_to_path.setdefault(figure_name, cached)
                     if figure_name not in plot_records:
                         plot_records.append(figure_name)
@@ -4645,7 +4702,7 @@ def build_database(
                             origin_cache[high_record.metadata.measurement_id] = cached_origin
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
-                    row["Figure â€” 1000 mA (Origin)"] = cached_origin.descriptor
+                    row["Figure — 1000 mA (Origin)"] = cached_origin.descriptor
             if origin_enabled and low_record:
                 cached_origin = origin_cache.get(low_record.metadata.measurement_id)
                 if cached_origin is None:
@@ -4670,7 +4727,7 @@ def build_database(
                             origin_cache[low_record.metadata.measurement_id] = cached_origin
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
-                    row["Figure â€” low mA (Origin)"] = cached_origin.descriptor
+                    row["Figure — low mA (Origin)"] = cached_origin.descriptor
         row_index = len(rows)
         rows.append(row)
         if row_highlights:

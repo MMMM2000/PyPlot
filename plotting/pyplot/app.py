@@ -120,6 +120,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._set_data_sources_visible(False)
         self._select_initial_plotter()
         self._update_window_title()
+        QtCore.QTimer.singleShot(0, self._show_primary_docks)
 
 
     def _update_window_title(self) -> None:
@@ -132,6 +133,19 @@ class PyPlotWorkbench(PyPlotWindow):
         else:
             parts.append("UNTITLED")
         self.setWindowTitle(" - ".join(parts))
+
+    def _show_primary_docks(self) -> None:
+        for dock in (
+            getattr(self, "project_dock", None),
+            getattr(self, "object_dock", None),
+        ):
+            if not isinstance(dock, QtWidgets.QDockWidget):
+                continue
+            try:
+                dock.show()
+                dock.raise_()
+            except Exception:
+                pass
 
     def _load_plotter_history(self) -> list[str]:
         stored = self.settings.value("plotter_history", "[]")
@@ -478,7 +492,7 @@ class PyPlotWorkbench(PyPlotWindow):
             return
         requires_data = bool(getattr(plugin, "requires_imported_data", False))
         if requires_data:
-            button.setEnabled(self._has_imported_data())
+            button.setEnabled(True)
             return
         button.setEnabled(True)
 

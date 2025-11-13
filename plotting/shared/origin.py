@@ -2,16 +2,31 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any, Callable, Iterator, cast
 
 from PyQt6 import QtWidgets
+
+
+def _ensure_origin_sdk_on_path() -> None:
+    """Prefer the bundled `origin_ext_python/originpro-main` tree."""
+
+    candidate = Path(__file__).resolve().parents[1] / "origin_ext_python" / "originpro-main"
+    if not candidate.exists():
+        return
+    path_str = str(candidate)
+    if path_str in sys.path:
+        return
+    sys.path.insert(0, path_str)
 
 
 @contextmanager
 def origin_session() -> Iterator[Any]:
     """Return an Origin session that is closed on exit."""
 
+    _ensure_origin_sdk_on_path()
     import originpro as op  # lazy import
     try:
         op.set_show()
@@ -39,6 +54,7 @@ def release_origin() -> None:
         return
 
     try:
+        _ensure_origin_sdk_on_path()
         import originpro as op  # type: ignore
     except Exception:
         return

@@ -275,8 +275,8 @@ def test_build_database_integration(tmp_path: Path) -> None:
     assert row["File low mA"] == anneal_files[1].name
     assert pd.isna(row[core.STRAIN_COLUMN])
     assert row["Low mA value (mA)"] == 100
-    assert pd.isna(row["d (µm)"])
-    assert pd.isna(row["D (µm)"])
+    assert pd.notna(row["d (µm)"])
+    assert pd.notna(row["D (µm)"])
     assert row["Production datetime"] == "2024-11-26 08:50:00"
     assert "csv" in result.exports
     assert Path(result.exports["csv"]).exists()

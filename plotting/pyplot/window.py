@@ -6042,6 +6042,37 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 dock.raise_()
             except Exception:
                 pass
+        try:
+            self._pin_primary_dock_switchers()
+        except Exception:
+            pass
+
+    def _pin_primary_dock_switchers(self) -> None:
+        panels = getattr(self, "_dock_switcher_panels", [])
+        if not panels:
+            return
+        self._pin_dock_switcher_tab(panels[0], 0)
+        if len(panels) > 1:
+            self._pin_dock_switcher_tab(panels[1], 0)
+
+    def _pin_dock_switcher_tab(
+        self,
+        panel: QtWidgets.QDockWidget | None,
+        index: int,
+    ) -> None:
+        if not isinstance(panel, QtWidgets.QDockWidget):
+            return
+        switcher = panel.widget()
+        if not isinstance(switcher, _DockSwitcherWidget):
+            return
+        try:
+            switcher._update_pinned_index(index, persist=False)
+        except Exception:
+            pass
+        try:
+            switcher._activate_index(index)
+        except Exception:
+            pass
 
     def _handle_primary_dock_location_change(
         self,

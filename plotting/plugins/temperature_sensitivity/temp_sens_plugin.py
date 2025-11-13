@@ -289,6 +289,7 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                         saved_name = fname
                     canvas = FigureCanvas(fig)
                     canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                    canvas.setMinimumSize(640, 360)
                     canvas.setSizePolicy(
                         QtWidgets.QSizePolicy.Policy.Expanding,
                         QtWidgets.QSizePolicy.Policy.Expanding,
@@ -296,7 +297,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     tab = QtWidgets.QWidget()
                     tab_layout = QtWidgets.QVBoxLayout(tab)
                     tab_layout.setContentsMargins(0, 0, 0, 0)
-                    tab_layout.addWidget(canvas)
+                    tab_layout.addWidget(canvas, 1)
+                    tab_layout.setStretch(tab_layout.indexOf(canvas), 1)
                     ax = fig.axes[0] if fig.axes else None
                     title = ax.get_title() if ax else variable
                     x_label = ax.get_xlabel() if ax else "Temperature"
