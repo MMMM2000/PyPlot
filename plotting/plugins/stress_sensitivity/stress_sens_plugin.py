@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Dict, Iterable
 
@@ -10,6 +11,25 @@ from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from . import core as sens_core
+
+
+def _format_units(units: str | None) -> str | None:
+    if not units:
+        return None
+    value = units.strip()
+    if not value:
+        return None
+    if value.startswith("[") and value.endswith("]"):
+        return value
+    return f"[{value}]"
+
+
+def _variable_units(variable: str) -> str | None:
+    label = sens_core.LABELS.get(variable)
+    if not label:
+        return None
+    match = re.search(r"\((.*?)\)", label)
+    return match.group(1).strip() if match else None
 
 
 @register_plugin("Stress Sensitivity")
@@ -123,33 +143,42 @@ class StressSensitivityPlugin(PyPlotPlugin):
     # Behaviour -----------------------------------------------------
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked()]
-        return selected or ["sum"]
+        if selected:
+            return selected
+        return list(sens_core.LABELS.keys())
 
-    def _apply_settings_to_core(self) -> dict[str, Any]:
+    def _gather_config(self, *, apply_to_core: bool = False) -> dict[str, Any]:
         variables = self._selected_variables()
-        sens_core.PLOT_VARS = list(variables)
-        sens_core.PLOT_SUM = "sum" in variables
-        sens_core.PLOT_DT = "dT" in variables
-        sens_core.PLOT_T1 = "T1" in variables
-        sens_core.PLOT_T2 = "T2" in variables
-
         include_dep = bool(self._include_dep_checkbox and self._include_dep_checkbox.isChecked())
-        sens_core.INCLUDE_DEPENDENCE = include_dep
+        med_window = sens_core.MED_WINDOW
         if isinstance(self._med_spin, QtWidgets.QSpinBox):
-            sens_core.MED_WINDOW = int(self._med_spin.value())
+            med_window = int(self._med_spin.value())
+        ma_window = sens_core.MA_WINDOW
         if isinstance(self._ma_spin, QtWidgets.QSpinBox):
-            sens_core.MA_WINDOW = int(self._ma_spin.value())
-
-        sens_core.BACKEND = "matplotlib"
-        sens_core.SHOW_PLOTS = False
-        sens_core.SAVE_PLOTS = False
-
+            ma_window = int(self._ma_spin.value())
+        if apply_to_core:
+            sens_core.PLOT_VARS = list(variables)
+            sens_core.PLOT_SUM = "sum" in variables
+            sens_core.PLOT_DT = "dT" in variables
+            sens_core.PLOT_T1 = "T1" in variables
+            sens_core.PLOT_T2 = "T2" in variables
+            sens_core.INCLUDE_DEPENDENCE = include_dep
+            sens_core.MED_WINDOW = med_window
+            sens_core.MA_WINDOW = ma_window
+            sens_core.BACKEND = "matplotlib"
+            sens_core.SHOW_PLOTS = False
+            sens_core.SAVE_PLOTS = False
         return {
-            "variables": variables,
+            "variables": list(variables),
             "save": False,
             "output_dir": "",
             "include_dep": include_dep,
+            "med_window": med_window,
+            "ma_window": ma_window,
         }
+
+    def _apply_settings_to_core(self) -> dict[str, Any]:
+        return self._gather_config(apply_to_core=True)
 
     def _clear_existing_tabs(self) -> None:
         if not self._plot_tabs:
@@ -164,84 +193,102 @@ class StressSensitivityPlugin(PyPlotPlugin):
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
 
-    def _register_workbooks(self, paths: list[Path]) -> None:
-        data = self._data
-        if data is None or "filename" not in data.columns:
-            return
-        host = self.host
-        window_module = window_api()
-        grouped = data.groupby("filename", dropna=False)
-        active_keys: set[str] = set()
-        meta_map = {
-            "line": ("Line", ""),
-            "load": ("Load", "g"),
-            "dir": ("Direction", ""),
-            "T1": ("T1", "µs"),
-            "T2": ("T2", "µs"),
-            "dT": ("T2-T1", "µs"),
-            "sum": ("T1+T2", "µs"),
-            "sample": ("Sample", ""),
-            "sample_end": ("Sample end", ""),
-            "composition": ("Composition", ""),
-            "title": ("Title", ""),
-            "anneal": ("Anneal", ""),
-            "filename": ("Filename", ""),
-        }
-        for path in paths:
-            file_name = path.name
-            if file_name not in grouped.groups:
-                continue
-            subset = grouped.get_group(file_name).copy().reset_index(drop=True)
-            columns = [
-                "line",
-                "load",
-                "dir",
-                "T1",
-                "T2",
-                "dT",
-                "sum",
-                "continuous",
+
+def _register_workbooks(self, config: dict[str, Any]) -> None:
+    data = self._data
+    if data is None:
+        return
+    host = self.host
+    window_module = window_api()
+    active_keys: set[str] = set()
+    variables = config.get("variables") or list(sens_core.LABELS.keys())
+    grouped = data.groupby(["composition", "title", "anneal"], dropna=False)
+    for (composition, title, anneal), group in grouped:
+        try:
+            table, _ = sens_core.build_workbook_table(group)
+        except Exception as exc:
+            self._log(f"Failed to prepare workbook data: {exc}", level="error")
+            continue
+        for variable in variables:
+            raw_columns = [
                 "composition",
                 "title",
                 "anneal",
-                "sample",
                 "sample_end",
+                "sample_label",
                 "filename",
+                "dir",
+                "load",
+                "line",
+                variable,
+                f"{variable}_relative",
+                f"baseline_{variable}",
+                f"delta_{variable}",
             ]
-            available = [column for column in columns if column in subset.columns]
-            extra = [column for column in subset.columns if column not in available and column != "filename"]
-            frame = subset[available + extra] if available or extra else subset
-            key = self._workbook_keys.get(str(path))
+            available = [column for column in raw_columns if column in table.columns]
+            if not available:
+                continue
+            frame = table[available].copy()
+            if frame.empty:
+                continue
+            workbook_id = f"{composition}|{title}|{anneal}|{variable}"
+            key = self._workbook_keys.get(workbook_id)
             if not key:
-                try:
-                    resolved = path.resolve()
-                except Exception:
-                    resolved = path
-                key = f"stress_sensitivity::{resolved}"
-                self._workbook_keys[str(path)] = key
+                safe_id = sens_core._sanitise_stem(composition, title, anneal, variable)  # type: ignore[attr-defined]
+                key = f"stress_sensitivity::{safe_id}"
+                self._workbook_keys[workbook_id] = key
+            label = sens_core.LABELS.get(variable, variable)
             workbook = window_module.WorkbookData(
                 key=key,
-                name=f"{path.stem} (stress sensitivity)",
+                name=f"{composition} {anneal} - {label}",
                 worksheets=[],
-                source=path,
-                folder=path.parent,
+                source=None,
+                folder=None,
             )
-            worksheet = host._create_worksheet_from_frame(workbook, "Stress sensitivity", frame)
-            for column, (long_name, units) in meta_map.items():
-                meta = worksheet.columns.get(column)
-                if isinstance(meta, window_module.WorksheetColumnMeta):
-                    meta.long_name = long_name
-                    meta.units = units
+            worksheet = host._create_worksheet_from_frame(workbook, "Processed data", frame)
+            self._apply_column_meta(window_module, worksheet, variable)
             workbook.worksheets = [worksheet.key]
             host._register_imported_workbook(workbook, [worksheet])
             active_keys.add(workbook.key)
-        stale = self._managed_workbooks - active_keys
-        if stale:
-            self._remove_managed_workbooks(stale)
-        self._managed_workbooks = active_keys
-        if active_keys:
-            host._refresh_imported_data_summary()
-            host._sync_selected_paths_with_imports()
+    stale = self._managed_workbooks - active_keys
+    if stale:
+        self._remove_managed_workbooks(stale)
+    self._managed_workbooks = active_keys
+    if active_keys or stale:
+        host._refresh_imported_data_summary()
+        host._sync_selected_paths_with_imports()
+
+def _apply_column_meta(
+    self,
+    window_module: Any,
+    worksheet: "WorksheetData" | None,
+    variable: str,
+) -> None:
+    if worksheet is None:
+        return
+    units = _format_units(_variable_units(variable))
+    label = sens_core.LABELS.get(variable, variable)
+    meta_map = {
+        "composition": ("Composition", None),
+        "title": ("Title", None),
+        "anneal": ("Anneal", None),
+        "sample_end": ("Sample end", None),
+        "sample_label": ("Sample label", None),
+        "filename": ("Source file", None),
+        "dir": ("Direction", None),
+        "load": ("Load", "g"),
+        "line": ("Line", None),
+        variable: (label, units),
+        f"{variable}_relative": (f"{label} relative", units),
+        f"baseline_{variable}": (f"{label} baseline", units),
+        f"delta_{variable}": (f"{label} delta", units),
+    }
+    for column, (long_name, units_text) in meta_map.items():
+        meta = worksheet.columns.get(column)
+        if isinstance(meta, window_module.WorksheetColumnMeta):
+            meta.long_name = long_name
+            meta.units = units_text
+
 
     def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
         host = self.host
@@ -279,7 +326,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
-        self._register_workbooks(paths)
+        config = self._gather_config()
+        self._register_workbooks(config)
         if self._summary_label is not None:
             self._summary_label.setText(
                 "Click Generate plots to review stress sensitivity summaries."
@@ -342,6 +390,11 @@ class StressSensitivityPlugin(PyPlotPlugin):
                     continue
                 canvas = FigureCanvas(fig)
                 canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+                canvas.setMinimumSize(640, 360)
+                canvas.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                )
                 tab = QtWidgets.QWidget()
                 tab_layout = QtWidgets.QVBoxLayout(tab)
                 tab_layout.setContentsMargins(0, 0, 0, 0)

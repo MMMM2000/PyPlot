@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-13 15:07 UTC
+
+- Temperature Sensitivity now creates one annotated workbook per plotted graph (raw jittered points, mean markers, continuous traces, and annotation positions) while Origin exports center the bold title at the top, hide the numeric X ticks in favor of the custom sample labels, and collapse their staging workbooks after plotting to leave only the graphs visible.
+- Stress Sensitivity adopts the same workflow: the plug-in consolidates each graph's processed data into a dedicated workbook with units metadata, the Matplotlib tabs use a sensible minimum canvas size, and the shared core exposes the export table helper so TXT exports and workbooks stay in sync.
+- Added a lightweight test environment (`.venv`) with PyQt6/matplotlib/numpy/pandas/tqdm available so the targeted pytest modules (config, filename parsing, current annealing, etc.) can run headlessly; the full suite still aborts in `tests/test_pyplot_plugins.py` because Qt terminates with signal 6 when instantiating the full PyPlot workbench in this headless CI shell.
+
 ## 2025-11-12 13:32 UTC
 
 - Pinned the dock switchers for the primary panels so Project Explorer/Object Manager remain open even after the hover-collapse logic runs, keeping the “Generate workbooks” button ready for imports and the temperature-sensitivity tab stretched while Origin helpers continue to target the bundled SDK.

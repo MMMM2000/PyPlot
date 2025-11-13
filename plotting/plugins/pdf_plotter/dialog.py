@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple, cast
 
 import matplotlib.pyplot as plt
@@ -100,6 +101,21 @@ class _NoWheelDoubleSpinBox(QtWidgets.QDoubleSpinBox):
 # -----------------------------------------------------------------------------
 # Data loading
 # -----------------------------------------------------------------------------
+def _resolve_pdf_pointer(path: Path) -> Path:
+    """Return the actual PDF path, resolving simple pointer files."""
+
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            content = handle.read().strip()
+    except (UnicodeDecodeError, OSError):
+        return path
+    if content.startswith("pdf_data/"):
+        candidate = path.parent / content
+        if candidate.exists():
+            return candidate
+    return path
+
+
 def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     """Extract numeric rows from a PDF.
 
@@ -109,8 +125,11 @@ def parse_pdf_to_rows(path: str) -> List[NumberRow]:
     """
     if PdfReader is None:
         raise RuntimeError("pypdf not installed. Install with: pip install pypdf")
+    source = Path(path)
+    if source.is_file():
+        source = _resolve_pdf_pointer(source)
     rows: List[NumberRow] = []
-    reader = PdfReader(path)
+    reader = PdfReader(str(source))
     for page in reader.pages:
         text = page.extract_text() or ""
         for raw in text.splitlines():
@@ -847,7 +866,8 @@ class PdfPlotterWindow(QtWidgets.QDialog):
         self._save_lines(self._last_lines, self._last_title, self._last_x_label, self._last_y_label)
 
     def plot(self) -> None:
-        self._reload_selected_files(show_feedback=False)
+        if any(self.files):
+            self._reload_selected_files(show_feedback=False)
         if not self.data:
             QtWidgets.QMessageBox.information(self, "No data", "Load PDF files first.")
             return

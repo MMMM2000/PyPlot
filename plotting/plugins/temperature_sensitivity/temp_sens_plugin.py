@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import re
 from pathlib import Path
 from typing import Any, Iterable, TYPE_CHECKING
 
@@ -11,6 +13,7 @@ from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from . import core as temp_sens_core
 
+
 def _format_units(units: str | None) -> str | None:
     if not units:
         return None
@@ -21,13 +24,34 @@ def _format_units(units: str | None) -> str | None:
         return value
     return f"[{value}]"
 
+
+def _variable_units(variable: str) -> str | None:
+    label = temp_sens_core.TS_LABELS.get(variable)
+    if not label:
+        return None
+    match = re.search(r"\\((.*?)\\)", label)
+    return match.group(1).strip() if match else None
+
+
+def _units_from_label(label: str | None) -> str | None:
+    if not label:
+        return None
+    match = re.search(r"\(([^)]+)\)\s*$", label.strip())
+    if match:
+        return match.group(1).strip()
+    return None
+
 if TYPE_CHECKING:
     from plotting.pyplot.window import (
         GraphLineState,
         WorksheetColumnMeta,
+        WorksheetData,
         WorkbookData,
         TabDescriptor,
     )
+
+
+MODE_LABELS = {"none": "Raw", "zero_25": "Zero @25°C"}
 
 
 @register_plugin("Temperature Sensitivity")
@@ -157,36 +181,49 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
 
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked() and cb.isEnabled()]
-        return selected or ["sum"]
+        if selected:
+            return selected
+        fallback = list(getattr(temp_sens_core, "PLOT_VARS", []))
+        if not fallback:
+            fallback = list(temp_sens_core.TS_LABELS.keys())
+        return fallback
 
-    def _apply_settings_to_core(self) -> dict[str, Any]:
+    def _gather_config(self, *, apply_to_core: bool = False) -> dict[str, Any]:
         vars_selected = self._selected_variables()
-        temp_sens_core.PLOT_VARS = list(vars_selected)
         baseline_value = "none"
         if isinstance(self._baseline_combo, QtWidgets.QComboBox):
             baseline_value = self._baseline_combo.currentData() or "none"
         if baseline_value not in {"none", "zero_25", "both"}:
             baseline_value = "none"
-        temp_sens_core.BASELINE_MODE = baseline_value
         include_cont = bool(self._include_continuous_checkbox and self._include_continuous_checkbox.isChecked())
-        temp_sens_core.INCLUDE_CONTINUOUS = include_cont
+        med_window = temp_sens_core.MED_WINDOW
         if isinstance(self._med_spin, QtWidgets.QSpinBox):
-            temp_sens_core.MED_WINDOW = int(self._med_spin.value())
+            med_window = int(self._med_spin.value())
+        ma_window = temp_sens_core.MA_WINDOW
         if isinstance(self._ma_spin, QtWidgets.QSpinBox):
-            temp_sens_core.MA_WINDOW = int(self._ma_spin.value())
-        temp_sens_core.SAVE_PLOTS = False
-        temp_sens_core.OUTPUT_DIR = str(temp_sens_core.OUTPUT_DIR)
-        temp_sens_core.SHOW_PLOTS = False
-        temp_sens_core.BACKEND = "matplotlib"
+            ma_window = int(self._ma_spin.value())
+        if apply_to_core:
+            temp_sens_core.PLOT_VARS = list(vars_selected)
+            temp_sens_core.BASELINE_MODE = baseline_value
+            temp_sens_core.INCLUDE_CONTINUOUS = include_cont
+            temp_sens_core.MED_WINDOW = med_window
+            temp_sens_core.MA_WINDOW = ma_window
+            temp_sens_core.SAVE_PLOTS = False
+            temp_sens_core.OUTPUT_DIR = str(temp_sens_core.OUTPUT_DIR)
+            temp_sens_core.SHOW_PLOTS = False
+            temp_sens_core.BACKEND = "matplotlib"
         return {
-            "variables": vars_selected,
+            "variables": list(vars_selected),
             "baseline_mode": baseline_value,
             "include_continuous": include_cont,
             "save": False,
             "output_dir": "",
-            "med_window": temp_sens_core.MED_WINDOW,
-            "ma_window": temp_sens_core.MA_WINDOW,
+            "med_window": med_window,
+            "ma_window": ma_window,
         }
+
+    def _apply_settings_to_core(self) -> dict[str, Any]:
+        return self._gather_config(apply_to_core=True)
 
     def load_data(self) -> None:  # type: ignore[override]
         host = self.host
@@ -229,7 +266,8 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._loaded_files = string_paths
         if valid_paths:
             self.host._plugin_last_directories[self.name] = valid_paths[0].parent
-        self._register_workbooks(valid_paths)
+        config = self._gather_config()
+        self._register_workbooks(config)
         if self._summary_label is not None:
             self._summary_label.setText(
                 "Data loaded. Adjust settings and click Plot Temperature Sensitivity to generate graphs."
@@ -353,86 +391,270 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._log(f"Generated {plots_created} temperature sensitivity plot(s).")
         self.update_ui()
 
-    def _register_workbooks(self, paths: list[Path]) -> None:
-        data = self._data
-        if data is None:
-            return
-        host = self.host
-        window_module = window_api()
-        active_keys: set[str] = set()
-        created: list[str] = []
-        if "filename" not in data.columns:
-            return
-        grouped = data.groupby("filename", dropna=False)
-        meta_map = {
-            "temp": ("Temperature", "°C"),
-            "T1": ("T1", "µs"),
-            "T2": ("T2", "µs"),
-            "dT": ("T2-T1", "µs"),
-            "sum": ("T1+T2", "µs"),
-        }
-        for path in paths:
-            file_name = path.name
-            if file_name not in grouped.groups:
-                continue
-            subset = grouped.get_group(file_name).copy()
-            subset = subset.reset_index(drop=True)
-            columns_order = [
-                "line",
-                "temp",
-                "T1",
-                "T2",
-                "dT",
-                "sum",
-                "continuous",
-                "composition",
-                "sample",
-                "anneal",
-            ]
-            available = [column for column in columns_order if column in subset.columns]
-            extras = [column for column in subset.columns if column not in available and column != "filename"]
-            frame = subset[available + extras] if available or extras else subset
-            key = self._workbook_keys.get(str(path))
-            if not key:
+
+def _format_workbook_name(
+    self,
+    composition: str,
+    anneal: str,
+    title: str,
+    variable: str,
+    mode: str,
+) -> str:
+    label = temp_sens_core.TS_LABELS.get(variable, variable)
+    base_parts = [composition.strip(), anneal.strip()]
+    head = " ".join(part for part in base_parts if part)
+    if title and title not in base_parts:
+        head = f"{head} {title}".strip()
+    mode_label = MODE_LABELS.get(mode, mode)
+    name = f"{head} - {label}".strip() if head else label
+    if mode_label:
+        name = f"{name} ({mode_label})"
+    return name.strip()
+
+def _build_graph_workbook(
+    self,
+    window_module: Any,
+    workbook: "WorkbookData",
+    ctx: temp_sens_core.TemperatureGraphContext,
+    variable: str,
+    mode: str,
+    include_cont: bool,
+) -> list["WorksheetData"]:
+    host = self.host
+    units = _format_units(_variable_units(variable))
+    raw_columns = [
+        "sample",
+        "sample_label",
+        "sample_idx",
+        "temp",
+        "temp_label",
+        "legend_label",
+        "X",
+        "Y",
+        "value",
+        "baseline",
+        "composition",
+        "anneal",
+    ]
+    raw_frame = ctx.raw_points[[col for col in raw_columns if col in ctx.raw_points.columns]].copy()
+    raw_frame.rename(
+        columns={
+            "sample": "sample_id",
+            "sample_label": "sample_label",
+            "sample_idx": "sample_index",
+            "temp": "temperature_c",
+            "temp_label": "temperature_label",
+            "legend_label": "series",
+            "X": "x_position",
+            "Y": "plotted_value",
+            "value": "raw_value",
+            "baseline": "baseline_value",
+        },
+        inplace=True,
+    )
+
+    mean_columns = [
+        "sample",
+        "sample_label",
+        "sample_idx",
+        "temp",
+        "temp_label",
+        "legend_label",
+        "plot_x",
+        "plot_y",
+        "composition",
+        "anneal",
+    ]
+    mean_frame = ctx.mean_points[[col for col in mean_columns if col in ctx.mean_points.columns]].copy()
+    mean_frame.rename(
+        columns={
+            "sample": "sample_id",
+            "sample_label": "sample_label",
+            "sample_idx": "sample_index",
+            "temp": "temperature_c",
+            "temp_label": "temperature_label",
+            "legend_label": "series",
+            "plot_x": "x_position",
+            "plot_y": "plotted_value",
+        },
+        inplace=True,
+    )
+
+    sheets: list["WorksheetData"] = []
+    raw_sheet = host._create_worksheet_from_frame(workbook, "Raw points", raw_frame)
+    self._apply_column_meta(
+        raw_sheet,
+        {
+            "sample_id": ("Sample", None),
+            "sample_label": ("Sample label", None),
+            "sample_index": ("Sample index", None),
+            "temperature_c": ("Temperature", _format_units("°C")),
+            "temperature_label": ("Temperature label", None),
+            "series": ("Legend entry", None),
+            "x_position": ("X position", None),
+            "plotted_value": (f"{ctx.var_label} ({MODE_LABELS.get(mode, mode)})", units),
+            "raw_value": (f"{ctx.var_label} (raw)", units),
+            "baseline_value": (f"{ctx.var_label} baseline", units),
+            "composition": ("Composition", None),
+            "anneal": ("Anneal", None),
+        },
+        window_module,
+    )
+    sheets.append(raw_sheet)
+
+    mean_sheet = host._create_worksheet_from_frame(workbook, "Means", mean_frame)
+    self._apply_column_meta(
+        mean_sheet,
+        {
+            "sample_id": ("Sample", None),
+            "sample_label": ("Sample label", None),
+            "sample_index": ("Sample index", None),
+            "temperature_c": ("Temperature", _format_units("°C")),
+            "temperature_label": ("Temperature label", None),
+            "series": ("Legend entry", None),
+            "x_position": ("X position", None),
+            "plotted_value": (f"{ctx.var_label} mean", units),
+            "composition": ("Composition", None),
+            "anneal": ("Anneal", None),
+        },
+        window_module,
+    )
+    sheets.append(mean_sheet)
+
+    if include_cont and ctx.cont_series:
+        cont_frame = pd.concat(ctx.cont_series, ignore_index=True)
+        cont_frame.rename(columns={"X": "x_position", "Y": "plotted_value"}, inplace=True)
+        cont_sheet = host._create_worksheet_from_frame(workbook, "Continuous", cont_frame)
+        self._apply_column_meta(
+            cont_sheet,
+            {
+                "sample": ("Sample", None),
+                "x_position": ("X position", None),
+                "plotted_value": (f"{ctx.var_label} smoothed", units),
+            },
+            window_module,
+        )
+        sheets.append(cont_sheet)
+
+    annotation_rows: list[dict[str, float | str]] = []
+    for sample, label in zip(ctx.samples, ctx.display_samples):
+        annotation_rows.append(
+            {
+                "type": "sample_label",
+                "sample": sample,
+                "label": label,
+                "x": ctx.sample_label_positions.get(sample, float(ctx.sample_idx.get(sample, 0))),
+                "y": ctx.axis.tick_level,
+            }
+        )
+    for x_pos, y_pos, text in ctx.delta_labels:
+        annotation_rows.append({"type": "delta_label", "label": text, "x": x_pos, "y": y_pos})
+    if annotation_rows:
+        annotations = pd.DataFrame(annotation_rows)
+        anno_sheet = host._create_worksheet_from_frame(workbook, "Annotations", annotations)
+        self._apply_column_meta(
+            anno_sheet,
+            {
+                "type": ("Kind", None),
+                "sample": ("Sample", None),
+                "label": ("Label", None),
+                "x": ("X position", None),
+                "y": ("Y position", None),
+            },
+            window_module,
+        )
+        sheets.append(anno_sheet)
+
+    return sheets
+
+def _apply_column_meta(
+    self,
+    worksheet: "WorksheetData" | None,
+    meta_map: dict[str, tuple[str, str | None]],
+    window_module: Any,
+) -> None:
+    if worksheet is None:
+        return
+    for column, (long_name, units_text) in meta_map.items():
+        meta = worksheet.columns.get(column)
+        if isinstance(meta, window_module.WorksheetColumnMeta):
+            meta.long_name = long_name
+            meta.units = units_text
+
+def _register_workbooks(self, config: dict[str, Any]) -> None:
+    data = self._data
+    if data is None:
+        return
+    host = self.host
+    window_module = window_api()
+    active_keys: set[str] = set()
+    include_cont = bool(config.get("include_continuous", temp_sens_core.INCLUDE_CONTINUOUS))
+    med_window = int(config.get("med_window", temp_sens_core.MED_WINDOW))
+    ma_window = int(config.get("ma_window", temp_sens_core.MA_WINDOW))
+    baseline_mode = config.get("baseline_mode", temp_sens_core.BASELINE_MODE)
+    modes = [baseline_mode] if baseline_mode != "both" else ["none", "zero_25"]
+    variables = config.get("variables") or list(temp_sens_core.TS_LABELS.keys())
+    grouped = data.groupby(["composition", "anneal"], dropna=False)
+    for (_, _), group in grouped:
+        for mode in modes:
+            for var in variables:
                 try:
-                    resolved = path.resolve()
+                    ctx = temp_sens_core.build_temperature_graph_context(
+                        group.copy(),
+                        var,
+                        baseline_mode=mode,
+                        include_cont=include_cont,
+                        med_window=med_window,
+                        ma_window=ma_window,
+                    )
+                except Exception as exc:
+                    self._log(f"Failed to prepare workbook data for {var} ({mode}): {exc}", level="error")
+                    continue
+                if ctx is None:
+                    continue
+                graph_id = f"{ctx.comp}|{ctx.anneal}|{var}|{mode}"
+                key = self._workbook_keys.get(graph_id)
+                if not key:
+                    safe_id = temp_sens_core._sanitise_stem(ctx.comp, ctx.anneal, var, mode)  # type: ignore[attr-defined]
+                    key = f"temperature_sensitivity::{safe_id}"
+                    self._workbook_keys[graph_id] = key
+                workbook = window_module.WorkbookData(
+                    key=key,
+                    name=self._format_workbook_name(ctx.comp, ctx.anneal, ctx.title, var, mode),
+                    worksheets=[],
+                    source=None,
+                    folder=None,
+                )
+                worksheets = self._build_graph_workbook(
+                    window_module,
+                    workbook,
+                    ctx,
+                    var,
+                    mode,
+                    include_cont,
+                )
+                if not worksheets:
+                    continue
+                workbook.worksheets = [worksheet.key for worksheet in worksheets]
+                host._register_imported_workbook(workbook, worksheets)
+                active_keys.add(workbook.key)
+                try:
+                    root = host._ensure_data_root()
+                    if root is not None:
+                        root.setExpanded(True)
+                    node = host._data_workbook_items.get(workbook.key)
+                    if node is not None:
+                        node.setExpanded(True)
                 except Exception:
-                    resolved = path
-                key = f"temperature_sensitivity::{resolved}"
-                self._workbook_keys[str(path)] = key
-            workbook = window_module.WorkbookData(
-                key=key,
-                name=f"{path.stem} (temperature)",
-                worksheets=[],
-                source=path,
-                folder=path.parent,
-            )
-            worksheet = host._create_worksheet_from_frame(workbook, "Temperature data", frame)
-            for column, (long_name, units) in meta_map.items():
-                meta = worksheet.columns.get(column)
-                if isinstance(meta, window_module.WorksheetColumnMeta):
-                    meta.long_name = long_name
-                    meta.units = _format_units(units)
-            workbook.worksheets = [worksheet.key]
-            host._register_imported_workbook(workbook, [worksheet])
-            active_keys.add(workbook.key)
-            created.append(path.name)
-            try:
-                root = host._ensure_data_root()
-                if root is not None:
-                    root.setExpanded(True)
-                node = host._data_workbook_items.get(workbook.key)
-                if node is not None:
-                    node.setExpanded(True)
-            except Exception:
-                pass
-        stale = self._managed_workbooks - active_keys
-        if stale:
-            self._remove_managed_workbooks(stale)
-        self._managed_workbooks = active_keys
-        if created or stale:
-            host._refresh_imported_data_summary()
-            host._sync_selected_paths_with_imports()
+                    pass
+    stale = self._managed_workbooks - active_keys
+    if stale:
+        self._remove_managed_workbooks(stale)
+    self._managed_workbooks = active_keys
+    if active_keys or stale:
+        host._refresh_imported_data_summary()
+        host._sync_selected_paths_with_imports()
+
 
     def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
         host = self.host

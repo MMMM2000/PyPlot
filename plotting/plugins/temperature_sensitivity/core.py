@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from numbers import Real
 from typing import List, Dict, Any, Tuple, cast, Callable, Protocol
@@ -21,7 +22,7 @@ from matplotlib.typing import ColorType
 from plotting.shared.config import load_config
 from plotting.shared import common
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import schedule_origin_release
+from plotting.shared.origin import schedule_origin_release, hide_origin_workbook
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
 
@@ -83,6 +84,284 @@ TS_LABELS = {
 _EXPORT_ORDER = tuple(TS_LABELS.keys())
 
 logger = logging.getLogger("PyPlot.temperature_sensitivity")
+
+
+@dataclass
+class TemperatureAxisLayout:
+    y_min: float
+    y_max: float
+    y_range: float
+    axis_bottom: float
+    tick_level: float
+    label_bottom: float
+    plot_top: float
+    title_level: float
+    delta_pad: float
+    title_gap: float
+    base_pad: float
+    tick_gap: float
+    label_extra: float
+
+
+@dataclass
+class TemperatureGraphContext:
+    comp: str
+    anneal: str
+    title: str
+    variable: str
+    var_label: str
+    baseline_mode: str
+    include_cont: bool
+    samples: List[str]
+    display_samples: List[str]
+    sample_idx: Dict[str, int]
+    idx_to_sample: Dict[float, str]
+    display_by_idx: Dict[float, str]
+    raw_points: pd.DataFrame
+    mean_points: pd.DataFrame
+    raw_series: Dict[float, pd.DataFrame]
+    mean_series: Dict[float, pd.DataFrame]
+    cont_series: List[pd.DataFrame]
+    cont_samples: set[str]
+    sample_label_positions: Dict[str, float]
+    delta_labels: List[Tuple[float, float, str]]
+    mean_positions: Dict[Tuple[float, float], float]
+    axis: TemperatureAxisLayout
+
+
+def build_temperature_graph_context(
+    df: pd.DataFrame,
+    var: str,
+    *,
+    baseline_mode: str = BASELINE_MODE,
+    include_cont: bool = INCLUDE_CONTINUOUS,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> TemperatureGraphContext | None:
+    """Prepare the processed data needed for both Origin export and workbooks."""
+
+    if df.empty:
+        return None
+
+    comp = str(df.get("composition", [""])[0]) if "composition" in df else ""
+    anneal = str(df.get("anneal", [""])[0]) if "anneal" in df else ""
+    var_label = TS_LABELS.get(var, var)
+    title = f"{comp} {anneal} - {var_label}".strip()
+
+    work = df.copy()
+    if "sample" not in work.columns:
+        if "sample_end" in work.columns:
+            work["sample"] = work["sample_end"]
+        else:
+            work["sample"] = ""
+    work["sample"] = work["sample"].astype(str)
+    work["continuous"] = work.get("continuous", False).astype(bool)
+    work["temp"] = pd.to_numeric(work.get("temp"), errors="coerce")
+
+    samples = [sample for sample in sorted(work["sample"].unique()) if sample and sample.lower() != "nan"]
+    if not samples:
+        samples = ["sample"]
+    display_samples = [sample.replace("_", "/") for sample in samples]
+    sample_idx = {sample: i + 1 for i, sample in enumerate(samples)}
+    idx_to_sample: Dict[float, str] = {float(idx): sample for sample, idx in sample_idx.items()}
+    display_by_idx: Dict[float, str] = {
+        float(sample_idx[sample]): label for sample, label in zip(samples, display_samples)
+    }
+
+    work["sample_idx"] = work["sample"].map(sample_idx).astype(float)
+    raw = work[~work["continuous"]].copy()
+    raw = raw.dropna(subset=["sample_idx", "temp"])
+    cont = work[work["continuous"]].copy() if include_cont else pd.DataFrame()
+    if not cont.empty:
+        cont = cont.dropna(subset=["sample_idx", "temp"])
+
+    if raw.empty:
+        return None
+
+    means = raw.groupby(["temp", "sample_idx"], dropna=False)[var].mean().reset_index()
+    baseline = means[means["temp"] == 25].set_index("sample_idx")[var].to_dict()
+
+    rng = np.random.default_rng(0)
+    offsets = {25: -OFFSET, 100: OFFSET}
+    raw["x_center"] = raw["sample_idx"] + raw["temp"].map(offsets).fillna(0.0)
+    raw["X"] = raw["x_center"] + rng.uniform(-JITTER_SPAN, JITTER_SPAN, len(raw))
+    raw["temp_label"] = raw["temp"].map(_format_temp_label)
+    raw["legend_label"] = raw["temp_label"].map(lambda lbl: f"raw {lbl}\N{DEGREE SIGN}C")
+    raw["sample_label"] = raw["sample"].str.replace("_", "/")
+    raw["value"] = raw[var]
+    raw["baseline"] = raw["sample_idx"].map(baseline).fillna(0.0)
+
+    def _baseline_for(idx_value: float) -> float:
+        return baseline.get(idx_value, 0.0)
+
+    if baseline_mode == "zero_25":
+        raw["Y"] = raw.apply(lambda r: r[var] - _baseline_for(r["sample_idx"]), axis=1)
+        means[var] = means.apply(lambda r: r[var] - _baseline_for(r["sample_idx"]), axis=1)
+        if include_cont and not cont.empty:
+            cont["Y"] = cont.apply(lambda r: r[var] - _baseline_for(r["sample_idx"]), axis=1)
+    else:
+        raw["Y"] = raw[var]
+        if include_cont and not cont.empty:
+            cont["Y"] = cont[var]
+
+    raw_points = raw.copy()
+    raw_points["composition"] = comp
+    raw_points["anneal"] = anneal
+    raw_points["series_kind"] = "raw"
+    cont_samples = set(cont["sample"]) if include_cont and not cont.empty else set()
+    means["plot_x"] = means["sample_idx"]
+    if include_cont and cont_samples:
+        def _shift(row: pd.Series) -> float:
+            sample_idx_value = _as_float(row["sample_idx"])
+            temp_value = _as_float(row["temp"])
+            if sample_idx_value is None:
+                return cast(float, row["sample_idx"])
+            sample_name = idx_to_sample.get(sample_idx_value)
+            if sample_name not in cont_samples or temp_value is None:
+                return sample_idx_value
+            if temp_value == 25.0:
+                return sample_idx_value - MEAN_SHIFT
+            if temp_value == 100.0:
+                return sample_idx_value + MEAN_SHIFT
+            return sample_idx_value
+
+        means["plot_x"] = means.apply(_shift, axis=1)
+
+    mean_positions: Dict[Tuple[float, float], float] = {}
+    if not means.empty:
+        for row in means.itertuples():
+            sample_idx_value = _as_float(getattr(row, "sample_idx", None))
+            temp_value = _as_float(getattr(row, "temp", None))
+            plot_x_value = _as_float(getattr(row, "plot_x", None))
+            if sample_idx_value is None or temp_value is None or plot_x_value is None:
+                continue
+            mean_positions[(sample_idx_value, temp_value)] = plot_x_value
+
+    sample_label_positions: Dict[str, float] = {
+        sample: mean_positions.get((float(sample_idx[sample]), 25.0), float(sample_idx[sample]))
+        for sample in samples
+    }
+
+    means["sample"] = means["sample_idx"].map(idx_to_sample)
+    means["sample_label"] = means["sample"].fillna("").astype(str).str.replace("_", "/")
+    means["temp_label"] = means["temp"].map(_format_temp_label)
+    means["legend_label"] = means["temp_label"].map(lambda lbl: f"mean {lbl}\N{DEGREE SIGN}C")
+    means["plot_y"] = means[var]
+    mean_points = means.copy()
+    mean_points["composition"] = comp
+    mean_points["anneal"] = anneal
+    mean_points["series_kind"] = "mean"
+
+    all_y = [raw["Y"]]
+    if include_cont and not cont.empty:
+        all_y.append(cont["Y"])
+    if all_y:
+        y_min = min(series.min() for series in all_y)
+        y_max = max(series.max() for series in all_y)
+    else:
+        y_min = y_max = 0.0
+    y_range = y_max - y_min if y_max != y_min else 1.0
+    delta_pad = max(0.04 * y_range, 0.4)
+    title_gap = max(0.06 * y_range, 0.5)
+    plot_top = y_max + delta_pad + title_gap
+    title_level = plot_top + max(0.02 * y_range, 0.5)
+
+    delta_labels: List[Tuple[float, float, str]] = []
+    pivot = means.pivot(index="sample_idx", columns="temp", values=var)
+    if 25 in pivot.columns and 100 in pivot.columns:
+        label_ceiling = plot_top - max(0.15 * title_gap, 0.4)
+        max_label_height = plot_top - max(0.05 * title_gap, 0.2)
+        for idx_value, row in pivot.dropna(subset=[25, 100]).iterrows():
+            idx_float = _as_float(idx_value)
+            val_25 = _as_float(row[25])
+            val_100 = _as_float(row[100])
+            if idx_float is None or val_25 is None or val_100 is None:
+                continue
+            sample_name = idx_to_sample.get(idx_float)
+            has_cont = sample_name in cont_samples if sample_name is not None else False
+            delta = val_100 - val_25
+            extra = delta_pad if has_cont else max(delta_pad * 0.5, 0.3)
+            base_y = val_100 + extra + max(0.05 * y_range, 0.5)
+            y_top = max(base_y, label_ceiling)
+            y_top = min(y_top, max_label_height)
+            x_pos = mean_positions.get((idx_float, 100.0), idx_float)
+            delta_labels.append((x_pos, y_top, f"{delta:.1f}"))
+
+    cont_processed: List[pd.DataFrame] = []
+    if include_cont and not cont.empty:
+        cont = cont.sort_values("temp")
+        for sample in samples:
+            sub = cont[cont["sample"] == sample]
+            if sub.empty:
+                continue
+            med = sub["Y"].rolling(med_window, center=True, min_periods=1).median()
+            proc = med.rolling(ma_window, center=True, min_periods=1).mean()
+            start = sub["temp"].iloc[0]
+            end = sub["temp"].iloc[-1]
+            x_start = sample_idx[sample] - MEAN_SHIFT
+            x_end = sample_idx[sample] + MEAN_SHIFT
+            scale = (x_end - x_start) / (end - start) if end != start else 1.0
+            x_vals = (sub["temp"] - start) * scale + x_start
+            cont_processed.append(
+                pd.DataFrame({"X": x_vals.to_numpy(), "Y": proc.to_numpy(), "sample": sample})
+            )
+
+    raw_series: Dict[float, pd.DataFrame] = {}
+    for temp_value, sub in raw.groupby("temp"):
+        raw_series[float(temp_value)] = sub[["X", "Y"]].reset_index(drop=True)
+
+    mean_series: Dict[float, pd.DataFrame] = {}
+    for temp_value, sub in means.groupby("temp"):
+        frame = pd.DataFrame({"X": sub["plot_x"].to_list(), "Y": sub[var].to_list()})
+        mean_series[float(temp_value)] = frame
+
+    base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
+    tick_gap = min(max(0.08 * y_range, 0.35), y_range * 0.25)
+    label_extra = min(max(0.03 * y_range, 0.25), y_range * 0.15)
+    axis_bottom = y_min - base_pad
+    tick_level = y_min - tick_gap
+    label_bottom = tick_level - label_extra
+
+    axis = TemperatureAxisLayout(
+        y_min=y_min,
+        y_max=y_max,
+        y_range=y_range,
+        axis_bottom=axis_bottom,
+        tick_level=tick_level,
+        label_bottom=label_bottom,
+        plot_top=plot_top,
+        title_level=title_level,
+        delta_pad=delta_pad,
+        title_gap=title_gap,
+        base_pad=base_pad,
+        tick_gap=tick_gap,
+        label_extra=label_extra,
+    )
+
+    return TemperatureGraphContext(
+        comp=comp,
+        anneal=anneal,
+        title=title,
+        variable=var,
+        var_label=var_label,
+        baseline_mode=baseline_mode,
+        include_cont=include_cont,
+        samples=samples,
+        display_samples=display_samples,
+        sample_idx=sample_idx,
+        idx_to_sample=idx_to_sample,
+        display_by_idx=display_by_idx,
+        raw_points=raw_points,
+        mean_points=mean_points,
+        raw_series=raw_series,
+        mean_series=mean_series,
+        cont_series=cont_processed,
+        cont_samples=cont_samples,
+        sample_label_positions=sample_label_positions,
+        delta_labels=delta_labels,
+        mean_positions=mean_positions,
+        axis=axis,
+    )
 
 
 def _sanitise_stem(*parts: str) -> str:
@@ -695,6 +974,7 @@ def plot_variable(
             text.setFontSize(9)
         except Exception:
             pass
+    hide_origin_workbook(op, book, gp)
 
     apply_readability(ax, globals())
     updated = ax.get_legend()
@@ -716,6 +996,7 @@ def plot_variable(
     return fig, f"{fname}.{SAVE_FORMAT}"
 
 
+
 def plot_variable_origin(
     df: pd.DataFrame,
     var: str,
@@ -726,7 +1007,15 @@ def plot_variable_origin(
 ) -> None:
     """Create an Origin graph roughly matching the Matplotlib style."""
 
-    if df.empty:
+    context = build_temperature_graph_context(
+        df,
+        var,
+        baseline_mode=baseline_mode,
+        include_cont=include_cont,
+        med_window=med_window,
+        ma_window=ma_window,
+    )
+    if context is None:
         return
 
     import originpro as op  # lazy import
@@ -735,136 +1024,33 @@ def plot_variable_origin(
     except Exception:
         pass
 
-    comp = df['composition'].iat[0]
-    anneal = df['anneal'].iat[0]
-    samples = sorted(df['sample'].unique())
-    display_samples = [s.replace('_', '/') for s in samples]
-    sample_idx = {s: i + 1 for i, s in enumerate(samples)}
-    idx_to_sample: dict[float, str] = {float(idx): sample for sample, idx in sample_idx.items()}
-    display_by_idx: dict[float, str] = {}
-    for sample, label in zip(samples, display_samples):
-        idx = float(sample_idx[sample])
-        display_by_idx[idx] = label
+    samples = context.samples
+    display_samples = context.display_samples
+    display_by_idx = context.display_by_idx
+    idx_to_sample = context.idx_to_sample
+    raw = context.raw_points
+    means = context.mean_points
+    cont_processed = context.cont_series
 
-
-    work = df.copy()
-    work['sample_idx'] = work['sample'].map(sample_idx).astype(float)
-    raw = work[~work['continuous']].copy()
-    cont = work[work['continuous']].copy()
-
-    means = raw.groupby(['temp', 'sample_idx'])[var].mean().reset_index()
-    baseline = means[means['temp'] == 25].set_index('sample_idx')[var].to_dict()
-
-    rng = np.random.default_rng(0)
-    raw['x_center'] = raw['sample_idx'] + raw['temp'].map({25: -OFFSET, 100: OFFSET}).fillna(0.0)
-    raw['X'] = raw['x_center'] + rng.uniform(-JITTER_SPAN, JITTER_SPAN, len(raw))
-
-    def _baseline_for(idx: float) -> float:
-        return baseline.get(idx, 0.0)
-
-    if baseline_mode == 'zero_25':
-        raw['Y'] = raw.apply(lambda r: r[var] - _baseline_for(r['sample_idx']), axis=1)
-        means[var] = means.apply(lambda r: r[var] - _baseline_for(r['sample_idx']), axis=1)
-        if include_cont and not cont.empty:
-            cont['Y'] = cont.apply(lambda r: r[var] - _baseline_for(r['sample_idx']), axis=1)
-    else:
-        raw['Y'] = raw[var]
-        if include_cont and not cont.empty:
-            cont['Y'] = cont[var]
-
-    all_y = [raw['Y']] if not raw.empty else []
-    if include_cont and not cont.empty:
-        all_y.append(cont['Y'])
-    if all_y:
-        y_min = min(series.min() for series in all_y)
-        y_max = max(series.max() for series in all_y)
-    else:
-        y_min = y_max = 0.0
-    y_range = y_max - y_min if y_max != y_min else 1.0
-    delta_pad = max(0.04 * y_range, 0.4)
-    title_gap = max(0.06 * y_range, 0.5)
-    plot_top = y_max + delta_pad + title_gap
-    title_level = plot_top + max(0.02 * y_range, 0.5)
-
-    cont_samples = set(cont['sample']) if include_cont else set()
-    means['plot_x'] = means['sample_idx']
-    if include_cont and cont_samples:
-        def _shift(row: pd.Series) -> float:
-            sample_idx_value = _as_float(row['sample_idx'])
-            temp_value = _as_float(row['temp'])
-            if sample_idx_value is None:
-                return cast(float, row['sample_idx'])
-            sample = idx_to_sample.get(sample_idx_value)
-            if sample not in cont_samples or temp_value is None:
-                return sample_idx_value
-            if temp_value == 25.0:
-                return sample_idx_value - MEAN_SHIFT
-            if temp_value == 100.0:
-                return sample_idx_value + MEAN_SHIFT
-            return sample_idx_value
-
-
-    mean_positions: dict[tuple[float, float], float] = {}
-    if not means.empty:
-        for row in means.itertuples():
-            sample_idx_value = _as_float(getattr(row, 'sample_idx', None))
-            temp_value = _as_float(getattr(row, 'temp', None))
-            plot_x_value = _as_float(getattr(row, 'plot_x', None))
-            if sample_idx_value is None or temp_value is None or plot_x_value is None:
-                continue
-            mean_positions[(sample_idx_value, temp_value)] = plot_x_value
-
-    sample_label_positions: dict[str, float] = {
-        sample: mean_positions.get((float(sample_idx[sample]), 25.0), float(sample_idx[sample]))
-        for sample in samples
-    }
-
-    delta_labels: list[tuple[float, float, str]] = []
-    pivot = means.pivot(index='sample_idx', columns='temp', values=var)
-    if 25 in pivot.columns and 100 in pivot.columns:
-        label_ceiling = plot_top - max(0.15 * title_gap, 0.4)
-        max_label_height = plot_top - max(0.05 * title_gap, 0.2)
-        for idx, row in pivot.dropna(subset=[25, 100]).iterrows():
-            idx_value = _as_float(idx)
-            val_25 = _as_float(row[25])
-            val_100 = _as_float(row[100])
-            if idx_value is None or val_25 is None or val_100 is None:
-                continue
-            sample = idx_to_sample.get(idx_value)
-            has_cont = (sample in cont_samples) if sample is not None else False
-            delta = val_100 - val_25
-            extra = delta_pad if has_cont else max(delta_pad * 0.5, 0.3)
-            base_y = val_100 + extra + max(0.05 * y_range, 0.5)
-            y_top = max(base_y, label_ceiling)
-            y_top = min(y_top, max_label_height)
-            x_pos = mean_positions.get((idx_value, 100.0), idx_value)
-            delta_labels.append((x_pos, y_top, f"{delta:.1f}"))
-
-
-    cont_processed: list[pd.DataFrame] = []
-    if include_cont and not cont.empty:
-        cont = cont.sort_values('temp')
-        for sample in samples:
-            sub = cont[cont['sample'] == sample]
-            if sub.empty:
-                continue
-            med = sub['Y'].rolling(med_window, center=True, min_periods=1).median()
-            proc = med.rolling(ma_window, center=True, min_periods=1).mean()
-            start = sub['temp'].iloc[0]
-            end = sub['temp'].iloc[-1]
-            x_start = sample_idx[sample] - MEAN_SHIFT
-            x_end = sample_idx[sample] + MEAN_SHIFT
-            scale = (x_end - x_start) / (end - start) if end != start else 1.0
-            x_vals = (sub['temp'] - start) * scale + x_start
-            cont_processed.append(pd.DataFrame({'X': x_vals.to_numpy(), 'Y': proc.to_numpy(), 'sample': sample}))
-
-    book_obj = op.new_book('w', lname="Temp Sens (Python)")
+    book_title = (f"{context.var_label} ({context.comp} {context.anneal})".strip()) or "Temp Sens (Python)"
+    book_obj = op.new_book('w', lname=book_title)
     book = cast(Any, book_obj)
+    sheet_factory = None
     if book is not None:
+        sheet_factory = getattr(book, 'add_sheet', None)
         try:
             book.activate()
         except Exception:
             pass
+
+    def _next_sheet(name: str) -> Any | None:
+        if callable(sheet_factory):
+            try:
+                return sheet_factory(name)
+            except Exception:
+                pass
+        return op.new_sheet('w', lname=name)
+
     gp_obj = op.new_graph(template='scatter')
     gp = cast(Any, gp_obj)
     try:
@@ -881,7 +1067,7 @@ def plot_variable_origin(
         if sub.empty:
             continue
         temp_label = _format_temp_label(temp)
-        sheet = op.new_sheet('w', lname=f'raw_{temp_label}')
+        sheet = _next_sheet(f'raw_{temp_label}')
         if sheet is None:
             continue
         w = cast(Any, sheet)
@@ -893,7 +1079,7 @@ def plot_variable_origin(
             continue
         p = cast(Any, plot_obj)
         color = RAW_COLORS.get(int(temp), RAW_COLORS.get(temp, '#45A1D6'))
-        legend_label = f"raw {temp_label}\N{DEGREE SIGN}C"
+        legend_label = f"raw {temp_label}°C"
         try:
             w.set_label(1, legend_label)
         except Exception:
@@ -908,12 +1094,13 @@ def plot_variable_origin(
             p.legend = legend_label
         except Exception:
             pass
+
     for temp in sorted(means['temp'].dropna().unique()):
         sub = means[means['temp'] == temp]
         if sub.empty:
             continue
         temp_label = _format_temp_label(temp)
-        sheet = op.new_sheet('w', lname=f'mean_{temp_label}')
+        sheet = _next_sheet(f'mean_{temp_label}')
         if sheet is None:
             continue
         w = cast(Any, sheet)
@@ -922,9 +1109,9 @@ def plot_variable_origin(
         w.from_list(1, sub['plot_x'].to_list())
         w.from_list(2, sub[var].to_list())
         try:
-            w.set_label(0, "Sample")
-            w.set_label(1, "Position")
-            w.set_label(2, "Value")
+            w.set_label(0, 'Sample')
+            w.set_label(1, 'Position')
+            w.set_label(2, 'Value')
         except Exception:
             pass
         plot_obj = gl.add_plot(w, coly=2, colx=1, type='s')
@@ -932,7 +1119,7 @@ def plot_variable_origin(
             continue
         p = cast(Any, plot_obj)
         color = MEAN_COLORS.get(int(temp), MEAN_COLORS.get(temp, 'black'))
-        legend_label = f"mean {temp_label}\N{DEGREE SIGN}C"
+        legend_label = f"mean {temp_label}°C"
         try:
             w.set_label(2, legend_label)
         except Exception:
@@ -946,10 +1133,11 @@ def plot_variable_origin(
             p.legend = legend_label
         except Exception:
             pass
+
     cont_label = f"25-100C med {med_window} mwa {ma_window}"
     cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
-        sheet = op.new_sheet('w', lname=f'cont_{idx}')
+        sheet = _next_sheet(f'cont_{idx}')
         if sheet is None:
             continue
         w = cast(Any, sheet)
@@ -981,6 +1169,7 @@ def plot_variable_origin(
                 cont_label_added = True
         except Exception:
             pass
+
     try:
         gl.rescale()
     except Exception:
@@ -1001,12 +1190,9 @@ def plot_variable_origin(
     except Exception:
         y_axis = None
 
-    base_pad = min(max(0.02 * y_range, 0.3), y_range * 0.1)
-    tick_gap = min(max(0.08 * y_range, 0.35), y_range * 0.25)
-    label_extra = min(max(0.03 * y_range, 0.25), y_range * 0.15)
-    axis_bottom = y_min - base_pad
-    tick_level = y_min - tick_gap
-    label_bottom = tick_level - label_extra
+    axis = context.axis
+    tick_level = axis.tick_level
+    label_bottom = axis.label_bottom
 
     try:
         if x_axis is not None:
@@ -1015,13 +1201,13 @@ def plot_variable_origin(
         pass
     try:
         if y_axis is not None:
-            y_axis.set_limits(axis_bottom, plot_top)
+            y_axis.set_limits(axis.axis_bottom, axis.plot_top)
     except Exception:
         pass
 
     try:
         if x_axis is not None:
-            x_axis.title = "Sample"
+            x_axis.title = 'Sample'
     except Exception:
         pass
     try:
@@ -1059,11 +1245,22 @@ def plot_variable_origin(
         gl.set_int('x.ticklabels', 0)
     except Exception:
         pass
+    for attr in ('x.bottom.ticklabels', 'x.major.ticklabels'):
+        try:
+            gl.set_int(attr, 0)
+        except Exception:
+            continue
+    for cmd in ("layer.x.showlabels=0;", "axis -ws x 0;", "layer.xaxis.showTickLabels=0;"):
+        try:
+            op.lt_exec(cmd)
+        except Exception:
+            continue
 
     manual_labels_added = False
+    sample_idx_map = context.sample_idx
     for idx, sample in enumerate(samples, start=1):
-        text = display_by_idx.get(float(sample_idx[sample]), sample.replace('_', '/'))
-        x_pos = sample_label_positions.get(sample, float(sample_idx[sample]))
+        text = display_samples[idx - 1]
+        x_pos = context.sample_label_positions.get(sample, float(sample_idx_map.get(sample, idx)))
         try:
             label = gl.add_label(text, float(x_pos), tick_level)
         except Exception:
@@ -1094,17 +1291,17 @@ def plot_variable_origin(
         manual_labels_added = True
     if manual_labels_added and y_axis is not None:
         try:
-            y_axis.set_limits(label_bottom, plot_top)
+            y_axis.set_limits(label_bottom, axis.plot_top)
         except Exception:
             pass
 
-    max_deltas = max(len(delta_labels), len(samples))
+    max_deltas = max(len(context.delta_labels), len(samples))
     for idx in range(1, max_deltas + 1):
         try:
             gl.remove_label(f'py_delta{idx}')
         except Exception:
             pass
-    for idx, (x_pos, y_pos, text) in enumerate(delta_labels, start=1):
+    for idx, (x_pos, y_pos, text) in enumerate(context.delta_labels, start=1):
         try:
             label = gl.add_label(text, float(x_pos), float(y_pos))
         except Exception:
@@ -1133,14 +1330,13 @@ def plot_variable_origin(
         except Exception:
             pass
 
-    title = f"{comp} {anneal} - {TS_LABELS[var]}"
     try:
         title_label = gl.label('Title')
     except Exception:
         title_label = None
     if title_label is not None:
         try:
-            title_label.text = title
+            title_label.text = context.title
         except Exception:
             pass
     try:
@@ -1149,7 +1345,7 @@ def plot_variable_origin(
         pass
     title_center = (len(samples) + 1) / 2.0
     try:
-        manual_title = gl.add_label(title, title_center, title_level)
+        manual_title = gl.add_label(context.title, title_center, axis.title_level)
     except Exception:
         manual_title = None
     if manual_title is not None:
@@ -1161,7 +1357,7 @@ def plot_variable_origin(
             except Exception:
                 pass
             try:
-                manual_title.set_int('vertalign', 0)
+                manual_title.set_int('vertalign', 2)
             except Exception:
                 pass
             try:
@@ -1175,22 +1371,24 @@ def plot_variable_origin(
         except Exception:
             pass
 
+    try:
+        hide_origin_workbook(op, book, gp)
+    except Exception:
+        pass
+
+
 from plotting.shared.common import maybe_handle_outliers
 
 
-def export_group_to_txt(
+def prepare_temperature_table(
     grp: pd.DataFrame,
-    directory: str | Path,
     *,
     baseline_mode: str = BASELINE_MODE,
     include_cont: bool = INCLUDE_CONTINUOUS,
     med_window: int = MED_WINDOW,
     ma_window: int = MA_WINDOW,
-) -> Path:
-    """Persist the processed temperature sensitivity tables to ``directory``."""
-
-    out_dir = Path(directory)
-    out_dir.mkdir(parents=True, exist_ok=True)
+) -> tuple[pd.DataFrame, str, str, str]:
+    """Return a processed table containing all workbook/export columns."""
 
     comp = str(grp.get("composition", [""])[0]) if "composition" in grp else ""
     anneal = str(grp.get("anneal", [""])[0]) if "anneal" in grp else ""
@@ -1221,10 +1419,7 @@ def export_group_to_txt(
     for var in _EXPORT_ORDER:
         base_series = baselines[var]
         work[f"baseline_{var}"] = work["sample"].map(base_series)
-        if baseline_mode in {"zero_25", "both"}:
-            work[f"{var}_zero25"] = work[var] - work[f"baseline_{var}"]
-        else:
-            work[f"{var}_zero25"] = work[var] - work[f"baseline_{var}"]
+        work[f"{var}_zero25"] = work[var] - work[f"baseline_{var}"]
         delta_series = high_points[var] - base_series.reindex(high_points[var].index)
         work[f"delta_{var}"] = work["sample"].map(delta_series)
 
@@ -1269,6 +1464,31 @@ def export_group_to_txt(
 
     export_cols = [col for col in columns if col in work.columns]
     export_df = work[export_cols].copy()
+    return export_df, comp, title, anneal
+
+
+def export_group_to_txt(
+    grp: pd.DataFrame,
+    directory: str | Path,
+    *,
+    baseline_mode: str = BASELINE_MODE,
+    include_cont: bool = INCLUDE_CONTINUOUS,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> Path:
+    """Persist the processed temperature sensitivity tables to ``directory``."""
+
+    out_dir = Path(directory)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    export_df, comp, title, anneal = prepare_temperature_table(
+        grp,
+        baseline_mode=baseline_mode,
+        include_cont=include_cont,
+        med_window=med_window,
+        ma_window=ma_window,
+    )
+
     stem = _sanitise_stem("temperature_sensitivity", comp, title, anneal)
     path = out_dir / f"{stem}.txt"
     export_df.to_csv(path, sep="\t", index=False, float_format="%.10g")

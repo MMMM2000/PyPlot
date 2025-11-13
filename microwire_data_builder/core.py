@@ -91,9 +91,9 @@ OUTPUT_COLUMNS = [
     "d/D",
     "Figure — 1000 mA",
     "Figure — low mA",
+    "Strain",
     "As (mA)",
     "Ms (mA)",
-    "Strain",
     "Length (m)",
     "Production datetime",
     "Mass (g)",
@@ -4018,8 +4018,6 @@ def _embed_assets_with_xlsxwriter(
             else:
                 row_heights_px[row_idx] = minimum_px
                 row_heights_pts[row_idx] = minimum_pts
-                return
-
         try:
             worksheet.set_row(row_idx, minimum_pts)
         except Exception:
@@ -4196,25 +4194,32 @@ def _embed_assets_with_xlsxwriter(
                 _excel_column_width(target_width_in),
             )
 
-    if highlight_map:
-        highlight_format = workbook.add_format({"bg_color": "#FFF4B5"})
-        for column, rows in highlight_map.items():
-            if column not in dataframe.columns:
-                continue
-            column_index = _column_index(column)
-            if column_index is None:
-                continue
-            for row_idx in rows:
-                if row_idx < 0 or row_idx >= len(reset_df):
+        if highlight_map:
+            highlight_format = workbook.add_format({"bg_color": "#FFF4B5"})
+            for column, rows in highlight_map.items():
+                if column not in dataframe.columns:
                     continue
-                value = reset_df.iloc[row_idx, column_index]
-                excel_row = row_idx + 1
-                if pd.isna(value):
-                    worksheet.write_blank(excel_row, column_index, None, highlight_format)
-                elif isinstance(value, (int, float)) and math.isfinite(float(value)):
-                    worksheet.write_number(excel_row, column_index, float(value), highlight_format)
-                else:
-                    worksheet.write(excel_row, column_index, value, highlight_format)
+                column_index = _column_index(column)
+                if column_index is None:
+                    continue
+                for row_idx in rows:
+                    if row_idx < 0 or row_idx >= len(reset_df):
+                        continue
+                    value = reset_df.iloc[row_idx, column_index]
+                    excel_row = row_idx + 1
+                    if pd.isna(value):
+                        worksheet.write_blank(excel_row, column_index, None, highlight_format)
+                    elif isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        worksheet.write_number(excel_row, column_index, float(value), highlight_format)
+                    else:
+                        worksheet.write(excel_row, column_index, value, highlight_format)
+
+    excel_path = getattr(writer, "path", None)
+    if isinstance(excel_path, str):
+        try:
+            _adjust_drawing_ext_dimensions(Path(excel_path), figure_size, log)
+        except Exception:
+            log.exception("Failed to adjust drawing metadata for %s", excel_path)
 
 def _origin_object_name(obj: object) -> Optional[str]:
     if obj is None:
@@ -4828,6 +4833,10 @@ def build_database(
                         )
                     except Exception:
                         log.exception("Failed to embed figures into %s", excel_path)
+                try:
+                    _adjust_drawing_ext_dimensions(excel_path, figure_size, log)
+                except Exception:
+                    log.exception("Failed to adjust drawing metadata for %s", excel_path)
             except ImportError:
                 excel_frame.to_excel(excel_path, index=False)
                 try:
@@ -4842,6 +4851,10 @@ def build_database(
                         microscope_crops=microscope_crop_map if include_crops else None,
                         highlight_map=ocr_highlights if highlight_ocr else None,
                     )
+                    try:
+                        _adjust_drawing_ext_dimensions(excel_path, figure_size, log)
+                    except Exception:
+                        log.exception("Failed to adjust drawing metadata for %s", excel_path)
                 except Exception:
                     log.exception("Failed to embed figure images into %s", excel_path)
             exports["excel"] = excel_path

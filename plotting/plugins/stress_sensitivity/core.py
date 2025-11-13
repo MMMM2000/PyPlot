@@ -20,9 +20,10 @@ from matplotlib.axes import Axes
 from plotting.shared.config import load_config
 from plotting.shared.common import maybe_handle_outliers
 from plotting.shared.utils import save_figure, show_plots
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import hide_origin_workbook, schedule_origin_release
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 from plotting.shared.backends import wants_matplotlib, wants_origin
+from tqdm import tqdm
 
 _CFG = load_config().get("stress_sensitivity", {})
 OUTPUT_DIR = _CFG.get("OUTPUT_DIR", os.getcwd())
@@ -500,11 +501,21 @@ def plot_samples_origin(
     # Push to Origin
     book_obj = op.new_book('w', lname="Stress Sens (Python)")
     book = cast(Any, book_obj)
+    sheet_factory = None
     if book is not None:
+        sheet_factory = getattr(book, "add_sheet", None)
         try:
             book.activate()
         except Exception:
             pass
+
+    def _next_sheet(name: str) -> Any | None:
+        if callable(sheet_factory):
+            try:
+                return sheet_factory(name)
+            except Exception:
+                pass
+        return op.new_sheet('w', lname=name)
     gp_obj = op.new_graph(template='scatter')
     gp = cast(Any, gp_obj)
     try:
@@ -514,8 +525,14 @@ def plot_samples_origin(
     if gl is None:
         return
 
+    try:
+        gp.activate()
+        op.lt_exec('window -s 0 0 1200 800;')
+    except Exception:
+        pass
+
     if not raw_odd.empty:
-        sheet = op.new_sheet('w', lname='raw_odd')
+        sheet = _next_sheet('raw_odd')
         if sheet is not None:
             w = cast(Any, sheet)
             w.from_df(raw_odd)
@@ -526,7 +543,7 @@ def plot_samples_origin(
             except Exception:
                 pass
     if not raw_even.empty:
-        sheet = op.new_sheet('w', lname='raw_even')
+        sheet = _next_sheet('raw_even')
         if sheet is not None:
             w = cast(Any, sheet)
             w.from_df(raw_even)
@@ -538,7 +555,7 @@ def plot_samples_origin(
                 pass
 
     for mean_df, color in mean_lines:
-        sheet = op.new_sheet('w', lname='mean')
+        sheet = _next_sheet('mean')
         if sheet is None:
             continue
         w = cast(Any, sheet)
@@ -552,7 +569,7 @@ def plot_samples_origin(
             pass
 
     for cont_df in cont_lines:
-        sheet = op.new_sheet('w', lname='cont')
+        sheet = _next_sheet('cont')
         if sheet is None:
             continue
         w = cast(Any, sheet)
@@ -577,17 +594,18 @@ def plot_samples_origin(
     except Exception:
         pass
 
-    try:
-        op.exit()
-    except Exception:
-        pass
+    hide_origin_workbook(op, book, gp)
 
 
-def export_group_to_txt(grp: pd.DataFrame, directory: str | Path) -> Path:
-    """Export stress sensitivity measurements with baseline metadata."""
-
-    out_dir = Path(directory)
-    out_dir.mkdir(parents=True, exist_ok=True)
+def build_workbook_table(
+    grp: pd.DataFrame,
+    *,
+    baseline_mode: str = "relative",
+    include_cont: bool = INCLUDE_DEPENDENCE,
+    med_window: int = MED_WINDOW,
+    ma_window: int = MA_WINDOW,
+) -> tuple[pd.DataFrame, Dict[str, str]]:
+    """Return a processed stress-sensitivity table for workbooks/exports."""
 
     comp = str(grp["composition"].iat[0]) if "composition" in grp else ""
     title = str(grp["title"].iat[0]) if "title" in grp else ""
@@ -646,6 +664,20 @@ def export_group_to_txt(grp: pd.DataFrame, directory: str | Path) -> Path:
 
     export_cols = [col for col in columns if col in work.columns]
     export_df = work[export_cols].copy()
+    return export_df, {"composition": comp, "title": title, "anneal": anneal}
+
+
+def export_group_to_txt(grp: pd.DataFrame, directory: str | Path) -> Path:
+    """Export stress sensitivity measurements with baseline metadata."""
+
+    out_dir = Path(directory)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    export_df, meta = build_workbook_table(grp)
+    comp = meta.get("composition", "")
+    title = meta.get("title", "")
+    anneal = meta.get("anneal", "")
+
     stem = _sanitise_stem("stress_sensitivity", comp, title, anneal)
     path = out_dir / f"{stem}.txt"
     export_df.to_csv(path, sep="\t", index=False, float_format="%.10g")
@@ -696,6 +728,9 @@ def main(files: List[str], backend: str = BACKEND) -> None:
             plt.close('all')
     else:
         plt.close('all')
+
+    if wants_origin(backend):
+        schedule_origin_release()
 
 
 class ProgressDialog:

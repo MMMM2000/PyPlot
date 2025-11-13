@@ -4,6 +4,8 @@ import contextlib
 import sys
 from typing import Iterator
 
+from pathlib import Path
+
 import pandas as pd
 import pytest
 
@@ -17,6 +19,8 @@ from plotting.pyplot.window import (
 )
 from plotting.pyplot.app import PyPlotWorkbench, main as pyplot_main
 from plotting.plugins import ExternalPlotterPlugin, PyPlotPlugin, builtin_plugin_registry
+from plotting.plugins.temperature_sensitivity import core as temp_sens_core
+from plotting.plugins.temperature_sensitivity import temp_sens_plugin
 
 
 def _ensure_app() -> QtWidgets.QApplication:
@@ -218,4 +222,31 @@ def test_available_plotters_wrapped_as_external_plugins() -> None:
         for widget in launched:
             if isinstance(widget, QtWidgets.QWidget):
                 widget.close()
+        window.close()
+
+
+def test_temperature_plugin_registers_group_workbooks() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        plugin = temp_sens_plugin.TemperatureSensitivityPlugin(window, "Temperature Sensitivity")
+        sample_dir = Path("sample_data/temperature_dependence")
+        files = [
+            sample_dir / "Fe77Mo4B18Cu1 2_1 77mA 25C.txt",
+            sample_dir / "Fe77Mo4B18Cu1 2_1 77mA 100C.txt",
+        ]
+        plugin._data = temp_sens_core.load_data([str(path) for path in files])
+        plugin._register_workbooks(files)
+        managed = plugin._managed_workbooks
+        assert managed
+        assert len(managed) == len(temp_sens_core.TS_LABELS)
+        for key in managed:
+            workbook = window._workbooks.get(key)
+            assert workbook is not None
+            assert workbook.worksheets
+            first_sheet_key = workbook.worksheets[0]
+            worksheet = window._worksheets.get(first_sheet_key)
+            assert worksheet is not None
+            assert "plot_value" in worksheet.dataframe.columns
+    finally:
         window.close()

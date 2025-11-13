@@ -93,4 +93,40 @@ def schedule_origin_release() -> None:
     _ORIGIN_RELEASE_REGISTERED = True
 
 
-__all__ = ["origin_session", "release_origin", "schedule_origin_release"]
+def hide_origin_workbook(origin: Any | None, workbook: Any | None, graph: Any | None = None) -> None:
+    """Hide an Origin workbook window so only the graphs remain visible."""
+
+    if workbook is None:
+        return
+
+    activator = getattr(workbook, "activate", None)
+    if callable(activator):
+        try:
+            activator()
+        except Exception:
+            pass
+
+    commands = ("win -h 1;", "window -h 1;", "win -hc 1;", "window -hc 1;")
+    executors = (
+        getattr(workbook, "lt_exec", None),
+        getattr(origin, "lt_exec", None) if origin is not None else None,
+    )
+    for cmd in commands:
+        for executor in executors:
+            if not callable(executor):
+                continue
+            try:
+                executor(cmd)
+            except Exception:
+                continue
+            if graph is not None:
+                activator = getattr(graph, "activate", None)
+                if callable(activator):
+                    try:
+                        activator()
+                    except Exception:
+                        pass
+            return
+
+
+__all__ = ["origin_session", "release_origin", "schedule_origin_release", "hide_origin_workbook"]

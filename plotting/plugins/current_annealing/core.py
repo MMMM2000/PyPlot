@@ -16,7 +16,7 @@ from matplotlib.lines import Line2D
 from .burnthrough import trim_burnthrough_glitch
 from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.utils import save_figure, show_plots, schedule_origin_release
-from plotting.shared.origin import origin_session
+from plotting.shared.origin import origin_session, hide_origin_workbook
 from plotting.shared.readability import apply_readability_fonts, apply_readability
 
 # Defaults
@@ -451,36 +451,6 @@ def _prepare_origin_workspace(
     return origin_any, workbook, worksheet, graph, layer, legend_label
 
 
-def _hide_workbook(origin_any: Any, workbook: Any | None, graph: Any | None) -> None:
-    if workbook is None:
-        return
-
-    activator = getattr(workbook, "activate", None)
-    if callable(activator):
-        try:
-            activator()
-        except Exception:
-            pass
-
-    commands = ["win -h 1;", "window -h 1;", "win -hc 1;", "window -hc 1;"]
-
-    executors = [getattr(workbook, "lt_exec", None), getattr(origin_any, "lt_exec", None)]
-    for cmd in commands:
-        for executor in executors:
-            if not callable(executor):
-                continue
-            try:
-                executor(cmd)
-                if graph is not None:
-                    try:
-                        graph.activate()
-                    except Exception:
-                        pass
-                return
-            except Exception:
-                continue
-
-
 def _apply_origin_readability(layer: Any, graph: Any | None) -> None:
     if layer is None:
         return
@@ -847,7 +817,7 @@ def plot_one_origin(
     resolved_mode = _normalise_origin_mode(mode if mode is not None else ORIGIN_MODE)
     if resolved_mode == "simple":
         _plot_origin_simple(workbook, worksheet, graph, layer, legend_label, display_label)
-        _hide_workbook(origin_any, workbook, graph)
+        hide_origin_workbook(origin_any, workbook, graph)
     else:
         _plot_origin_experimental(
             origin_any,
