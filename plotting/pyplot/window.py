@@ -71,7 +71,8 @@ from plotting.shared.readability import (
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
-PRIMARY_DOCK_DEFAULT_WIDTH = 360
+PRIMARY_DOCK_DEFAULT_WIDTH = 320
+PRIMARY_DOCK_MIN_WIDTH = 200
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -2868,7 +2869,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
-        project_dock.setMinimumWidth(PRIMARY_DOCK_DEFAULT_WIDTH)
+        project_dock.setMinimumWidth(PRIMARY_DOCK_MIN_WIDTH)
         self.project_dock = project_dock
 
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -2900,7 +2901,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
-        object_dock.setMinimumWidth(PRIMARY_DOCK_DEFAULT_WIDTH)
+        object_dock.setMinimumWidth(PRIMARY_DOCK_MIN_WIDTH)
         self.object_dock = object_dock
 
         graph_dock: QtWidgets.QDockWidget | None = None
@@ -5810,7 +5811,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         header = view.verticalHeader()
         header.setVisible(True)
         for row_index in range(len(WorksheetTableModel.METADATA_FIELDS)):
-            header.setSectionResizeMode(row_index, QtWidgets.QHeaderView.ResizeToContents)
+            header.setSectionResizeMode(
+                row_index, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+            )
         header.setDefaultSectionSize(max(22, header.defaultSectionSize()))
         layout.addWidget(view, 1)
         container._worksheet_view = view  # type: ignore[attr-defined]
@@ -6053,11 +6056,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not isinstance(dock, QtWidgets.QDockWidget):
             return
         width = self._load_primary_dock_width(dock)
-        min_width = max(default_width, dock.minimumWidth())
+        min_width = max(PRIMARY_DOCK_MIN_WIDTH, dock.minimumWidth())
         if width is None or width <= 0:
-            width = max(dock.sizeHint().width(), min_width)
-        else:
-            width = max(width, min_width)
+            width = max(dock.sizeHint().width(), default_width)
+        width = max(width, min_width)
         self._primary_dock_widths[dock] = width
         try:
             self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
