@@ -205,10 +205,11 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
         "title": "VSM hysteresis loops",
         "body": dedent(
             """
-            ### Generate workbooks
+            ### Plot loops and workbooks
             1. Use **Browse files…** or **Browse folder…** to point at your Lakeshore
-               `VSM-Hys-Data` exports. Selected items load immediately and populate every dock—no
-               extra **Generate workbooks** step required.
+               `VSM-Hys-Data` exports. Selected items load immediately and populate every dock—click
+               **Plot VSM Hysteresis Loops** whenever you want to rebuild the graphs and per-graph
+               workbooks.
             2. Tune the X/Y axis selectors in the **Graph Settings** dock. Your axis choices,
                backend preference, plot style, dark-theme toggle, and normalise-endpoints option are
                remembered across sessions.
@@ -225,7 +226,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               sync without regenerating plots. Angles and temperatures are sorted numerically to
               match the legends shown on each tab.
             * The **Worksheets** dock exposes editable pandas-backed tables for each measurement.
-              Right-click rows to delete them, then hit **Generate plots** to refresh curves and
+              Right-click rows to delete them, then hit **Plot VSM Hysteresis Loops** to refresh curves and
               metrics with the cleaned data.
 
             ### Configure plots and overlays
@@ -233,7 +234,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
               TXT export preferences, and the overlay picker. Multi-select angles in the overlay
               list and press **Plot selected angles across temperatures** to add comparison tabs
               directly to the main viewer.
-            * Press **Generate plots** once the inputs look right. **Normalize Y** (available on
+            * Press **Plot VSM Hysteresis Loops** once the inputs look right. **Normalize Y** (available on
               hysteresis-loop and angle-overlay tabs) toggles the active curves between raw and
               unit-scaled data, automatically rescales the axis around the span of the normalised
               samples (symmetrically whenever the curves cross zero), and restores the previous

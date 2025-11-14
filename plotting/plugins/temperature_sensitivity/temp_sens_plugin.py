@@ -703,19 +703,25 @@ def _build_graph_workbook(
             self._log("Sent temperature sensitivity plots to Origin.")
 
     def update_ui(self) -> None:
+        host = self.host
         has_data = self._data is not None
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data)
-            self.host.plot_button.setText("Plot Temperature Sensitivity")
+        ready_to_plot = has_data or self._host_has_data_selection()
+        if hasattr(host, "plot_button"):
+            host.plot_button.setEnabled(ready_to_plot)
+            host.plot_button.setText("Plot Temperature Sensitivity")
         if self._summary_label is not None:
             if self._plot_tabs:
                 self._summary_label.clear()
                 self._summary_label.setVisible(False)
             else:
                 self._summary_label.setVisible(True)
-                if not has_data:
+                if not ready_to_plot:
                     self._summary_label.setText(
-                        "Import temperature sensitivity files to load them automatically."
+                        "Import temperature sensitivity files, then click Plot Temperature Sensitivity."
+                    )
+                elif not has_data:
+                    self._summary_label.setText(
+                        "Click Plot Temperature Sensitivity to load data and build graphs/workbooks with the current settings."
                     )
                 elif not self._summary_label.text().strip():
                     self._summary_label.setText(

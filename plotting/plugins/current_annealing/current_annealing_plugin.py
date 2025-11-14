@@ -211,7 +211,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             QtWidgets.QMessageBox.information(
                 self.host,
                 self.name,
-                "Generate workbooks before exporting to Origin.",
+                "Load current annealing data before exporting to Origin.",
             )
             return
         try:
@@ -226,8 +226,10 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
+        ready_to_plot = has_data or self._host_has_data_selection()
         if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data)
+            self.host.plot_button.setEnabled(ready_to_plot)
+            self.host.plot_button.setText("Plot Current Annealing")
         if hasattr(self.host, "save_graph_button"):
             self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
         if hasattr(self.host, "normalize_button"):

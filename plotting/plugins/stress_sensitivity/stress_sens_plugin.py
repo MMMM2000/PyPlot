@@ -330,7 +330,7 @@ def _apply_column_meta(
         self._register_workbooks(config)
         if self._summary_label is not None:
             self._summary_label.setText(
-                "Click Generate plots to review stress sensitivity summaries."
+                "Click Plot Stress Sensitivity to review stress sensitivity summaries."
             )
         self._log(f"Loaded {len(paths)} stress sensitivity file(s).")
         self.update_ui()
@@ -533,9 +533,10 @@ def _apply_column_meta(
         has_data = self._data is not None
         has_files = bool(self._loaded_files)
         has_plots = bool(self._plot_tabs)
+        ready_to_plot = has_data or self._host_has_data_selection()
         if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data)
-            self.host.plot_button.setText("Generate Stress Sensitivity")
+            self.host.plot_button.setEnabled(ready_to_plot)
+            self.host.plot_button.setText("Plot Stress Sensitivity")
         if hasattr(self.host, "save_graph_button"):
             self.host.save_graph_button.setEnabled(has_plots)
         if hasattr(self.host, "normalize_button"):

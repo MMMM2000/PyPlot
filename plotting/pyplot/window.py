@@ -3091,31 +3091,33 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         toolbar.setProperty("mwPrimaryToolbar", True)
 
     def _apply_toolbar_style_hint(self) -> None:
-        """Ensure clickable toolbar buttons stand out without deviating from native themes."""
+        """Style toolbar buttons with native-like chrome and muted disabled states."""
 
         rules = """
 QToolBar[mwPrimaryToolbar="true"] QToolButton {
-    border: 1px solid transparent;
-    border-radius: 4px;
-    padding: 3px 10px;
+    border: 1px solid #3f3f46;
+    border-radius: 6px;
+    padding: 4px 14px;
+    background-color: #1f2933;
+    color: #f3f4f6;
 }
 QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled {
-    border-color: #2563eb;
-    color: #f9fafb;
-    background-image: qlineargradient(
-        spread:pad,
-        x1:0,
-        y1:0,
-        x2:0,
-        y2:1,
-        stop:0 rgba(79, 70, 229, 200),
-        stop:1 rgba(37, 99, 235, 220)
-    );
+    border-color: #6b7280;
+    background-color: #2b3440;
+}
+QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled:hover {
+    border-color: #8891a1;
+    background-color: #343f4d;
+}
+QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled:pressed,
+QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled:checked {
+    border-color: #6b7280;
+    background-color: #1b2330;
 }
 QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
-    border-color: transparent;
-    color: #9ca3af;
-    background: transparent;
+    border-color: #1f2430;
+    color: #6b7280;
+    background-color: #111827;
 }
 """
         current = self.styleSheet() or ""
@@ -3794,12 +3796,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.addToolBar(QtCore.Qt.ToolBarArea.TopToolBarArea, toolbar)
         self._script_toolbar = toolbar
 
-        load_action = toolbar.addAction("Generate workbooks")
-        load_action.setEnabled(False)
-        load_action.triggered.connect(self._load_data)
-        self.load_data_button = load_action
-
-        generate_action = toolbar.addAction("Generate plots")
+        generate_action = toolbar.addAction("Plot graphs")
         generate_action.setEnabled(False)
         generate_action.triggered.connect(self._generate_plots)
         self.plot_button = generate_action

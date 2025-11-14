@@ -65,7 +65,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
         window_module = window_api()
         overview_section, overview_layout = window_module.create_toolbar_section("Overview", parent=container)
-        summary = QtWidgets.QLabel("Select temperature data files then click Generate workbooks.")
+        summary = QtWidgets.QLabel("Select temperature data files, then click Plot Temperature Dependence.")
         summary.setWordWrap(True)
         summary.setObjectName("mw_temp_dep_overview_text")
         overview_layout.addWidget(summary)
@@ -171,7 +171,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self.host._plugin_last_directories[self.name] = paths[0].parent
         if self._summary_label is not None and not self._summary_label.text().strip():
             self._summary_label.setText(
-                "Select one or more temperature dependence files and click Generate workbooks."
+                "Select one or more temperature dependence files, then click Plot Temperature Dependence."
             )
         self._log(f"Loaded {len(paths)} temperature dependence file(s).")
         self._register_workbooks(paths)
@@ -241,7 +241,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             QtWidgets.QMessageBox.information(
                 self.host,
                 self.name,
-                "Generate workbooks before exporting to Origin.",
+                "Load temperature dependence data before exporting to Origin.",
             )
             return
         try:
@@ -256,8 +256,9 @@ class TemperatureDependencePlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = self._data is not None
+        ready_to_plot = has_data or self._host_has_data_selection()
         if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data)
+            self.host.plot_button.setEnabled(ready_to_plot)
             self.host.plot_button.setText("Plot Temperature Dependence")
         if hasattr(self.host, "save_graph_button"):
             self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
@@ -270,8 +271,12 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         if hasattr(self.host, "popout_button"):
             self.host.popout_button.setEnabled(bool(self._plot_tabs))
         if self._summary_label is not None:
-            if not has_data:
-                self._summary_label.setText("Select temperature dependence files then click Generate workbooks.")
+            if not ready_to_plot:
+                self._summary_label.setText("Import temperature dependence files, then click Plot Temperature Dependence.")
+            elif not has_data:
+                self._summary_label.setText(
+                    "Click Plot Temperature Dependence to load data and generate graphs/workbooks with the current settings."
+                )
             elif self._plot_tabs:
                 self._summary_label.clear()
             else:

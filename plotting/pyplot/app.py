@@ -210,12 +210,7 @@ class PyPlotWorkbench(PyPlotWindow):
 
         toolbar.addSeparator()
 
-        load_action = toolbar.addAction("Generate workbooks")
-        load_action.setEnabled(False)
-        load_action.triggered.connect(self._load_data)
-        self.load_data_button = load_action
-
-        generate_action = toolbar.addAction("Generate plots")
+        generate_action = toolbar.addAction("Plot graphs")
         generate_action.setEnabled(False)
         generate_action.triggered.connect(self._generate_plots)
         self.plot_button = generate_action
@@ -420,30 +415,13 @@ class PyPlotWorkbench(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 title,
-                "Import data through the toolbar before loading it in this plugin.",
+                "Import data through the toolbar before plotting in this plugin.",
             )
             try:
                 self._prompt_import_data()
             except Exception:
                 pass
         return []
-
-    def _load_data(self) -> None:
-        if self._current_plugin is None:
-            QtWidgets.QMessageBox.information(
-                self,
-                "PyPlot",
-                "Select a plugin before loading data.",
-            )
-            return
-        plugin = self._current_plugin
-        requires_data = bool(getattr(plugin, "requires_imported_data", False))
-        if requires_data:
-            selection = self.ensure_data_selection(plugin, warn_on_missing=True)
-            if not selection:
-                return
-        plugin.load_data()
-        self._update_action_states()
 
     def _update_action_states(self) -> None:
         export_origin_action = getattr(self, "export_origin_button", None)
@@ -459,13 +437,10 @@ class PyPlotWorkbench(PyPlotWindow):
             except Exception:
                 pass
             self._sync_shared_action_states()
-            self._enforce_load_data_availability()
             return
-        if hasattr(self, "load_data_button"):
-            self.load_data_button.setEnabled(False)
         if hasattr(self, "plot_button"):
             self.plot_button.setEnabled(False)
-            self.plot_button.setText("Generate")
+            self.plot_button.setText("Plot graphs")
         if hasattr(self, "popout_button"):
             self.popout_button.setEnabled(False)
         if hasattr(self, "save_graph_button"):
@@ -477,32 +452,12 @@ class PyPlotWorkbench(PyPlotWindow):
         if hasattr(self, "open_origin_button"):
             self.open_origin_button.setEnabled(False)
         self._sync_shared_action_states()
-        self._enforce_load_data_availability()
 
     def _has_imported_data(self) -> bool:
         if getattr(self, "_session_has_imports", False):
             return True
         worksheets = getattr(self, "_worksheets", None)
         return bool(worksheets)
-
-    def _enforce_load_data_availability(self) -> None:
-        button = getattr(self, "load_data_button", None)
-        if not isinstance(button, QtGui.QAction):
-            return
-        plugin = self._current_plugin
-        if plugin is None:
-            button.setVisible(True)
-            button.setEnabled(False)
-            return
-        if not getattr(plugin, "exposes_load_data", True):
-            button.setVisible(False)
-            return
-        button.setVisible(True)
-        requires_data = bool(getattr(plugin, "requires_imported_data", False))
-        if requires_data:
-            button.setEnabled(True)
-            return
-        button.setEnabled(True)
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         super()._import_paths(paths)

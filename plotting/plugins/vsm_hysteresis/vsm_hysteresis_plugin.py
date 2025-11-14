@@ -43,7 +43,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
         summary = QtWidgets.QLabel(
-            "Select one or more VSM hysteresis files and click Generate workbooks."
+            "Select one or more VSM hysteresis files and click Plot VSM Hysteresis Loops."
         )
         summary.setWordWrap(True)
         layout.addWidget(summary)
@@ -245,11 +245,11 @@ class VSMHysteresisPlugin(PyPlotPlugin):
         has_paths = bool(host._selected_paths())
         if self._summary_label is not None and not has_paths:
             self._summary_label.setText(
-                "Select one or more VSM hysteresis files and click Generate workbooks."
+                "Select one or more VSM hysteresis files and click Plot VSM Hysteresis Loops."
             )
         if hasattr(host, "plot_button"):
             host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))
-            host.plot_button.setText("Generate VSM Hysteresis Loops")
+            host.plot_button.setText("Plot VSM Hysteresis Loops")
         if hasattr(host, "_update_save_graph_enabled"):
             host._update_save_graph_enabled()
         if hasattr(host, "_update_normalize_enabled"):
@@ -374,11 +374,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             global_pos = menu_bar.mapToGlobal(anchor)
             menu_bar.setActiveAction(action)
         else:
-            button = getattr(self.host, "load_data_button", None)
-            if isinstance(button, QtWidgets.QPushButton):
-                global_pos = button.mapToGlobal(button.rect().bottomLeft())
-            else:
-                global_pos = self.host.mapToGlobal(QtCore.QPoint(0, 0))
+            global_pos = self.host.mapToGlobal(QtCore.QPoint(0, 0))
         data_menu.popup(global_pos)
         return True
 

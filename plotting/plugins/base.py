@@ -143,6 +143,25 @@ class PyPlotPlugin:
         logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
         logger.log(log_level, message)
 
+    def _host_has_data_selection(self) -> bool:
+        """Return True when the host already has imported worksheets or selected files."""
+
+        selected_paths = getattr(self.host, "_selected_paths", None)
+        if callable(selected_paths):
+            try:
+                if selected_paths():
+                    return True
+            except Exception:
+                pass
+        has_imports = getattr(self.host, "_has_imported_data", None)
+        if callable(has_imports):
+            try:
+                if has_imports():
+                    return True
+            except Exception:
+                return False
+        return False
+
 
 class ExternalPlotterPlugin(PyPlotPlugin):
     """Adapter that launches legacy standalone plotters from within PyPlot."""
@@ -299,7 +318,6 @@ class EmbeddedWidgetPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:  # type: ignore[override]
         for attr in (
-            "load_data_button",
             "plot_button",
             "save_graph_button",
             "normalize_button",
@@ -311,7 +329,7 @@ class EmbeddedWidgetPlugin(PyPlotPlugin):
             if isinstance(widget, (QtWidgets.QWidget, QtGui.QAction)):
                 widget.setEnabled(False)
                 if attr == "plot_button" and hasattr(widget, "setText"):
-                    widget.setText("Generate")
+                    widget.setText("Plot graphs")
 
 
 __all__ = [

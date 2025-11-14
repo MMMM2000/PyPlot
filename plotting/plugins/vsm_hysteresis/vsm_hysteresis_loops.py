@@ -333,7 +333,7 @@ class MetricDebugWindow(QtWidgets.QDialog):
         layout.setSpacing(10)
 
         self._empty_label = QtWidgets.QLabel(
-            "Generate plots to inspect raw metric crossings."
+            "Plot loops to inspect raw metric crossings."
         )
         self._empty_label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._empty_label)
@@ -4344,7 +4344,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots before creating angle overlays.",
+                "Plot loops before creating angle overlays.",
             )
             return
 
@@ -4567,7 +4567,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots to compute derived metrics first.",
+                "Plot loops to compute derived metrics first.",
             )
             return
 
@@ -4680,7 +4680,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots to compute derived metrics first.",
+                "Plot loops to compute derived metrics first.",
             )
             return
 
@@ -4803,7 +4803,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots to compute derived metrics first.",
+                "Plot loops to compute derived metrics first.",
             )
             return
 
@@ -5247,7 +5247,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots before exporting TXT data.",
+                "Plot loops before exporting TXT data.",
             )
             return
 
@@ -5346,7 +5346,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Generate plots before sending data to Origin.",
+                "Plot loops before sending data to Origin.",
             )
             return
 
@@ -5403,7 +5403,7 @@ class VSMPlotter(PyPlotWindow):
             QtWidgets.QMessageBox.information(
                 self,
                 "VSM Hysteresis Loops",
-                "Selected plots are no longer available. Generate plots again and retry.",
+                "Selected plots are no longer available. Plot loops again and retry.",
             )
             return
 

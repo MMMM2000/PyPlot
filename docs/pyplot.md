@@ -23,13 +23,13 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. |
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
 
-Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Providing `requires_imported_data = True` ensures the shared UI disables “Generate workbooks” until files are imported.
+Use `plotting/plugins/__init__.py` as the registry when you add a new tool. When a plug-in sets `requires_imported_data = True`, gate its Plot button behind `_host_has_data_selection()` so every click loads the selected files and rebuilds the associated workbooks automatically.
 
 ## Importing Data
 
 1. Use the **Import data…** button (or the Data menu) to select files/folders.
 2. Supported formats: CSV/TSV/TXT/XLS/XLSX/XLSM/JSON/VSM `.vsm-hys-data`. Plug-ins can add their own loaders (see `PyPlotPlugin.load_data` implementations).
-3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Otherwise “Generate workbooks” remains available for manual runs.
+3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Otherwise the Plot button handles both loading and workbook regeneration whenever you click it.
 4. All worksheets live under `Imported Data` → `<folder>` → `<workbook>` so every plug-in can reuse them (export to Origin, duplicate, edit columns, etc.).
 
 ## Logs

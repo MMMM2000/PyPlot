@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-14 08:24 UTC
+
+- Restored the Plot toolbar action (e.g., “Plot Temperature Sensitivity/Dependence”) so it’s always visible and clickable once data is imported, removed the redundant “Generate workbooks” button, and taught every plug-in to auto-load data and rebuild its per-graph workbooks as part of each plot run.
+- Reworded the help docs, ideas list, and plug-in prompts to drop references to the retired “Generate workbooks” step, updated `AGENTS.md` with the new workflow expectations, and ensured Origin-export warnings now tell users to load/plot their data instead.
+- Re-skinned the primary toolbar buttons to match the launcher’s native Run-style chrome with a solid disabled state so clickable actions stand out even in the dark theme.
+
 ## 2025-11-13 15:07 UTC
 
 - Temperature Sensitivity now creates one annotated workbook per plotted graph (raw jittered points, mean markers, continuous traces, and annotation positions) while Origin exports center the bold title at the top, hide the numeric X ticks in favor of the custom sample labels, and collapse their staging workbooks after plotting to leave only the graphs visible.
