@@ -6,6 +6,7 @@
 - Added a lightweight test environment (`.venv`) with PyQt6/matplotlib/numpy/pandas/tqdm available so the targeted pytest modules (config, filename parsing, current annealing, etc.) can run headlessly; the full suite still aborts in `tests/test_pyplot_plugins.py` because Qt terminates with signal 6 when instantiating the full PyPlot workbench in this headless CI shell.
 - Fixed the indentation regression that accidentally nested `update_ui`/Origin-export helpers inside the workbook builder, restoring the Temperature Sensitivity plugin’s toolbar state updates, and wired the PyPlot workbench to update the launcher’s “last used” timestamps so the launcher’s Plotting tab always reflects the most recently opened plugin even if it was launched from inside PyPlot.
 - Added a no-op `PyPlotPlugin.update_ui()` implementation so legacy or partially loaded plug-ins never crash the launcher when it refreshes toolbar state before those classes override the method.
+- Removed the extra “Generate workbooks” step for Temperature Sensitivity: the toolbar button now hides when the plug-in is active, and each time you click Plot the per-graph workbooks (with populated long-name/units/comments/F(x) rows) are rebuilt in the Project Explorer/Object Manager automatically.
 
 ## 2025-11-12 13:32 UTC
 

@@ -25,8 +25,11 @@ def stress_metal_core(m_grams):
 ### Increasing force/strain different color that decreasing:  
 -for pdf plotter
 
-### simple plotting script:  
--maybe have some folder for simple scripts, that will have the functionality of pyplot plugins, but just open s simple tkinter gui. Basically, much simpler and easier to maintain. Just open, import files/folders and open matplotlib or origin graphs.
+### Better workbook functionality:  
+-generate workbooks automatically for each graph (1 workbook per graph). Working "long name", "units", "comments", "notes" and "F(x)" rows. Being able to add, remove columns and rows, and edit cell values.
+
+### simple plotting scripts:  
+-maybe have some folder for simple scripts, that will have the functionality of pyplot plugins, but just open s simple tkinter gui. Basically, much simpler and easier to maintain. Just open, import files/folders and open matplotlib or origin graphs. Or there could be some toggle in the plotting section in the launcher, where I could toggle between pyplot and simple scripts. 
 
 ### save on close:  
 -ask to save on close in pyplot and data builder (already works in pyplot)

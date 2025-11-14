@@ -491,11 +491,13 @@ class PyPlotWorkbench(PyPlotWindow):
             return
         plugin = self._current_plugin
         if plugin is None:
+            button.setVisible(True)
             button.setEnabled(False)
             return
         if not getattr(plugin, "exposes_load_data", True):
-            button.setEnabled(False)
+            button.setVisible(False)
             return
+        button.setVisible(True)
         requires_data = bool(getattr(plugin, "requires_imported_data", False))
         if requires_data:
             button.setEnabled(True)
