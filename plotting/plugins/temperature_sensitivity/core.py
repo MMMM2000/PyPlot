@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -75,7 +76,7 @@ OUTLIER_PROGRESS_THRESHOLD = 1000
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
 CONT_LEGEND_LABEL = "25-100C"
 CONT_SYMBOL = _CFG.get("CONT_SYMBOL", "D")
-CONT_SYMBOL_SIZE = float(_CFG.get("CONT_SYMBOL_SIZE", 56.0))
+CONT_SYMBOL_SIZE = float(_CFG.get("CONT_SYMBOL_SIZE", RAW_MARKER_SIZE))
 CONT_SYMBOL_COLOR = _CFG.get("CONT_SYMBOL_COLOR", "#111111")
 
 TS_LABELS = {
@@ -758,7 +759,26 @@ def plot_variable(
 
     fig, ax = plt.subplots(figsize=(11.5, 6.0))
     fig.subplots_adjust(left=0.12, right=0.78, top=0.9, bottom=0.28)
-    cont_label_added = False
+    legend_specs: Dict[str, dict[str, Any]] = {}
+    legend_order: list[str] = []
+
+    def _add_legend_entry(
+        label: str,
+        *,
+        color: str,
+        marker: str,
+        size: float,
+        kind: str = "scatter",
+    ) -> None:
+        if label in legend_specs:
+            return
+        legend_specs[label] = {
+            "color": color,
+            "marker": marker,
+            "size": size,
+            "kind": kind,
+        }
+        legend_order.append(label)
     for temp in sorted(raw['temp'].unique()):
         sub = raw[raw['temp'] == temp]
         ax.scatter(
@@ -769,6 +789,14 @@ def plot_variable(
             s=RAW_MARKER_SIZE,
             alpha=RAW_ALPHA,
             label=f'raw {_format_temp_label(temp)}\N{DEGREE SIGN}C',
+        )
+        label_text = f'raw {_format_temp_label(temp)}\N{DEGREE SIGN}C'
+        _add_legend_entry(
+            label_text,
+            color=RAW_COLORS.get(temp, 'gray'),
+            marker=RAW_MARKER,
+            size=max(RAW_MARKER_SIZE, 1.0),
+            kind="scatter",
         )
 
     for temp in sorted(raw['temp'].unique()):
@@ -796,6 +824,14 @@ def plot_variable(
             c=MEAN_COLORS.get(temp, 'gray'),
             markersize=MEAN_MSIZE,
             label=f'mean {_format_temp_label(temp)}\N{DEGREE SIGN}C',
+        )
+        label_text = f'mean {_format_temp_label(temp)}\N{DEGREE SIGN}C'
+        _add_legend_entry(
+            label_text,
+            color=MEAN_COLORS.get(temp, 'gray'),
+            marker=MEAN_MARKER,
+            size=max(float(MEAN_MSIZE), 1.0),
+            kind="marker",
         )
 
     # Connect 25C and 100C means per sample and show delta
@@ -840,7 +876,6 @@ def plot_variable(
             x_end = sample_idx[s] + MEAN_SHIFT
             scale = (x_end - x_start) / (end - start) if end != start else 1.0
             x_vals = (sub['temp'] - start) * scale + x_start
-            label = CONT_LEGEND_LABEL if not cont_label_added else None
             ax.scatter(
                 x_vals,
                 proc,
@@ -849,10 +884,16 @@ def plot_variable(
                 facecolors=CONT_SYMBOL_COLOR,
                 edgecolors=CONT_SYMBOL_COLOR,
                 linewidths=0.75,
-                label=label,
+                label=CONT_LEGEND_LABEL,
                 zorder=3,
             )
-            cont_label_added = True
+        _add_legend_entry(
+            CONT_LEGEND_LABEL,
+            color=CONT_SYMBOL_COLOR,
+            marker=CONT_SYMBOL,
+            size=max(CONT_SYMBOL_SIZE, 1.0),
+            kind="scatter",
+        )
 
     def _legend_kwargs_from_location(loc_value: str) -> dict[str, Any]:
         loc = (loc_value or "inside").strip().lower()
@@ -874,10 +915,7 @@ def plot_variable(
         for text, handle in zip(legend_obj.get_texts(), handles):
             rawcol: Any = 'black'
             if isinstance(handle, Line2D):
-                rawcol = handle.get_color()
-                face = handle.get_markerfacecolor()
-                if face not in (None, 'none'):
-                    rawcol = face
+                rawcol = handle.get_markerfacecolor() or handle.get_color()
                 if adjust_sizes:
                     try:
                         handle.set_markersize(LEGEND_MARKER_SIZE)
@@ -900,81 +938,50 @@ def plot_variable(
             except Exception:
                 pass
 
-    def _apply_symbol_visibility(legend_obj: Any) -> None:
-        if legend_obj is None:
-            return
-
-        show_symbols = bool(globals().get("LEGEND_SHOW_SYMBOLS", False))
-        marker_size = float(globals().get("LEGEND_SYMBOL_SIZE", 10))
-        handles: list[Any] = []
-        for attr in ("legendHandles", "legend_handles"):
-            found = getattr(legend_obj, attr, None)
-            if found:
-                handles = list(found)
-                break
-
-        for handle in handles:
-            handle_any = cast(Any, handle)
-            if isinstance(handle, PathCollection):
-                try:
-                    if show_symbols:
-                        handle.set_alpha(1.0)
-                        handle.set_sizes([marker_size ** 2])
-                    else:
-                        handle.set_alpha(0.0)
-                        handle.set_sizes([0.1])
-                except Exception:
-                    pass
-            elif isinstance(handle, Patch):
-                try:
-                    handle.set_alpha(1.0 if show_symbols else 0.0)
-                except Exception:
-                    pass
-
-            marker_sizer = getattr(handle_any, "set_markersize", None)
-            if callable(marker_sizer):
-                try:
-                    marker_sizer(marker_size if show_symbols else 0.1)
-                except Exception:
-                    pass
-
-            marker_setter = getattr(handle_any, "set_marker", None)
-            if callable(marker_setter):
-                if show_symbols:
-                    marker_getter = getattr(handle_any, "get_marker", None)
-                    current = None
-                    if callable(marker_getter):
-                        try:
-                            current = marker_getter()
-                        except Exception:
-                            current = None
-                    if current in (None, "", " ", "None"):
-                        for candidate in ("o", "s", "."):
-                            try:
-                                marker_setter(candidate)
-                                break
-                            except Exception:
-                                continue
-                else:
-                    for empty in (None, "", " "):
-                        try:
-                            marker_setter(empty)
-                            break
-                        except Exception:
-                            continue
-
     ax.set_xlabel('Sample')
     ax.set_ylabel(TS_LABELS[var])
     ax.set_title(f"{comp} {anneal} - {TS_LABELS[var]}")
     ax.grid(True)
 
+    show_symbols = bool(globals().get("LEGEND_SHOW_SYMBOLS", False))
+    handles: list[Line2D] = []
+    labels: list[str] = []
+    for label in legend_order:
+        spec = legend_specs.get(label)
+        if not spec:
+            continue
+        marker = spec["marker"] if show_symbols else ""
+        size_kind = spec.get("kind", "scatter")
+        base_size = max(float(spec.get("size", 6.0)), 1.0)
+        if size_kind == "scatter":
+            display_size = max(math.sqrt(base_size), 3.0)
+        else:
+            display_size = max(base_size, 3.0)
+        handle = Line2D(
+            [0],
+            [0],
+            marker=marker or None,
+            linestyle="None",
+            color=spec["color"],
+            markerfacecolor=spec["color"],
+            markeredgecolor=spec["color"],
+            markersize=display_size,
+        )
+        handles.append(handle)
+        labels.append(label)
+
     legend_kwargs = _legend_kwargs_from_location(LEGEND_LOCATION)
-    legend = ax.legend(frameon=False, **legend_kwargs)
+    legend_kwargs.setdefault("frameon", False)
+    if show_symbols:
+        legend_kwargs.setdefault("handlelength", 1.6)
+        legend_kwargs.setdefault("handletextpad", 0.8)
+    else:
+        legend_kwargs.setdefault("handlelength", 0.0001)
+        legend_kwargs.setdefault("handletextpad", 0.3)
+    legend = ax.legend(handles, labels, **legend_kwargs)
     _colorize_legend(legend, adjust_sizes=True)
-    _apply_symbol_visibility(legend)
     apply_readability(ax, globals())
     updated = ax.get_legend()
-    _apply_symbol_visibility(updated)
     _colorize_legend(updated)
 
     ax.margins(x=0.02)
@@ -983,7 +990,12 @@ def plot_variable(
     ax.set_xlim(0.5 - x_pad, len(samples) + 0.5 + x_pad)
     tick_positions = list(range(1, len(samples) + 1))
     ax.set_xticks(tick_positions)
-    ax.set_xticklabels(display_samples, rotation=28, ha="right")
+    ax.set_xticklabels(display_samples)
+    for label in ax.get_xticklabels():
+        label.set_rotation(0)
+        label.set_ha("center")
+    ax.tick_params(axis="x", labelsize=10)
+    ax.tick_params(axis="y", labelsize=10)
     fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)

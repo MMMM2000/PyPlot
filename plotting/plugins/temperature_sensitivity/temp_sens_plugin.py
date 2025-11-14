@@ -699,6 +699,9 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     if index >= 0:
                         parent.takeChild(index)
             self._managed_workbooks.discard(key)
+        cleanup = getattr(host, "_remove_workbook_root_if_empty", None)
+        if callable(cleanup):
+            cleanup()
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._loaded_files:

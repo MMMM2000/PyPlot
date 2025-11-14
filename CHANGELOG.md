@@ -1,4 +1,10 @@
 # Changelog
+## 2025-11-14 14:02 UTC
+
+- Restored the native dock widths so Project Explorer/Object Manager start at a readable size, moved the Workbooks tree above Imported Data only when graphs exist, and double-clicking a workbook now opens its first worksheet tab directly.
+- Temperature Sensitivity plots now render continuous sweeps with the same marker size as raw points, auto-centered X-axis labels, and lightweight proxy legend handles so hiding/dragging the legend no longer lags while text-only legends collapse without blank space.
+- Origin exports share the same symbol-only continuous traces and workbook nodes disappear automatically once every generated workbook is removed, keeping the Project Explorer uncluttered.
+
 ## 2025-11-14 13:33 UTC
 
 - Restored the explicit “Plot Temperature Sensitivity” action label, kept it disabled until data loads, and immediately unlocked Export TXT/Open in Origin so importing once again yields ready-to-run plotting and export buttons without the old Generate Workbooks step.

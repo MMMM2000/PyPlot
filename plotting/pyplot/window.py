@@ -71,6 +71,7 @@ from plotting.shared.readability import (
 
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
+PRIMARY_DOCK_DEFAULT_WIDTH = 360
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -2864,11 +2865,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree.itemDoubleClicked.connect(self._handle_project_item_double_click)
         self.project_tree.itemActivated.connect(self._handle_project_item_double_click)
         self._ensure_data_root()
-        self._ensure_workbook_root()
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
-        project_dock.setMinimumWidth(240)
+        project_dock.setMinimumWidth(PRIMARY_DOCK_DEFAULT_WIDTH)
         self.project_dock = project_dock
 
         self.log_view = QtWidgets.QPlainTextEdit()
@@ -2900,7 +2900,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
-        object_dock.setMinimumWidth(240)
+        object_dock.setMinimumWidth(PRIMARY_DOCK_DEFAULT_WIDTH)
         self.object_dock = object_dock
 
         graph_dock: QtWidgets.QDockWidget | None = None
@@ -5710,9 +5710,29 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if self._workbook_tree_root is None:
             root = QtWidgets.QTreeWidgetItem(["Workbooks", ""])
             root.setExpanded(True)
-            self.project_tree.addTopLevelItem(root)
+            tree = self.project_tree
+            if isinstance(tree, QtWidgets.QTreeWidget):
+                insert_index = 0
+                if self._data_tree_root is not None:
+                    index = tree.indexOfTopLevelItem(self._data_tree_root)
+                    if index > 0:
+                        insert_index = index
+                tree.insertTopLevelItem(insert_index, root)
             self._workbook_tree_root = root
         return self._workbook_tree_root
+
+    def _remove_workbook_root_if_empty(self) -> None:
+        root = self._workbook_tree_root
+        if root is None:
+            return
+        if root.childCount() > 0:
+            return
+        tree = self.project_tree
+        if isinstance(tree, QtWidgets.QTreeWidget):
+            index = tree.indexOfTopLevelItem(root)
+            if index >= 0:
+                tree.takeTopLevelItem(index)
+        self._workbook_tree_root = None
 
     def _ensure_folder_item(self, folder: Path | None) -> QtWidgets.QTreeWidgetItem:
         root = self._ensure_data_root()
@@ -6014,8 +6034,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return panel
 
     def _apply_initial_dock_sizes(self) -> None:
-        self._apply_initial_primary_dock_size(getattr(self, "project_dock", None), 320)
-        self._apply_initial_primary_dock_size(getattr(self, "object_dock", None), 320)
+        self._apply_initial_primary_dock_size(
+            getattr(self, "project_dock", None), PRIMARY_DOCK_DEFAULT_WIDTH
+        )
+        self._apply_initial_primary_dock_size(
+            getattr(self, "object_dock", None), PRIMARY_DOCK_DEFAULT_WIDTH
+        )
         log_dock = getattr(self, "log_dock", None)
         if isinstance(log_dock, QtWidgets.QDockWidget):
             width = self._load_primary_dock_width(log_dock)
@@ -6029,8 +6053,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not isinstance(dock, QtWidgets.QDockWidget):
             return
         width = self._load_primary_dock_width(dock)
+        min_width = max(default_width, dock.minimumWidth())
         if width is None or width <= 0:
-            width = max(dock.sizeHint().width(), default_width)
+            width = max(dock.sizeHint().width(), min_width)
+        else:
+            width = max(width, min_width)
         self._primary_dock_widths[dock] = width
         try:
             self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
@@ -6398,6 +6425,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if isinstance(path, Path):
                 self._open_worksheet_tab(path)
         elif role == "worksheet_group":
+            target = data[1]
+            if isinstance(target, Hashable) and target in self._workbooks:
+                workbook = self._workbooks.get(target)
+                if workbook is not None and workbook.worksheets:
+                    self._open_worksheet_tab(workbook.worksheets[0])
+                    return
             item.setExpanded(not item.isExpanded())
 
     def _assign_project_payload(
