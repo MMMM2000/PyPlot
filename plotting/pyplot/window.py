@@ -115,6 +115,18 @@ def _deref_qpointer(pointer: Any) -> Optional[QtCore.QObject]:
     return pointer if isinstance(pointer, QtCore.QObject) else None
 
 
+def _should_force_light_text(color: Any) -> bool:
+    """Return True when ``color`` is effectively dark/neutral and needs light text."""
+
+    try:
+        r, g, b, _ = mcolors.to_rgba(color)  # type: ignore[arg-type]
+    except Exception:
+        return False
+    luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    spread = max(r, g, b) - min(r, g, b)
+    return luminance < 0.6 and spread < 0.12
+
+
 class _MessageLogHandler(logging.Handler):
     """Logging handler that forwards PyPlot messages into the workspace log view."""
 
@@ -495,8 +507,6 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 return
         if self._expanded_index == index:
             self._expanded_index = None
-        if self._pinned_index == index:
-            self._pinned_index = None
         self._floating_indices.discard(index)
         self._schedule_collapse()
 
@@ -609,6 +619,11 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if self._pointer_over_tab_bar() or self._pointer_over_any_dock():
             return
         self._collapse_all()
+        if self._pinned_index is not None:
+            if 0 <= self._pinned_index < len(self._docks):
+                dock = self._docks[self._pinned_index]
+                if not dock.isVisible() and not dock.isFloating():
+                    self._activate_index(self._pinned_index)
 
     def _pointer_over_tab_bar(self) -> bool:
         cursor = QtGui.QCursor.pos()
@@ -1844,7 +1859,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._rescale_y_action: QtGui.QAction | None = None
         self._rescale_all_action: QtGui.QAction | None = None
         self._dark_mode_action: QtGui.QAction | None = None
-        self._dark_mode_enabled: bool = False
+        stored_dark = False
+        if isinstance(self.settings, QtCore.QSettings):
+            try:
+                stored_dark = bool(int(self.settings.value("graphs/dark_mode", 0)))
+            except Exception:
+                stored_dark = bool(self.settings.value("graphs/dark_mode", False))
+        self._dark_mode_enabled: bool = bool(stored_dark)
         self._temperature_tab_widgets: List[QtWidgets.QWidget] = []
         self._metrics_angle_tabs: List[QtWidgets.QWidget] = []
         self._metrics_temperature_tabs: List[QtWidgets.QWidget] = []
@@ -1861,6 +1882,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._script_panel_layout: QtWidgets.QVBoxLayout | None = None
         self._data_sources_widget: QtWidgets.QWidget | None = None
         self._data_tree_root: QtWidgets.QTreeWidgetItem | None = None
+        self._workbook_tree_root: QtWidgets.QTreeWidgetItem | None = None
         self._data_folder_items: Dict[Path, QtWidgets.QTreeWidgetItem] = {}
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
@@ -2774,6 +2796,34 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         layout.addWidget(widget)
         self._script_panel_container.setVisible(True)
 
+    def _set_plot_button_label(self, plugin: "PyPlotPlugin" | None) -> None:
+        """Ensure the shared Plot action reflects the active plugin."""
+
+        button = getattr(self, "plot_button", None)
+        setter: Callable[[str], None] | None = None
+        if isinstance(button, QtGui.QAction):
+            setter = button.setText
+        elif isinstance(button, QtWidgets.QAbstractButton):
+            setter = button.setText
+        else:
+            return
+        if plugin is None:
+            setter("Plot graphs")
+            return
+        label_getter = getattr(plugin, "plot_action_label", None)
+        label: str | None = None
+        if callable(label_getter):
+            try:
+                candidate = label_getter()
+            except Exception:
+                candidate = None
+            if isinstance(candidate, str):
+                label = candidate.strip()
+        if not label:
+            name = getattr(plugin, "name", "")
+            label = f"Plot {name}".strip() if name else "Plot graphs"
+        setter(label)
+
     def _set_data_sources_visible(self, visible: bool) -> None:
         if self._data_sources_widget is None:
             return
@@ -2783,8 +2833,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
     def _build_base_ui(self) -> None:
         central = QtWidgets.QWidget()
         central_layout = QtWidgets.QVBoxLayout(central)
-        central_layout.setContentsMargins(12, 12, 12, 12)
-        central_layout.setSpacing(10)
+        central_layout.setContentsMargins(6, 6, 6, 4)
+        central_layout.setSpacing(6)
 
         self.path_edit = QtWidgets.QLineEdit()
         self.path_edit.setPlaceholderText("Select files or folders…")
@@ -2813,6 +2863,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree.header().setStretchLastSection(True)
         self.project_tree.itemDoubleClicked.connect(self._handle_project_item_double_click)
         self.project_tree.itemActivated.connect(self._handle_project_item_double_click)
+        self._ensure_data_root()
+        self._ensure_workbook_root()
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
@@ -3091,39 +3143,46 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         toolbar.setProperty("mwPrimaryToolbar", True)
 
     def _apply_toolbar_style_hint(self) -> None:
-        """Style toolbar buttons with native-like chrome and muted disabled states."""
+        """Use the platform default toolbar styling with muted disabled buttons."""
 
         rules = """
-QToolBar[mwPrimaryToolbar="true"] QToolButton {
-    border: 1px solid #3f3f46;
-    border-radius: 6px;
-    padding: 4px 14px;
-    background-color: #1f2933;
-    color: #f3f4f6;
-}
-QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled {
-    border-color: #6b7280;
-    background-color: #2b3440;
-}
-QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled:hover {
-    border-color: #8891a1;
-    background-color: #343f4d;
-}
-QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled:pressed,
-QToolBar[mwPrimaryToolbar="true"] QToolButton:enabled:checked {
-    border-color: #6b7280;
-    background-color: #1b2330;
-}
 QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
-    border-color: #1f2430;
+    border: 1px solid transparent;
+    background: transparent;
     color: #6b7280;
-    background-color: #111827;
 }
 """
         current = self.styleSheet() or ""
         if rules.strip() in current:
             return
         self.setStyleSheet(f"{current}\n{rules}" if current else rules)
+
+    def _style_toolbar_button(
+        self,
+        toolbar: QtWidgets.QToolBar,
+        target: QtGui.QAction | QtWidgets.QAbstractButton,
+        *,
+        object_name: str | None = None,
+    ) -> None:
+        button: QtWidgets.QAbstractButton | None
+        if isinstance(target, QtGui.QAction):
+            if not isinstance(toolbar, QtWidgets.QToolBar):
+                return
+            button = toolbar.widgetForAction(target)
+            if not isinstance(button, QtWidgets.QToolButton):
+                toolbar.update()
+                button = toolbar.widgetForAction(target)
+        elif isinstance(target, QtWidgets.QAbstractButton):
+            button = target
+        else:
+            button = None
+        if not isinstance(button, QtWidgets.QAbstractButton):
+            return
+        button.setAutoRaise(False)
+        button.setMinimumHeight(self._toolbar_icon_size.height() + 6)
+        button.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+        if object_name:
+            button.setObjectName(object_name)
 
     def _update_history_actions(self) -> None:
         undo_enabled = self._history.can_undo()
@@ -3800,6 +3859,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         generate_action.setEnabled(False)
         generate_action.triggered.connect(self._generate_plots)
         self.plot_button = generate_action
+        self._style_toolbar_button(toolbar, generate_action, object_name="mw_plot_action")
 
         self._init_graph_settings_menu(toolbar)
 
@@ -3814,36 +3874,43 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         import_action = toolbar.addAction("Import data…")
         import_action.triggered.connect(self._prompt_import_data)
         self.import_data_button = import_action
+        self._style_toolbar_button(toolbar, import_action)
 
         save_action = toolbar.addAction("Save graph…")
         save_action.setEnabled(False)
         save_action.triggered.connect(self._save_current_graph)
         self.save_graph_button = save_action
+        self._style_toolbar_button(toolbar, save_action)
 
         normalize_action = toolbar.addAction("Normalize Y")
         normalize_action.setEnabled(False)
         normalize_action.triggered.connect(self._normalize_current_graph)
         self.normalize_button = normalize_action
+        self._style_toolbar_button(toolbar, normalize_action)
 
         export_action = toolbar.addAction("Export TXT…")
         export_action.setEnabled(False)
         export_action.triggered.connect(self._export_txt)
         self.export_button = export_action
+        self._style_toolbar_button(toolbar, export_action)
 
         origin_action = toolbar.addAction("Open in Origin…")
         origin_action.setEnabled(False)
         origin_action.triggered.connect(self._open_origin_prompt)
         self.open_origin_button = origin_action
+        self._style_toolbar_button(toolbar, origin_action)
 
         export_workbooks_action = toolbar.addAction("Export workbooks to Origin…")
         export_workbooks_action.setEnabled(False)
         export_workbooks_action.triggered.connect(self._export_workbooks_to_origin)
         self.export_origin_button = export_workbooks_action
+        self._style_toolbar_button(toolbar, export_workbooks_action)
 
         check_outliers_action = toolbar.addAction("Check outliers…")
         check_outliers_action.setEnabled(False)
         check_outliers_action.triggered.connect(self._show_check_outliers_placeholder)
         self.check_outliers_button = check_outliers_action
+        self._style_toolbar_button(toolbar, check_outliers_action)
 
     def _setup_navigation_toolbar(self) -> None:
         toolbar = QtWidgets.QToolBar("Navigation", self)
@@ -3862,6 +3929,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         zoom_action.triggered.connect(self._handle_zoom_triggered)
         mode_group.addAction(zoom_action)
         self._zoom_action = zoom_action
+        self._style_toolbar_button(toolbar, zoom_action)
 
         pan_action = toolbar.addAction("Pan")
         pan_action.setCheckable(True)
@@ -3870,6 +3938,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         pan_action.triggered.connect(self._handle_pan_triggered)
         mode_group.addAction(pan_action)
         self._pan_action = pan_action
+        self._style_toolbar_button(toolbar, pan_action)
 
         toolbar.addSeparator()
 
@@ -3878,24 +3947,28 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         rescale_action.setToolTip("Autoscale both axes for the current graph.")
         rescale_action.triggered.connect(self._handle_rescale_both)
         self._rescale_action = rescale_action
+        self._style_toolbar_button(toolbar, rescale_action)
 
         rescale_x_action = toolbar.addAction("Rescale X")
         rescale_x_action.setEnabled(False)
         rescale_x_action.setToolTip("Autoscale the X axis for the current graph.")
         rescale_x_action.triggered.connect(self._handle_rescale_x)
         self._rescale_x_action = rescale_x_action
+        self._style_toolbar_button(toolbar, rescale_x_action)
 
         rescale_y_action = toolbar.addAction("Rescale Y")
         rescale_y_action.setEnabled(False)
         rescale_y_action.setToolTip("Autoscale the Y axis for the current graph.")
         rescale_y_action.triggered.connect(self._handle_rescale_y)
         self._rescale_y_action = rescale_y_action
+        self._style_toolbar_button(toolbar, rescale_y_action)
 
         rescale_all_action = toolbar.addAction("Rescale all…")
         rescale_all_action.setEnabled(False)
         rescale_all_action.setToolTip("Rescale multiple graphs at once.")
         rescale_all_action.triggered.connect(self._open_rescale_all_dialog)
         self._rescale_all_action = rescale_all_action
+        self._style_toolbar_button(toolbar, rescale_all_action)
 
         toolbar.addSeparator()
 
@@ -3904,6 +3977,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         dark_mode_action.setToolTip("Toggle a dark theme for all graphs.")
         dark_mode_action.toggled.connect(self._handle_dark_mode_toggled)
         self._dark_mode_action = dark_mode_action
+        dark_mode_action.setChecked(self._dark_mode_enabled)
         self._update_navigation_enabled()
 
     def _handle_zoom_triggered(self, checked: bool) -> None:
@@ -4335,6 +4409,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _handle_dark_mode_toggled(self, enabled: bool) -> None:
         self._dark_mode_enabled = bool(enabled)
+        if isinstance(self.settings, QtCore.QSettings):
+            try:
+                self.settings.setValue("graphs/dark_mode", int(self._dark_mode_enabled))
+            except Exception:
+                self.settings.setValue("graphs/dark_mode", self._dark_mode_enabled)
         self._apply_dark_mode_to_all_axes()
 
     def _apply_dark_mode_to_all_axes(self) -> None:
@@ -4357,6 +4436,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         figure = getattr(axes, "figure", None)
         canvas = getattr(figure, "canvas", None) if figure is not None else None
         state = self._axes_theme_state.setdefault(axes, {})
+
+        text_state = state.setdefault("text_items", {})
 
         if enabled:
             if "figure_face" not in state and figure is not None:
@@ -4419,6 +4500,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 title.set_color(light_text)
             for tick in axes.get_xticklabels() + axes.get_yticklabels():
                 tick.set_color(light_text)
+            for artist in getattr(axes, "texts", []):
+                get_color = getattr(artist, "get_color", None)
+                if not callable(get_color):
+                    continue
+                try:
+                    current = get_color()
+                except Exception:
+                    continue
+                if not _should_force_light_text(current):
+                    continue
+                key = id(artist)
+                if key not in text_state:
+                    text_state[key] = (_make_qpointer(artist), current)
+                try:
+                    artist.set_color(light_text)
+                except Exception:
+                    pass
             if legend is not None:
                 try:
                     legend.get_frame().set_facecolor(dark_face)
@@ -4426,9 +4524,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 except Exception:
                     pass
                 for text in legend.get_texts():
-                    text.set_color(light_text)
+                    if _should_force_light_text(text.get_color()):
+                        text.set_color(light_text)
                 title_artist = legend.get_title()
-                if title_artist is not None:
+                if title_artist is not None and _should_force_light_text(title_artist.get_color()):
                     title_artist.set_color(light_text)
         else:
             if figure is not None and "figure_face" in state:
@@ -4479,6 +4578,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                             line.set_alpha(original_grid_alpha)
                 except Exception:
                     pass
+            stale: list[int] = []
+            for key, data in list(text_state.items()):
+                pointer, original = data
+                artist = _deref_qpointer(pointer)
+                if not isinstance(artist, Text):
+                    stale.append(key)
+                    continue
+                try:
+                    artist.set_color(original)
+                except Exception:
+                    pass
+            for key in stale:
+                text_state.pop(key, None)
         return canvas
     def _prompt_import_data(self) -> None:
         files_action = getattr(self, "_import_files_action", None)
@@ -4545,6 +4657,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         bold_action.triggered.connect(self._apply_text_bold)
         bold_action.setToolTip("Toggle bold text")
         controls.bold_action = bold_action
+        self._style_toolbar_button(toolbar, bold_action)
 
         italic_action = toolbar.addAction("I")
         italic_action.setCheckable(True)
@@ -4552,6 +4665,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         italic_action.triggered.connect(self._apply_text_italic)
         italic_action.setToolTip("Toggle italic text")
         controls.italic_action = italic_action
+        self._style_toolbar_button(toolbar, italic_action)
 
         underline_action = toolbar.addAction("U")
         underline_action.setCheckable(True)
@@ -4559,6 +4673,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         underline_action.triggered.connect(self._apply_text_underline)
         underline_action.setToolTip("Toggle underlined text")
         controls.underline_action = underline_action
+        self._style_toolbar_button(toolbar, underline_action)
 
         color_button = QtWidgets.QToolButton(toolbar)
         color_button.setText("Color…")
@@ -4567,6 +4682,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         color_button.setToolTip("Select an object to adjust its colour")
         controls.color_button = color_button
         toolbar.addWidget(color_button)
+        self._style_toolbar_button(toolbar, color_button)
 
         toolbar.addSeparator()
 
@@ -4581,6 +4697,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         line_action.setToolTip("Show the selection as a line")
         line_group.addAction(line_action)
         controls.line_action = line_action
+        self._style_toolbar_button(toolbar, line_action)
 
         scatter_action = toolbar.addAction("Scatter")
         scatter_action.setCheckable(True)
@@ -4589,6 +4706,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         scatter_action.setToolTip("Show only markers for the selection")
         line_group.addAction(scatter_action)
         controls.scatter_action = scatter_action
+        self._style_toolbar_button(toolbar, scatter_action)
 
         line_symbol_action = toolbar.addAction("Line + symbol")
         line_symbol_action.setCheckable(True)
@@ -4599,6 +4717,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         line_symbol_action.setToolTip("Show the selection with lines and markers")
         line_group.addAction(line_symbol_action)
         controls.line_symbol_action = line_symbol_action
+        self._style_toolbar_button(toolbar, line_symbol_action)
 
     # ------------------------------------------------------------------ shared menu helpers
     def _project_settings_key(self, suffix: str) -> str:
@@ -5508,10 +5627,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     parent.takeChild(index)
         self._workbooks[workbook.key] = workbook
 
-        folder_item = self._ensure_folder_item(workbook.folder)
+        if workbook.source is None:
+            parent_item = self._ensure_workbook_root()
+        else:
+            parent_item = self._ensure_folder_item(workbook.folder)
+
         workbook_item = QtWidgets.QTreeWidgetItem([workbook.name, str(workbook.source or "")])
         self._assign_project_payload(workbook_item, ("worksheet_group", workbook.key))
-        folder_item.addChild(workbook_item)
+        parent_item.addChild(workbook_item)
         workbook_item.setExpanded(True)
         self._data_workbook_items[workbook.key] = workbook_item
 
@@ -5582,6 +5705,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             self.project_tree.addTopLevelItem(root)
             self._data_tree_root = root
         return self._data_tree_root
+
+    def _ensure_workbook_root(self) -> QtWidgets.QTreeWidgetItem:
+        if self._workbook_tree_root is None:
+            root = QtWidgets.QTreeWidgetItem(["Workbooks", ""])
+            root.setExpanded(True)
+            self.project_tree.addTopLevelItem(root)
+            self._workbook_tree_root = root
+        return self._workbook_tree_root
 
     def _ensure_folder_item(self, folder: Path | None) -> QtWidgets.QTreeWidgetItem:
         root = self._ensure_data_root()

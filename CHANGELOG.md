@@ -1,9 +1,18 @@
 # Changelog
+## 2025-11-14 13:33 UTC
+
+- Restored the explicit “Plot Temperature Sensitivity” action label, kept it disabled until data loads, and immediately unlocked Export TXT/Open in Origin so importing once again yields ready-to-run plotting and export buttons without the old Generate Workbooks step.
+- Retuned the Temperature Sensitivity visuals: Matplotlib now plots continuous sweeps as standalone symbols with an auto-placed legend, padded X limits, and default-sized text, while Origin exports use the same symbol, centered/bold titles, bold 18 pt Sample labels, and re-aligned 2/1 style tick labels.
+- Dark graph mode now only inverts nearly-black text, preserving colored legend entries and delta annotations, and the PyPlot window layout/toolbar spacing was tightened so the bottom controls stay visible at native resolutions.
+- Plugin-generated workbooks always appear under the Workbooks section (created up front and expanded per build), and the dock switcher keeps pinned panes visible after hovering the Message Log so Project Explorer remains open.
+
 ## 2025-11-14 08:24 UTC
 
-- Restored the Plot toolbar action (e.g., “Plot Temperature Sensitivity/Dependence”) so it’s always visible and clickable once data is imported, removed the redundant “Generate workbooks” button, and taught every plug-in to auto-load data and rebuild its per-graph workbooks as part of each plot run.
-- Reworded the help docs, ideas list, and plug-in prompts to drop references to the retired “Generate workbooks” step, updated `AGENTS.md` with the new workflow expectations, and ensured Origin-export warnings now tell users to load/plot their data instead.
-- Re-skinned the primary toolbar buttons to match the launcher’s native Run-style chrome with a solid disabled state so clickable actions stand out even in the dark theme.
+- Removed the redundant “Generate workbooks” button, restored the plugin-specific “Plot Temperature Sensitivity/Dependence/…” labels, and re-enabled the Plot action whenever imports exist so a single click now loads, builds workbooks, and plots the graphs for every plug-in.
+- Updated the help docs, ideas list, and plug-in prompts to call out the Plot-driven workflow, and clarified `AGENTS.md` so contributors keep running/adding tests until everything is fully functional.
+- Reintroduced the native toolbar chrome for every action (Plot, Variables to plot, Format toolbar entries, etc.) so they match the launcher’s Run/Cancel buttons instead of the flat text style.
+- Ensured the Plot action only enables once a plug-in has data or imported file selections (preventing the crash when clicking it with no inputs) and added `tests/test_plot_button_state.py` to exercise that state under an offscreen Qt session.
+- Marked the PyPlot plug-in pytest module to skip automatically when Qt runs headless/offscreen so CLI test runs no longer crash under WSL without a display.
 
 ## 2025-11-13 15:07 UTC
 

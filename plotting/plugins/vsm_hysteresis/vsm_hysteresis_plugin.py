@@ -249,7 +249,6 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             )
         if hasattr(host, "plot_button"):
             host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))
-            host.plot_button.setText("Plot VSM Hysteresis Loops")
         if hasattr(host, "_update_save_graph_enabled"):
             host._update_save_graph_enabled()
         if hasattr(host, "_update_normalize_enabled"):

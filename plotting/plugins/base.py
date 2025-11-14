@@ -129,6 +129,11 @@ class PyPlotPlugin:
         # asks them to refresh before they override the method.
         return
 
+    def plot_action_label(self) -> str:
+        """Text shown on the shared Plot button when this plugin is active."""
+
+        return f"Plot {self.name}".strip()
+
     def _log(self, message: str, *, level: str = "info") -> None:
         """Log helper that prefers the host console when available."""
 
@@ -144,7 +149,7 @@ class PyPlotPlugin:
         logger.log(log_level, message)
 
     def _host_has_data_selection(self) -> bool:
-        """Return True when the host already has imported worksheets or selected files."""
+        """Return True when the host already has imported data or file selections."""
 
         selected_paths = getattr(self.host, "_selected_paths", None)
         if callable(selected_paths):
@@ -153,6 +158,9 @@ class PyPlotPlugin:
                     return True
             except Exception:
                 pass
+        entries = getattr(self.host, "_selected_path_entries", None)
+        if isinstance(entries, list) and entries:
+            return True
         has_imports = getattr(self.host, "_has_imported_data", None)
         if callable(has_imports):
             try:

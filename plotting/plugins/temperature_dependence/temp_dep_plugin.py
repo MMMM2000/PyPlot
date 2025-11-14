@@ -259,7 +259,6 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         ready_to_plot = has_data or self._host_has_data_selection()
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(ready_to_plot)
-            self.host.plot_button.setText("Plot Temperature Dependence")
         if hasattr(self.host, "save_graph_button"):
             self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
         if hasattr(self.host, "normalize_button"):

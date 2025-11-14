@@ -210,10 +210,11 @@ class PyPlotWorkbench(PyPlotWindow):
 
         toolbar.addSeparator()
 
-        generate_action = toolbar.addAction("Plot graphs")
-        generate_action.setEnabled(False)
-        generate_action.triggered.connect(self._generate_plots)
-        self.plot_button = generate_action
+        plot_action = toolbar.addAction("Plot graphs")
+        plot_action.setEnabled(False)
+        plot_action.triggered.connect(self._generate_plots)
+        self.plot_button = plot_action
+        self._style_toolbar_button(toolbar, plot_action, object_name="mw_plot_action")
 
         self._init_graph_settings_menu(toolbar)
 
@@ -432,15 +433,20 @@ class PyPlotWorkbench(PyPlotWindow):
             outlier_action.setEnabled(False)
 
         if self._current_plugin is not None:
+            self._set_plot_button_label(self._current_plugin)
             try:
                 self._current_plugin.update_ui()
             except Exception:
                 pass
+            button = getattr(self, "plot_button", None)
+            if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
+                button.setEnabled(self._plugin_ready_to_plot(self._current_plugin))
             self._sync_shared_action_states()
             return
-        if hasattr(self, "plot_button"):
-            self.plot_button.setEnabled(False)
-            self.plot_button.setText("Plot graphs")
+        button = getattr(self, "plot_button", None)
+        if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
+            button.setEnabled(False)
+        self._set_plot_button_label(None)
         if hasattr(self, "popout_button"):
             self.popout_button.setEnabled(False)
         if hasattr(self, "save_graph_button"):
@@ -459,8 +465,32 @@ class PyPlotWorkbench(PyPlotWindow):
         worksheets = getattr(self, "_worksheets", None)
         return bool(worksheets)
 
+    def _plugin_has_loaded_data(self, plugin: PyPlotPlugin | None) -> bool:
+        if plugin is None:
+            return False
+        data = getattr(plugin, "_data", None)
+        if data is None:
+            return False
+        if isinstance(data, pd.DataFrame):
+            return not data.empty
+        return True
+
+    def _plugin_ready_to_plot(self, plugin: PyPlotPlugin | None) -> bool:
+        if plugin is None:
+            return False
+        if self._plugin_has_loaded_data(plugin):
+            return True
+        requires = bool(getattr(plugin, "requires_imported_data", False))
+        if requires:
+            return False
+        return bool(self._selected_paths())
+
     def _import_paths(self, paths: Iterable[Path]) -> None:
-        super()._import_paths(paths)
+        path_list = [Path(p) for p in paths]
+        super()._import_paths(path_list)
+        if path_list:
+            self._commit_selected_paths(path_list)
+            self._session_has_imports = True
         self._sync_selected_paths_with_imports()
         if self._current_plotter_name and self._last_directory is not None:
             self._plugin_last_directories[self._current_plotter_name] = self._last_directory
@@ -800,6 +830,7 @@ class PyPlotWorkbench(PyPlotWindow):
             self._set_script_panel(None)
             self._set_plugin_settings_widget(None)
             self._active_plugin_updater = None
+            self._set_plot_button_label(None)
             self._update_window_title()
             self._update_action_states()
             return
@@ -821,6 +852,7 @@ class PyPlotWorkbench(PyPlotWindow):
             self._set_script_panel(plugin.panel_widget())
             self._set_plugin_settings_widget(plugin.settings_widget())
             plugin.activate()
+            self._set_plot_button_label(plugin)
             last_dir = self._plugin_last_directories.get(name)
             if last_dir is not None:
                 self._last_directory = last_dir if last_dir.exists() else self._last_directory

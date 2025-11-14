@@ -13,6 +13,7 @@
 ## Testing and Verification
 - After dependency changes, sanity-check imports for key modules (PyQt6, matplotlib, numpy, pandas, plotly, opencv-python if used).
 - Re-run smoke scripts such as `launcher.py` when practical, or note when they were not run.
+- Keep running tests and iterating until each feature is fully functional; create new tests or extend existing ones whenever coverage is missing.
 
 ## Origin Integration
 - Prefer the shipped `origin_ext_python/originpro-main` tree (or configure `PYTHONPATH` to include an Origin Python SDK) whenever touching Origin exports or automation helpers.

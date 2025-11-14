@@ -4,6 +4,7 @@ import contextlib
 import sys
 from typing import Iterator
 
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +22,13 @@ from plotting.pyplot.app import PyPlotWorkbench, main as pyplot_main
 from plotting.plugins import ExternalPlotterPlugin, PyPlotPlugin, builtin_plugin_registry
 from plotting.plugins.temperature_sensitivity import core as temp_sens_core
 from plotting.plugins.temperature_sensitivity import temp_sens_plugin
+
+_HEADLESS = not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
+_OFFSCREEN = os.environ.get("QT_QPA_PLATFORM", "").lower() == "offscreen"
+pytestmark = pytest.mark.skipif(
+    _HEADLESS or _OFFSCREEN,
+    reason="PyQt plug-in tests require a display-capable Qt platform",
+)
 
 
 def _ensure_app() -> QtWidgets.QApplication:

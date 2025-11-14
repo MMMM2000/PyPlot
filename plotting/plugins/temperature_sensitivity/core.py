@@ -47,7 +47,7 @@ IMPROVE_READABILITY = False
 SHOW_LEGEND = bool(_CFG.get("SHOW_LEGEND", True))
 LEGEND_SIZE = int(_CFG.get("LEGEND_SIZE", 18))
 LEGEND_ORIENTATION = str(_CFG.get("LEGEND_ORIENTATION", "auto"))
-LEGEND_LOCATION = str(_CFG.get("LEGEND_LOCATION", "outside_right")).lower()
+LEGEND_LOCATION = str(_CFG.get("LEGEND_LOCATION", "auto")).lower()
 LEGEND_SHOW_SYMBOLS = bool(_CFG.get("LEGEND_SHOW_SYMBOLS", False))
 LEGEND_SYMBOL_SIZE = float(_CFG.get("LEGEND_SYMBOL_SIZE", 10))
 TICK_SIZE = int(_CFG.get("TICK_SIZE", 18))
@@ -73,6 +73,10 @@ MEAN_SHIFT = OFFSET * 2
 MAX_SHOW = 8
 OUTLIER_PROGRESS_THRESHOLD = 1000
 BACKEND = str(_CFG.get("BACKEND", "matplotlib"))
+CONT_LEGEND_LABEL = "25-100C"
+CONT_SYMBOL = _CFG.get("CONT_SYMBOL", "D")
+CONT_SYMBOL_SIZE = float(_CFG.get("CONT_SYMBOL_SIZE", 56.0))
+CONT_SYMBOL_COLOR = _CFG.get("CONT_SYMBOL_COLOR", "#111111")
 
 TS_LABELS = {
     "T1": "T1 (\u03BCs)",
@@ -754,7 +758,7 @@ def plot_variable(
 
     fig, ax = plt.subplots(figsize=(11.5, 6.0))
     fig.subplots_adjust(left=0.12, right=0.78, top=0.9, bottom=0.28)
-    legend_done: set[str] = set()
+    cont_label_added = False
     for temp in sorted(raw['temp'].unique()):
         sub = raw[raw['temp'] == temp]
         ax.scatter(
@@ -836,21 +840,25 @@ def plot_variable(
             x_end = sample_idx[s] + MEAN_SHIFT
             scale = (x_end - x_start) / (end - start) if end != start else 1.0
             x_vals = (sub['temp'] - start) * scale + x_start
-            lbl = None if 'cont' in legend_done else f'25-100C med {med_window} mwa {ma_window}'
-            ax.plot(x_vals, proc, color='black', label=lbl)
-            legend_done.add('cont')
-
-    ax.set_ylim(y_min - 0.02 * y_range, y_max + 0.02 * y_range)
-
-    ticks = [sample_idx[s] for s in samples]
-    ax.set_xticks(ticks)
-    ax.set_xticklabels(display_samples)
+            label = CONT_LEGEND_LABEL if not cont_label_added else None
+            ax.scatter(
+                x_vals,
+                proc,
+                marker=CONT_SYMBOL,
+                s=CONT_SYMBOL_SIZE,
+                facecolors=CONT_SYMBOL_COLOR,
+                edgecolors=CONT_SYMBOL_COLOR,
+                linewidths=0.75,
+                label=label,
+                zorder=3,
+            )
+            cont_label_added = True
 
     def _legend_kwargs_from_location(loc_value: str) -> dict[str, Any]:
         loc = (loc_value or "inside").strip().lower()
         if loc in {"outside_right", "outside", "outside right"}:
             return {"loc": "center left", "bbox_to_anchor": (1.02, 0.5), "borderaxespad": 0.0}
-        if loc in {"inside", "auto", "best", ""}:
+        if loc in {"inside", "auto", "best", "", "smart"}:
             return {"loc": "best"}
         return {"loc": loc}
 
@@ -960,22 +968,10 @@ def plot_variable(
     ax.set_title(f"{comp} {anneal} - {TS_LABELS[var]}")
     ax.grid(True)
 
-    legend_kwargs = _legend_kwargs_from_location(str(globals().get("LEGEND_LOCATION", "inside")))
-    legend = ax.legend(
-        loc="center left",
-        bbox_to_anchor=(1.02, 0.5),
-        borderaxespad=0.0,
-        frameon=False,
-    )
+    legend_kwargs = _legend_kwargs_from_location(LEGEND_LOCATION)
+    legend = ax.legend(frameon=False, **legend_kwargs)
     _colorize_legend(legend, adjust_sizes=True)
     _apply_symbol_visibility(legend)
-    for text in legend.get_texts():
-        try:
-            text.setFontSize(9)
-        except Exception:
-            pass
-    hide_origin_workbook(op, book, gp)
-
     apply_readability(ax, globals())
     updated = ax.get_legend()
     _apply_symbol_visibility(updated)
@@ -983,12 +979,11 @@ def plot_variable(
 
     ax.margins(x=0.02)
     ax.set_ylim(y_min - y_padding, y_max + y_padding)
-    ax.set_xlim(0.5, len(samples) + 0.5)
+    x_pad = max(0.25, min(0.6, 0.04 * max(len(samples), 1)))
+    ax.set_xlim(0.5 - x_pad, len(samples) + 0.5 + x_pad)
     tick_positions = list(range(1, len(samples) + 1))
     ax.set_xticks(tick_positions)
     ax.set_xticklabels(display_samples, rotation=28, ha="right")
-    ax.tick_params(axis="x", labelsize=10)
-    ax.tick_params(axis="y", labelsize=10)
     fname = f"{comp} {anneal} {var}"
     if save_flag:
         os.makedirs(out_dir, exist_ok=True)
@@ -1007,6 +1002,11 @@ def plot_variable_origin(
 ) -> None:
     """Create an Origin graph roughly matching the Matplotlib style."""
 
+    try:
+        import originpro as op  # type: ignore
+    except Exception as exc:  # pragma: no cover - origin only available on Windows
+        raise RuntimeError("originpro is required for Origin export") from exc
+
     context = build_temperature_graph_context(
         df,
         var,
@@ -1018,7 +1018,6 @@ def plot_variable_origin(
     if context is None:
         return
 
-    import originpro as op  # lazy import
     try:
         op.set_show()
     except Exception:
@@ -1134,7 +1133,7 @@ def plot_variable_origin(
         except Exception:
             pass
 
-    cont_label = f"25-100C med {med_window} mwa {ma_window}"
+    cont_label = CONT_LEGEND_LABEL
     cont_label_added = False
     for idx, cont_df in enumerate(cont_processed, start=1):
         sheet = _next_sheet(f'cont_{idx}')
@@ -1144,14 +1143,18 @@ def plot_variable_origin(
         w.from_list(0, cont_df['X'].tolist())
         w.from_list(1, cont_df['Y'].tolist())
         w.cols_axis('XY')
-        plot_obj = gl.add_plot(w, coly=1, colx=0, type='y')
+        plot_obj = gl.add_plot(w, coly=1, colx=0, type='s')
         if plot_obj is None:
             continue
         p = cast(Any, plot_obj)
+        marker_size = max(int(CONT_SYMBOL_SIZE ** 0.5), 6)
         try:
-            p.color = 'black'
-            p.line_width = 1
-            p.symbol_size = 1
+            p.color = CONT_SYMBOL_COLOR
+            p.line_width = 0
+            p.symbol_shape = 2
+            p.symbol_size = marker_size
+            p.symbol_edge_color = CONT_SYMBOL_COLOR
+            p.symbol_fill_color = CONT_SYMBOL_COLOR
             if cont_label_added:
                 try:
                     p.legend = ''
@@ -1177,7 +1180,7 @@ def plot_variable_origin(
 
     try:
         gp.activate()
-        op.lt_exec('legend -o; legend.textcolor=1;')
+        op.lt_exec('legend -o;')
     except Exception:
         pass
 
@@ -1257,10 +1260,15 @@ def plot_variable_origin(
             continue
 
     manual_labels_added = False
+    title_center = (len(samples) + 1) / 2.0
     sample_idx_map = context.sample_idx
     for idx, sample in enumerate(samples, start=1):
         text = display_samples[idx - 1]
-        x_pos = context.sample_label_positions.get(sample, float(sample_idx_map.get(sample, idx)))
+        raw_pos = context.sample_label_positions.get(sample, float(sample_idx_map.get(sample, idx)))
+        try:
+            x_pos = float(round(raw_pos, 6))
+        except Exception:
+            x_pos = float(raw_pos)
         try:
             label = gl.add_label(text, float(x_pos), tick_level)
         except Exception:
@@ -1295,6 +1303,29 @@ def plot_variable_origin(
         except Exception:
             pass
 
+    try:
+        gl.remove_label('py_xlabel')
+    except Exception:
+        pass
+    try:
+        axis_label = gl.add_label(
+            'Sample',
+            float(title_center),
+            float(axis.label_bottom - max(axis.label_extra, 0.3)),
+        )
+    except Exception:
+        axis_label = None
+    if axis_label is not None:
+        try:
+            axis_label.name = 'py_xlabel'
+            axis_label.set_int('attach', 0)
+            axis_label.set_int('horzalign', 1)
+            axis_label.set_int('vertalign', 0)
+            axis_label.set_int('fontweight', 700)
+            axis_label.set_int('fontheight', max(AXIS_LABEL_SIZE, 18))
+        except Exception:
+            pass
+
     max_deltas = max(len(context.delta_labels), len(samples))
     for idx in range(1, max_deltas + 1):
         try:
@@ -1324,7 +1355,7 @@ def plot_variable_origin(
             except Exception:
                 pass
             try:
-                label.set_int('fontheight', max(TICK_SIZE - 2, 14))
+                label.set_int('fontheight', max(TICK_SIZE, 18))
             except Exception:
                 pass
         except Exception:
@@ -1343,9 +1374,9 @@ def plot_variable_origin(
         gl.remove_label('py_title')
     except Exception:
         pass
-    title_center = (len(samples) + 1) / 2.0
+    title_y = axis.title_level + max(axis.title_gap * 0.15, 0.3)
     try:
-        manual_title = gl.add_label(context.title, title_center, axis.title_level)
+        manual_title = gl.add_label(context.title, title_center, title_y)
     except Exception:
         manual_title = None
     if manual_title is not None:

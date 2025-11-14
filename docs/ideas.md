@@ -22,6 +22,9 @@ def stress_metal_core(m_grams):
     sigma = (K * P) / (K*S_m + S_gl)  
     return sigma / 1e6      # MPa  
 
+### Autosave  
+-automatically save project to some temp file. Folder path can be set in the settings. Autosave frequency can also be changed in the settings.
+
 ### Increasing force/strain different color that decreasing:  
 -for pdf plotter
 

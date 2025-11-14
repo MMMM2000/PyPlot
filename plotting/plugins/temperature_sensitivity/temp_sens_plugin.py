@@ -182,6 +182,16 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
         self._settings_widget = container
         return container
 
+    def plot_action_label(self) -> str:  # type: ignore[override]
+        return "Plot Temperature Sensitivity"
+
+    def _has_loaded_data(self) -> bool:
+        if self._data is None:
+            return False
+        if isinstance(self._data, pd.DataFrame):
+            return not self._data.empty
+        return True
+
     def _selected_variables(self) -> list[str]:
         selected = [key for key, cb in self._var_checks.items() if cb.isChecked() and cb.isEnabled()]
         if selected:
@@ -409,185 +419,187 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             if index >= 0:
                 self.host.tab_widget.setCurrentIndex(index)
         self._log(f"Generated {plots_created} temperature sensitivity plot(s).")
-        self._finalize_workbooks(active_workbooks)
+        finalize = getattr(self, "_finalize_workbooks", None)
+        if callable(finalize):
+            finalize(active_workbooks)
         self.update_ui()
 
 
-def _format_workbook_name(
-    self,
-    composition: str,
-    anneal: str,
-    title: str,
-    variable: str,
-    mode: str,
-) -> str:
-    label = temp_sens_core.TS_LABELS.get(variable, variable)
-    base_parts = [composition.strip(), anneal.strip()]
-    head = " ".join(part for part in base_parts if part)
-    if title and title not in base_parts:
-        head = f"{head} {title}".strip()
-    mode_label = MODE_LABELS.get(mode, mode)
-    name = f"{head} - {label}".strip() if head else label
-    if mode_label:
-        name = f"{name} ({mode_label})"
-    return name.strip()
+    def _format_workbook_name(
+        self,
+        composition: str,
+        anneal: str,
+        title: str,
+        variable: str,
+        mode: str,
+    ) -> str:
+        label = temp_sens_core.TS_LABELS.get(variable, variable)
+        base_parts = [composition.strip(), anneal.strip()]
+        head = " ".join(part for part in base_parts if part)
+        if title and title not in base_parts:
+            head = f"{head} {title}".strip()
+        mode_label = MODE_LABELS.get(mode, mode)
+        name = f"{head} - {label}".strip() if head else label
+        if mode_label:
+            name = f"{name} ({mode_label})"
+        return name.strip()
 
-def _build_graph_workbook(
-    self,
-    window_module: Any,
-    workbook: "WorkbookData",
-    ctx: temp_sens_core.TemperatureGraphContext,
-    variable: str,
-    mode: str,
-    include_cont: bool,
-) -> list["WorksheetData"]:
-    host = self.host
-    units = _format_units(_variable_units(variable))
-    mode_label = MODE_LABELS.get(mode, mode)
-    raw_columns = [
-        "sample",
-        "sample_label",
-        "sample_idx",
-        "temp",
-        "temp_label",
-        "legend_label",
-        "X",
-        "Y",
-        "value",
-        "baseline",
-        "composition",
-        "anneal",
-    ]
-    raw_frame = ctx.raw_points[[col for col in raw_columns if col in ctx.raw_points.columns]].copy()
-    raw_frame.rename(
-        columns={
-            "sample": "sample_id",
-            "sample_label": "sample_label",
-            "sample_idx": "sample_index",
-            "temp": "temperature_c",
-            "temp_label": "temperature_label",
-            "legend_label": "series",
-            "X": "x_position",
-            "Y": "plotted_value",
-            "value": "raw_value",
-            "baseline": "baseline_value",
-        },
-        inplace=True,
-    )
+    def _build_graph_workbook(
+        self,
+        window_module: Any,
+        workbook: "WorkbookData",
+        ctx: temp_sens_core.TemperatureGraphContext,
+        variable: str,
+        mode: str,
+        include_cont: bool,
+    ) -> list["WorksheetData"]:
+        host = self.host
+        units = _format_units(_variable_units(variable))
+        mode_label = MODE_LABELS.get(mode, mode)
+        raw_columns = [
+            "sample",
+            "sample_label",
+            "sample_idx",
+            "temp",
+            "temp_label",
+            "legend_label",
+            "X",
+            "Y",
+            "value",
+            "baseline",
+            "composition",
+            "anneal",
+        ]
+        raw_frame = ctx.raw_points[[col for col in raw_columns if col in ctx.raw_points.columns]].copy()
+        raw_frame.rename(
+            columns={
+                "sample": "sample_id",
+                "sample_label": "sample_label",
+                "sample_idx": "sample_index",
+                "temp": "temperature_c",
+                "temp_label": "temperature_label",
+                "legend_label": "series",
+                "X": "x_position",
+                "Y": "plotted_value",
+                "value": "raw_value",
+                "baseline": "baseline_value",
+            },
+            inplace=True,
+        )
 
-    mean_columns = [
-        "sample",
-        "sample_label",
-        "sample_idx",
-        "temp",
-        "temp_label",
-        "legend_label",
-        "plot_x",
-        "plot_y",
-        "composition",
-        "anneal",
-    ]
-    mean_frame = ctx.mean_points[[col for col in mean_columns if col in ctx.mean_points.columns]].copy()
-    mean_frame.rename(
-        columns={
-            "sample": "sample_id",
-            "sample_label": "sample_label",
-            "sample_idx": "sample_index",
-            "temp": "temperature_c",
-            "temp_label": "temperature_label",
-            "legend_label": "series",
-            "plot_x": "x_position",
-            "plot_y": "plotted_value",
-        },
-        inplace=True,
-    )
+        mean_columns = [
+            "sample",
+            "sample_label",
+            "sample_idx",
+            "temp",
+            "temp_label",
+            "legend_label",
+            "plot_x",
+            "plot_y",
+            "composition",
+            "anneal",
+        ]
+        mean_frame = ctx.mean_points[[col for col in mean_columns if col in ctx.mean_points.columns]].copy()
+        mean_frame.rename(
+            columns={
+                "sample": "sample_id",
+                "sample_label": "sample_label",
+                "sample_idx": "sample_index",
+                "temp": "temperature_c",
+                "temp_label": "temperature_label",
+                "legend_label": "series",
+                "plot_x": "x_position",
+                "plot_y": "plotted_value",
+            },
+            inplace=True,
+        )
 
-    sheets: list["WorksheetData"] = []
-    raw_sheet = host._create_worksheet_from_frame(workbook, "Raw points", raw_frame)
-    self._apply_column_meta(
-        raw_sheet,
-        {
-            "sample_id": ("Sample", None, "Sample identifier", ""),
-            "sample_label": ("Sample label", None, "Formatted label used in plots", ""),
-            "sample_index": ("Sample index", None, "Numeric index assigned per sample", ""),
-            "temperature_c": ("Temperature", _format_units("°C"), "Discrete measurement temperature", ""),
-            "temperature_label": ("Temperature label", None, "Display label for temperature", ""),
-            "series": ("Legend entry", None, "Legend label for this series", ""),
-            "x_position": ("X position", None, "Jittered position used for plotting", "X"),
-            "plotted_value": (f"{ctx.var_label} ({mode_label})", units, "Value sent to the graph", "Y"),
-            "raw_value": (f"{ctx.var_label} (raw)", units, "Original measurement value", ""),
-            "baseline_value": (f"{ctx.var_label} baseline", units, "Mean at 25°C per sample", ""),
-            "composition": ("Composition", None, "Alloy composition", ""),
-            "anneal": ("Anneal", None, "Annealing condition", ""),
-        },
-        window_module,
-    )
-    sheets.append(raw_sheet)
-
-    mean_sheet = host._create_worksheet_from_frame(workbook, "Means", mean_frame)
-    self._apply_column_meta(
-        mean_sheet,
-        {
-            "sample_id": ("Sample", None, "Sample identifier", ""),
-            "sample_label": ("Sample label", None, "Formatted label used in plots", ""),
-            "sample_index": ("Sample index", None, "Numeric index assigned per sample", ""),
-            "temperature_c": ("Temperature", _format_units("°C"), "Discrete measurement temperature", ""),
-            "temperature_label": ("Temperature label", None, "Display label for temperature", ""),
-            "series": ("Legend entry", None, "Legend label for this series", ""),
-            "x_position": ("X position", None, "Position assigned to the mean marker", "X"),
-            "plotted_value": (f"{ctx.var_label} mean", units, "Mean value per temperature", "Y"),
-            "composition": ("Composition", None, "Alloy composition", ""),
-            "anneal": ("Anneal", None, "Annealing condition", ""),
-        },
-        window_module,
-    )
-    sheets.append(mean_sheet)
-
-    if include_cont and ctx.cont_series:
-        cont_frame = pd.concat(ctx.cont_series, ignore_index=True)
-        cont_frame.rename(columns={"X": "x_position", "Y": "plotted_value"}, inplace=True)
-        cont_sheet = host._create_worksheet_from_frame(workbook, "Continuous", cont_frame)
+        sheets: list["WorksheetData"] = []
+        raw_sheet = host._create_worksheet_from_frame(workbook, "Raw points", raw_frame)
         self._apply_column_meta(
-            cont_sheet,
+            raw_sheet,
             {
-                "sample": ("Sample", None, "Sample identifier", ""),
-                "x_position": ("X position", None, "Mapped temperature axis for continuous data", "X"),
-                "plotted_value": (f"{ctx.var_label} smoothed", units, "Median/MA smoothed continuous series", "Y"),
+                "sample_id": ("Sample", None, "Sample identifier", ""),
+                "sample_label": ("Sample label", None, "Formatted label used in plots", ""),
+                "sample_index": ("Sample index", None, "Numeric index assigned per sample", ""),
+                "temperature_c": ("Temperature", _format_units("°C"), "Discrete measurement temperature", ""),
+                "temperature_label": ("Temperature label", None, "Display label for temperature", ""),
+                "series": ("Legend entry", None, "Legend label for this series", ""),
+                "x_position": ("X position", None, "Jittered position used for plotting", "X"),
+                "plotted_value": (f"{ctx.var_label} ({mode_label})", units, "Value sent to the graph", "Y"),
+                "raw_value": (f"{ctx.var_label} (raw)", units, "Original measurement value", ""),
+                "baseline_value": (f"{ctx.var_label} baseline", units, "Mean at 25°C per sample", ""),
+                "composition": ("Composition", None, "Alloy composition", ""),
+                "anneal": ("Anneal", None, "Annealing condition", ""),
             },
             window_module,
         )
-        sheets.append(cont_sheet)
+        sheets.append(raw_sheet)
 
-    annotation_rows: list[dict[str, float | str]] = []
-    for sample, label in zip(ctx.samples, ctx.display_samples):
-        annotation_rows.append(
-            {
-                "type": "sample_label",
-                "sample": sample,
-                "label": label,
-                "x": ctx.sample_label_positions.get(sample, float(ctx.sample_idx.get(sample, 0))),
-                "y": ctx.axis.tick_level,
-            }
-        )
-    for x_pos, y_pos, text in ctx.delta_labels:
-        annotation_rows.append({"type": "delta_label", "label": text, "x": x_pos, "y": y_pos})
-    if annotation_rows:
-        annotations = pd.DataFrame(annotation_rows)
-        anno_sheet = host._create_worksheet_from_frame(workbook, "Annotations", annotations)
+        mean_sheet = host._create_worksheet_from_frame(workbook, "Means", mean_frame)
         self._apply_column_meta(
-            anno_sheet,
+            mean_sheet,
             {
-                "type": ("Kind", None, "Annotation type (sample label or delta)", ""),
-                "sample": ("Sample", None, "Related sample (labels only)", ""),
-                "label": ("Label", None, "Displayed annotation text", ""),
-                "x": ("X position", None, "Annotation X coordinate", "X"),
-                "y": ("Y position", None, "Annotation Y coordinate", "Y"),
+                "sample_id": ("Sample", None, "Sample identifier", ""),
+                "sample_label": ("Sample label", None, "Formatted label used in plots", ""),
+                "sample_index": ("Sample index", None, "Numeric index assigned per sample", ""),
+                "temperature_c": ("Temperature", _format_units("°C"), "Discrete measurement temperature", ""),
+                "temperature_label": ("Temperature label", None, "Display label for temperature", ""),
+                "series": ("Legend entry", None, "Legend label for this series", ""),
+                "x_position": ("X position", None, "Position assigned to the mean marker", "X"),
+                "plotted_value": (f"{ctx.var_label} mean", units, "Mean value per temperature", "Y"),
+                "composition": ("Composition", None, "Alloy composition", ""),
+                "anneal": ("Anneal", None, "Annealing condition", ""),
             },
             window_module,
         )
-        sheets.append(anno_sheet)
+        sheets.append(mean_sheet)
 
-    return sheets
+        if include_cont and ctx.cont_series:
+            cont_frame = pd.concat(ctx.cont_series, ignore_index=True)
+            cont_frame.rename(columns={"X": "x_position", "Y": "plotted_value"}, inplace=True)
+            cont_sheet = host._create_worksheet_from_frame(workbook, "Continuous", cont_frame)
+            self._apply_column_meta(
+                cont_sheet,
+                {
+                    "sample": ("Sample", None, "Sample identifier", ""),
+                    "x_position": ("X position", None, "Mapped temperature axis for continuous data", "X"),
+                    "plotted_value": (f"{ctx.var_label} smoothed", units, "Median/MA smoothed continuous series", "Y"),
+                },
+                window_module,
+            )
+            sheets.append(cont_sheet)
+
+        annotation_rows: list[dict[str, float | str]] = []
+        for sample, label in zip(ctx.samples, ctx.display_samples):
+            annotation_rows.append(
+                {
+                    "type": "sample_label",
+                    "sample": sample,
+                    "label": label,
+                    "x": ctx.sample_label_positions.get(sample, float(ctx.sample_idx.get(sample, 0))),
+                    "y": ctx.axis.tick_level,
+                }
+            )
+        for x_pos, y_pos, text in ctx.delta_labels:
+            annotation_rows.append({"type": "delta_label", "label": text, "x": x_pos, "y": y_pos})
+        if annotation_rows:
+            annotations = pd.DataFrame(annotation_rows)
+            anno_sheet = host._create_worksheet_from_frame(workbook, "Annotations", annotations)
+            self._apply_column_meta(
+                anno_sheet,
+                {
+                    "type": ("Kind", None, "Annotation type (sample label or delta)", ""),
+                    "sample": ("Sample", None, "Related sample (labels only)", ""),
+                    "label": ("Label", None, "Displayed annotation text", ""),
+                    "x": ("X position", None, "Annotation X coordinate", "X"),
+                    "y": ("Y position", None, "Annotation Y coordinate", "Y"),
+                },
+                window_module,
+            )
+            sheets.append(anno_sheet)
+
+        return sheets
 
     def _apply_column_meta(
         self,
@@ -647,11 +659,15 @@ def _build_graph_workbook(
         workbook.worksheets = [worksheet.key for worksheet in worksheets]
         host._register_imported_workbook(workbook, worksheets)
         try:
-            root = host._ensure_data_root()
-            if root is not None:
-                root.setExpanded(True)
+            ensure_workbooks = getattr(host, "_ensure_workbook_root", None)
+            tree_root = ensure_workbooks() if callable(ensure_workbooks) else None
+            if tree_root is not None:
+                tree_root.setExpanded(True)
             node = host._data_workbook_items.get(workbook.key)
             if node is not None:
+                parent = node.parent()
+                if parent is not None:
+                    parent.setExpanded(True)
                 node.setExpanded(True)
         except Exception:
             pass
@@ -704,11 +720,10 @@ def _build_graph_workbook(
 
     def update_ui(self) -> None:
         host = self.host
-        has_data = self._data is not None
-        ready_to_plot = has_data or self._host_has_data_selection()
+        has_data = self._has_loaded_data()
+        ready_to_plot = has_data
         if hasattr(host, "plot_button"):
             host.plot_button.setEnabled(ready_to_plot)
-            host.plot_button.setText("Plot Temperature Sensitivity")
         if self._summary_label is not None:
             if self._plot_tabs:
                 self._summary_label.clear()
@@ -732,7 +747,7 @@ def _build_graph_workbook(
         if hasattr(self.host, "normalize_button"):
             self.host.normalize_button.setEnabled(False)
         if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
+            self.host.export_button.setEnabled(has_data)
         if hasattr(self.host, "open_origin_button"):
             self.host.open_origin_button.setEnabled(has_data)
         if hasattr(self.host, "popout_button"):
