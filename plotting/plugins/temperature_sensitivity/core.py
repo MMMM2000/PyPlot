@@ -243,8 +243,7 @@ def build_temperature_graph_context(
             mean_positions[(sample_idx_value, temp_value)] = plot_x_value
 
     sample_label_positions: Dict[str, float] = {
-        sample: mean_positions.get((float(sample_idx[sample]), 25.0), float(sample_idx[sample]))
-        for sample in samples
+        sample: float(sample_idx[sample]) for sample in samples
     }
 
     means["sample"] = means["sample_idx"].map(idx_to_sample)
@@ -943,14 +942,13 @@ def plot_variable(
     ax.set_title(f"{comp} {anneal} - {TS_LABELS[var]}")
     ax.grid(True)
 
-    show_symbols = bool(globals().get("LEGEND_SHOW_SYMBOLS", False))
     handles: list[Line2D] = []
     labels: list[str] = []
     for label in legend_order:
         spec = legend_specs.get(label)
         if not spec:
             continue
-        marker = spec["marker"] if show_symbols else ""
+        marker = spec["marker"]
         size_kind = spec.get("kind", "scatter")
         base_size = max(float(spec.get("size", 6.0)), 1.0)
         if size_kind == "scatter":
@@ -972,12 +970,6 @@ def plot_variable(
 
     legend_kwargs = _legend_kwargs_from_location(LEGEND_LOCATION)
     legend_kwargs.setdefault("frameon", False)
-    if show_symbols:
-        legend_kwargs.setdefault("handlelength", 1.6)
-        legend_kwargs.setdefault("handletextpad", 0.8)
-    else:
-        legend_kwargs.setdefault("handlelength", 0.0001)
-        legend_kwargs.setdefault("handletextpad", 0.3)
     legend = ax.legend(handles, labels, **legend_kwargs)
     _colorize_legend(legend, adjust_sizes=True)
     apply_readability(ax, globals())
@@ -1222,7 +1214,7 @@ def plot_variable_origin(
 
     try:
         if x_axis is not None:
-            x_axis.title = 'Sample'
+            x_axis.title = ''
     except Exception:
         pass
     try:
@@ -1380,13 +1372,24 @@ def plot_variable_origin(
     if title_label is not None:
         try:
             title_label.text = context.title
+            title_label.set_int('attach', 0)
+            try:
+                title_label.set_double('x', title_center)
+                title_label.set_double('y', axis.plot_top + max(axis.title_gap * 0.1, 0.4))
+            except Exception:
+                pass
+            try:
+                title_label.set_int('horzalign', 1)
+                title_label.set_int('vertalign', 2)
+            except Exception:
+                pass
         except Exception:
             pass
     try:
         gl.remove_label('py_title')
     except Exception:
         pass
-    title_y = axis.title_level + max(axis.title_gap * 0.15, 0.3)
+    title_y = axis.plot_top + max(axis.title_gap * 0.25, 0.6)
     try:
         manual_title = gl.add_label(context.title, title_center, title_y)
     except Exception:

@@ -307,6 +307,14 @@ def apply_readability(ax: Axes, cfg: dict) -> None:
         elif orient == "vertical":
             legend_kwargs["ncol"] = 1
 
+        show_symbols = bool(cfg.get("LEGEND_SHOW_SYMBOLS", False))
+        if show_symbols:
+            legend_kwargs.setdefault("handlelength", 1.6)
+            legend_kwargs.setdefault("handletextpad", 0.8)
+        else:
+            legend_kwargs.setdefault("handlelength", 0.0001)
+            legend_kwargs.setdefault("handletextpad", 0.35)
+
         if handles_existing and labels_existing:
             legend = ax.legend(handles=handles_existing, labels=labels_existing, **legend_kwargs)
         else:
@@ -327,7 +335,6 @@ def apply_readability(ax: Axes, cfg: dict) -> None:
                 handles = list(found)
                 break
 
-        show_symbols = bool(cfg.get("LEGEND_SHOW_SYMBOLS", False))
         marker_size = cfg.get("LEGEND_SYMBOL_SIZE", 10)
         match_colors = bool(cfg.get("LEGEND_MATCH_COLORS", False))
         for handle in handles:

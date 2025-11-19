@@ -13,6 +13,7 @@ from typing import (
     Dict,
     Hashable,
     Iterable,
+    Iterator,
     List,
     Optional,
     Literal,
@@ -22,6 +23,7 @@ from typing import (
 )
 
 import json
+from contextlib import contextmanager
 import uuid
 from functools import partial
 
@@ -1890,6 +1892,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._workbooks: Dict[Hashable, WorkbookData] = {}
         self._worksheets: Dict[Hashable, WorksheetData] = {}
         self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
+        self._project_tree_update_depth = 0
+        self._project_tree_updates_prev = True
         self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
         self._log_alert_enabled: bool = False
         self._left_dock_switcher_widget: _DockSwitcherWidget | None = None
@@ -2831,6 +2835,26 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
         self._data_sources_widget.setVisible(visible)
 
+    @contextmanager
+    def _suspend_project_tree_updates(self) -> Iterator[QtWidgets.QTreeWidget | None]:
+        tree = getattr(self, "project_tree", None)
+        if not isinstance(tree, QtWidgets.QTreeWidget):
+            yield None
+            return
+        depth = getattr(self, "_project_tree_update_depth", 0)
+        if depth == 0:
+            self._project_tree_updates_prev = tree.updatesEnabled()
+            tree.setUpdatesEnabled(False)
+        self._project_tree_update_depth = depth + 1
+        try:
+            yield tree
+        finally:
+            depth = getattr(self, "_project_tree_update_depth", 1) - 1
+            self._project_tree_update_depth = depth
+            if depth == 0:
+                tree.setUpdatesEnabled(self._project_tree_updates_prev)
+                tree.viewport().update()
+
     # ------------------------------------------------------------------ base UI
     def _build_base_ui(self) -> None:
         central = QtWidgets.QWidget()
@@ -2863,6 +2887,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
         self.project_tree.header().setStretchLastSection(True)
+        self.project_tree.setUniformRowHeights(True)
+        self.project_tree.setAnimated(False)
         self.project_tree.itemDoubleClicked.connect(self._handle_project_item_double_click)
         self.project_tree.itemActivated.connect(self._handle_project_item_double_click)
         self._ensure_data_root()
@@ -4895,12 +4921,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         root = self._ensure_graph_tree_root()
         if root is None:
             return None
-        label = descriptor.root_label or descriptor.title or "Plot"
-        item = QtWidgets.QTreeWidgetItem([label, descriptor.title or ""])
-        root.addChild(item)
-        item.setExpanded(True)
-        self._assign_project_payload(item, ("graph", tab))
-        return item
+        with self._suspend_project_tree_updates():
+            label = descriptor.root_label or descriptor.title or "Plot"
+            item = QtWidgets.QTreeWidgetItem([label, descriptor.title or ""])
+            root.addChild(item)
+            item.setExpanded(True)
+            self._assign_project_payload(item, ("graph", tab))
+            return item
 
     def _ensure_graph_tree_root(self) -> QtWidgets.QTreeWidgetItem | None:
         tree = getattr(self, "project_tree", None)
@@ -4908,11 +4935,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return None
         root = self._graph_tree_root
         if root is None:
-            root = QtWidgets.QTreeWidgetItem(["Plots"])
-            root.setFirstColumnSpanned(True)
-            root.setExpanded(True)
-            tree.insertTopLevelItem(0, root)
-            self._graph_tree_root = root
+            with self._suspend_project_tree_updates():
+                root = QtWidgets.QTreeWidgetItem(["Plots"])
+                root.setFirstColumnSpanned(True)
+                root.setExpanded(True)
+                tree.insertTopLevelItem(0, root)
+                self._graph_tree_root = root
         return root
 
     def _insert_column(self, *, position: Literal["before", "after"]) -> None:
@@ -5614,38 +5642,39 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         worksheets: List[WorksheetData],
     ) -> None:
         self._ensure_data_root()
-        # Remove any previous representation of this workbook.
-        previous = self._workbooks.get(workbook.key)
-        if previous is not None:
-            for key in list(previous.worksheets):
-                self._remove_worksheet(key)
-        old_item = self._data_workbook_items.pop(workbook.key, None)
-        if old_item is not None:
-            parent = old_item.parent()
-            if parent is not None:
-                index = parent.indexOfChild(old_item)
-                if index >= 0:
-                    parent.takeChild(index)
-        self._workbooks[workbook.key] = workbook
+        with self._suspend_project_tree_updates():
+            # Remove any previous representation of this workbook.
+            previous = self._workbooks.get(workbook.key)
+            if previous is not None:
+                for key in list(previous.worksheets):
+                    self._remove_worksheet(key)
+            old_item = self._data_workbook_items.pop(workbook.key, None)
+            if old_item is not None:
+                parent = old_item.parent()
+                if parent is not None:
+                    index = parent.indexOfChild(old_item)
+                    if index >= 0:
+                        parent.takeChild(index)
+            self._workbooks[workbook.key] = workbook
 
-        if workbook.source is None:
-            parent_item = self._ensure_workbook_root()
-        else:
-            parent_item = self._ensure_folder_item(workbook.folder)
+            if workbook.source is None:
+                parent_item = self._ensure_workbook_root()
+            else:
+                parent_item = self._ensure_folder_item(workbook.folder)
 
-        workbook_item = QtWidgets.QTreeWidgetItem([workbook.name, str(workbook.source or "")])
-        self._assign_project_payload(workbook_item, ("worksheet_group", workbook.key))
-        parent_item.addChild(workbook_item)
-        workbook_item.setExpanded(True)
-        self._data_workbook_items[workbook.key] = workbook_item
+            workbook_item = QtWidgets.QTreeWidgetItem([workbook.name, str(workbook.source or "")])
+            self._assign_project_payload(workbook_item, ("worksheet_group", workbook.key))
+            parent_item.addChild(workbook_item)
+            workbook_item.setExpanded(True)
+            self._data_workbook_items[workbook.key] = workbook_item
 
-        for worksheet in worksheets:
-            worksheet.workbook_key = workbook.key
-            self._worksheets[worksheet.key] = worksheet
-            sheet_item = QtWidgets.QTreeWidgetItem([worksheet.name, ""])
-            self._assign_project_payload(sheet_item, ("worksheet", worksheet.key))
-            workbook_item.addChild(sheet_item)
-            self._worksheet_tree_items[worksheet.key] = sheet_item
+            for worksheet in worksheets:
+                worksheet.workbook_key = workbook.key
+                self._worksheets[worksheet.key] = worksheet
+                sheet_item = QtWidgets.QTreeWidgetItem([worksheet.name, ""])
+                self._assign_project_payload(sheet_item, ("worksheet", worksheet.key))
+                workbook_item.addChild(sheet_item)
+                self._worksheet_tree_items[worksheet.key] = sheet_item
 
         self._sync_shared_action_states()
         if worksheets:
@@ -5730,9 +5759,10 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         tree = self.project_tree
         if isinstance(tree, QtWidgets.QTreeWidget):
-            index = tree.indexOfTopLevelItem(root)
-            if index >= 0:
-                tree.takeTopLevelItem(index)
+            with self._suspend_project_tree_updates():
+                index = tree.indexOfTopLevelItem(root)
+                if index >= 0:
+                    tree.takeTopLevelItem(index)
         self._workbook_tree_root = None
 
     def _ensure_folder_item(self, folder: Path | None) -> QtWidgets.QTreeWidgetItem:
@@ -5754,21 +5784,22 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return item
 
     def _remove_worksheet(self, key: Hashable) -> None:
-        tab = self._worksheet_tabs_open.pop(key, None)
-        if tab is not None:
-            self._tab_to_worksheet_key.pop(tab, None)
-            index = self.tab_widget.indexOf(tab)
-            if index >= 0:
-                self.tab_widget.removeTab(index)
-        item = self._worksheet_tree_items.pop(key, None)
-        if item is not None:
-            parent = item.parent()
-            if parent is not None:
-                index = parent.indexOfChild(item)
+        with self._suspend_project_tree_updates():
+            tab = self._worksheet_tabs_open.pop(key, None)
+            if tab is not None:
+                self._tab_to_worksheet_key.pop(tab, None)
+                index = self.tab_widget.indexOf(tab)
                 if index >= 0:
-                    parent.takeChild(index)
-        self._worksheets.pop(key, None)
-        self._worksheet_models.pop(key, None)
+                    self.tab_widget.removeTab(index)
+            item = self._worksheet_tree_items.pop(key, None)
+            if item is not None:
+                parent = item.parent()
+                if parent is not None:
+                    index = parent.indexOfChild(item)
+                    if index >= 0:
+                        parent.takeChild(index)
+            self._worksheets.pop(key, None)
+            self._worksheet_models.pop(key, None)
         self._sync_shared_action_states()
         self._mark_project_dirty()
 

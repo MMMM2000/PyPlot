@@ -1,4 +1,11 @@
 # Changelog
+## 2025-11-19 10:15 UTC
+
+- Project Explorer now keeps uniform row heights and suspends repaints while new workbooks are added, eliminating the sluggish scrolling/expanding behavior when large data batches load.
+- The readability toggle once again controls legend symbols: proxy handles always include markers, and when “Show symbols” is off the legend now shrinks its handle spacing (and expands again immediately when the toggle is re-enabled).
+- Expanded the project-tree suspension logic to cover plot-tab nodes as well, so the Plots/Workbooks sections appear instantly instead of pausing while hundreds of items populate.
+- Origin exports now place sample labels at the true sample centers, drop the duplicate “Sample” axis title, and pin the graph title to the top-center of the frame so the output matches the Matplotlib layout.
+
 ## 2025-11-14 14:02 UTC
 
 - Restored the native dock widths so Project Explorer/Object Manager start at a readable size, moved the Workbooks tree above Imported Data only when graphs exist, and double-clicking a workbook now opens its first worksheet tab directly.
