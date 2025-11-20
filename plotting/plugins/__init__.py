@@ -20,6 +20,7 @@ from .hysteresis_loops import HysteresisLoopsPlugin
 from .hsw_distribution import HswDistributionPlugin
 from .strain_3d_plot import Strain3DPlotPlugin
 from .vsm_hysteresis import VSMHysteresisPlugin
+from .vsm_temperature_scan import VSMTemperatureScanPlugin
 
 
 def builtin_plugin_registry() -> dict[str, type[PyPlotPlugin]]:
@@ -43,6 +44,7 @@ __all__ = [
     "HswDistributionPlugin",
     "Strain3DPlotPlugin",
     "VSMHysteresisPlugin",
+    "VSMTemperatureScanPlugin",
     "register_plugin",
     "get_plugin_registry",
     "iter_registered_plugins",

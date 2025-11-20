@@ -74,7 +74,7 @@ from plotting.shared.readability import (
 
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
 PRIMARY_DOCK_DEFAULT_WIDTH = 320
-PRIMARY_DOCK_MIN_WIDTH = 200
+PRIMARY_DOCK_MIN_WIDTH = 160
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -836,6 +836,7 @@ class WorksheetData:
     columns: Dict[str, WorksheetColumnMeta]
     source: Path | None = None
     workbook_key: Hashable | None = None
+    axis_roles: str = ""
 
 
 @dataclass
@@ -1817,6 +1818,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         ".xlsm",
         ".json",
         ".vsm-hys-data",
+        ".vsm-tscn-data",
     )
 
     def __init__(self, *, title: str) -> None:
@@ -2647,7 +2649,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                         errors.append(f"{workbook.name}/{worksheet.name}: {exc}")
                         continue
 
-                    roles = self._origin_axis_roles(frame)
+                    roles = ""
+                    try:
+                        roles = (worksheet.axis_roles or "").strip()
+                    except Exception:
+                        roles = ""
+                    if not roles:
+                        roles = self._origin_axis_roles(frame)
                     if roles:
                         try:
                             sheet.cols_axis(roles)
@@ -5554,6 +5562,16 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
                 workbook.worksheets = [worksheet.key]
                 return workbook, [worksheet]
+            if suffix == ".vsm-tscn-data":
+                try:
+                    text = path.read_text(errors="ignore").splitlines()
+                except Exception:
+                    text = []
+                frame = pd.DataFrame({"value": text})
+                workbook = self._build_workbook_shell(path)
+                worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
+                workbook.worksheets = [worksheet.key]
+                return workbook, [worksheet]
         except Exception as exc:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -5998,6 +6016,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _clear_project_dirty(self) -> None:
         self._project_dirty = False
 
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        try:
+            self._refresh_primary_dock_layout()
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            pass
+
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
         dock.setObjectName(object_name)
@@ -6080,6 +6106,28 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if width is None or width <= 0:
                 width = max(log_dock.sizeHint().width(), 220)
             self._primary_dock_widths[log_dock] = width
+
+    def _refresh_primary_dock_layout(self) -> None:
+        """Force dock sizes/visibility to refresh after import or restore."""
+
+        docks = [dock for dock in (getattr(self, "project_dock", None), getattr(self, "object_dock", None)) if isinstance(dock, QtWidgets.QDockWidget)]
+        if not docks:
+            return
+        widths: list[int] = []
+        for dock in docks:
+            try:
+                dock.show()
+            except Exception:
+                pass
+            widths.append(max(self._load_primary_dock_width(dock) or dock.sizeHint().width(), PRIMARY_DOCK_MIN_WIDTH))
+        try:
+            self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
+        except Exception:
+            for dock, width in zip(docks, widths):
+                try:
+                    dock.resize(width, dock.height())
+                except Exception:
+                    continue
 
     def _apply_initial_primary_dock_size(
         self, dock: QtWidgets.QDockWidget | None, default_width: int

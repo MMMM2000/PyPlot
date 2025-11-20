@@ -1,4 +1,16 @@
 # Changelog
+
+## 2025-11-20 14:08 UTC
+
+- Kept VSM Temperature Scan Matplotlib figures open (main/derivative/smoothed) with clear legends and secondary-axis labeling, removing duplicate temperature rows per section before smoothing/derivatives and tightening section-aware legend/comments.
+- Aligned TXT/Origin exports for VSM Temperature Scan: raw and smoothed data now share the same long-name/unit/comment headers, derivative/smoothed workbooks only emit when enabled, and Origin graphs/books include the section comments used for legend text.
+- Added a PyPlot VSM Temperature Scan plug-in with heating/cooling and smoothing controls that register Origin-ready workbooks (including derivative/smoothed variants) and updated Origin workbook export to honor explicit axis-role strings for XY column pairs.
+- Raised the default dock minimum width so Project Explorer/Object Manager aren’t collapsed on launch, and allowed `.VSM-TSCN-Data` imports so VSM temperature scan files can be loaded directly through PyPlot.
+- Re-enabled plotting after imports by recognizing plugins that keep data in `_dataset`, refreshed dock layouts post-import so Project Explorer/Object Manager are immediately responsive, and lowered dock minimum width so users can shrink those panes if desired.
+- Made the VSM Temperature Scan plug-in auto-load on import, enabled Plot when files are selected even before parsing, and scheduled post-show dock refreshes so Project Explorer/Object Manager respond without a reopen cycle.
+- Disabled the dock switcher to avoid startup interaction glitches, refreshed docks on first show, embedded VSM Temperature Scan plots inside PyPlot tabs (with derivative/smoothed views), and registered its workbooks under the Workbooks root instead of Imported Data.
+- Re-enabled dock switcher buttons for quick pane toggling, embedded VSM Temperature Scan plots now select tabs safely in all layouts, and duplicate temperatures are averaged instead of dropped so Origin sees de-duped X values without losing data.
+
 ## 2025-11-20 08:38 UTC
 ## 2025-11-20 09:39 UTC
 ## 2025-11-20 10:15 UTC

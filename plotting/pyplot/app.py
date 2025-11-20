@@ -147,6 +147,11 @@ class PyPlotWorkbench(PyPlotWindow):
                 dock.raise_()
             except Exception:
                 pass
+        self._refresh_primary_dock_layout()
+        try:
+            QtCore.QTimer.singleShot(50, self._refresh_primary_dock_layout)
+        except Exception:
+            pass
 
     def _load_plotter_history(self) -> list[str]:
         stored = self.settings.value("plotter_history", "[]")
@@ -468,12 +473,16 @@ class PyPlotWorkbench(PyPlotWindow):
     def _plugin_has_loaded_data(self, plugin: PyPlotPlugin | None) -> bool:
         if plugin is None:
             return False
-        data = getattr(plugin, "_data", None)
-        if data is None:
-            return False
-        if isinstance(data, pd.DataFrame):
-            return not data.empty
-        return True
+        for attr in ("_data", "_dataset"):
+            data = getattr(plugin, attr, None)
+            if data is None:
+                continue
+            if isinstance(data, pd.DataFrame):
+                if not data.empty:
+                    return True
+            else:
+                return True
+        return False
 
     def _plugin_ready_to_plot(self, plugin: PyPlotPlugin | None) -> bool:
         if plugin is None:
@@ -482,7 +491,7 @@ class PyPlotWorkbench(PyPlotWindow):
             return True
         requires = bool(getattr(plugin, "requires_imported_data", False))
         if requires:
-            return False
+            return bool(self._selected_paths())
         return bool(self._selected_paths())
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
@@ -513,6 +522,12 @@ class PyPlotWorkbench(PyPlotWindow):
                 LOGGER.warning("Automatic data load failed for %s", self._current_plotter_name, exc_info=True)
         self._update_action_states()
         self._update_project_actions()
+        refresh = getattr(self, "_refresh_primary_dock_layout", None)
+        if callable(refresh):
+            try:
+                refresh()
+            except Exception:
+                pass
         self.settings.setValue("sources", self.path_edit.text())
         self.settings.sync()
     def _has_project_data_to_save(self) -> bool:
