@@ -1,5 +1,8 @@
 # AGENT GUIDELINES
 
+## Environment
+- On WSL, prefer the pre-provisioned virtualenv at `.venv-wsl` (e.g. `/mnt/c/Users/Martin/PyPlot/.venv-wsl/bin/python`) for Python/pip/pytest instead of system interpreters.
+
 ## Dependency Maintenance
 - Edit `pyproject.toml` first, then run `pip-compile --upgrade pyproject.toml` so `requirements.txt` stays in sync.
 - Keep pins aligned between `pyproject.toml` and `requirements.txt`; do not submit mismatched files.

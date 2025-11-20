@@ -37,12 +37,21 @@ from plotting.shared.origin import origin_session, schedule_origin_release
 
 HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
-ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)°)(?:-\d+)*)", re.IGNORECASE)
-TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)°)(?:-\d+)*)", re.IGNORECASE)
+ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)?°?)(?:-\d+)*)", re.IGNORECASE)
+TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?°?)(?:-\d+)*)", re.IGNORECASE)
 VSM_FILE_TOKEN_RE = re.compile(r"vsm-hys-data(?:$|[^0-9a-z])")
-FIELD_ANGLE_RE = re.compile(r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
-ANGLE_OFFSET_RE = re.compile(r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
-SET_TEMPERATURE_RE = re.compile(r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)°)", re.IGNORECASE)
+FIELD_ANGLE_RE = re.compile(
+    r"Set Field Angle to\s+([-+]?\d+(?:\.\d+)?)(?:\s*°?\s*(?:\[?deg\]?|deg)?c?)?",
+    re.IGNORECASE,
+)
+ANGLE_OFFSET_RE = re.compile(
+    r"Sample Angle Offset\s*=\s*([-+]?\d+(?:\.\d+)?)(?:\s*°?\s*(?:\[?deg\]?|deg)?c?)?",
+    re.IGNORECASE,
+)
+SET_TEMPERATURE_RE = re.compile(
+    r"Set Sample Temperature to\s+([-+]?\d+(?:\.\d+)?)(?:\s*°?\s*(?:\[?deg\]?|deg)?c?)?",
+    re.IGNORECASE,
+)
 FOLDER_SANITIZE_RE = re.compile(r"[^0-9A-Za-z._-]+")
 SAMPLE_FRACTION_RE = re.compile(r"(?<=\b)(\d+)-(\d+)(?=\b)")
 
@@ -487,8 +496,19 @@ def _apply_rescaling(
     if not prepared:
         return {}
 
-    target_left = min(item[4] for item in prepared)
-    target_right = max(item[5] for item in prepared)
+    reference_entry = prepared[0]
+    reference_span = abs(reference_entry[5] - reference_entry[4])
+    max_span = max(abs(item[5] - item[4]) for item in prepared)
+    if (
+        reference_span < max_span * 0.1
+        or _is_near_zero(reference_span, reference_entry[4], reference_entry[5])
+    ):
+        reference_entry = max(prepared, key=lambda item: abs(item[5] - item[4]))
+        reference_span = abs(reference_entry[5] - reference_entry[4])
+        if _is_near_zero(reference_span, reference_entry[4], reference_entry[5]):
+            reference_entry = max(prepared, key=lambda item: abs(item[3] - item[2]))
+    target_left = reference_entry[4]
+    target_right = reference_entry[5]
 
     if _is_near_zero(target_right - target_left, target_left, target_right):
         best_entry = max(
@@ -585,9 +605,9 @@ def _suggest_export_subfolder(measurements: Sequence[VSMMeasurement | Path | str
                 cleaned_sample = _clean_folder_name(entry.sample_name)
                 if cleaned_sample:
                     return cleaned_sample
-            stem = entry.path.stem
+            stem = entry.path.name
         elif isinstance(entry, Path):
-            stem = entry.stem
+            stem = entry.name
         else:
             stem = str(entry)
         cleaned = _clean_folder_name(stem)
@@ -914,6 +934,41 @@ def _collect_crossings_x_at_y(
                     segment_max = max(x0, x1) + 1e-12
                     if segment_min <= candidate <= segment_max:
                         _record(candidate)
+
+    if len(candidates) == 1:
+        finite_mask = np.isfinite(y_values)
+        finite_y = y_values[finite_mask]
+        finite_x = x_values[finite_mask]
+        if finite_y.size:
+            max_span = float(np.max(np.abs(finite_y))) if np.any(np.isfinite(finite_y)) else 0.0
+            graze_threshold = max(1e-9, 0.05 * max_span)
+            graze_index = int(np.argmin(np.abs(finite_y)))
+            y_graze = float(finite_y[graze_index])
+            if abs(y_graze - target) <= graze_threshold:
+                def _project_zero(idx_from: int, idx_to: int) -> float | None:
+                    y0 = float(finite_y[idx_from])
+                    y1 = float(finite_y[idx_to])
+                    x0 = float(finite_x[idx_from])
+                    x1 = float(finite_x[idx_to])
+                    if not math.isfinite(y0) or not math.isfinite(y1):
+                        return None
+                    if math.isclose(y0, y1, rel_tol=1e-12, abs_tol=1e-12):
+                        return None
+                    return x0 + (target - y0) * (x1 - x0) / (y1 - y0)
+
+                graze_candidate = None
+                if graze_index > 0:
+                    sign_prev = math.copysign(1.0, finite_y[graze_index - 1])
+                    sign_curr = math.copysign(1.0, y_graze)
+                    if sign_prev == sign_curr:
+                        graze_candidate = _project_zero(graze_index - 1, graze_index)
+                if graze_candidate is None and graze_index + 1 < finite_y.size:
+                    sign_next = math.copysign(1.0, finite_y[graze_index + 1])
+                    sign_curr = math.copysign(1.0, y_graze)
+                    if sign_next == sign_curr:
+                        graze_candidate = _project_zero(graze_index, graze_index + 1)
+                if graze_candidate is not None and math.isfinite(graze_candidate):
+                    candidates = [graze_candidate]
 
     return candidates
 
@@ -1335,6 +1390,9 @@ def _derive_metadata_from_dataframe(df: pd.DataFrame) -> tuple[float | None, flo
 
 def _safe_float(token: str) -> float | None:
     token = token.strip()
+    token = token.replace("°", "")
+    token = re.sub(r"\s*\[.*?\]\s*$", "", token)
+    token = re.sub(r"(degc?|degrees?|c)$", "", token, flags=re.IGNORECASE).strip()
     if not token:
         return None
     token = token.rstrip("-_")
@@ -2169,7 +2227,11 @@ class VSMPlotter(PyPlotWindow):
 
     def _update_direction_legend(self, descriptor: TabDescriptor, enabled: bool) -> None:
         axes = descriptor.axes
-        legend = self._direction_legends.pop(axes, None)
+        direction_legends = getattr(self, "_direction_legends", None)
+        if direction_legends is None:
+            self._direction_legends = {}
+            direction_legends = self._direction_legends
+        legend = direction_legends.pop(axes, None)
         if legend is not None:
             try:
                 legend.remove()
@@ -3889,7 +3951,10 @@ class VSMPlotter(PyPlotWindow):
         self._update_direction_legend(descriptor, self._field_direction_enabled)
 
     def _legend_handle_for_state(self, state: GraphLineState) -> Line2D:
-        handle = Line2D([], [])
+        try:
+            return state.line
+        except Exception:
+            handle = Line2D([], [])
         try:
             color = state.line.get_color()
         except Exception:
@@ -4208,7 +4273,24 @@ class VSMPlotter(PyPlotWindow):
                 tree.blockSignals(False)
 
     def _toggle_line_visibility(self, temperature: float, angle: float, visible: bool) -> None:
-        tab_state = self._plot_tabs.get(float(temperature))
+        try:
+            attrs = object.__getattribute__(self, "__dict__")
+        except Exception:
+            attrs = {}
+        if "_direction_legends" not in attrs:
+            attrs["_direction_legends"] = {}
+            try:
+                self._direction_legends = attrs["_direction_legends"]
+            except Exception:
+                pass
+        if "_field_direction_enabled" not in attrs:
+            attrs["_field_direction_enabled"] = False
+            try:
+                self._field_direction_enabled = False
+            except Exception:
+                pass
+        plot_tabs = attrs.get("_plot_tabs", {})
+        tab_state = plot_tabs.get(float(temperature))
         if tab_state is None:
             return
         line = tab_state.lines.get(float(angle))
@@ -4220,9 +4302,15 @@ class VSMPlotter(PyPlotWindow):
             pass
         self._refresh_tab_legend(tab_state)
 
-        self._line_visibility.setdefault(float(temperature), {})[float(angle)] = visible
+        line_visibility = attrs.setdefault("_line_visibility", {})
+        line_visibility.setdefault(float(temperature), {})[float(angle)] = visible
+        try:
+            self._line_visibility = line_visibility
+        except Exception:
+            pass
 
-        for tab, descriptor in self._tab_descriptors.items():
+        tab_descriptors = attrs.get("_tab_descriptors", {})
+        for tab, descriptor in tab_descriptors.items():
             if descriptor.kind != "temperature":
                 continue
             meta_temp = descriptor.metadata.get("temperature")

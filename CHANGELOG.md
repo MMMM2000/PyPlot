@@ -1,4 +1,21 @@
 # Changelog
+## 2025-11-20 08:38 UTC
+## 2025-11-20 09:39 UTC
+## 2025-11-20 10:15 UTC
+- Applied 5-point median + 20-point moving-average smoothing before derivative calculations, added an optional smoothed-view plot, ensured derivative legends render (and carry through to Origin graphs/comments), and aligned TXT exports to match Origin/TScan data/derivative workbooks with long names, units, and comments consistent across both.
+
+- Removed the stray `plotting/strain_3d_plot.py` shim and re-exported its helpers from the plug-in package so Strain 3D Plot now lives solely under `plotting.plugins`, with toolbar settings/shortcuts exposed inside PyPlot.
+- Added toolbar sections to the Strain 3D Plot plug-in for quick focus/file-picking actions, keeping the embedded widget discoverable when selected from the PyPlot plug-in list.
+- Marshalled background load logs and dataset updates onto the Tk UI thread for the simple scripts (including VSM Temperature Scan) to prevent crashes or freezes during data import and window teardown.
+- VSM Temperature Scan now keeps heating/cooling segments in their recorded order, plots/derivatives per segment, and ensures its Tk controls/variables stay bound to the main window to avoid “main thread is not in main loop” errors on exit.
+- Hardened VSM hysteresis parsing to accept filenames/headers without degree symbols, honour action blocks and angle offsets, and aligned rescaling/export folder suggestions with the reference loops.
+- Fixed coercivity/remanence calculations and legend toggling in the VSM plug-in for offscreen test harnesses.
+- Switched pytest’s default capture to `--capture=sys` and forced a POSIX temp root so default `pytest` runs succeed under WSL without FileNotFound errors.
+- Simplified VSM Temperature Scan legends to one entry per heating/cooling segment per field, kept segment-sensitive derivatives, and ensured Origin/TXT exports create distinct columns per segment (with stable Matplotlib cleanup to avoid Tk shutdown warnings).
+- VSM Temperature Scan now honours the VSM-TSCN section markers (0–3) to build four equal segments per field, using first/last temperatures to label heating vs cooling without over-splitting jitter between points.
+- Clarified VSM Temperature Scan legends (no “#” suffixes), added derivative legends, marked secondary Y axes, and exported section-aware comments plus derivative workbooks to Origin when enabled.
+- Applied 5-point median + 20-point moving-average smoothing before derivative calculations, added an optional smoothed-view plot, and ensured derivative legends render (and carry through to Origin graphs/comments).
+
 ## 2025-11-19 10:15 UTC
 
 - Project Explorer now keeps uniform row heights and suspends repaints while new workbooks are added, eliminating the sluggish scrolling/expanding behavior when large data batches load.

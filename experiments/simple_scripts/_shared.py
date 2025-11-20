@@ -54,8 +54,14 @@ class SimpleScriptApp(tk.Tk):
         self._selected_paths: list[Path] = []
         self._dataset: Any | None = None
         self._busy = False
+        self._closing = False
+        self._worker_threads: set[threading.Thread] = set()
         self._init_theme()
         self._build_ui()
+        try:
+            self.protocol("WM_DELETE_WINDOW", self._on_close)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI helpers
     def _init_theme(self) -> None:
@@ -205,6 +211,9 @@ class SimpleScriptApp(tk.Tk):
     def _load_worker(self) -> None:
         self.log("Loading data…")
         dataset = self.processor.load(self._selected_paths.copy())
+        self.after(0, lambda d=dataset: self._finish_load(d))
+
+    def _finish_load(self, dataset: Any) -> None:
         self._dataset = dataset
         self.log("Data ready.")
         self._update_action_states()
@@ -237,13 +246,19 @@ class SimpleScriptApp(tk.Tk):
                 self.after(0, lambda: self._handle_error(exc))
             finally:
                 self.after(0, self._task_complete)
+                self.after(
+                    0,
+                    lambda thr=threading.current_thread(): self._worker_threads.discard(thr),
+                )
 
-        if self._busy:
+        if self._busy or self._closing:
             return
         self._busy = True
         self._set_buttons_state(tk.DISABLED)
         if background:
-            threading.Thread(target=worker, daemon=True).start()
+            thread = threading.Thread(target=worker, daemon=True)
+            self._worker_threads.add(thread)
+            thread.start()
         else:
             try:
                 func(*args)
@@ -273,10 +288,26 @@ class SimpleScriptApp(tk.Tk):
         self.export_btn.config(state=state)
 
     def log(self, message: str) -> None:
+        if threading.current_thread() is not threading.main_thread():
+            self.after(0, lambda msg=message: self.log(msg))
+            return
         self.log_text.config(state=tk.NORMAL)
         self.log_text.insert(tk.END, f"{message}\n")
         self.log_text.see(tk.END)
         self.log_text.config(state=tk.DISABLED)
+
+    def _on_close(self) -> None:
+        self._closing = True
+        self._set_buttons_state(tk.DISABLED)
+        for thread in list(self._worker_threads):
+            try:
+                thread.join(timeout=1.0)
+            except Exception:
+                continue
+        try:
+            super().destroy()
+        except Exception:
+            pass
 
 
 __all__ = ["SimpleScriptApp", "SimpleScriptProcessor"]
