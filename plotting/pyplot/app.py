@@ -150,6 +150,8 @@ class PyPlotWorkbench(PyPlotWindow):
         self._refresh_primary_dock_layout()
         try:
             QtCore.QTimer.singleShot(50, self._refresh_primary_dock_layout)
+            QtCore.QTimer.singleShot(200, self._refresh_primary_dock_layout)
+            QtCore.QTimer.singleShot(500, self._refresh_primary_dock_layout)
         except Exception:
             pass
 

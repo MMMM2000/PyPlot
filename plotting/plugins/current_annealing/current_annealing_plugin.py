@@ -168,6 +168,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
             tab_layout.setContentsMargins(0, 0, 0, 0)
+            canvas.setMinimumSize(900, 560)
             tab_layout.addWidget(canvas)
             ax = fig.axes[0] if fig.axes else None
             lines: dict[tuple[str, float | str], GraphLineState] = {}
@@ -202,7 +203,11 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self._plot_tabs.append(tab)
             plots_created += 1
         if self._plot_tabs:
-            self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+            setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
+            if callable(setter):
+                index = self.host.tab_widget.indexOf(self._plot_tabs[0])
+                if index >= 0:
+                    setter(index)
         self._log(f"Generated {plots_created} current annealing plot(s).")
         self.update_ui()
 
@@ -255,8 +260,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 key=key,
                 name=f"{path.stem} (annealing)",
                 worksheets=[],
-                source=path,
-                folder=path.parent,
+                source=None,
+                folder=None,
             )
             worksheet_objects: list[WorksheetData] = []
             for sheet_name, frame in self._split_by_direction(df):

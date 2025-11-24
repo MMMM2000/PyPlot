@@ -40,5 +40,9 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
 
 - Shared UI helpers live in `plotting/pyplot/window.py` so plug-ins can reuse the same worksheet/graph machinery without reimplementing it.
 - Use `docs/todo/pyplot_migration_todo.md` for open work. Update this `pyplot.md` file when you add major features or new plug-ins so other developers can discover them quickly.
+- Window layout conventions:
+  - Graph/worksheet windows are MDI subwindows (no visible tab bar). Default width is half of the available viewport; height follows the subwindow’s aspect ratio and shrinks width if needed to fit vertically. Aspect ratio is locked during manual resizing.
+  - Maximizing any subwindow maximizes all of them when you switch via the Project Explorer; restoring one returns all to windowed mode.
+  - When adding or updating plug-ins, keep these sizing/fullscreen rules intact and refresh this document if the behavior changes.
 
 Feel free to expand these sections with screenshots, plugin-specific quirks, or Origin export caveats as the toolset grows.

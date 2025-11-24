@@ -1,5 +1,19 @@
 # Changelog
 
+## 2025-11-21 15:30 UTC
+- Split VSM Temperature Scan smoothing controls into signal and derivative sections, applying the derivative-smoothing toggle to both Matplotlib and Origin d/dT plots/exports with separate window settings.
+- Kept VSM Temperature Scan colors consistent across raw/smoothed/derivative Origin graphs (including 50 Oe traces) and drive legends from the workbook comments so arrows/sections appear in the Origin legends.
+- Preserved workbook comments for every VSM Temperature Scan sheet and aligned the PyPlot plug-in with the new smoothing controls so plot/export buttons rebuild workbooks with the latest smoothing preferences.
+
+## 2025-11-24 08:41 UTC
+- Hid the PyPlot tab bar while the VSM Temperature Scan plug-in is active (and auto-restored on deactivate), bumping worksheet tabs to a 960×640 minimum so opened workbooks aren’t tiny.
+- Added smoothed d/dT plotting/Origin+TXT exports with dedicated workbooks/graphs, and auto-enable derivatives when “Smooth derivatives” is toggled.
+- Fixed VSM Temperature Scan legends to include 50 Oe traces, brightened dark-graph labels/legends, and differentiated left/right Y axes (10 kOe vs 50 Oe) with color-coded labels and comments mirrored into Origin.
+
+## 2025-11-24 09:28 UTC
+- Removed the PyPlot tab bar entirely (MDI subwindows only), locking graph/worksheet aspect ratios with default width at half the viewport, auto-fit on resize, and synchronized maximize/restore across all windows; documented the rules in `docs/pyplot.md` and `AGENTS.md`.
+- Added a “Smoothed derivatives only” toggle for VSM Temperature Scan so smoothed d/dT plots/exports can be shown without raw derivatives, and ensured 50 Oe traces remain in legends.
+
 ## 2025-11-20 14:08 UTC
 
 - Kept VSM Temperature Scan Matplotlib figures open (main/derivative/smoothed) with clear legends and secondary-axis labeling, removing duplicate temperature rows per section before smoothing/derivatives and tightening section-aware legend/comments.
@@ -10,6 +24,8 @@
 - Made the VSM Temperature Scan plug-in auto-load on import, enabled Plot when files are selected even before parsing, and scheduled post-show dock refreshes so Project Explorer/Object Manager respond without a reopen cycle.
 - Disabled the dock switcher to avoid startup interaction glitches, refreshed docks on first show, embedded VSM Temperature Scan plots inside PyPlot tabs (with derivative/smoothed views), and registered its workbooks under the Workbooks root instead of Imported Data.
 - Re-enabled dock switcher buttons for quick pane toggling, embedded VSM Temperature Scan plots now select tabs safely in all layouts, and duplicate temperatures are averaged instead of dropped so Origin sees de-duped X values without losing data.
+- Averaged duplicate temperatures before smoothing/derivative for VSM temperature scans, kept plugin plot tabs registered internally, and ensured dock toggles remain visible while refreshing after show for responsiveness.
+- Allowed VSM Temperature Scan imports to succeed even when Tk isn’t available (so the PyPlot plug-in can load outside the Tk UI environment).
 
 ## 2025-11-20 08:38 UTC
 ## 2025-11-20 09:39 UTC

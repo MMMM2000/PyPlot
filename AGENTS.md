@@ -18,6 +18,12 @@
 - Re-run smoke scripts such as `launcher.py` when practical, or note when they were not run.
 - Keep running tests and iterating until each feature is fully functional; create new tests or extend existing ones whenever coverage is missing.
 
+## Task Tracking
+- Keep `TODO.md` up to date based on conversations; add new tasks yourself and ask the user before moving items to "Done."
+
 ## Origin Integration
 - Prefer the shipped `origin_ext_python/originpro-main` tree (or configure `PYTHONPATH` to include an Origin Python SDK) whenever touching Origin exports or automation helpers.
 - Consult the OriginLab Python documentation at https://docs.originlab.com/originpro/index.html for missing APIs or behavior samples before adding duplicate logic.
+
+## PyPlot Updates
+- When changing PyPlot or any of its plug-ins, review `docs/pyplot.md` first and keep it updated with any new conventions or behavioral rules you introduce.

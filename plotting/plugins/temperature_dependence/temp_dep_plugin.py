@@ -232,7 +232,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             self._plot_tabs.append(tab)
             plots_created += 1
         if self._plot_tabs:
-            self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+            setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
+            if callable(setter):
+                index = self.host.tab_widget.indexOf(self._plot_tabs[0])
+                if index >= 0:
+                    setter(index)
         self._log(f"Generated {plots_created} temperature plot(s).")
         self.update_ui()
 

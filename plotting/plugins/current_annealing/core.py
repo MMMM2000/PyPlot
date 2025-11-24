@@ -681,7 +681,7 @@ def plot_one(
         height = max(float(target_height) / dpi, 0.5)
     else:
         if not figsize:
-            figsize = (4.0, 2.25)
+            figsize = (8.5, 4.8)
         width = max(float(figsize[0]), 0.5)
         height = max(float(figsize[1]), 0.5)
         dpi = 144.0
@@ -692,6 +692,8 @@ def plot_one(
     _, segments = _direction_profile(currents)
     marker_size = 4.0
     line_width = 1.6
+    heating_color = "#dc2626"  # red
+    cooling_color = "#2563eb"  # blue
 
     legend_handles: list[Line2D] = []
     legend_kinds: set[str] = set()
@@ -712,7 +714,7 @@ def plot_one(
         inc_count = 0
         dec_count = 0
         for start, end, direction in segments:
-            color = "r" if direction >= 0 else "b"
+            color = heating_color if direction >= 0 else cooling_color
             if end <= start:
                 previous_direction = direction
                 continue
@@ -773,7 +775,12 @@ def plot_one(
     ax.set_title(title)
     ax.grid(True, ls="--", alpha=0.3)
     if legend_handles:
-        ax.legend(handles=legend_handles, loc="best")
+        ax.legend(
+            handles=legend_handles,
+            loc="best",
+            labelcolor="linecolor",
+            handlelength=2.5,
+        )
     fig.tight_layout()
     cfg = dict(globals())
     apply_readability(ax, cfg)

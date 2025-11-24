@@ -317,7 +317,11 @@ class StressDependencePlugin(PyPlotPlugin):
             )
             return
 
-        self.host.tab_widget.setCurrentWidget(self._plot_tabs[0])
+        setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
+        if callable(setter):
+            index = self.host.tab_widget.indexOf(self._plot_tabs[0])
+            if index >= 0:
+                setter(index)
         if self._summary_label is not None:
             self._summary_label.setText(
                 f"Generated {plots_created} plot(s) across {len(grouped)} group(s)."

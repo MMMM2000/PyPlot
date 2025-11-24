@@ -1855,6 +1855,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             QtWidgets.QTreeWidgetItem,
         ] = {}
         self._navigation_helpers: Dict[FigureCanvas, NavigationToolbar2QT] = {}
+        self._cursor_connections: Dict[FigureCanvas, int] = {}
+        self._cursor_label: QtWidgets.QLabel | None = None
+        self._cursor_axes: Any | None = None
         self._nav_mode: Optional[str] = None
         self._nav_active_canvas: FigureCanvas | None = None
         self._nav_toolbar: QtWidgets.QToolBar | None = None
@@ -2891,6 +2894,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         central_layout.addWidget(self.tab_widget, 1)
 
         self.setCentralWidget(central)
+        # Shared cursor readout in the status bar.
+        try:
+            status = self.statusBar()
+        except Exception:
+            status = None
+        if status is not None:
+            label = QtWidgets.QLabel("x: —   y: —", self)
+            label.setObjectName("mw_cursor_status")
+            label.setMinimumWidth(220)
+            status.addPermanentWidget(label, 1)
+            self._cursor_label = label
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
@@ -4125,6 +4139,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if self._dark_mode_action is not None:
             self._dark_mode_action.setEnabled(True)
 
+    def _update_cursor_status(self, event: Any | None) -> None:
+        label = self._cursor_label
+        if label is None:
+            return
+        if event is None or getattr(event, "inaxes", None) is None:
+            label.setText("x: —   y: —")
+            return
+        try:
+            x_val = float(event.xdata)
+            y_val = float(event.ydata)
+            label.setText(f"x: {x_val:.4g}   y: {y_val:.4g}")
+        except Exception:
+            label.setText("x: —   y: —")
+
     def _rescale_current_axes(self, axis: str) -> None:
         axes = self._current_axes()
         if axes is None:
@@ -4888,6 +4916,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> None:
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
+        # Hook cursor tracking for this canvas
+        cursor_handler = getattr(self, "_update_cursor_status", None)
+        if callable(cursor_handler):
+            try:
+                cid = canvas.mpl_connect("motion_notify_event", cursor_handler)
+                self._cursor_connections[canvas] = cid
+            except Exception:
+                pass
         if descriptor is not None:
             self._tab_descriptors[tab] = descriptor
             item = self._ensure_graph_tree_item(tab, descriptor)
@@ -5852,6 +5888,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         layout = QtWidgets.QVBoxLayout(container)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(6)
+        container.setMinimumSize(960, 640)
 
         view = WorksheetTableView()
         view.setModel(model)
@@ -7431,6 +7468,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 helper.deleteLater()
             if self._nav_active_canvas is canvas:
                 self._deactivate_navigation_mode()
+            cid = self._cursor_connections.pop(canvas, None)
+            if cid is not None:
+                try:
+                    canvas.mpl_disconnect(cid)
+                except Exception:
+                    pass
         item = self._graph_tree_items.pop(tab, None)
         if item is not None:
             parent = item.parent()
@@ -7511,6 +7554,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._focus_tree_on_tab(tab)
         self._rebuild_object_manager_for_tab(tab)
         self._update_worksheet_actions()
+        # Update cursor label immediately when switching tabs
+        self._update_cursor_status(None)
         self._update_navigation_enabled()
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
@@ -7623,6 +7668,42 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
     def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
         super().__init__(parent)
         self.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, False)
+        self._aspect_ratio: float | None = None
+        self._owner: _MdiTabProxy | None = None
+        self._resizing = False
+
+    def set_owner(self, owner: "_MdiTabProxy") -> None:
+        self._owner = owner
+
+    def set_aspect_ratio(self, ratio: float | None) -> None:
+        if ratio is None or ratio <= 0:
+            return
+        self._aspect_ratio = float(ratio)
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if (
+            event.type() == QtCore.QEvent.Type.WindowStateChange
+            and self._owner is not None
+            and not self._owner._syncing_state  # noqa: SLF001
+        ):
+            self._owner._handle_subwindow_state_change(  # noqa: SLF001
+                self.isMaximized() or self.isFullScreen()
+            )
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        if self._resizing or self._aspect_ratio is None or self._owner is None:
+            return super().resizeEvent(event)
+        self._resizing = True
+        try:
+            self._owner._fit_subwindow(  # noqa: SLF001
+                self,
+                use_half_width=False,
+                preferred_width=event.size().width(),
+            )
+        finally:
+            self._resizing = False
+        super().resizeEvent(event)
 
 
 class _MdiTabProxy(QtWidgets.QWidget):
@@ -7636,13 +7717,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         self._mdi = QtWidgets.QMdiArea(self)
-        self._mdi.setViewMode(QtWidgets.QMdiArea.ViewMode.TabbedView)
-        self._mdi.setOption(QtWidgets.QMdiArea.AreaOption.DontMaximizeSubWindowOnActivation, True)
-        try:
-            self._mdi.setTabsClosable(False)
-            self._mdi.setTabsMovable(True)
-        except Exception:
-            pass
+        self._mdi.setViewMode(QtWidgets.QMdiArea.ViewMode.SubWindowView)
+        self._mdi.setOption(QtWidgets.QMdiArea.AreaOption.DontMaximizeSubWindowOnActivation, False)
+        self._mdi.viewport().installEventFilter(self)
         layout.addWidget(self._mdi)
 
         self._widgets: list[QtWidgets.QWidget] = []
@@ -7651,6 +7728,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._icons: dict[QtWidgets.QWidget, QtGui.QIcon] = {}
         self._visible: dict[QtWidgets.QWidget, bool] = {}
         self._blocking = False
+        self._global_maximized = False
+        self._syncing_state = False
         self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
 
     # ------------------------------------------------------------------ helpers
@@ -7659,6 +7738,12 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
+        if self._global_maximized and sub is not None and not sub.isMaximized():
+            self._syncing_state = True
+            try:
+                sub.showMaximized()
+            finally:
+                self._syncing_state = False
         self.currentChanged.emit(index)
 
     def _subwindow_for(self, widget: QtWidgets.QWidget | None) -> _ManagedSubWindow | None:
@@ -7681,6 +7766,61 @@ class _MdiTabProxy(QtWidgets.QWidget):
         sub.raise_()
         self._blocking = False
         self.currentChanged.emit(index)
+
+    def _handle_subwindow_state_change(self, maximized: bool) -> None:
+        if self._syncing_state:
+            return
+        self._global_maximized = bool(maximized)
+        self._apply_global_window_state()
+
+    def _apply_global_window_state(self) -> None:
+        self._syncing_state = True
+        try:
+            for sub in self._subwindows.values():
+                if self._global_maximized:
+                    sub.showMaximized()
+                else:
+                    sub.showNormal()
+                    self._fit_subwindow(sub, preferred_width=sub.width())
+        finally:
+            self._syncing_state = False
+
+    def _fit_subwindow(
+        self,
+        sub: _ManagedSubWindow,
+        *,
+        use_half_width: bool = True,
+        preferred_width: int | None = None,
+    ) -> None:
+        area_size = self._mdi.viewport().size()
+        if not area_size.isValid():
+            return
+        widget = sub.widget()
+        hint = widget.sizeHint() if widget is not None else QtCore.QSize(900, 560)
+        min_hint = widget.minimumSizeHint() if widget is not None else hint
+        base_w = max(hint.width(), min_hint.width(), 400)
+        base_h = max(hint.height(), min_hint.height(), 300)
+        aspect = base_w / base_h if base_h else 1.6
+        sub.set_aspect_ratio(aspect)
+        if preferred_width is None:
+            target_w = area_size.width() // 2 if use_half_width else area_size.width()
+        else:
+            target_w = preferred_width
+        target_w = max(min(target_w, area_size.width()), 400)
+        target_h = int(target_w / aspect)
+        if target_h > area_size.height():
+            if area_size.height() > 0:
+                scale = area_size.height() / float(target_h)
+                target_w = max(300, int(target_w * scale))
+                target_h = int(target_w / aspect)
+        sub.resize(target_w, target_h)
+
+    def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+        if source is self._mdi.viewport() and event.type() == QtCore.QEvent.Type.Resize:
+            if not self._global_maximized:
+                for sub in self._subwindows.values():
+                    self._fit_subwindow(sub, use_half_width=True, preferred_width=sub.width())
+        return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
         if widget is None:
@@ -7714,13 +7854,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
         index = max(0, min(index, len(self._widgets)))
         widget.setParent(None)
         sub = _ManagedSubWindow(self._mdi)
+        sub.set_owner(self)
         sub.setWidget(widget)
         sub.setWindowTitle(title)
         icon = self._icons.get(widget, QtGui.QIcon())
         if not icon.isNull():
             sub.setWindowIcon(icon)
         self._mdi.addSubWindow(sub)
-        sub.show()
+        self._fit_subwindow(sub)
+        if self._global_maximized:
+            sub.showMaximized()
+        else:
+            sub.show()
 
         if widget in self._widgets:
             self._remove_widget(widget)

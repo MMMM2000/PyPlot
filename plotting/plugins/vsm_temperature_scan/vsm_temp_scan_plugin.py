@@ -15,11 +15,13 @@ try:
         PlotSeries,
         VSMEntry,
         VSMTemperatureScanProcessor,
+        VSM_TEMP_SCAN_COLORS,
     )
 except Exception:  # pragma: no cover - fallback when optional dependency missing
     PlotSeries = Any  # type: ignore
     VSMEntry = Any  # type: ignore
     VSMTemperatureScanProcessor = None  # type: ignore
+    VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]  # type: ignore
 
 
 @register_plugin("VSM Temperature Scan")
@@ -44,8 +46,11 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         self._derivative_cb: QtWidgets.QCheckBox | None = None
         self._smooth_cb: QtWidgets.QCheckBox | None = None
         self._split_cb: QtWidgets.QCheckBox | None = None
+        self._smoothed_only_cb: QtWidgets.QCheckBox | None = None
         self._median_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
+        self._deriv_median_spin: QtWidgets.QSpinBox | None = None
+        self._deriv_ma_spin: QtWidgets.QSpinBox | None = None
         self._last_export_dir: Path | None = None
         self._managed_workbooks: set[str] = set()
         self._plot_tabs: list[QtWidgets.QWidget] = []
@@ -53,10 +58,12 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
     # ------------------------------------------------------------------ lifecycle
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(True)
+        self._set_tab_bar_visible(False)
         self.update_ui()
 
     def deactivate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(False)
+        self._set_tab_bar_visible(True)
 
     # ------------------------------------------------------------------ UI helpers
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -110,6 +117,17 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         smooth_cb.toggled.connect(lambda checked: self._on_smoothed_changed(bool(checked)))
         options_layout.addWidget(smooth_cb)
         self._smooth_cb = smooth_cb
+
+        smooth_deriv_cb = QtWidgets.QCheckBox("Smooth derivatives", options_section)
+        smooth_deriv_cb.setChecked(bool(getattr(self._processor, "smooth_derivative", True)))
+        smooth_deriv_cb.toggled.connect(lambda checked: self._on_smooth_derivative_changed(bool(checked)))
+        options_layout.addWidget(smooth_deriv_cb)
+        smoothed_only_cb = QtWidgets.QCheckBox("Smoothed derivatives only", options_section)
+        smoothed_only_cb.setChecked(bool(getattr(self._processor, "plot_smoothed_derivative_only", False)))
+        smoothed_only_cb.toggled.connect(lambda checked: self._on_smoothed_derivative_only_changed(bool(checked)))
+        smoothed_only_cb.setEnabled(bool(getattr(self._processor, "smooth_derivative", True)))
+        options_layout.addWidget(smoothed_only_cb)
+        self._smoothed_only_cb = smoothed_only_cb
         options_layout.addStretch(1)
         layout.addWidget(options_section)
 
@@ -124,7 +142,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             return form
 
         smoothing_section, smoothing_layout = window_module.create_toolbar_section(
-            "Smoothing (applied before derivative)", parent=container, layout_factory=_form_layout
+            "Signal smoothing (before derivative)", parent=container, layout_factory=_form_layout
         )
         median_spin = QtWidgets.QSpinBox(smoothing_section)
         median_spin.setRange(1, 9999)
@@ -138,11 +156,28 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         self._ma_spin = ma_spin
         smoothing_layout.addRow("Moving average window:", ma_spin)
 
-        apply_btn = QtWidgets.QPushButton("Apply smoothing", smoothing_section)
-        apply_btn.clicked.connect(self._apply_smoothing_settings)
-        smoothing_layout.addRow(apply_btn)
-
         layout.addWidget(smoothing_section)
+
+        deriv_section, deriv_layout = window_module.create_toolbar_section(
+            "Derivative smoothing (applied after d/dT)", parent=container, layout_factory=_form_layout
+        )
+        deriv_median_spin = QtWidgets.QSpinBox(deriv_section)
+        deriv_median_spin.setRange(1, 9999)
+        deriv_median_spin.setValue(int(getattr(self._processor, "derivative_median_window", 5)))
+        self._deriv_median_spin = deriv_median_spin
+        deriv_layout.addRow("Median window:", deriv_median_spin)
+
+        deriv_ma_spin = QtWidgets.QSpinBox(deriv_section)
+        deriv_ma_spin.setRange(1, 9999)
+        deriv_ma_spin.setValue(int(getattr(self._processor, "derivative_moving_avg_window", 20)))
+        self._deriv_ma_spin = deriv_ma_spin
+        deriv_layout.addRow("Moving average window:", deriv_ma_spin)
+
+        apply_btn = QtWidgets.QPushButton("Apply smoothing", deriv_section)
+        apply_btn.clicked.connect(self._apply_smoothing_settings)
+        deriv_layout.addRow(apply_btn)
+
+        layout.addWidget(deriv_section)
         layout.addStretch(1)
 
         self._settings_widget = container
@@ -183,20 +218,29 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             series = self._processor._build_series(entry.dataframe.copy())
             if not series:
                 continue
-            colors = ["#2563eb", "#dc2626", "#059669", "#d97706", "#7c3aed", "#0ea5e9"]
+            color_map = self._processor.series_color_map(series)
+            include_raw_derivative = bool(
+                self._processor.show_derivative
+                and not (
+                    getattr(self._processor, "smooth_derivative", False)
+                    and getattr(self._processor, "plot_smoothed_derivative_only", False)
+                )
+            )
             x_label = "Temperature (°C)"
             y_label = "Signal X (emu)"
 
             def _plot_main(smoothed: bool = False) -> None:
                 fig = Figure(figsize=(8.5, 5))
                 ax_left = fig.add_subplot(111)
+                ax_left.set_title(f"{entry.sample} - {'Smoothed' if smoothed else 'VSM Temperature Scan'}")
                 axes_map: dict[float, Any] = {}
                 ax_right = None
                 for idx, entry_series in enumerate(series):
                     frame = entry_series.frame if not smoothed else self._processor._smooth_frame(entry_series.frame)
                     temps = frame["temperature"]
                     signal = frame["signal"]
-                    color = colors[idx % len(colors)]
+                    color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
+                    color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
                     label = f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}"
                     if entry_series.field not in axes_map:
                         axes_map[entry_series.field] = ax_left if not axes_map else ax_left.twinx()
@@ -213,11 +257,12 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout = QtWidgets.QVBoxLayout(tab)
                 layout.setContentsMargins(0, 0, 0, 0)
                 canvas = FigureCanvas(fig)
+                canvas.setMinimumSize(900, 560)
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan",
                     title=f"{entry.sample} - {'Smoothed' if smoothed else 'VSM Temperature Scan'}",
-                    root_label="Smoothed" if smoothed else "TScan",
+                    root_label=f"{entry.sample} - {'Smoothed' if smoothed else 'TScan'}",
                     x_label=x_label,
                     y_label=y_label,
                     canvas=canvas,
@@ -231,19 +276,21 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     setter(index)
                 self.host._register_plot_tab(tab, canvas, ax_left, descriptor)
                 self._plot_tabs.append(tab)
+                self._set_tab_bar_visible(False)
 
             _plot_main(smoothed=False)
             if self._processor.show_smoothed_plot:
                 _plot_main(smoothed=True)
 
-            if self._processor.show_derivative:
+            if include_raw_derivative:
                 fig = Figure(figsize=(8.5, 5))
                 ax = fig.add_subplot(111)
                 for idx, entry_series in enumerate(series):
                     frame = self._processor._smooth_frame(entry_series.frame)
                     temps = frame["temperature"]
-                    derivs = self._processor._compute_derivative(frame)
-                    color = colors[idx % len(colors)]
+                    derivs = self._processor._compute_derivative(frame, smooth=False)
+                    color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
+                    color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
                     label = f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}"
                     ax.plot(temps, derivs, linestyle="--", linewidth=1.2, color=color, label=label)
                 ax.set_xlabel(x_label)
@@ -253,11 +300,12 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout = QtWidgets.QVBoxLayout(tab)
                 layout.setContentsMargins(0, 0, 0, 0)
                 canvas = FigureCanvas(fig)
+                canvas.setMinimumSize(900, 560)
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan_derivative",
                     title=f"{entry.sample} - d(Signal X)/dT",
-                    root_label="d(Signal X)/dT",
+                    root_label=f"{entry.sample} - d(Signal X)/dT",
                     x_label=x_label,
                     y_label="d(Signal X)/dT (emu/°C)",
                     canvas=canvas,
@@ -271,6 +319,45 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     setter(index)
                 self.host._register_plot_tab(tab, canvas, ax, descriptor)
                 self._plot_tabs.append(tab)
+                self._set_tab_bar_visible(False)
+            if self._processor.show_derivative and getattr(self._processor, "smooth_derivative", False):
+                fig = Figure(figsize=(8.5, 5))
+                ax = fig.add_subplot(111)
+                for idx, entry_series in enumerate(series):
+                    frame = self._processor._smooth_frame(entry_series.frame)
+                    temps = frame["temperature"]
+                    derivs = self._processor._compute_derivative(frame, smooth=True)
+                    color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
+                    color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
+                    label = f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}"
+                    ax.plot(temps, derivs, linestyle="-", linewidth=1.2, color=color, label=label)
+                ax.set_xlabel(x_label)
+                ax.set_ylabel("d(Signal X)/dT (smoothed) (emu/°C)")
+                ax.legend(loc="best")
+                tab = QtWidgets.QWidget()
+                layout = QtWidgets.QVBoxLayout(tab)
+                layout.setContentsMargins(0, 0, 0, 0)
+                canvas = FigureCanvas(fig)
+                canvas.setMinimumSize(900, 560)
+                layout.addWidget(canvas)
+                descriptor = window_module.TabDescriptor(
+                    kind="vsm_temperature_scan_derivative_smoothed",
+                    title=f"{entry.sample} - Smoothed d(Signal X)/dT",
+                    root_label=f"{entry.sample} - d(Signal X)/dT (smoothed)",
+                    x_label=x_label,
+                    y_label="d(Signal X)/dT (emu/°C)",
+                    canvas=canvas,
+                    axes=ax,
+                    lines={},
+                    metadata={"sample": entry.sample, "derivative": True, "smoothed": True, "fields": [s.field for s in series]},
+                )
+                index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Derivative")
+                setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
+                if callable(setter):
+                    setter(index)
+                self.host._register_plot_tab(tab, canvas, ax, descriptor)
+                self._plot_tabs.append(tab)
+                self._set_tab_bar_visible(False)
 
     def export_txt(self) -> None:  # type: ignore[override]
         if self._dataset is None:
@@ -328,6 +415,25 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         self._plot_tabs.clear()
         host._rebuild_object_manager_for_tab(host.tab_widget.currentWidget())
 
+    def _set_tab_bar_visible(self, visible: bool) -> None:
+        bar_getter = getattr(self.host.tab_widget, "tabBar", None)
+        if callable(bar_getter):
+            try:
+                bar = bar_getter()
+            except Exception:
+                return
+            try:
+                bar.setVisible(visible)
+                bar.setMaximumHeight(0 if not visible else 16777215)
+                auto_hide = getattr(self.host.tab_widget, "setTabBarAutoHide", None)
+                if callable(auto_hide):
+                    try:
+                        auto_hide(not visible)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------ UI state
     def update_ui(self) -> None:
         has_data = self._dataset is not None
@@ -354,11 +460,20 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
     def _apply_smoothing_settings(self) -> None:
         median = self._processor.median_window
         ma = self._processor.moving_avg_window
+        d_median = getattr(self._processor, "derivative_median_window", median)
+        d_ma = getattr(self._processor, "derivative_moving_avg_window", ma)
         if isinstance(self._median_spin, QtWidgets.QSpinBox):
             median = int(self._median_spin.value())
         if isinstance(self._ma_spin, QtWidgets.QSpinBox):
             ma = int(self._ma_spin.value())
+        if isinstance(self._deriv_median_spin, QtWidgets.QSpinBox):
+            d_median = int(self._deriv_median_spin.value())
+        if isinstance(self._deriv_ma_spin, QtWidgets.QSpinBox):
+            d_ma = int(self._deriv_ma_spin.value())
         self._processor.set_smoothing_windows(median, ma)
+        setter = getattr(self._processor, "set_derivative_smoothing_windows", None)
+        if callable(setter):
+            setter(d_median, d_ma)
         self._register_workbooks()
 
     def _on_derivative_changed(self, enabled: bool) -> None:
@@ -367,6 +482,37 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
 
     def _on_smoothed_changed(self, enabled: bool) -> None:
         self._processor.set_show_smoothed(enabled)
+        self._register_workbooks()
+
+    def _on_smooth_derivative_changed(self, enabled: bool) -> None:
+        setter = getattr(self._processor, "set_smooth_derivative", None)
+        if callable(setter):
+            setter(enabled)
+        else:
+            self._processor.smooth_derivative = bool(enabled)
+        if enabled and isinstance(self._derivative_cb, QtWidgets.QCheckBox) and not self._derivative_cb.isChecked():
+            self._derivative_cb.setChecked(True)
+        if isinstance(self._smoothed_only_cb, QtWidgets.QCheckBox):
+            self._smoothed_only_cb.setEnabled(enabled)
+            if not enabled:
+                self._smoothed_only_cb.setChecked(False)
+        self._register_workbooks()
+
+    def _on_smoothed_derivative_only_changed(self, enabled: bool) -> None:
+        setter = getattr(self._processor, "set_smoothed_derivative_only", None)
+        if callable(setter):
+            setter(enabled)
+        else:
+            setattr(self._processor, "plot_smoothed_derivative_only", bool(enabled))
+        if enabled:
+            if isinstance(self._derivative_cb, QtWidgets.QCheckBox) and not self._derivative_cb.isChecked():
+                self._derivative_cb.setChecked(True)
+            if isinstance(self._smoothed_only_cb, QtWidgets.QCheckBox) and not self._smoothed_only_cb.isEnabled():
+                self._smoothed_only_cb.setEnabled(True)
+            if isinstance(self._deriv_median_spin, QtWidgets.QSpinBox):
+                self._deriv_median_spin.setEnabled(True)
+            if isinstance(self._deriv_ma_spin, QtWidgets.QSpinBox):
+                self._deriv_ma_spin.setEnabled(True)
         self._register_workbooks()
 
     def _on_split_changed(self, enabled: bool) -> None:
@@ -413,6 +559,13 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             series = self._processor._build_series(entry.dataframe.copy())
             if not series:
                 continue
+            include_raw_derivative = bool(
+                self._processor.show_derivative
+                and not (
+                    getattr(self._processor, "smooth_derivative", False)
+                    and getattr(self._processor, "plot_smoothed_derivative_only", False)
+                )
+            )
             main_sheet = self._build_sheet(entry, series, mode="main")
             if main_sheet is not None:
                 frame, meta, roles = main_sheet
@@ -438,7 +591,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 workbook.worksheets.append(sheet_key)
                 host._register_imported_workbook(workbook, [worksheet])
 
-            if self._processor.show_derivative:
+            if self._processor.show_derivative and include_raw_derivative:
                 deriv_sheet = self._build_sheet(entry, series, mode="derivative")
                 if deriv_sheet is not None:
                     frame, meta, roles = deriv_sheet
@@ -463,6 +616,31 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     )
                     workbook.worksheets.append(sheet_key)
                     host._register_imported_workbook(workbook, [worksheet])
+                if getattr(self._processor, "smooth_derivative", False):
+                    deriv_sm_sheet = self._build_sheet(entry, series, mode="derivative_smoothed")
+                    if deriv_sm_sheet is not None:
+                        frame, meta, roles = deriv_sm_sheet
+                        wb_key = self._workbook_key(entry, "derivative_smoothed")
+                        new_keys.add(wb_key)
+                        workbook = window_module.WorkbookData(
+                            key=wb_key,
+                            name=f"{entry.sample} (TScan Derivatives Smoothed)",
+                            worksheets=[],
+                            source=None,
+                            folder=None,
+                        )
+                        sheet_key = host._worksheet_key(wb_key, "dSignal/dT (smoothed)")
+                        worksheet = window_module.WorksheetData(
+                            key=sheet_key,
+                            name="dSignal/dT (smoothed)",
+                            dataframe=frame,
+                            columns=meta,
+                            source=entry.path,
+                            workbook_key=wb_key,
+                            axis_roles=roles,
+                        )
+                        workbook.worksheets.append(sheet_key)
+                        host._register_imported_workbook(workbook, [worksheet])
 
             if self._processor.show_smoothed_plot:
                 sm_sheet = self._build_sheet(entry, series, mode="smoothed")
@@ -514,13 +692,16 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             working = frame.sort_values("temperature")
             units = "emu"
             long_name = "Signal X"
-            if mode in {"smoothed", "derivative"}:
+            smooth_signal = mode in {"smoothed"}
+            if smooth_signal or mode.startswith("derivative"):
                 working = self._processor._smooth_frame(working)
-                long_name = "Signal X (smoothed)"
+                if smooth_signal:
+                    long_name = "Signal X (smoothed)"
             values = working["signal"].astype(float).tolist()
-            if mode == "derivative":
-                values = self._processor._compute_derivative(working)
-                long_name = "dSignal/dT"
+            if mode.startswith("derivative"):
+                smooth_deriv = mode == "derivative_smoothed"
+                values = self._processor._compute_derivative(working, smooth=smooth_deriv)
+                long_name = "dSignal/dT" if not smooth_deriv else "dSignal/dT (smoothed)"
                 units = "emu/°C"
             temps = working["temperature"].astype(float).tolist()
             section_comment = f"Section {entry_series.segment_index + 1}"
