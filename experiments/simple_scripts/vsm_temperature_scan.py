@@ -66,13 +66,14 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
         super().__init__()
         self.split_directions: bool = True
         self.show_derivative: bool = False
+        self.show_smoothed_derivative: bool = False
+        self.show_overlay_derivative: bool = False
         self.show_smoothed_plot: bool = False
         self.median_window: int = 5
-        self.moving_avg_window: int = 20
+        self.moving_avg_window: int = 201
         self.smooth_derivative: bool = True
-        self.plot_smoothed_derivative_only: bool = False
         self.derivative_median_window: int = 5
-        self.derivative_moving_avg_window: int = 20
+        self.derivative_moving_avg_window: int = 201
         self._prefs_path = Path.home() / ".vsm_temp_scan_prefs.json"
         self._load_prefs()
 
@@ -83,9 +84,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             self.moving_avg_window = int(content.get("moving_avg_window", self.moving_avg_window))
             self.show_smoothed_plot = bool(content.get("show_smoothed_plot", self.show_smoothed_plot))
             self.smooth_derivative = bool(content.get("smooth_derivative", self.smooth_derivative))
+            self.show_smoothed_derivative = bool(content.get("show_smoothed_derivative", self.show_smoothed_derivative))
+            self.show_overlay_derivative = bool(content.get("show_overlay_derivative", self.show_overlay_derivative))
             self.derivative_median_window = int(content.get("derivative_median_window", self.derivative_median_window))
             self.derivative_moving_avg_window = int(content.get("derivative_moving_avg_window", self.derivative_moving_avg_window))
-            self.plot_smoothed_derivative_only = bool(content.get("plot_smoothed_derivative_only", self.plot_smoothed_derivative_only))
         except Exception:
             return
 
@@ -95,9 +97,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             "moving_avg_window": self.moving_avg_window,
             "show_smoothed_plot": self.show_smoothed_plot,
             "smooth_derivative": self.smooth_derivative,
+            "show_smoothed_derivative": self.show_smoothed_derivative,
+            "show_overlay_derivative": self.show_overlay_derivative,
             "derivative_median_window": self.derivative_median_window,
             "derivative_moving_avg_window": self.derivative_moving_avg_window,
-            "plot_smoothed_derivative_only": self.plot_smoothed_derivative_only,
         }
         try:
             self._prefs_path.write_text(json.dumps(data))
@@ -429,16 +432,18 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
         self.show_derivative = bool(enabled)
         self._save_prefs()
 
+    def set_show_smoothed_derivative(self, enabled: bool) -> None:
+        self.show_smoothed_derivative = bool(enabled)
+        if enabled and not self.smooth_derivative:
+            self.smooth_derivative = True
+        self._save_prefs()
+
+    def set_show_overlay_derivative(self, enabled: bool) -> None:
+        self.show_overlay_derivative = bool(enabled)
+        self._save_prefs()
+
     def set_show_smoothed(self, enabled: bool) -> None:
         self.show_smoothed_plot = bool(enabled)
-        self._save_prefs()
-
-    def set_smooth_derivative(self, enabled: bool) -> None:
-        self.smooth_derivative = bool(enabled)
-        self._save_prefs()
-
-    def set_smoothed_derivative_only(self, enabled: bool) -> None:
-        self.plot_smoothed_derivative_only = bool(enabled)
         self._save_prefs()
 
     def set_smoothing_windows(self, median: int, moving_avg: int) -> None:
@@ -493,9 +498,6 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             if not series:
                 continue
             color_map = self.series_color_map(series)
-            include_raw_derivative = self.show_derivative and not (
-                self.smooth_derivative and self.plot_smoothed_derivative_only
-            )
             fig, ax_left = plt.subplots(figsize=(9, 5))
             ax_left.set_title(f"{entry.sample} - VSM Temperature Scan")
             ax_left.set_xlabel("Temperature (°C)")
@@ -509,12 +511,12 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             ax_deriv = None
             fig_deriv_s = None
             ax_deriv_s = None
-            if include_raw_derivative:
+            if self.show_derivative:
                 fig_deriv, ax_deriv = plt.subplots(figsize=(9, 5))
                 ax_deriv.set_title(f"{entry.sample} - d(Signal X)/dT")
                 ax_deriv.set_xlabel("Temperature (°C)")
                 ax_deriv.set_ylabel("dS/dT (emu/°C)")
-            if self.show_derivative and self.smooth_derivative:
+            if self.show_smoothed_derivative:
                 fig_deriv_s, ax_deriv_s = plt.subplots(figsize=(9, 5))
                 ax_deriv_s.set_title(f"{entry.sample} - Smoothed d(Signal X)/dT")
                 ax_deriv_s.set_xlabel("Temperature (°C)")
@@ -547,11 +549,11 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     linewidth=1.6,
                 )[0]
                 handles.append(line)
-                if self.show_derivative and (ax_deriv is not None or ax_deriv_s is not None):
+                if (self.show_derivative and ax_deriv is not None) or (self.show_smoothed_derivative and ax_deriv_s is not None):
                     derivative_raw = self._compute_derivative(smoothed_frame, smooth=False)
                     derivative_smoothed = self._compute_derivative(smoothed_frame, smooth=True)
                     dlabel = f"d/dT {label}"
-                    if include_raw_derivative and ax_deriv is not None:
+                    if self.show_derivative and ax_deriv is not None:
                         dline = ax_deriv.plot(
                             smoothed_frame["temperature"],
                             derivative_raw,
@@ -682,6 +684,71 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     ax_s.legend(handles=smooth_handles, loc="best")
                 fig_s.tight_layout()
 
+            if self.show_overlay_derivative:
+                for entry_series in series:
+                    fig_o, ax_o_left = plt.subplots(figsize=(9, 5))
+                    ax_o_left.set_title(
+                        f"{entry.sample} - {entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} overlay"
+                    )
+                    raw_frame, _ = self._dedupe_temperatures(entry_series.frame)
+                    raw_frame = raw_frame.sort_values("temperature")
+                    smoothed_frame = self._smooth_frame(raw_frame)
+                    deriv = self._compute_derivative(smoothed_frame, smooth=True)
+                    color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
+                    base_color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[0])
+                    raw_color = base_color
+                    smooth_color = "#a855f7" if base_color == VSM_TEMP_SCAN_COLORS[0] else base_color
+                    deriv_color = "#22c55e"
+                    raw_line = ax_o_left.plot(
+                        raw_frame["temperature"],
+                        raw_frame["signal"],
+                        color=raw_color,
+                        linewidth=1.1,
+                        alpha=0.6,
+                        label="Raw",
+                    )[0]
+                    sm_line = ax_o_left.plot(
+                        smoothed_frame["temperature"],
+                        smoothed_frame["signal"],
+                        color=smooth_color,
+                        linewidth=1.6,
+                        linestyle="--",
+                        label="Smoothed",
+                    )[0]
+                    ax_o_left.set_xlabel("Temperature (°C)")
+                    ax_o_left.set_ylabel("Signal X (emu)")
+                    ax_o_right = ax_o_left.twinx()
+                    d_line = ax_o_right.plot(
+                        smoothed_frame["temperature"],
+                        deriv,
+                        color=deriv_color,
+                        linewidth=1.2,
+                        label="d(Signal X)/dT (smoothed)",
+                    )[0]
+                    ax_o_right.set_ylabel("d(Signal X)/dT (emu/°C)")
+                    handles = [raw_line, sm_line, d_line]
+                    labels = [
+                        f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} - Raw",
+                        f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} - Smoothed",
+                        f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} - d/dT (smoothed)",
+                    ]
+                    legend = ax_o_left.legend(handles, labels, loc="best")
+                    try:
+                        for text in legend.get_texts():
+                            text.set_color("#e5e7eb")
+                        legend.get_frame().set_edgecolor("#6b7280")
+                    except Exception:
+                        pass
+                    try:
+                        ax_o_left.tick_params(axis="both", colors="#e5e7eb")
+                        ax_o_left.yaxis.label.set_color("#e5e7eb")
+                        ax_o_left.xaxis.label.set_color("#e5e7eb")
+                        ax_o_right.tick_params(axis="y", colors="#cbd5e1")
+                        ax_o_right.yaxis.label.set_color("#cbd5e1")
+                    except Exception:
+                        pass
+                    fig_o.tight_layout()
+
             try:
                 plt.show()
             except Exception:
@@ -704,9 +771,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             if not series:
                 continue
             color_map = self.series_color_map(series)
-            include_raw_derivative = self.show_derivative and not (
-                self.smooth_derivative and self.plot_smoothed_derivative_only
-            )
+            include_raw_derivative = bool(self.show_derivative)
             series_info: list[tuple[PlotSeries, str, str, str]] = []
             for idx, entry_series in enumerate(series):
                 section_label = f"Section {entry_series.segment_index + 1}"
@@ -987,7 +1052,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 except Exception:
                     pass
 
-                if self.smooth_derivative:
+                if self.show_smoothed_derivative and self.smooth_derivative:
                     deriv_sm_sheet = book.add_sheet()
                     deriv_sm_sheet.name = "Derivative (smoothed)"
                     col = 0
@@ -1128,11 +1193,11 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             self.log(f"Exported {fname.name}")
 
             # Derivative export (one file per graph) when enabled
-            if self.show_derivative:
-                dname = output_dir / f"{entry.path.stem}_TScan_derivative.txt"
-                d_headers: List[List[str]] = []
-                d_columns: List[List[str]] = []
-                if not (self.smooth_derivative and self.plot_smoothed_derivative_only):
+            if self.show_derivative or self.show_smoothed_derivative:
+                if self.show_derivative:
+                    dname = output_dir / f"{entry.path.stem}_TScan_derivative.txt"
+                    d_headers: List[List[str]] = []
+                    d_columns: List[List[str]] = []
                     for entry_series in series:
                         base_frame, _ = self._dedupe_temperatures(entry_series.frame)
                         frame = self._smooth_frame(base_frame.sort_values("temperature"))
@@ -1152,7 +1217,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         for data_row in zip_longest(*d_columns, fillvalue=""):
                             writer.writerow(data_row)
                     self.log(f"Exported {dname.name}")
-                if self.smooth_derivative:
+                if self.show_smoothed_derivative and self.smooth_derivative:
                     sdname = output_dir / f"{entry.path.stem}_TScan_derivative_smoothed.txt"
                     sd_headers: List[List[str]] = []
                     sd_columns: List[List[str]] = []
@@ -1230,12 +1295,12 @@ def main() -> None:
         command=lambda: processor.set_smooth_derivative(smooth_deriv_var.get()),
     ).pack(side=tk.LEFT, padx=(12, 0))
 
-    smoothed_only_var = tk.BooleanVar(app, value=processor.plot_smoothed_derivative_only)
+    sm_deriv_var = tk.BooleanVar(app, value=processor.show_smoothed_derivative)
     ttk.Checkbutton(
         app.options_frame,
-        text="Smoothed derivatives only",
-        variable=smoothed_only_var,
-        command=lambda: processor.set_smoothed_derivative_only(smoothed_only_var.get()),
+        text="Plot smoothed derivatives",
+        variable=sm_deriv_var,
+        command=lambda: processor.set_show_smoothed_derivative(sm_deriv_var.get()),
     ).pack(side=tk.LEFT, padx=(12, 0))
 
     smooth_plot_var = tk.BooleanVar(app, value=processor.show_smoothed_plot)

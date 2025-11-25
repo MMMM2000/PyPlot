@@ -44,5 +44,10 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
   - Graph/worksheet windows are MDI subwindows (no visible tab bar). Default width is half of the available viewport; height follows the subwindow’s aspect ratio and shrinks width if needed to fit vertically. Aspect ratio is locked during manual resizing.
   - Maximizing any subwindow maximizes all of them when you switch via the Project Explorer; restoring one returns all to windowed mode.
   - When adding or updating plug-ins, keep these sizing/fullscreen rules intact and refresh this document if the behavior changes.
+- Subwindow lifecycle:
+  - The close button hides a graph instead of destroying it; reopen via Project Explorer → Plots. Keep windows in fullscreen/windowed mode until the user changes it, and sync that state across subwindows when switching.
 
 Feel free to expand these sections with screenshots, plugin-specific quirks, or Origin export caveats as the toolset grows.
+
+## Ongoing problems (investigating)
+- Initial Project Explorer/Object Manager layout sometimes appears squashed until the docks are toggled; window content can shift down causing the status-bar X/Y readout to clip. Keep retrying layout fixes until this is resolved.

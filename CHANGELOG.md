@@ -12,7 +12,8 @@
 
 ## 2025-11-24 09:28 UTC
 - Removed the PyPlot tab bar entirely (MDI subwindows only), locking graph/worksheet aspect ratios with default width at half the viewport, auto-fit on resize, and synchronized maximize/restore across all windows; documented the rules in `docs/pyplot.md` and `AGENTS.md`.
-- Added a “Smoothed derivatives only” toggle for VSM Temperature Scan so smoothed d/dT plots/exports can be shown without raw derivatives, and ensured 50 Oe traces remain in legends.
+- Added separate “Plot derivatives” and “Plot smoothed derivatives” toggles for VSM Temperature Scan so smoothed d/dT plots/exports can be shown independently of raw derivatives, and ensured 50 Oe traces remain in legends.
+- Added VSM Temperature Scan overlay plots (raw + smoothed + smoothed d/dT per segment with legends) and hardened initial dock sizing to reduce the squashed Project Explorer/Object Manager layout.
 
 ## 2025-11-20 14:08 UTC
 

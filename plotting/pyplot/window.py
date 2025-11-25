@@ -1831,6 +1831,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._save_project_action: QtGui.QAction | None = None
         self._save_project_as_action: QtGui.QAction | None = None
         self._project_menu_separator: QtGui.QAction | None = None
+        self._hidden_subwindows: set["_ManagedSubWindow"] = set()
+        self._maximized_hidden: set["_ManagedSubWindow"] = set()
 
         if not hasattr(self, "settings"):
             self.settings = QtCore.QSettings("MicrowireLab", self.__class__.__name__)
@@ -2902,9 +2904,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if status is not None:
             label = QtWidgets.QLabel("x: —   y: —", self)
             label.setObjectName("mw_cursor_status")
-            label.setMinimumWidth(220)
+            label.setMinimumWidth(320)
+            label.setMinimumHeight(26)
+            label.setContentsMargins(6, 2, 6, 2)
             status.addPermanentWidget(label, 1)
             self._cursor_label = label
+            try:
+                status.setMinimumHeight(30)
+                status.setSizeGripEnabled(True)
+            except Exception:
+                pass
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
@@ -2951,6 +2960,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
         object_dock.setMinimumWidth(PRIMARY_DOCK_MIN_WIDTH)
         self.object_dock = object_dock
+        object_dock.visibilityChanged.connect(lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial))
 
         graph_dock: QtWidgets.QDockWidget | None = None
         graph_panel: QtWidgets.QWidget | None = None
@@ -2961,6 +2971,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._setup_action_toolbar()
         self._setup_navigation_toolbar()
         self._setup_format_toolbar()
+        QtCore.QTimer.singleShot(0, self._normalize_docks_initial)
+        self._layout_fixed_once = False
+        if isinstance(project_dock, QtWidgets.QDockWidget):
+            project_dock.visibilityChanged.connect(lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial))
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
         dock_switcher_enabled = self._dock_switcher_supported()
@@ -4497,6 +4511,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if axes is None:
             return None
         figure = getattr(axes, "figure", None)
+        if figure is not None:
+            canv = getattr(figure, "canvas", None)
+            axes_list = list(getattr(figure, "axes", []))
+            if not axes_list:
+                axes_list = [axes]
+            for ax in axes_list:
+                self._apply_dark_mode_to_single_axes(ax, enabled)
+            return canv
+        return None
+
+    def _apply_dark_mode_to_single_axes(self, axes: Any, enabled: bool) -> None:
+        if axes is None:
+            return
+        figure = getattr(axes, "figure", None)
         canvas = getattr(figure, "canvas", None) if figure is not None else None
         state = self._axes_theme_state.setdefault(axes, {})
 
@@ -4654,6 +4682,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     pass
             for key in stale:
                 text_state.pop(key, None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
         return canvas
     def _prompt_import_data(self) -> None:
         files_action = getattr(self, "_import_files_action", None)
@@ -4916,6 +4949,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> None:
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
+        try:
+            tab.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        except Exception:
+            pass
+        try:
+            canvas.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        except Exception:
+            pass
         # Hook cursor tracking for this canvas
         cursor_handler = getattr(self, "_update_cursor_status", None)
         if callable(cursor_handler):
@@ -6743,6 +6784,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             axes_list = list(getattr(figure, "axes", []))
         except Exception:
             axes_list = []
+        figure_legends: list[Any] = []
+        try:
+            figure_legends = list(getattr(figure, "legends", []))
+        except Exception:
+            figure_legends = []
 
         def _make_item(label: str, kind: str | None = None, obj: Any | None = None) -> QtWidgets.QTreeWidgetItem:
             item = QtWidgets.QTreeWidgetItem([label])
@@ -6803,51 +6849,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     {"kind": "text", "object": y_artist},
                 )
             axis_item.addChild(y_label_item)
-            legend = None
-            try:
-                legend = axis.get_legend()
-            except Exception:
-                legend = None
+        # collect legends separately so multi-axis legends are siblings under root
+        legends: list[Any] = []
+        try:
+            legend = axis.get_legend()
             if legend is not None:
-                try:
-                    if not hasattr(legend, "_mw_show_symbols"):
-                        legend._mw_show_symbols = True
-                    if not hasattr(legend, "_mw_text_follows_handles"):
-                        legend._mw_text_follows_handles = False
-                    if not hasattr(legend, "_mw_orientation"):
-                        legend._mw_orientation = "auto"
-                    if not hasattr(legend, "_mw_placement"):
-                        legend._mw_placement = "inside"
-                        legend.set_bbox_to_anchor(None)
-                    if not hasattr(legend, "_mw_draggable"):
-                        legend._mw_draggable = True
-                    if not getattr(legend, "get_draggable", lambda: True)():
-                        legend.set_draggable(True)
-                except Exception:
-                    pass
-                try:
-                    legend_title = legend.get_title().get_text() if legend.get_title() else "Legend"
-                except Exception:
-                    legend_title = "Legend"
-                legend_item = _make_item(legend_title or "Legend", kind="legend", obj=legend)
-                try:
-                    texts = legend.get_texts()
-                except Exception:
-                    texts = []
-                for entry in texts:
-                    try:
-                        text = entry.get_text()
-                    except Exception:
-                        text = ""
-                    entry_item = _make_item(text or "Entry")
-                    if isinstance(entry, Text):
-                        entry_item.setData(
-                            0,
-                            QtCore.Qt.ItemDataRole.UserRole,
-                            {"kind": "text", "object": entry},
-                        )
-                    legend_item.addChild(entry_item)
-                axis_item.addChild(legend_item)
+                legends.append(legend)
+        except Exception:
+            pass
             try:
                 lines = list(axis.get_lines())
             except Exception:
@@ -6866,7 +6875,63 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         QtCore.Qt.ItemDataRole.UserRole,
                         {"kind": "line", "object": line},
                     )
+                visible = True
+                getter = getattr(line, "get_visible", None)
+                if callable(getter):
+                    try:
+                        visible = bool(getter())
+                    except Exception:
+                        visible = True
+                self._apply_object_item_visibility(line_item, visible)
                 axis_item.addChild(line_item)
+        # add legends as top-level children under the figure root
+        legend_seen: set[int] = set()
+        for legend in legends + figure_legends:
+            if legend is None or id(legend) in legend_seen:
+                continue
+            legend_seen.add(id(legend))
+            try:
+                if not hasattr(legend, "_mw_show_symbols"):
+                    legend._mw_show_symbols = True
+                if not hasattr(legend, "_mw_text_follows_handles"):
+                    legend._mw_text_follows_handles = False
+                if not hasattr(legend, "_mw_orientation"):
+                    legend._mw_orientation = "auto"
+                if not hasattr(legend, "_mw_placement"):
+                    legend._mw_placement = "inside"
+                    legend.set_bbox_to_anchor(None)
+                if not hasattr(legend, "_mw_draggable"):
+                    legend._mw_draggable = True
+                if not getattr(legend, "get_draggable", lambda: True)():
+                    legend.set_draggable(True)
+            except Exception:
+                pass
+            try:
+                legend_title = legend.get_title().get_text() if legend.get_title() else "Legend"
+            except Exception:
+                legend_title = "Legend"
+            legend_item = _make_item(legend_title or "Legend", kind="legend", obj=legend)
+            try:
+                texts = legend.get_texts()
+            except Exception:
+                texts = []
+            for entry in texts:
+                try:
+                    text = entry.get_text()
+                except Exception:
+                    text = ""
+                entry_item = _make_item(text or "Entry")
+                if isinstance(entry, Text):
+                    entry_item.setData(
+                        0,
+                        QtCore.Qt.ItemDataRole.UserRole,
+                        {"kind": "text", "object": entry},
+                    )
+                legend_item.addChild(entry_item)
+            self._apply_object_item_visibility(legend_item, True)
+            root_item.addChild(legend_item)
+
+
         tree.expandAll()
         self._object_tree_updating = False
         tree.blockSignals(False)
@@ -7327,6 +7392,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             tab.setVisible(visible)
         if visible:
             self._hidden_tabs.discard(tab)
+            sub = self.tab_widget._subwindow_for(tab)  # type: ignore[attr-defined]
+            if sub is not None and sub in self._hidden_subwindows:
+                self._hidden_subwindows.discard(sub)
+                sub.show()
+                if self._global_maximized:
+                    sub.showMaximized()
+                else:
+                    self._fit_subwindow(sub, preferred_width=sub.width())
         else:
             self._hidden_tabs.add(tab)
 
@@ -7510,6 +7583,36 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._after_tab_removed(info)
         return info
 
+    def _normalize_docks_initial(self) -> None:
+        """Ensure primary docks start at readable sizes and stay visible."""
+
+        try:
+            docks: list[QtWidgets.QDockWidget] = []
+            widths: list[int] = []
+            if getattr(self, "project_dock", None):
+                docks.append(self.project_dock)
+                widths.append(max(PRIMARY_DOCK_MIN_WIDTH, 260))
+            if getattr(self, "object_dock", None):
+                docks.append(self.object_dock)
+                widths.append(max(PRIMARY_DOCK_MIN_WIDTH, 260))
+            visible_docks = [dock for dock in docks if dock.isVisible()]
+            if visible_docks and widths:
+                try:
+                    self.resizeDocks(visible_docks, widths[: len(visible_docks)], QtCore.Qt.Orientation.Horizontal)
+                    self.resizeDocks(visible_docks, [max(360, self.height() // 2)] * len(visible_docks), QtCore.Qt.Orientation.Vertical)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
+        super().showEvent(event)
+        if not getattr(self, "_layout_fixed_once", False):
+            self._layout_fixed_once = True
+            QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
+        QtCore.QTimer.singleShot(100, self._normalize_docks_initial)
+        QtCore.QTimer.singleShot(300, self._normalize_docks_initial)
+
     def _restore_tab_from_info(self, info: _RemovedTabInfo) -> None:
         insert_index = min(info.index, self.tab_widget.count())
         self.tab_widget.insertTab(insert_index, info.tab, info.title)
@@ -7671,6 +7774,8 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
         self._aspect_ratio: float | None = None
         self._owner: _MdiTabProxy | None = None
         self._resizing = False
+        self.setWindowFlag(QtCore.Qt.WindowType.Tool, False)
+        self.setWidgetResizable(True)
 
     def set_owner(self, owner: "_MdiTabProxy") -> None:
         self._owner = owner
@@ -7690,6 +7795,15 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
             self._owner._handle_subwindow_state_change(  # noqa: SLF001
                 self.isMaximized() or self.isFullScreen()
             )
+            if event.oldState() & QtCore.Qt.WindowState.WindowMinimized:
+                QtCore.QTimer.singleShot(30, self._owner._normalize_docks_initial)  # noqa: SLF001
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        # hide instead of destroying so the graph can be reopened from Project Explorer
+        event.ignore()
+        self.hide()
+        if self._owner is not None:
+            self._owner._handle_subwindow_hidden(self)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
         if self._resizing or self._aspect_ratio is None or self._owner is None:
@@ -7730,7 +7844,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._blocking = False
         self._global_maximized = False
         self._syncing_state = False
+        self._hidden_subwindows: set[_ManagedSubWindow] = set()
+        self._hidden_tabs: set[QtWidgets.QWidget] = set()
         self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
+        try:
+            self._mdi.setContentsMargins(0, 0, 0, 0)
+            self._mdi.setViewportMargins(0, 0, 0, 0)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ helpers
     def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
@@ -7738,6 +7859,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
+        if sub is not None:
+            self._global_maximized = sub.isMaximized() or sub.isFullScreen()
+            self._apply_global_window_state(active=sub)
         if self._global_maximized and sub is not None and not sub.isMaximized():
             self._syncing_state = True
             try:
@@ -7773,15 +7897,31 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._global_maximized = bool(maximized)
         self._apply_global_window_state()
 
-    def _apply_global_window_state(self) -> None:
+    def _handle_subwindow_hidden(self, sub: _ManagedSubWindow) -> None:
+        self._hidden_subwindows.add(sub)
+        # ensure tab visibility matches hidden state
+        widget = sub.widget()
+        if widget is not None:
+            self._set_tab_visibility(widget, False)
+        if self._mdi.activeSubWindow() is sub:
+            self._mdi.setActiveSubWindow(None)
+
+    def _apply_global_window_state(self, *, active: _ManagedSubWindow | None = None) -> None:
         self._syncing_state = True
         try:
+            active_sub = active or self._mdi.activeSubWindow()
             for sub in self._subwindows.values():
+                if sub in self._hidden_subwindows:
+                    continue
                 if self._global_maximized:
+                    sub.show()
                     sub.showMaximized()
+                    sub.raise_()
                 else:
+                    sub.show()
                     sub.showNormal()
                     self._fit_subwindow(sub, preferred_width=sub.width())
+                    sub.raise_()
         finally:
             self._syncing_state = False
 
@@ -7817,9 +7957,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
 
     def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         if source is self._mdi.viewport() and event.type() == QtCore.QEvent.Type.Resize:
-            if not self._global_maximized:
-                for sub in self._subwindows.values():
-                    self._fit_subwindow(sub, use_half_width=True, preferred_width=sub.width())
+            for sub in self._subwindows.values():
+                if sub in self._hidden_subwindows:
+                    continue
+                self._fit_subwindow(
+                    sub,
+                    use_half_width=not self._global_maximized,
+                    preferred_width=self._mdi.viewport().width() if self._global_maximized else sub.width(),
+                )
         return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
@@ -7973,6 +8118,27 @@ class _MdiTabProxy(QtWidgets.QWidget):
 
     def tabBar(self) -> None:
         return None
+
+    def _set_tab_visibility(self, widget: QtWidgets.QWidget, visible: bool) -> None:
+        if widget not in self._widgets:
+            return
+        sub = self._subwindow_for(widget)
+        if sub is None:
+            return
+        if visible:
+            self._hidden_tabs.discard(widget)
+            self._hidden_subwindows.discard(sub)
+            self._maximized_hidden.discard(sub)
+            sub.show()
+            if self._global_maximized:
+                sub.showMaximized()
+            else:
+                sub.showNormal()
+                self._fit_subwindow(sub, preferred_width=sub.width())
+        else:
+            self._hidden_tabs.add(widget)
+            self._hidden_subwindows.add(sub)
+            sub.hide()
 
     def setTabToolTip(self, index: int, tooltip: str) -> None:
         _ = index, tooltip
