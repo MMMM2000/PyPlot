@@ -72,6 +72,14 @@ class PyPlotWorkbench(PyPlotWindow):
         self._plugin_last_directories: Dict[str, Path] = {
             key: Path(value) for key, value in parsed_dirs.items() if isinstance(value, str)
         }
+        raw_export_dirs = self.settings.value("plugin_last_export_dirs", "{}")
+        try:
+            parsed_export_dirs = json.loads(raw_export_dirs) if isinstance(raw_export_dirs, str) else {}
+        except json.JSONDecodeError:
+            parsed_export_dirs = {}
+        self._plugin_last_export_dirs: Dict[str, Path] = {
+            key: Path(value) for key, value in parsed_export_dirs.items() if isinstance(value, str)
+        }
         self._last_directory: Path | None = None
         self._last_source_dir: Path | None = None
         self._selected_path_entries: List[Path] = []
@@ -292,6 +300,28 @@ class PyPlotWorkbench(PyPlotWindow):
                 return stored
         return super()._dialog_start_directory()
 
+    def _sync_plugin_directory_settings(self) -> None:
+        settings = getattr(self, "settings", None)
+        if not isinstance(settings, QtCore.QSettings):
+            return
+        try:
+            import_payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
+            settings.setValue("plugin_last_dirs", json.dumps(import_payload))
+        except Exception:
+            pass
+        try:
+            export_dirs = getattr(self, "_plugin_last_export_dirs", {})
+            export_payload = {
+                key: str(value) for key, value in export_dirs.items() if isinstance(value, Path)
+            }
+            settings.setValue("plugin_last_export_dirs", json.dumps(export_payload))
+        except Exception:
+            pass
+        try:
+            settings.sync()
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------ Qt hooks
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._current_plugin is not None:
@@ -299,8 +329,7 @@ class PyPlotWorkbench(PyPlotWindow):
                 self._current_plugin.deactivate()
             except Exception:
                 pass
-        payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
-        self.settings.setValue("plugin_last_dirs", json.dumps(payload))
+        self._sync_plugin_directory_settings()
         self.settings.setValue("sources", self.path_edit.text())
         if self._last_directory is not None:
             self.settings.setValue("last_directory", str(self._last_directory))
@@ -308,6 +337,11 @@ class PyPlotWorkbench(PyPlotWindow):
             self.settings.setValue("last_graph_dir", str(self._last_graph_dir))
         else:
             self.settings.remove("last_graph_dir")
+        try:
+            legend_settings = getattr(self, "_legend_settings_by_plugin", {})
+            self.settings.setValue("legend_settings_by_plugin", json.dumps(legend_settings))
+        except Exception:
+            pass
         self.settings.sync()
         super().closeEvent(event)
 
@@ -505,8 +539,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._sync_selected_paths_with_imports()
         if self._current_plotter_name and self._last_directory is not None:
             self._plugin_last_directories[self._current_plotter_name] = self._last_directory
-            payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
-            self.settings.setValue("plugin_last_dirs", json.dumps(payload))
+            self._sync_plugin_directory_settings()
         auto_loader = (
             self._current_plugin
             if self._current_plugin is not None
@@ -860,6 +893,16 @@ class PyPlotWorkbench(PyPlotWindow):
             else:
                 plugin = factory(self)
             self._plugin_instances[name] = plugin
+        else:
+            try:
+                # If a placeholder base plugin slipped through, rebuild it from the factory.
+                if getattr(type(plugin), "generate", None) is PyPlotPlugin.generate:
+                    factory = self._plugin_factories.get(name)
+                    if factory is not None:
+                        plugin = factory(self)
+                        self._plugin_instances[name] = plugin
+            except Exception:
+                pass
 
         if self._current_plugin is not plugin:
             if self._current_plugin is not None:
@@ -997,6 +1040,10 @@ class PyPlotWorkbench(PyPlotWindow):
                 last = path.parent
         if last is not None:
             self._last_directory = last
+            plugin_name = self._current_plotter_name
+            if plugin_name:
+                self._plugin_last_directories[plugin_name] = last
+                self._sync_plugin_directory_settings()
 
     def _sync_selected_paths_with_imports(self) -> None:
         ordered: list[Path] = []
@@ -1045,18 +1092,6 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _update_project_title(self) -> None:
         self._update_window_title()
-
-    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
-        if self._current_plugin is not None:
-            try:
-                self._current_plugin.deactivate()
-            except Exception:
-                pass
-        payload = {key: str(value) for key, value in self._plugin_last_directories.items()}
-        self.settings.setValue("plugin_last_dirs", json.dumps(payload))
-        self.settings.setValue("sources", self.path_edit.text())
-        self.settings.sync()
-        super().closeEvent(event)
 
 def main(
     available_plotters: Dict[str, Callable[[], QtWidgets.QWidget | None]] | None = None,

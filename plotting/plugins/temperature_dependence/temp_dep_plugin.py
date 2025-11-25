@@ -43,7 +43,10 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         self._mode_combo: QtWidgets.QComboBox | None = None
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
-        self._last_export_dir: Path | None = None
+        self._workbook_keys: dict[str, str] = {}
+        self._managed_workbooks: set[str] = set()
+        stored_export = getattr(host, "_plugin_last_export_dirs", {}).get(name)
+        self._last_export_dir: Path | None = stored_export if isinstance(stored_export, Path) else None
 
     # ------------------------------------------------------------------ lifecycle
     def activate(self) -> None:  # type: ignore[override]
@@ -297,15 +300,11 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             )
             return
         self._apply_settings_to_core()
-        start_dir = (
-            str(self._last_export_dir)
-            if self._last_export_dir is not None
-            else ""
-        )
+        start_dir = self.host._preferred_export_directory(self.name, self._last_export_dir)
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self.host,
             "Select TXT export folder",
-            start_dir or str(Path.home()),
+            str(start_dir),
         )
         if not directory:
             return
@@ -341,6 +340,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
             )
             return
         self._last_export_dir = target
+        self.host._remember_plugin_export_dir(self.name, target)
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,

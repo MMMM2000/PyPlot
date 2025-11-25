@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-11-25 12:13 UTC
+- Scoped import pickers, TXT exports, and graph saves to remember their last-used folders per plug-in, persisting the history separately instead of sharing one global path.
+- Guarded PyPlot subwindow creation so Temperature Sensitivity plots no longer crash on Qt6 when QMdiSubWindow lacks `setWidgetResizable`.
+- Routed stress/temperature dependence, stress sensitivity, and VSM temperature scan TXT exports through the per-plug-in export folders to keep Origin/TXT workflows using their own directories.
+- Restored temperature dependence workbook registration and added stress dependence workbook creation so plots and Origin/TXT exports surface in Project Explorer.
+- Defaulted legend text colour to follow plot colours for all plug-ins and persisted legend preferences per plug-in between sessions.
+
 ## 2025-11-21 15:30 UTC
 - Split VSM Temperature Scan smoothing controls into signal and derivative sections, applying the derivative-smoothing toggle to both Matplotlib and Origin d/dT plots/exports with separate window settings.
 - Kept VSM Temperature Scan colors consistent across raw/smoothed/derivative Origin graphs (including 50 Oe traces) and drive legends from the workbook comments so arrows/sections appear in the Origin legends.

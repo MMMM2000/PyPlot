@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Callable, Dict, Iterable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
@@ -147,6 +148,52 @@ class PyPlotPlugin:
         log_level = logging.ERROR if level == "error" else logging.INFO
         logger = logging.getLogger(f"PyPlot.{self.name.replace(' ', '_')}")
         logger.log(log_level, message)
+
+    # Folder history ---------------------------------------------------
+    def preferred_import_directory(self) -> Path:
+        """Return the starting folder for file pickers scoped to this plug-in."""
+
+        start = None
+        if hasattr(self.host, "_dialog_start_directory"):
+            try:
+                start = self.host._dialog_start_directory()
+            except Exception:
+                start = None
+        if isinstance(start, Path):
+            return start
+        return Path.home()
+
+    def preferred_export_directory(self, *fallbacks: Path | None) -> Path:
+        """Return the starting folder for exports scoped to this plug-in."""
+
+        getter = getattr(self.host, "_preferred_export_directory", None)
+        if callable(getter):
+            try:
+                return getter(self.name, *fallbacks)
+            except Exception:
+                pass
+        for candidate in fallbacks:
+            if isinstance(candidate, Path) and candidate.exists():
+                return candidate
+        return Path.home()
+
+    def remember_export_directory(self, path: Path | None) -> None:
+        """Persist the last export folder for this plug-in."""
+
+        if not isinstance(path, Path):
+            return
+        helper = getattr(self.host, "_remember_plugin_export_dir", None)
+        if callable(helper):
+            try:
+                helper(self.name, path)
+                return
+            except Exception:
+                pass
+        try:
+            resolved = path.resolve()
+        except Exception:
+            resolved = path
+        self._log(f"Saved export folder: {resolved}")
 
     def _host_has_data_selection(self) -> bool:
         """Return True when the host already has imported data or file selections."""

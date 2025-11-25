@@ -63,7 +63,7 @@ END_LOAD = float(_CFG.get("END_LOAD", 17.5))
 RAW_ALT_COLORS = ["#45A1D6", "#F09C67"]  # alternating raw point colors
 RAW_COLORS = {BASE_LOAD: RAW_ALT_COLORS[0], END_LOAD: RAW_ALT_COLORS[1]}
 RAW_MARKER = "o"
-RAW_MARKER_SIZE = 0.1
+RAW_MARKER_SIZE = 1.0
 RAW_ALPHA = 1.0
 
 # Mean values
@@ -343,7 +343,9 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     title = df['title'].iat[0]
     anneal = df['anneal'].iat[0]
 
-    samples = sorted(df['sample_end'].unique())
+    sample_order = list(dict.fromkeys(df['sample_end'].tolist()))
+    sample_labels = df.set_index("sample_end").get("sample_label", pd.Series(dtype=str))
+    samples = sample_order
     # Give each sample enough horizontal space so its miniature dependence curve
     # spans ``CURVE_WIDTH`` units.  The figure width scales with ``CURVE_WIDTH``
     # to retain roughly the same level of detail regardless of the setting.
@@ -363,7 +365,8 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
 
     ax.set_xlim(0.5, len(samples) + 0.5)
     ax.set_xticks(range(1, len(samples) + 1))
-    ax.set_xticklabels(samples)
+    labels = [sample_labels.get(s, s) for s in samples]
+    ax.set_xticklabels(labels)
     ax.set_xlabel('Sample')
     ax.set_ylabel(LABELS[var])
     ax.set_title(f"{comp} {title} {anneal} — {LABELS[var]}")
@@ -420,6 +423,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
+    fig.subplots_adjust(left=0.12, right=0.95, bottom=0.18, top=0.9)
     apply_readability(ax, globals())
     fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
@@ -448,7 +452,9 @@ def plot_samples_origin(
     title = df['title'].iat[0]
     anneal = df['anneal'].iat[0]
 
-    samples = sorted(df['sample_end'].unique())
+    sample_order = list(dict.fromkeys(df["sample_end"].tolist()))
+    label_map = df.set_index("sample_end").get("sample_label", pd.Series(dtype=str))
+    samples = sample_order
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
 
     # Build raw points and means for b-direction only, baseline at BASE_LOAD
@@ -516,6 +522,19 @@ def plot_samples_origin(
             except Exception:
                 pass
         return op.new_sheet('w', lname=name)
+
+    def _apply_column_meta(sheet_obj: Any, x_label: str, y_label: str) -> None:
+        try:
+            cols = getattr(sheet_obj, "cols", None)
+            if cols and len(cols) >= 2:
+                cols[0].lname = x_label
+                cols[0].units = ""
+                cols[0].comments = "Sample"
+                cols[1].lname = y_label
+                cols[1].units = LABELS.get(var, "")
+                cols[1].comments = LABELS.get(var, "")
+        except Exception:
+            pass
     gp_obj = op.new_graph(template='scatter')
     gp = cast(Any, gp_obj)
     try:
@@ -537,9 +556,11 @@ def plot_samples_origin(
             w = cast(Any, sheet)
             w.from_df(raw_odd)
             w.cols_axis('XY')
+            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
             p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
             try:
                 p.color = RAW_ALT_COLORS[1]
+                p.symbol_size = RAW_MARKER_SIZE
             except Exception:
                 pass
     if not raw_even.empty:
@@ -548,9 +569,11 @@ def plot_samples_origin(
             w = cast(Any, sheet)
             w.from_df(raw_even)
             w.cols_axis('XY')
+            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
             p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
             try:
                 p.color = RAW_ALT_COLORS[0]
+                p.symbol_size = RAW_MARKER_SIZE
             except Exception:
                 pass
 
@@ -561,10 +584,12 @@ def plot_samples_origin(
         w = cast(Any, sheet)
         w.from_df(mean_df)
         w.cols_axis('XY')
+        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
         p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
         try:
             p.color = color
             p.symbol_shape = 2
+            p.symbol_size = LEGEND_MARKER_SIZE
         except Exception:
             pass
 
@@ -575,6 +600,7 @@ def plot_samples_origin(
         w = cast(Any, sheet)
         w.from_df(cont_df)
         w.cols_axis('XY')
+        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
         p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
         try:
             p.color = 'black'
@@ -588,9 +614,20 @@ def plot_samples_origin(
         op.lt_exec('layer -aa 1;')
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{LABELS[var]}";')
-        esc = (f"{comp} {title} {anneal} - {LABELS[var]}").replace('"', "'")
+        esc = (f"{comp} {title} {anneal} — {LABELS[var]}").replace('"', "'")
         op.lt_exec(f'title -s "{esc}";')
         op.lt_exec('legend;')
+    except Exception:
+        pass
+
+    # apply X tick labels (samples) and mirror axes like Matplotlib
+    try:
+        tick_labels = [label_map.get(s, s) for s in samples]
+        gl.x.type = 4  # custom labels
+        gl.x.from_ = 0.5
+        gl.x.to = len(samples) + 0.5
+        gl.x.inc = 0.5
+        gl.x.label = tick_labels
     except Exception:
         pass
 
@@ -610,6 +647,7 @@ def build_workbook_table(
     comp = str(grp["composition"].iat[0]) if "composition" in grp else ""
     title = str(grp["title"].iat[0]) if "title" in grp else ""
     anneal = str(grp["anneal"].iat[0]) if "anneal" in grp else ""
+    sample_names = grp.set_index("sample_end").get("sample", pd.Series(dtype=str))
 
     work = grp.copy()
     work["load"] = pd.to_numeric(work.get("load"), errors="coerce")
@@ -619,6 +657,7 @@ def build_workbook_table(
         work["sample_label"] = work["sample"].astype(str)
     else:
         work["sample_label"] = work.get("sample_end", "").astype(str)
+    work["sample_name"] = work["sample_end"].map(sample_names).fillna(work["sample_label"])
 
     base_mask = (
         (work.get("dir") == "b")
@@ -641,8 +680,8 @@ def build_workbook_table(
     }
 
     for var in _EXPORT_ORDER:
-        base_series = baselines[var]
-        end_series = end_means[var]
+        base_series = baselines[var].reset_index().drop_duplicates("sample_end").set_index("sample_end")[var]
+        end_series = end_means[var].reset_index().drop_duplicates("sample_end").set_index("sample_end")[var]
         work[f"baseline_{var}"] = work["sample_end"].map(base_series)
         work[f"{var}_relative"] = work[var] - work[f"baseline_{var}"]
         delta_series = end_series - base_series.reindex(end_series.index)
@@ -653,6 +692,7 @@ def build_workbook_table(
         "title",
         "anneal",
         "sample_end",
+        "sample_name",
         "sample_label",
         "filename",
         "dir",
@@ -737,7 +777,7 @@ class ProgressDialog:
     """CLI progress bar used when no GUI is provided."""
 
     def __init__(self, total: int):
-        self.pbar = tqdm(total=total, desc="Processing", unit="plot")
+        self.pbar = tqdm(total=total, desc="Processing", unit="plot", disable=True)
         self.cancelled = False
         self.root = self
 

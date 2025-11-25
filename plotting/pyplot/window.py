@@ -131,6 +131,67 @@ def _should_force_light_text(color: Any) -> bool:
     return luminance < 0.6 and spread < 0.12
 
 
+def _sync_legend_text_colors(legend: Legend) -> None:
+    """Apply text-follows-handle behaviour when requested."""
+
+    if not isinstance(legend, Legend):
+        return
+    follow = getattr(legend, "_mw_text_follows_handles", False)
+    if not follow:
+        originals = getattr(legend, "_mw_text_original_colors", [])
+        if originals:
+            for text, color in zip(legend.get_texts(), originals):
+                try:
+                    text.set_color(color)
+                except Exception:
+                    continue
+        return
+    try:
+        handles = list(getattr(legend, "legendHandles", []))
+    except Exception:
+        handles = []
+    if not handles:
+        try:
+            handles = list(legend.legendHandles)
+        except Exception:
+            handles = []
+    texts = list(legend.get_texts())
+    if not texts:
+        return
+    originals = getattr(legend, "_mw_text_original_colors", [])
+    if not originals:
+        try:
+            originals = [text.get_color() for text in texts]
+        except Exception:
+            originals = []
+        setattr(legend, "_mw_text_original_colors", originals)
+    for text, handle in zip(texts, handles):
+        color = None
+        for getter_name in ("get_color", "get_facecolor"):
+            getter = getattr(handle, getter_name, None)
+            if callable(getter):
+                try:
+                    color = getter()
+                except Exception:
+                    color = None
+                if color is not None:
+                    break
+        if isinstance(color, (list, tuple)) and color:
+            color = color[0]
+        if isinstance(color, (list, tuple)) and len(color) >= 3:
+            color = color[:3]
+        if color is None:
+            continue
+        try:
+            text.set_color(color)
+        except Exception:
+            continue
+    try:
+        legend.figure.canvas.draw_idle()
+    except Exception:
+        pass
+
+
 class _MessageLogHandler(logging.Handler):
     """Logging handler that forwards PyPlot messages into the workspace log view."""
 
@@ -1376,9 +1437,16 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         self,
         parent: QtWidgets.QWidget | None,
         legend: Legend,
+        *,
+        plugin_name: str | None = None,
+        defaults: Dict[str, Any] | None = None,
+        on_save: Callable[[Dict[str, Any]], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self._legend = legend
+        self._on_save = on_save
+        self._defaults = defaults or {}
+        self._plugin_name = plugin_name
         try:
             original_text_colors = [text.get_color() for text in legend.get_texts()]
         except Exception:
@@ -1521,11 +1589,15 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         form.addRow("Marker scale", self.marker_scale_spin)
 
         stored_symbol_setting = getattr(legend, "_mw_show_symbols", True)
+        if stored_symbol_setting is None:
+            stored_symbol_setting = bool(self._defaults.get("show_symbols", True))
         self.symbol_checkbox = QtWidgets.QCheckBox("Show legend symbols", self)
         self.symbol_checkbox.setChecked(bool(stored_symbol_setting))
         form.addRow("", self.symbol_checkbox)
 
-        stored_follow_setting = getattr(legend, "_mw_text_follows_handles", False)
+        stored_follow_setting = getattr(legend, "_mw_text_follows_handles", None)
+        if stored_follow_setting is None:
+            stored_follow_setting = bool(self._defaults.get("text_follows_handles", True))
         self.text_color_follow_checkbox = QtWidgets.QCheckBox("Text colour follows plots", self)
         self.text_color_follow_checkbox.setChecked(bool(stored_follow_setting))
         form.addRow("", self.text_color_follow_checkbox)
@@ -1534,7 +1606,9 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         self.orientation_combo.addItem("Auto", "auto")
         self.orientation_combo.addItem("Horizontal", "horizontal")
         self.orientation_combo.addItem("Vertical", "vertical")
-        stored_orientation = getattr(legend, "_mw_orientation", "auto")
+        stored_orientation = getattr(legend, "_mw_orientation", None)
+        if stored_orientation is None:
+            stored_orientation = self._defaults.get("orientation", "auto")
         orientation_index = self.orientation_combo.findData(stored_orientation)
         if orientation_index < 0:
             orientation_index = 0
@@ -1546,7 +1620,10 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         self.placement_combo.addItem("Outside (right)", "outside")
         stored_placement = getattr(legend, "_mw_placement", None)
         if stored_placement is None:
-            stored_placement = "outside" if getattr(legend, "_bbox_to_anchor", None) else "inside"
+            stored_placement = self._defaults.get(
+                "placement",
+                "outside" if getattr(legend, "_bbox_to_anchor", None) else "inside",
+            )
         placement_index = self.placement_combo.findData(stored_placement)
         if placement_index < 0:
             placement_index = 0
@@ -1556,7 +1633,7 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         self.draggable_checkbox = QtWidgets.QCheckBox("Allow drag", self)
         stored_draggable = getattr(legend, "_mw_draggable", None)
         if stored_draggable is None:
-            stored_draggable = True
+            stored_draggable = self._defaults.get("draggable", True)
         self.draggable_checkbox.setChecked(bool(stored_draggable))
         try:
             legend.set_draggable(bool(stored_draggable))
@@ -1576,6 +1653,25 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         if apply_button is not None:
             apply_button.clicked.connect(self._apply)
         layout.addWidget(button_box)
+
+    def _persist_defaults(self) -> None:
+        follow_colors = self.text_color_follow_checkbox.isChecked()
+        show_symbols = self.symbol_checkbox.isChecked()
+        orientation = self.orientation_combo.currentData()
+        placement = self.placement_combo.currentData()
+        draggable = self.draggable_checkbox.isChecked()
+        payload = {
+            "text_follows_handles": follow_colors,
+            "show_symbols": show_symbols,
+            "orientation": orientation,
+            "placement": placement,
+            "draggable": draggable,
+        }
+        if callable(self._on_save):
+            try:
+                self._on_save(payload)
+            except Exception:
+                pass
 
     def _apply(self) -> None:
         legend = self._legend
@@ -1795,6 +1891,7 @@ class LegendSettingsDialog(QtWidgets.QDialog):
                     canvas.draw()
                 except Exception:
                     pass
+        self._persist_defaults()
 
     def accept(self) -> None:  # type: ignore[override]
         self._apply()
@@ -1846,6 +1943,28 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 candidate = Path(stored_export_dir)
                 if candidate.exists():
                     self._last_export_dir = candidate
+        if not hasattr(self, "_plugin_last_export_dirs"):
+            raw_export_dirs = "{}"
+            if isinstance(self.settings, QtCore.QSettings):
+                raw_export_dirs = self.settings.value("plugin_last_export_dirs", "{}")
+            try:
+                parsed_exports = json.loads(raw_export_dirs) if isinstance(raw_export_dirs, str) else {}
+            except json.JSONDecodeError:
+                parsed_exports = {}
+            self._plugin_last_export_dirs: Dict[str, Path] = {
+                key: Path(value) for key, value in parsed_exports.items() if isinstance(value, str)
+            }
+        raw_legend_settings = "{}"
+        if isinstance(self.settings, QtCore.QSettings):
+            raw_legend_settings = self.settings.value("legend_settings_by_plugin", "{}")
+        try:
+            parsed_legend_settings = json.loads(raw_legend_settings) if isinstance(raw_legend_settings, str) else {}
+        except json.JSONDecodeError:
+            parsed_legend_settings = {}
+        self._legend_settings_by_plugin: Dict[str, Dict[str, Any]] = (
+            parsed_legend_settings if isinstance(parsed_legend_settings, dict) else {}
+        )
+        self._legend_color_cache: Dict[int, list[Any]] = {}
 
         # Tab/graph bookkeeping shared by subclasses.
         self._tab_descriptors: Dict[QtWidgets.QWidget, TabDescriptor] = {}
@@ -2236,6 +2355,105 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 "No visible data series were available to plot.",
             )
 
+    def _tab_plugin_name(self, descriptor: TabDescriptor | None = None) -> str | None:
+        if descriptor is not None and isinstance(descriptor.metadata, dict):
+            plugin_name = descriptor.metadata.get("plugin") or descriptor.metadata.get("plugin_name")
+            if isinstance(plugin_name, str) and plugin_name.strip():
+                return plugin_name.strip()
+        current = getattr(self, "_current_plotter_name", None)
+        if isinstance(current, str) and current.strip():
+            return current.strip()
+        return None
+
+    def _plugin_import_directory(self, plugin_name: str | None) -> Path | None:
+        if not plugin_name:
+            return None
+        plugin_dirs = getattr(self, "_plugin_last_directories", None)
+        if isinstance(plugin_dirs, dict):
+            candidate = plugin_dirs.get(plugin_name)
+            if isinstance(candidate, Path) and candidate.exists():
+                return candidate
+        return None
+
+    def _plugin_export_directory(self, plugin_name: str | None) -> Path | None:
+        if not plugin_name:
+            return None
+        plugin_dirs = getattr(self, "_plugin_last_export_dirs", None)
+        if isinstance(plugin_dirs, dict):
+            candidate = plugin_dirs.get(plugin_name)
+            if isinstance(candidate, Path) and candidate.exists():
+                return candidate
+            if isinstance(candidate, str):
+                path_candidate = Path(candidate)
+                if path_candidate.exists():
+                    return path_candidate
+        return None
+
+    def _preferred_export_directory(
+        self,
+        plugin_name: str | None,
+        *candidates: Path | None,
+    ) -> Path:
+        options: list[Path | None] = [
+            self._plugin_export_directory(plugin_name),
+            self._plugin_import_directory(plugin_name),
+        ]
+        options.extend(candidates)
+        options.append(Path.home())
+        for candidate in options:
+            if isinstance(candidate, Path):
+                try:
+                    if candidate.exists():
+                        return candidate
+                except Exception:
+                    continue
+        return Path.home()
+
+    def _remember_plugin_export_dir(self, plugin_name: str | None, path: Path | None) -> None:
+        if not plugin_name or not isinstance(path, Path):
+            return
+        plugin_dirs = getattr(self, "_plugin_last_export_dirs", None)
+        if not isinstance(plugin_dirs, dict):
+            plugin_dirs = {}
+            self._plugin_last_export_dirs = plugin_dirs
+        plugin_dirs[plugin_name] = path
+        settings = getattr(self, "settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            payload = {key: str(value) for key, value in plugin_dirs.items()}
+            try:
+                settings.setValue("plugin_last_export_dirs", json.dumps(payload))
+                settings.sync()
+            except Exception:
+                pass
+
+    def _legend_settings_for(self, plugin_name: str | None) -> Dict[str, Any]:
+        settings = self._legend_settings_by_plugin.get(plugin_name or "", {})
+        defaults = {
+            "text_follows_handles": True,
+            "show_symbols": True,
+            "orientation": "auto",
+            "placement": "inside",
+            "draggable": True,
+        }
+        merged = {**defaults, **settings} if isinstance(settings, dict) else defaults
+        if plugin_name:
+            self._legend_settings_by_plugin.setdefault(plugin_name, merged)
+        return merged
+
+    def _remember_legend_settings(self, plugin_name: str | None, payload: Dict[str, Any]) -> None:
+        if not plugin_name:
+            return
+        if not isinstance(self._legend_settings_by_plugin, dict):
+            self._legend_settings_by_plugin = {}
+        self._legend_settings_by_plugin[plugin_name] = dict(payload)
+        settings = getattr(self, "settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            try:
+                settings.setValue("legend_settings_by_plugin", json.dumps(self._legend_settings_by_plugin))
+                settings.sync()
+            except Exception:
+                pass
+
     def _save_current_graph(self) -> None:
         self._save_graph_for_current_tab()
 
@@ -2281,6 +2499,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
             return False
 
+        plugin_name = self._tab_plugin_name(descriptor)
+
         def _clean_stem(text: str) -> str:
             stem_chars = [
                 ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in text
@@ -2301,14 +2521,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             default_name = "Graph"
         suggested_filename = _clean_stem(default_name) + ".png"
 
-        start_dir = getattr(self, "_last_graph_dir", None)
-        if not isinstance(start_dir, Path) or not start_dir.exists():
-            project_path = getattr(self, "_project_path", None)
-            if isinstance(project_path, Path) and project_path.exists():
-                start_dir = project_path.parent
-        if not isinstance(start_dir, Path) or not start_dir.exists():
-            start_dir = Path.home()
-        suggested_path = start_dir / suggested_filename
+        project_path = getattr(self, "_project_path", None)
+        project_parent = project_path.parent if isinstance(project_path, Path) and project_path.exists() else None
+        start_dir = self._preferred_export_directory(
+            plugin_name,
+            getattr(self, "_last_graph_dir", None),
+            project_parent,
+        )
+        suggested_path = Path(start_dir) / suggested_filename
 
         filters = "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;All files (*)"
         path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
@@ -2349,6 +2569,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if status is not None:
             status.showMessage(f"Saved graph to {path}", 5000)
 
+        self._remember_plugin_export_dir(plugin_name, path.parent)
         if descriptor is not None:
             try:
                 descriptor.metadata["saved_path"] = str(path)
@@ -2399,6 +2620,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
             return
 
+        plugin_name = self._tab_plugin_name(descriptor)
         series: list[tuple[str, Any, Any]] = []
         for index, state in enumerate(descriptor.lines.values(), start=1):
             label = state.label or f"Series {index}"
@@ -2442,15 +2664,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         default_name = descriptor.root_label or descriptor.title or "graph"
         suggested = _clean_stem(default_name) + ".txt"
 
-        start_dir = getattr(self, "_last_export_dir", None)
-        if not isinstance(start_dir, Path) or not start_dir.exists():
-            start_dir = getattr(self, "_last_graph_dir", None)
-        if not isinstance(start_dir, Path) or not start_dir.exists():
-            project_path = getattr(self, "_project_path", None)
-            if isinstance(project_path, Path) and project_path.exists():
-                start_dir = project_path.parent
-        if not isinstance(start_dir, Path) or not start_dir.exists():
-            start_dir = Path.home()
+        project_path = getattr(self, "_project_path", None)
+        project_parent = project_path.parent if isinstance(project_path, Path) and project_path.exists() else None
+        start_dir = self._preferred_export_directory(
+            plugin_name,
+            getattr(self, "_last_export_dir", None),
+            getattr(self, "_last_graph_dir", None),
+            project_parent,
+        )
 
         path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             self,
@@ -2499,6 +2720,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             self._last_export_dir = path.parent
         except Exception:
             self._last_export_dir = None
+        self._remember_plugin_export_dir(plugin_name, path.parent)
         settings = getattr(self, "settings", None)
         if isinstance(settings, QtCore.QSettings):
             if isinstance(self._last_export_dir, Path):
@@ -4529,6 +4751,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         state = self._axes_theme_state.setdefault(axes, {})
 
         text_state = state.setdefault("text_items", {})
+        legend = None
 
         if enabled:
             if "figure_face" not in state and figure is not None:
@@ -4554,7 +4777,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 except Exception:
                     state.setdefault("grid_color", None)
                     state.setdefault("grid_alpha", None)
-            legend = None
             try:
                 legend = axes.get_legend()
             except Exception:
@@ -4608,18 +4830,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     artist.set_color(light_text)
                 except Exception:
                     pass
-            if legend is not None:
-                try:
-                    legend.get_frame().set_facecolor(dark_face)
-                    legend.get_frame().set_edgecolor(light_text)
-                except Exception:
-                    pass
-                for text in legend.get_texts():
-                    if _should_force_light_text(text.get_color()):
-                        text.set_color(light_text)
-                title_artist = legend.get_title()
-                if title_artist is not None and _should_force_light_text(title_artist.get_color()):
-                    title_artist.set_color(light_text)
+        if legend is not None:
+            try:
+                legend.get_frame().set_facecolor(dark_face)
+                legend.get_frame().set_edgecolor(light_text)
+            except Exception:
+                pass
+            for text in legend.get_texts():
+                if _should_force_light_text(text.get_color()):
+                    text.set_color(light_text)
+            _sync_legend_text_colors(legend)
+            title_artist = legend.get_title()
+            if title_artist is not None and _should_force_light_text(title_artist.get_color()):
+                title_artist.set_color(light_text)
         else:
             if figure is not None and "figure_face" in state:
                 figure.patch.set_facecolor(state["figure_face"])
@@ -4655,10 +4878,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     pass
                 text_colors = meta.get("text_colors", [])
                 for text, color in zip(legend.get_texts(), text_colors):
-                    text.set_color(color)
+                    try:
+                        text.set_color(color)
+                    except Exception:
+                        pass
                 title_artist = legend.get_title()
                 if title_artist is not None and meta.get("title_color") is not None:
                     title_artist.set_color(meta.get("title_color"))
+                _sync_legend_text_colors(legend)
             original_grid_color = state.get("grid_color")
             original_grid_alpha = state.get("grid_alpha")
             if original_grid_color is not None:
@@ -4687,6 +4914,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 canvas.draw_idle()
             except Exception:
                 pass
+
+    def accept(self) -> None:  # type: ignore[override]
+        self._apply()
+        self._persist_defaults()
+        super().accept()
         return canvas
     def _prompt_import_data(self) -> None:
         files_action = getattr(self, "_import_files_action", None)
@@ -4967,6 +5199,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 pass
         if descriptor is not None:
             self._tab_descriptors[tab] = descriptor
+            plugin_name = self._tab_plugin_name(descriptor)
+            if plugin_name and isinstance(descriptor.metadata, dict) and "plugin" not in descriptor.metadata:
+                descriptor.metadata["plugin"] = plugin_name
             item = self._ensure_graph_tree_item(tab, descriptor)
             if item is not None:
                 self._graph_tree_items[tab] = item
@@ -6710,7 +6945,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         legend = data.get("object")
         if not isinstance(legend, Legend):
             return
-        dialog = LegendSettingsDialog(self, legend)
+        current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+        descriptor = self._tab_descriptors.get(current_tab)
+        plugin_name = self._tab_plugin_name(descriptor)
+        defaults = self._legend_settings_for(plugin_name)
+        dialog = LegendSettingsDialog(
+            self,
+            legend,
+            plugin_name=plugin_name,
+            defaults=defaults,
+            on_save=lambda payload: self._remember_legend_settings(plugin_name, payload),
+        )
         if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return
         try:
@@ -6730,6 +6975,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         tree = getattr(self, "object_tree", None)
         if not isinstance(tree, QtWidgets.QTreeWidget):
             return
+        descriptor = self._tab_descriptors.get(tab) if hasattr(self, "_tab_descriptors") else None
+        plugin_name = self._tab_plugin_name(descriptor)
+        legend_defaults = self._legend_settings_for(plugin_name)
         tree.blockSignals(True)
         self._object_tree_updating = True
         tree.clear()
@@ -6891,19 +7139,81 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 continue
             legend_seen.add(id(legend))
             try:
+                legend_handles: list[Any] = []
+                for attr in ("legendHandles", "legend_handles"):
+                    value = getattr(legend, attr, None)
+                    if value:
+                        try:
+                            legend_handles = list(value)
+                        except Exception:
+                            legend_handles = []
+                        if legend_handles:
+                            break
+                if not legend_handles:
+                    try:
+                        legend_handles = list(legend.legendHandles)
+                    except Exception:
+                        legend_handles = []
+            except Exception:
+                legend_handles = []
+            try:
                 if not hasattr(legend, "_mw_show_symbols"):
-                    legend._mw_show_symbols = True
+                    legend._mw_show_symbols = bool(legend_defaults.get("show_symbols", True))
                 if not hasattr(legend, "_mw_text_follows_handles"):
-                    legend._mw_text_follows_handles = False
+                    legend._mw_text_follows_handles = bool(legend_defaults.get("text_follows_handles", True))
                 if not hasattr(legend, "_mw_orientation"):
-                    legend._mw_orientation = "auto"
+                    legend._mw_orientation = legend_defaults.get("orientation", "auto")
                 if not hasattr(legend, "_mw_placement"):
-                    legend._mw_placement = "inside"
-                    legend.set_bbox_to_anchor(None)
+                    legend._mw_placement = legend_defaults.get("placement", "inside")
+                    if legend._mw_placement == "outside":
+                        axes = getattr(legend, "axes", None)
+                        if axes is not None:
+                            try:
+                                legend.set_bbox_to_anchor((1.02, 1.0), transform=axes.transAxes)
+                            except Exception:
+                                pass
+                    else:
+                        legend.set_bbox_to_anchor(None)
                 if not hasattr(legend, "_mw_draggable"):
-                    legend._mw_draggable = True
+                    legend._mw_draggable = bool(legend_defaults.get("draggable", True))
                 if not getattr(legend, "get_draggable", lambda: True)():
                     legend.set_draggable(True)
+                if legend._mw_text_follows_handles and legend_handles:
+                    try:
+                        legend_texts = list(legend.get_texts())
+                    except Exception:
+                        legend_texts = []
+                    originals = getattr(legend, "_mw_text_original_colors", [])
+                    if not originals:
+                        try:
+                            originals = [text.get_color() for text in legend_texts]
+                        except Exception:
+                            originals = []
+                        setattr(legend, "_mw_text_original_colors", originals)
+                    for text, handle in zip(legend_texts, legend_handles):
+                        color = None
+                        getter = getattr(handle, "get_color", None)
+                        if callable(getter):
+                            try:
+                                color = getter()
+                            except Exception:
+                                color = None
+                        if color is None:
+                            getter = getattr(handle, "get_facecolor", None)
+                            if callable(getter):
+                                try:
+                                    color = getter()
+                                except Exception:
+                                    color = None
+                                if isinstance(color, (list, tuple)) and color:
+                                    color = color[0]
+                        if isinstance(color, (list, tuple)) and len(color) >= 3:
+                            color = color[:3]
+                        if color is not None:
+                            try:
+                                text.set_color(color)
+                            except Exception:
+                                pass
             except Exception:
                 pass
             try:
@@ -7775,7 +8085,19 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
         self._owner: _MdiTabProxy | None = None
         self._resizing = False
         self.setWindowFlag(QtCore.Qt.WindowType.Tool, False)
-        self.setWidgetResizable(True)
+        set_resizable = getattr(QtWidgets.QMdiSubWindow, "setWidgetResizable", None)
+        if callable(set_resizable):
+            try:
+                set_resizable(self, True)
+            except Exception:
+                pass
+        try:
+            self.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        except Exception:
+            pass
 
     def set_owner(self, owner: "_MdiTabProxy") -> None:
         self._owner = owner

@@ -10,6 +10,14 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Dock switchers** sit on the left/right edges so you can collapse/restore the Project Explorer, Message Log, and Object Manager without losing their placement.
 - **Undo/Redo** are exposed on the Edit menu (Ctrl+Z / Ctrl+Y). They track tab changes, worksheet tabs, and other session actions.
 - **Saving** uses `.pypj` project files. When a session contains imported data or generated worksheets PyPlot prompts you to save, discard, or cancel if you try to close the window.
+- **Folder memory** is scoped per plug-in. Import file pickers, graph saves, and TXT exports reopen in the last folder used by that plug-in instead of sharing a single global path; plug-ins can also call `PyPlotPlugin.preferred_export_directory(...)` / `remember_export_directory(...)` to share the same history.
+- **Legends** default to “text colour follows plot” for every plug-in. Legend options (show symbols, placement, orientation, drag, follow colours) are remembered per plug-in between sessions so each workflow keeps its own defaults.
+
+## Origin export checklist
+- Use the same titles/axis labels as the Matplotlib view (include composition/title/anneal and variable label).
+- Preserve sample labels on X and long name/units/comments rows in the Origin worksheets (baseline, deltas, relative values documented).
+- Match symbol sizes/colours and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
+- Avoid terminal spam (disable tqdm/console progress) and keep graph extents so nothing is cropped after export.
 
 ## Built-in Plug-ins
 

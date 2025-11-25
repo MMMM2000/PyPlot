@@ -49,7 +49,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         self._include_dep_checkbox: QtWidgets.QCheckBox | None = None
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
-        self._last_export_dir: Path | None = None
+        stored_export = getattr(host, "_plugin_last_export_dirs", {}).get(name)
+        self._last_export_dir: Path | None = stored_export if isinstance(stored_export, Path) else None
         self._workbook_keys: Dict[str, str] = {}
         self._managed_workbooks: set[str] = set()
     # Lifecycle -----------------------------------------------------
@@ -193,102 +194,108 @@ class StressSensitivityPlugin(PyPlotPlugin):
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
 
-
-def _register_workbooks(self, config: dict[str, Any]) -> None:
-    data = self._data
-    if data is None:
-        return
-    host = self.host
-    window_module = window_api()
-    active_keys: set[str] = set()
-    variables = config.get("variables") or list(sens_core.LABELS.keys())
-    grouped = data.groupby(["composition", "title", "anneal"], dropna=False)
-    for (composition, title, anneal), group in grouped:
-        try:
-            table, _ = sens_core.build_workbook_table(group)
-        except Exception as exc:
-            self._log(f"Failed to prepare workbook data: {exc}", level="error")
-            continue
-        for variable in variables:
-            raw_columns = [
-                "composition",
-                "title",
-                "anneal",
-                "sample_end",
-                "sample_label",
-                "filename",
-                "dir",
-                "load",
-                "line",
-                variable,
-                f"{variable}_relative",
-                f"baseline_{variable}",
-                f"delta_{variable}",
-            ]
-            available = [column for column in raw_columns if column in table.columns]
-            if not available:
+    def _register_workbooks(self, config: dict[str, Any]) -> None:
+        data = self._data
+        if data is None:
+            return
+        host = self.host
+        window_module = window_api()
+        active_keys: set[str] = set()
+        variables = config.get("variables") or list(sens_core.LABELS.keys())
+        grouped = data.groupby(["composition", "title", "anneal"], dropna=False)
+        for (composition, title, anneal), group in grouped:
+            try:
+                table, _ = sens_core.build_workbook_table(group)
+            except Exception as exc:
+                self._log(f"Failed to prepare workbook data: {exc}", level="error")
                 continue
-            frame = table[available].copy()
-            if frame.empty:
-                continue
-            workbook_id = f"{composition}|{title}|{anneal}|{variable}"
-            key = self._workbook_keys.get(workbook_id)
-            if not key:
-                safe_id = sens_core._sanitise_stem(composition, title, anneal, variable)  # type: ignore[attr-defined]
-                key = f"stress_sensitivity::{safe_id}"
-                self._workbook_keys[workbook_id] = key
-            label = sens_core.LABELS.get(variable, variable)
-            workbook = window_module.WorkbookData(
-                key=key,
-                name=f"{composition} {anneal} - {label}",
-                worksheets=[],
-                source=None,
-                folder=None,
-            )
-            worksheet = host._create_worksheet_from_frame(workbook, "Processed data", frame)
-            self._apply_column_meta(window_module, worksheet, variable)
-            workbook.worksheets = [worksheet.key]
-            host._register_imported_workbook(workbook, [worksheet])
-            active_keys.add(workbook.key)
-    stale = self._managed_workbooks - active_keys
-    if stale:
-        self._remove_managed_workbooks(stale)
-    self._managed_workbooks = active_keys
-    if active_keys or stale:
-        host._refresh_imported_data_summary()
-        host._sync_selected_paths_with_imports()
+            for variable in variables:
+                raw_columns = [
+                    "composition",
+                    "title",
+                    "anneal",
+                    "sample_end",
+                    "sample_label",
+                    "filename",
+                    "dir",
+                    "load",
+                    "line",
+                    variable,
+                    f"{variable}_relative",
+                    f"baseline_{variable}",
+                    f"delta_{variable}",
+                ]
+                available = [column for column in raw_columns if column in table.columns]
+                if not available:
+                    continue
+                frame = table[available].copy()
+                if frame.empty:
+                    continue
+                workbook_id = f"{composition}|{title}|{anneal}|{variable}"
+                key = self._workbook_keys.get(workbook_id)
+                if not key:
+                    safe_id = sens_core._sanitise_stem(composition, title, anneal, variable)  # type: ignore[attr-defined]
+                    key = f"stress_sensitivity::{safe_id}"
+                    self._workbook_keys[workbook_id] = key
+                label = sens_core.LABELS.get(variable, variable)
+                workbook = window_module.WorkbookData(
+                    key=key,
+                    name=f"{composition} {anneal} - {label}",
+                    worksheets=[],
+                    source=None,
+                    folder=None,
+                )
+                worksheet = host._create_worksheet_from_frame(workbook, "Processed data", frame)
+                self._apply_column_meta(window_module, worksheet, variable)
+                workbook.worksheets = [worksheet.key]
+                host._register_imported_workbook(workbook, [worksheet])
+                active_keys.add(workbook.key)
+        stale = self._managed_workbooks - active_keys
+        if stale:
+            self._remove_managed_workbooks(stale)
+        self._managed_workbooks = active_keys
+        if active_keys or stale:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
 
-def _apply_column_meta(
-    self,
-    window_module: Any,
-    worksheet: "WorksheetData" | None,
-    variable: str,
-) -> None:
-    if worksheet is None:
-        return
-    units = _format_units(_variable_units(variable))
-    label = sens_core.LABELS.get(variable, variable)
-    meta_map = {
-        "composition": ("Composition", None),
-        "title": ("Title", None),
-        "anneal": ("Anneal", None),
-        "sample_end": ("Sample end", None),
-        "sample_label": ("Sample label", None),
-        "filename": ("Source file", None),
-        "dir": ("Direction", None),
-        "load": ("Load", "g"),
-        "line": ("Line", None),
-        variable: (label, units),
-        f"{variable}_relative": (f"{label} relative", units),
-        f"baseline_{variable}": (f"{label} baseline", units),
-        f"delta_{variable}": (f"{label} delta", units),
-    }
-    for column, (long_name, units_text) in meta_map.items():
-        meta = worksheet.columns.get(column)
-        if isinstance(meta, window_module.WorksheetColumnMeta):
-            meta.long_name = long_name
-            meta.units = units_text
-
+    def _apply_column_meta(
+        self,
+        window_module: Any,
+        worksheet: "WorksheetData" | None,
+        variable: str,
+    ) -> None:
+        if worksheet is None:
+            return
+        units = _format_units(_variable_units(variable))
+        label = sens_core.LABELS.get(variable, variable)
+        meta_map = {
+            "composition": ("Composition", None),
+            "title": ("Title", None),
+            "anneal": ("Anneal", None),
+            "sample_end": ("Sample end", None),
+            "sample_label": ("Sample label", None),
+            "filename": ("Source file", None),
+            "dir": ("Direction", None),
+            "load": ("Load", "g"),
+            "line": ("Line", None),
+            variable: (label, units),
+            f"{variable}_relative": (f"{label} relative", units),
+            f"baseline_{variable}": (f"{label} baseline", units),
+            f"delta_{variable}": (f"{label} delta", units),
+        }
+        for column, (long_name, units_text) in meta_map.items():
+            meta = worksheet.columns.get(column)
+            if isinstance(meta, window_module.WorksheetColumnMeta):
+                meta.long_name = long_name
+                meta.units = units_text
+                if column.startswith("baseline_"):
+                    meta.comments = f"Baseline at {sens_core.BASE_LOAD} g"
+                elif column.startswith("delta_"):
+                    meta.comments = f"Delta (end at {sens_core.END_LOAD} g minus baseline)"
+                elif column.endswith("_relative"):
+                    meta.comments = "Value - baseline"
+                elif column == variable:
+                    meta.comments = label
 
     def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
         host = self.host
@@ -485,15 +492,11 @@ def _apply_column_meta(
             )
             return
         self._apply_settings_to_core()
-        start_dir = (
-            str(self._last_export_dir)
-            if self._last_export_dir is not None
-            else ""
-        )
+        start_dir = self.host._preferred_export_directory(self.name, self._last_export_dir)
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self.host,
             "Select TXT export folder",
-            start_dir or str(Path.home()),
+            str(start_dir),
         )
         if not directory:
             return
@@ -522,6 +525,7 @@ def _apply_column_meta(
             )
             return
         self._last_export_dir = target
+        self.host._remember_plugin_export_dir(self.name, target)
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,

@@ -38,7 +38,10 @@ class StressDependencePlugin(PyPlotPlugin):
         self._processed_checkbox: QtWidgets.QCheckBox | None = None
         self._med_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
-        self._last_export_dir: Path | None = None
+        stored_export = getattr(host, "_plugin_last_export_dirs", {}).get(name)
+        self._last_export_dir: Path | None = stored_export if isinstance(stored_export, Path) else None
+        self._workbook_keys: dict[str, str] = {}
+        self._managed_workbooks: set[str] = set()
     # Lifecycle -----------------------------------------------------
     def activate(self) -> None:  # type: ignore[override]
         self.host._set_data_sources_visible(True)
@@ -202,6 +205,7 @@ class StressDependencePlugin(PyPlotPlugin):
                 "Select stress dependence files, load them, then generate plots."
             )
         self._log(f"Loaded {len(paths)} stress dependence file(s).")
+        self._register_workbooks(paths)
         self.update_ui()
 
     def _clear_existing_tabs(self) -> None:
@@ -216,6 +220,95 @@ class StressDependencePlugin(PyPlotPlugin):
                 if index >= 0:
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
+
+    # ------------------------------------------------------------------ workbook helpers
+    def _register_workbooks(self, paths: Iterable[Path]) -> None:
+        data = self._data
+        if data is None or "filename" not in data.columns:
+            return
+        host = self.host
+        window_module = window_api()
+        grouped = data.groupby("filename", dropna=False)
+        active_keys: set[str] = set()
+        meta_map = {
+            "T1": ("T1", "µs"),
+            "T2": ("T2", "µs"),
+            "dT": ("T2–T1", "µs"),
+            "sum": ("T1+T2", "µs"),
+            "load": ("Load", "g"),
+        }
+        columns_order = [
+            "line",
+            "load",
+            "dir",
+            "T1",
+            "T2",
+            "dT",
+            "sum",
+            "composition",
+            "title",
+            "sample_end",
+            "anneal",
+        ]
+        for path in paths:
+            file_name = path.name
+            if file_name not in grouped.groups:
+                continue
+            subset = grouped.get_group(file_name).copy().reset_index(drop=True)
+            available = [column for column in columns_order if column in subset.columns]
+            extras = [column for column in subset.columns if column not in available and column != "filename"]
+            frame = subset[available + extras] if available or extras else subset
+            key = self._workbook_keys.get(str(path))
+            if not key:
+                try:
+                    resolved = path.resolve()
+                except Exception:
+                    resolved = path
+                key = f"stress_dependence::{resolved}"
+                self._workbook_keys[str(path)] = key
+            workbook = window_module.WorkbookData(
+                key=key,
+                name=f"{path.stem} (stress dependence)",
+                worksheets=[],
+                source=path,
+                folder=path.parent,
+            )
+            worksheet = host._create_worksheet_from_frame(workbook, "Stress dependence", frame)
+            for column, (long_name, units) in meta_map.items():
+                meta = worksheet.columns.get(column)
+                if isinstance(meta, window_module.WorksheetColumnMeta):
+                    meta.long_name = long_name
+                    meta.units = units
+            workbook.worksheets = [worksheet.key]
+            host._register_imported_workbook(workbook, [worksheet])
+            active_keys.add(workbook.key)
+        stale = self._managed_workbooks - active_keys
+        if stale:
+            self._remove_managed_workbooks(stale)
+        self._managed_workbooks = active_keys
+        if active_keys or stale:
+            host._refresh_imported_data_summary()
+            host._sync_selected_paths_with_imports()
+
+    def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
+        host = self.host
+        for key in keys:
+            workbook = host._workbooks.get(key)
+            if workbook is not None:
+                for sheet_key in list(workbook.worksheets):
+                    host._remove_worksheet(sheet_key)
+            host._workbooks.pop(key, None)
+            item = host._data_workbook_items.pop(key, None)
+            if item is not None:
+                parent = item.parent()
+                if parent is not None:
+                    index = parent.indexOfChild(item)
+                    if index >= 0:
+                        parent.takeChild(index)
+            self._managed_workbooks.discard(key)
+        cleanup = getattr(host, "_remove_workbook_root_if_empty", None)
+        if callable(cleanup):
+            cleanup()
 
     def generate(self) -> None:  # type: ignore[override]
         if self._data is None:
@@ -334,7 +427,9 @@ class StressDependencePlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        if not self._loaded_files:
+        if self._data is None:
+            self.load_data()
+        if self._data is None or not self._loaded_files:
             QtWidgets.QMessageBox.information(
                 self.host,
                 self.name,
@@ -364,16 +459,11 @@ class StressDependencePlugin(PyPlotPlugin):
             )
             return
         self._apply_settings_to_core()
-        start_dir = (
-            str(self._last_export_dir)
-            if self._last_export_dir is not None
-            else ""
-            or ""
-        )
+        start_dir = self.host._preferred_export_directory(self.name, self._last_export_dir)
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self.host,
             "Select TXT export folder",
-            start_dir or str(Path.home()),
+            str(start_dir),
         )
         if not directory:
             return
@@ -402,6 +492,7 @@ class StressDependencePlugin(PyPlotPlugin):
             )
             return
         self._last_export_dir = target
+        self.host._remember_plugin_export_dir(self.name, target)
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,

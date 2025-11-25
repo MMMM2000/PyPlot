@@ -52,7 +52,8 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         self._deriv_median_spin: QtWidgets.QSpinBox | None = None
         self._deriv_ma_spin: QtWidgets.QSpinBox | None = None
         self._overlay_cb: QtWidgets.QCheckBox | None = None
-        self._last_export_dir: Path | None = None
+        stored_export = getattr(host, "_plugin_last_export_dirs", {}).get(name)
+        self._last_export_dir: Path | None = stored_export if isinstance(stored_export, Path) else None
         self._managed_workbooks: set[str] = set()
         self._plot_tabs: list[QtWidgets.QWidget] = []
 
@@ -411,11 +412,11 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         if self._dataset is None:
             return
         self._apply_smoothing_settings()
-        start_dir = str(self._last_export_dir) if self._last_export_dir else str(Path.home())
+        start_dir = self.host._preferred_export_directory(self.name, self._last_export_dir)
         directory = QtWidgets.QFileDialog.getExistingDirectory(
             self.host,
             "Select TXT export folder",
-            start_dir,
+            str(start_dir),
         )
         if not directory:
             return
@@ -427,6 +428,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             self._log(f"TXT export failed: {exc}", level="error")
             return
         self._last_export_dir = target
+        self.host._remember_plugin_export_dir(self.name, target)
         self._log(f"Exported TXT files to {target}")
 
     def open_origin(self) -> None:  # type: ignore[override]
