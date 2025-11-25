@@ -456,6 +456,7 @@ def plot_samples_origin(
     label_map = df.set_index("sample_end").get("sample_label", pd.Series(dtype=str))
     samples = sample_order
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
+    delta_map: dict[str, float] = {}
 
     # Build raw points and means for b-direction only, baseline at BASE_LOAD
     frames_raw_odd = []
@@ -523,7 +524,7 @@ def plot_samples_origin(
                 pass
         return op.new_sheet('w', lname=name)
 
-    def _apply_column_meta(sheet_obj: Any, x_label: str, y_label: str) -> None:
+    def _apply_column_meta(sheet_obj: Any, x_label: str, y_label: str, *, comments: str = "") -> None:
         try:
             cols = getattr(sheet_obj, "cols", None)
             if cols and len(cols) >= 2:
@@ -532,7 +533,7 @@ def plot_samples_origin(
                 cols[0].comments = "Sample"
                 cols[1].lname = y_label
                 cols[1].units = LABELS.get(var, "")
-                cols[1].comments = LABELS.get(var, "")
+                cols[1].comments = comments or LABELS.get(var, "")
         except Exception:
             pass
     gp_obj = op.new_graph(template='scatter')
@@ -556,7 +557,7 @@ def plot_samples_origin(
             w = cast(Any, sheet)
             w.from_df(raw_odd)
             w.cols_axis('XY')
-            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
+            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments="Raw odd loads")
             p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
             try:
                 p.color = RAW_ALT_COLORS[1]
@@ -569,7 +570,7 @@ def plot_samples_origin(
             w = cast(Any, sheet)
             w.from_df(raw_even)
             w.cols_axis('XY')
-            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
+            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments="Raw even loads")
             p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
             try:
                 p.color = RAW_ALT_COLORS[0]
@@ -584,7 +585,7 @@ def plot_samples_origin(
         w = cast(Any, sheet)
         w.from_df(mean_df)
         w.cols_axis('XY')
-        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
+        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments="Mean")
         p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
         try:
             p.color = color
@@ -600,7 +601,7 @@ def plot_samples_origin(
         w = cast(Any, sheet)
         w.from_df(cont_df)
         w.cols_axis('XY')
-        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"))
+        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments=f"Processed med {med_window} + mwa {ma_window}")
         p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
         try:
             p.color = 'black'
@@ -622,14 +623,81 @@ def plot_samples_origin(
 
     # apply X tick labels (samples) and mirror axes like Matplotlib
     try:
-        tick_labels = [label_map.get(s, s) for s in samples]
-        gl.x.type = 4  # custom labels
-        gl.x.from_ = 0.5
-        gl.x.to = len(samples) + 0.5
-        gl.x.inc = 0.5
-        gl.x.label = tick_labels
+        gl.set_int('x.top', 0); gl.set_int('y.right', 0)
+        gl.set_int('x.top.label.show', 0); gl.set_int('y.right.label.show', 0)
+        gl.set_int('x.top.ticklabels', 0); gl.set_int('y.right.ticklabels', 0)
+        gl.set_int('x.label.show', 0); gl.set_int('x.ticklabels', 0)
     except Exception:
         pass
+    for idx in range(1, len(samples) + 1):
+        try:
+            gl.remove_label(f'py_xtick{idx}')
+        except Exception:
+            pass
+    try:
+        bottom = getattr(gl.axis('y'), 'from_', None)
+    except Exception:
+        bottom = None
+    for idx, sample in enumerate(samples, start=1):
+        label = label_map.get(sample, sample)
+        try:
+            lbl = gl.add_label(label, float(idx), float(bottom or 0))
+        except Exception:
+            lbl = None
+        if lbl is None:
+            continue
+        try:
+            lbl.name = f'py_xtick{idx}'
+            lbl.set_int('attach', 0)
+            lbl.set_int('horzalign', 1)
+            lbl.set_int('vertalign', 2)
+            lbl.set_int('fontweight', 700)
+        except Exception:
+            pass
+
+    # Delta labels mirroring Matplotlib
+    for idx, sample in enumerate(samples, start=1):
+        delta_val = delta_map.get(sample)
+        if delta_val is None or np.isnan(delta_val):
+            continue
+        try:
+            lbl = gl.add_label(f"{delta_val:.1f}", float(idx), float(delta_val))
+        except Exception:
+            lbl = None
+        if lbl is None:
+            continue
+        try:
+            lbl.set_int('attach', 0)
+            lbl.set_int('horzalign', 1)
+            lbl.set_int('vertalign', 0 if delta_val >= 0 else 1)
+            lbl.set_int('fontweight', 700)
+        except Exception:
+            pass
+
+    # Build a consolidated workbook sheet with metadata rows
+    try:
+        processed_df, _meta = build_workbook_table(df)
+        sheet = _next_sheet('processed')
+        if sheet is not None:
+            w = cast(Any, sheet)
+            w.from_df(processed_df)
+            try:
+                cols = w.cols
+                for idx, col in enumerate(processed_df.columns):
+                    col_obj = cols[idx]
+                    col_obj.lname = col
+                    if col in LABELS:
+                        col_obj.units = LABELS[col]
+                    if col.startswith("baseline_"):
+                        col_obj.comments = f"Baseline at {BASE_LOAD} g"
+                    elif col.startswith("delta_"):
+                        col_obj.comments = f"Delta @ {END_LOAD} g - baseline"
+                    elif col.endswith("_relative"):
+                        col_obj.comments = "Value - baseline"
+            except Exception:
+                pass
+    except Exception:
+        logger.warning("Failed to build Origin workbook sheet", exc_info=True)
 
     hide_origin_workbook(op, book, gp)
 
