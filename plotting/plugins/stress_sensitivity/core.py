@@ -349,7 +349,8 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     # Give each sample enough horizontal space so its miniature dependence curve
     # spans ``CURVE_WIDTH`` units.  The figure width scales with ``CURVE_WIDTH``
     # to retain roughly the same level of detail regardless of the setting.
-    fig, ax = plt.subplots(figsize=(max(10, len(samples) * CURVE_WIDTH * 2.8), 6.8))
+    fig_width = max(9.0, len(samples) * CURVE_WIDTH * 1.8)
+    fig, ax = plt.subplots(figsize=(fig_width, 6.5))
 
     y_min, y_max = np.inf, -np.inf
     deltas = []
@@ -423,7 +424,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fig.subplots_adjust(left=0.18, right=0.99, bottom=0.3, top=0.9)
+    fig.subplots_adjust(left=0.12, right=0.98, bottom=0.2, top=0.88)
     apply_readability(ax, globals())
     fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
@@ -531,45 +532,21 @@ def plot_samples_origin(
     raw_odd = pd.concat(frames_raw_odd, ignore_index=True) if frames_raw_odd else pd.DataFrame(columns=['X','Y'])
     raw_even = pd.concat(frames_raw_even, ignore_index=True) if frames_raw_even else pd.DataFrame(columns=['X','Y'])
 
-    # Push to Origin
+    # Push to Origin (single worksheet with all series)
     book_obj = op.new_book('w', lname="Stress Sens (Python)")
     book = cast(Any, book_obj)
-    sheet_factory = None
-    if book is not None:
-        sheet_factory = getattr(book, "add_sheet", None)
-        try:
-            book.activate()
-        except Exception:
-            pass
-
-    def _next_sheet(name: str) -> Any | None:
-        if callable(sheet_factory):
-            try:
-                return sheet_factory(name)
-            except Exception:
-                pass
-        return op.new_sheet('w', lname=name)
-
-    def _apply_column_meta(sheet_obj: Any, x_label: str, y_label: str, *, comments: str = "") -> None:
-        try:
-            cols = getattr(sheet_obj, "cols", None)
-            if cols and len(cols) >= 2:
-                cols[0].lname = x_label
-                cols[0].units = ""
-                cols[0].comments = "Sample"
-                cols[1].lname = y_label
-                cols[1].units = LABELS.get(var, "")
-                cols[1].comments = comments or LABELS.get(var, "")
-        except Exception:
-            pass
     gp_obj = op.new_graph(template='scatter')
     gp = cast(Any, gp_obj)
     try:
         gl = cast(Any, gp[0])
     except Exception:
         gl = None
-    if gl is None:
+    if gp is None or gl is None:
         return
+    try:
+        book.activate()
+    except Exception:
+        pass
 
     try:
         gp.activate()
@@ -577,62 +554,187 @@ def plot_samples_origin(
     except Exception:
         pass
 
-    if not raw_odd.empty:
-        sheet = _next_sheet('raw_odd')
-        if sheet is not None:
-            w = cast(Any, sheet)
-            w.from_df(raw_odd)
-            w.cols_axis('XY')
-            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments="Raw odd loads")
-            p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
-            try:
-                p.color = RAW_ALT_COLORS[1]
-                p.symbol_size = RAW_MARKER_SIZE
-            except Exception:
-                pass
-    if not raw_even.empty:
-        sheet = _next_sheet('raw_even')
-        if sheet is not None:
-            w = cast(Any, sheet)
-            w.from_df(raw_even)
-            w.cols_axis('XY')
-            _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments="Raw even loads")
-            p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='s'))
-            try:
-                p.color = RAW_ALT_COLORS[0]
-                p.symbol_size = RAW_MARKER_SIZE
-            except Exception:
-                pass
+    # Build a combined worksheet
+    series_lengths: list[int] = [len(raw_odd), len(raw_even)]
+    series_lengths.extend(len(df_) for df_, _ in mean_lines)
+    series_lengths.extend(len(df_) for df_ in cont_lines)
+    if 'processed_df' in locals():
+        series_lengths.append(len(processed_df))
+    max_len = max(series_lengths) if series_lengths else 0
+    def _pad(series: list[Any], target: int) -> list[Any]:
+        return series + [np.nan] * (target - len(series))
 
-    for mean_df, color in mean_lines:
-        sheet = _next_sheet('mean')
-        if sheet is None:
+    plot_data: dict[str, list[Any]] = {}
+    plot_comments: dict[str, str] = {}
+    plot_units: dict[str, str] = {}
+
+    plot_data["raw_odd_x"] = _pad(raw_odd["X"].to_list(), max_len)
+    plot_data["raw_odd_y"] = _pad(raw_odd["Y"].to_list(), max_len)
+    plot_comments["raw_odd_x"] = "Raw odd loads (X)"
+    plot_comments["raw_odd_y"] = "Raw odd loads"
+    plot_units["raw_odd_y"] = LABELS.get(var, "")
+
+    plot_data["raw_even_x"] = _pad(raw_even["X"].to_list(), max_len)
+    plot_data["raw_even_y"] = _pad(raw_even["Y"].to_list(), max_len)
+    plot_comments["raw_even_x"] = "Raw even loads (X)"
+    plot_comments["raw_even_y"] = "Raw even loads"
+    plot_units["raw_even_y"] = LABELS.get(var, "")
+
+    mean_column_pairs: list[tuple[str, str, str]] = []
+    for idx, (m_df, color) in enumerate(mean_lines, start=1):
+        x_key = f"mean{idx}_x"
+        y_key = f"mean{idx}_y"
+        plot_data[x_key] = _pad(m_df["X"].to_list(), max_len)
+        plot_data[y_key] = _pad(m_df["Y"].to_list(), max_len)
+        plot_comments[x_key] = f"Mean line {idx} (X)"
+        plot_comments[y_key] = f"Mean line {idx}"
+        plot_units[y_key] = LABELS.get(var, "")
+        mean_column_pairs.append((x_key, y_key, color))
+
+    cont_column_pairs: list[tuple[str, str]] = []
+    if cont_lines:
+        for idx, cont_df in enumerate(cont_lines, start=1):
+            x_key = f"cont{idx}_x"
+            y_key = f"cont{idx}_y"
+            plot_data[x_key] = _pad(cont_df["X"].to_list(), max_len)
+            plot_data[y_key] = _pad(cont_df["Y"].to_list(), max_len)
+            plot_comments[x_key] = f"Processed {idx} (X)"
+            plot_comments[y_key] = f"Processed {idx} med {med_window} + mwa {ma_window}"
+            plot_units[y_key] = LABELS.get(var, "")
+            cont_column_pairs.append((x_key, y_key))
+
+    processed_df, _meta = build_workbook_table(df)
+    proc_padded = processed_df.reindex(range(max_len)).reset_index(drop=True)
+    combined_df = proc_padded.copy()
+    for key, values in plot_data.items():
+        combined_df[key] = values
+
+    sheet = op.new_sheet('w', lname='Stress Sens')
+    w = cast(Any, sheet)
+    w.from_df(combined_df)
+
+    # Column metadata
+    try:
+        cols = w.cols
+        units_map = {
+            "load": "g",
+            "dir": "",
+            "line": "",
+            "sample_end": "",
+            "sample_name": "",
+            "sample_label": "",
+            "filename": "",
+        }
+        friendly = {
+            "sample_end": "Sample",
+            "sample_name": "Sample name",
+            "sample_label": "Label",
+            "filename": "Filename",
+            "dir": "Direction",
+            "line": "Line",
+        }
+        for col_name in combined_df.columns:
+            units_map.setdefault(col_name, "")
+        for idx, col in enumerate(combined_df.columns):
+            col_obj = cols[idx]
+            lname = friendly.get(col, col)
+            col_obj.lname = lname
+            base_key = None
+            if col in LABELS:
+                units = LABELS[col]
+            elif col.startswith("baseline_"):
+                base_key = col.split("_", 1)[1]
+                units = LABELS.get(base_key, "")
+            elif col.startswith("delta_"):
+                base_key = col.split("_", 1)[1]
+                units = LABELS.get(base_key, "")
+            elif col.endswith("_relative"):
+                base_key = col.rsplit("_", 1)[0]
+                units = LABELS.get(base_key, "")
+            elif col.endswith("_x"):
+                units = plot_units.get(col, "")
+            elif col.endswith("_y"):
+                units = plot_units.get(col, LABELS.get(var, ""))
+            else:
+                units = units_map.get(col, "")
+            col_obj.units = units
+            comments = ""
+            if col.startswith("baseline_"):
+                comments = f"Baseline at {BASE_LOAD} g"
+            elif col.startswith("delta_"):
+                comments = f"Delta @ {END_LOAD} g - baseline"
+            elif col.endswith("_relative"):
+                comments = "Value - baseline"
+            elif col == "load":
+                comments = "Applied load"
+            elif col == "dir":
+                comments = "b = unmarked end"
+            elif col == "sample_name":
+                comments = "Display sample label"
+            elif col == "sample_label":
+                comments = "Label from file"
+            elif col in plot_comments:
+                comments = plot_comments[col]
+            elif col.endswith("_x"):
+                comments = lname + " (X)"
+            elif col.endswith("_y"):
+                comments = lname + " (Y)"
+            col_obj.comments = comments
+            try:
+                w.set_label(idx, lname)
+                w.set_units(idx, units)
+                w.set_comments(idx, comments)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # Use combined sheet for plots
+    idx_raw_odd_x = combined_df.columns.get_loc("raw_odd_x")
+    idx_raw_odd_y = combined_df.columns.get_loc("raw_odd_y")
+    idx_raw_even_x = combined_df.columns.get_loc("raw_even_x")
+    idx_raw_even_y = combined_df.columns.get_loc("raw_even_y")
+    p = cast(Any, gl.add_plot(w, coly=idx_raw_odd_y, colx=idx_raw_odd_x, type='s'))
+    try:
+        p.color = RAW_ALT_COLORS[1]
+        p.symbol_size = RAW_MARKER_SIZE
+    except Exception:
+        pass
+    p = cast(Any, gl.add_plot(w, coly=idx_raw_even_y, colx=idx_raw_even_x, type='s'))
+    try:
+        p.color = RAW_ALT_COLORS[0]
+        p.symbol_size = RAW_MARKER_SIZE
+    except Exception:
+        pass
+
+    for plot_idx, (x_key, y_key, color) in enumerate(mean_column_pairs, start=1):
+        try:
+            idx_x = combined_df.columns.get_loc(x_key)
+            idx_y = combined_df.columns.get_loc(y_key)
+        except Exception:
             continue
-        w = cast(Any, sheet)
-        w.from_df(mean_df)
-        w.cols_axis('XY')
-        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments="Mean")
-        p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
+        p = cast(Any, gl.add_plot(w, coly=idx_y, colx=idx_x, type='y'))
         try:
             p.color = color
             p.symbol_shape = 2
             p.symbol_size = LEGEND_MARKER_SIZE
+            p.legend = "mean marked end" if plot_idx == 1 else "mean unmarked end"
         except Exception:
             pass
 
-    for cont_df in cont_lines:
-        sheet = _next_sheet('cont')
-        if sheet is None:
-            continue
-        w = cast(Any, sheet)
-        w.from_df(cont_df)
-        w.cols_axis('XY')
-        _apply_column_meta(w, "Sample", LABELS.get(var, "Y"), comments=f"Processed med {med_window} + mwa {ma_window}")
-        p = cast(Any, gl.add_plot(w, coly=1, colx=0, type='y'))
-        try:
-            p.color = 'black'
-        except Exception:
-            pass
+    if INCLUDE_DEPENDENCE:
+        for x_key, y_key in cont_column_pairs:
+            try:
+                idx_x = combined_df.columns.get_loc(x_key)
+                idx_y = combined_df.columns.get_loc(y_key)
+            except Exception:
+                continue
+            p = cast(Any, gl.add_plot(w, coly=idx_y, colx=idx_x, type='y'))
+            try:
+                p.color = 'black'
+                p.legend = f"dependence med {med_window} mwa {ma_window}"
+            except Exception:
+                pass
 
     title_str = f"{comp} {title} {anneal} — {LABELS.get(var, var)}".strip(" —")
 
@@ -666,6 +768,12 @@ def plot_samples_origin(
             y_axis.title = LABELS.get(var, "")
     except Exception:
         pass
+    try:
+        gl.set_str('x.top.title$', title_str)
+        gl.set_int('x.top.title.show', 1)
+        gl.set_int('x.top', 1)
+    except Exception:
+        pass
 
     for attr in (
         'x.top', 'y.right',
@@ -678,6 +786,7 @@ def plot_samples_origin(
             gl.set_int(attr, 0)
         except Exception:
             continue
+    # avoid LT errors; rely on set_int calls above
 
     for idx in range(1, len(samples) + 1):
         try:
@@ -697,11 +806,10 @@ def plot_samples_origin(
         bottom = None
         top = None
     y_range = (top - bottom) if (top is not None and bottom is not None) else 1.0
-    label_y = float(bottom - 0.08 * y_range) if bottom is not None else 0.0
-    title_y = float((top if top is not None else 0.0) + 0.08 * y_range)
+    label_y = float(bottom - 0.12 * y_range) if bottom is not None else 0.0
+    title_y = float((top if top is not None else 0.0) + 0.12 * y_range)
     title_center = (len(samples) + 1) / 2.0
 
-    manual_labels_added = False
     for idx, sample in enumerate(samples, start=1):
         label = label_map.get(sample, sample)
         try:
@@ -710,7 +818,6 @@ def plot_samples_origin(
             lbl = None
         if lbl is None:
             continue
-        manual_labels_added = True
         try:
             lbl.name = f'py_xtick{idx}'
             lbl.set_int('attach', 0)
@@ -723,7 +830,7 @@ def plot_samples_origin(
     if y_axis is not None and bottom is not None and top is not None:
         safe_range = y_range if y_range else 1.0
         try:
-            y_axis.set_limits(bottom - 0.12 * safe_range, top + 0.05 * safe_range)
+            y_axis.set_limits(bottom - 0.15 * safe_range, top + 0.12 * safe_range)
         except Exception:
             pass
 
@@ -731,7 +838,7 @@ def plot_samples_origin(
         axis_label = gl.add_label(
             'Sample',
             float(title_center),
-            float(label_y - 0.08 * y_range),
+            float(label_y - 0.06 * y_range),
         )
     except Exception:
         axis_label = None
@@ -779,68 +886,10 @@ def plot_samples_origin(
         except Exception:
             pass
 
-    # Build a consolidated workbook sheet with metadata rows
     try:
-        processed_df, _meta = build_workbook_table(df)
-        sheet = _next_sheet('processed')
-        if sheet is not None:
-            w = cast(Any, sheet)
-            w.from_df(processed_df)
-            try:
-                cols = w.cols
-                units_map = {
-                    "load": "g",
-                    "dir": "",
-                    "line": "",
-                    "sample_end": "",
-                    "sample_name": "",
-                    "sample_label": "",
-                    "filename": "",
-                }
-                friendly = {
-                    "sample_end": "Sample",
-                    "sample_name": "Sample name",
-                    "sample_label": "Label",
-                    "filename": "Filename",
-                    "dir": "Direction",
-                    "line": "Line",
-                }
-                for col in processed_df.columns:
-                    units_map[col] = units_map.get(col, "")
-                for idx, col in enumerate(processed_df.columns):
-                    col_obj = cols[idx]
-                    col_obj.lname = friendly.get(col, col)
-                    base_key = None
-                    if col in LABELS:
-                        col_obj.units = LABELS[col]
-                    elif col.startswith("baseline_"):
-                        base_key = col.split("_", 1)[1]
-                        col_obj.units = LABELS.get(base_key, "")
-                    elif col.startswith("delta_"):
-                        base_key = col.split("_", 1)[1]
-                        col_obj.units = LABELS.get(base_key, "")
-                    elif col.endswith("_relative"):
-                        base_key = col.rsplit("_", 1)[0]
-                        col_obj.units = LABELS.get(base_key, "")
-                    else:
-                        col_obj.units = units_map.get(col, "")
-                    if col.startswith("baseline_"):
-                        col_obj.comments = f"Baseline at {BASE_LOAD} g"
-                    elif col.startswith("delta_"):
-                        col_obj.comments = f"Delta @ {END_LOAD} g - baseline"
-                    elif col.endswith("_relative"):
-                        col_obj.comments = "Value - baseline"
-                    elif col == "load":
-                        col_obj.comments = "Applied load"
-                    elif col == "dir":
-                        col_obj.comments = "b = unmarked end"
-            except Exception:
-                pass
+        hide_origin_workbook(op, book, gp)
     except Exception:
-        logger.warning("Failed to build Origin workbook sheet", exc_info=True)
-
-    hide_origin_workbook(op, book, gp)
-
+        pass
 
 def build_workbook_table(
     grp: pd.DataFrame,

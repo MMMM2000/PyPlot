@@ -379,8 +379,8 @@ class StressSensitivityPlugin(PyPlotPlugin):
         cancelled = False
         plots_created = 0
         self._plot_tabs.clear()
-        min_width = 1100
-        min_height = 760
+        min_width = 1280
+        min_height = 900
 
         for (composition, title, anneal), group in grouped:
             for variable in config["variables"]:
@@ -413,6 +413,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
                 tab_layout = QtWidgets.QVBoxLayout(tab)
                 tab_layout.setContentsMargins(0, 0, 0, 0)
                 tab_layout.addWidget(canvas)
+                tab_layout.setStretch(0, 1)
 
                 ax = fig.axes[0] if fig.axes else None
                 title_text = ax.get_title() if ax else variable
