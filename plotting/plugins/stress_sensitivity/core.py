@@ -349,7 +349,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     # Give each sample enough horizontal space so its miniature dependence curve
     # spans ``CURVE_WIDTH`` units.  The figure width scales with ``CURVE_WIDTH``
     # to retain roughly the same level of detail regardless of the setting.
-    fig, ax = plt.subplots(figsize=(max(7, len(samples) * CURVE_WIDTH * 2), 5))
+    fig, ax = plt.subplots(figsize=(max(9, len(samples) * CURVE_WIDTH * 2.5), 6.2))
 
     y_min, y_max = np.inf, -np.inf
     deltas = []
@@ -423,7 +423,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fig.subplots_adjust(left=0.12, right=0.95, bottom=0.18, top=0.9)
+    fig.subplots_adjust(left=0.16, right=0.98, bottom=0.26, top=0.9)
     apply_readability(ax, globals())
     fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
@@ -448,15 +448,41 @@ def plot_samples_origin(
     except Exception:
         pass
 
-    comp = df['composition'].iat[0]
-    title = df['title'].iat[0]
-    anneal = df['anneal'].iat[0]
+    work_df = df.copy()
+    if "sample_label" not in work_df.columns:
+        if "sample" in work_df.columns:
+            work_df["sample_label"] = work_df["sample"].astype(str)
+        else:
+            work_df["sample_label"] = work_df.get("sample_end", "").astype(str)
 
-    sample_order = list(dict.fromkeys(df["sample_end"].tolist()))
-    label_map = df.set_index("sample_end").get("sample_label", pd.Series(dtype=str))
+    comp = work_df['composition'].iat[0]
+    title = work_df['title'].iat[0]
+    anneal = work_df['anneal'].iat[0]
+
+    sample_order = list(dict.fromkeys(work_df["sample_end"].tolist()))
+    label_map = (
+        work_df[["sample_end", "sample_label"]]
+        .drop_duplicates("sample_end")
+        .set_index("sample_end")
+        .get("sample_label", pd.Series(dtype=str))
+    )
     samples = sample_order
     sample_idx = {s: i + 1 for i, s in enumerate(samples)}
     delta_map: dict[str, float] = {}
+
+    # Compute per-sample deltas for label placement
+    base_vals = (
+        work_df[(work_df.get("dir") == "b") & (work_df.get("load") == BASE_LOAD)]
+        .groupby("sample_end")[var]
+        .mean()
+    )
+    end_vals = (
+        work_df[(work_df.get("dir") == "b") & (work_df.get("load") == END_LOAD)]
+        .groupby("sample_end")[var]
+        .mean()
+    )
+    delta_series = (end_vals - base_vals.reindex(end_vals.index)).dropna()
+    delta_map.update(delta_series.to_dict())
 
     # Build raw points and means for b-direction only, baseline at BASE_LOAD
     frames_raw_odd = []
@@ -616,7 +642,22 @@ def plot_samples_origin(
         op.lt_exec('lab -xb "Sample";')
         op.lt_exec(f'lab -yl "{LABELS[var]}";')
         esc = (f"{comp} {title} {anneal} — {LABELS[var]}").replace('"', "'")
-        op.lt_exec(f'title -s "{esc}";')
+        try:
+            gl.set_str('x.top.title$', esc)
+            gl.set_int('x.top.title.show', 1)
+        except Exception:
+            op.lt_exec(f'layer.x.title$=\"{esc}\"; layer.x.title.show=1;')
+        # hide tick labels on top/bottom; we add manual labels later
+        for cmd in (
+            "layer.x.top.showLabels=0;",
+            "layer.x.top.showTickLabels=0;",
+            "layer.x.bottom.showLabels=0;",
+            "layer.x.bottom.showTickLabels=0;",
+        ):
+            try:
+                op.lt_exec(cmd)
+            except Exception:
+                pass
         op.lt_exec('legend;')
     except Exception:
         pass
@@ -635,13 +676,19 @@ def plot_samples_origin(
         except Exception:
             pass
     try:
-        bottom = getattr(gl.axis('y'), 'from_', None)
+        y_axis = gl.axis('y')
+        bottom = getattr(y_axis, 'from_', None)
+        top = getattr(y_axis, 'to', None)
     except Exception:
+        y_axis = None
         bottom = None
+        top = None
+    y_range = (top - bottom) if (top is not None and bottom is not None) else 0
+    label_y = float(bottom - 0.08 * y_range) if bottom is not None else 0.0
     for idx, sample in enumerate(samples, start=1):
         label = label_map.get(sample, sample)
         try:
-            lbl = gl.add_label(label, float(idx), float(bottom or 0))
+            lbl = gl.add_label(label, float(idx), label_y)
         except Exception:
             lbl = None
         if lbl is None:
@@ -683,17 +730,32 @@ def plot_samples_origin(
             w.from_df(processed_df)
             try:
                 cols = w.cols
+                units_map = {
+                    "load": "g",
+                    "dir": "",
+                    "line": "",
+                }
+                for col in processed_df.columns:
+                    units_map[col] = units_map.get(col, "")
                 for idx, col in enumerate(processed_df.columns):
                     col_obj = cols[idx]
                     col_obj.lname = col
                     if col in LABELS:
                         col_obj.units = LABELS[col]
+                    elif col.endswith(("_relative", "_delta", "_baseline")):
+                        col_obj.units = LABELS.get(col.split("_")[0], "")
+                    else:
+                        col_obj.units = units_map.get(col, "")
                     if col.startswith("baseline_"):
                         col_obj.comments = f"Baseline at {BASE_LOAD} g"
                     elif col.startswith("delta_"):
                         col_obj.comments = f"Delta @ {END_LOAD} g - baseline"
                     elif col.endswith("_relative"):
                         col_obj.comments = "Value - baseline"
+                    elif col == "load":
+                        col_obj.comments = "Applied load"
+                    elif col == "dir":
+                        col_obj.comments = "b = unmarked end"
             except Exception:
                 pass
     except Exception:
@@ -715,7 +777,19 @@ def build_workbook_table(
     comp = str(grp["composition"].iat[0]) if "composition" in grp else ""
     title = str(grp["title"].iat[0]) if "title" in grp else ""
     anneal = str(grp["anneal"].iat[0]) if "anneal" in grp else ""
-    sample_names = grp.set_index("sample_end").get("sample", pd.Series(dtype=str))
+    if "sample_label" not in grp.columns:
+        if "sample" in grp.columns:
+            grp = grp.copy()
+            grp["sample_label"] = grp["sample"].astype(str)
+        else:
+            grp = grp.copy()
+            grp["sample_label"] = grp.get("sample_end", "").astype(str)
+    sample_names = (
+        grp[["sample_end", "sample"]]
+        .drop_duplicates("sample_end")
+        .set_index("sample_end")
+        .get("sample", pd.Series(dtype=str))
+    )
 
     work = grp.copy()
     work["load"] = pd.to_numeric(work.get("load"), errors="coerce")

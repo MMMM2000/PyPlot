@@ -428,10 +428,10 @@ class StressSensitivityPlugin(PyPlotPlugin):
                 )
                 self.host.tab_widget.addTab(tab, sens_core.LABELS.get(variable, variable))
                 self.host._register_plot_tab(tab, canvas, ax, descriptor)
-                self._plot_tabs.append(tab)
-                plots_created += 1
-                if progress_dialog is not None:
-                    progress_dialog.setValue(progress_dialog.value() + 1)
+        self._plot_tabs.append(tab)
+        plots_created += 1
+        if progress_dialog is not None:
+            progress_dialog.setValue(progress_dialog.value() + 1)
             if cancelled:
                 break
 
