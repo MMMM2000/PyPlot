@@ -378,6 +378,10 @@ class StressSensitivityPlugin(PyPlotPlugin):
 
         cancelled = False
         plots_created = 0
+        self._plot_tabs.clear()
+        min_width = 1100
+        min_height = 760
+
         for (composition, title, anneal), group in grouped:
             for variable in config["variables"]:
                 if progress_dialog is not None:
@@ -395,17 +399,21 @@ class StressSensitivityPlugin(PyPlotPlugin):
                         level="error",
                     )
                     continue
+
                 canvas = FigureCanvas(fig)
                 canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-                canvas.setMinimumSize(640, 360)
+                canvas.setMinimumSize(min_width, min_height)
                 canvas.setSizePolicy(
                     QtWidgets.QSizePolicy.Policy.Expanding,
                     QtWidgets.QSizePolicy.Policy.Expanding,
                 )
+
                 tab = QtWidgets.QWidget()
+                tab.setMinimumSize(min_width, min_height)
                 tab_layout = QtWidgets.QVBoxLayout(tab)
                 tab_layout.setContentsMargins(0, 0, 0, 0)
                 tab_layout.addWidget(canvas)
+
                 ax = fig.axes[0] if fig.axes else None
                 title_text = ax.get_title() if ax else variable
                 descriptor = window_module.TabDescriptor(
@@ -428,10 +436,12 @@ class StressSensitivityPlugin(PyPlotPlugin):
                 )
                 self.host.tab_widget.addTab(tab, sens_core.LABELS.get(variable, variable))
                 self.host._register_plot_tab(tab, canvas, ax, descriptor)
-        self._plot_tabs.append(tab)
-        plots_created += 1
-        if progress_dialog is not None:
-            progress_dialog.setValue(progress_dialog.value() + 1)
+
+                self._plot_tabs.append(tab)
+                plots_created += 1
+                if progress_dialog is not None:
+                    progress_dialog.setValue(progress_dialog.value() + 1)
+
             if cancelled:
                 break
 

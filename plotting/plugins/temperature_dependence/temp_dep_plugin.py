@@ -353,6 +353,8 @@ class TemperatureDependencePlugin(PyPlotPlugin):
         data = self._data
         if data is None or "filename" not in data.columns:
             return
+        if not hasattr(self, "_workbook_keys"):
+            self._workbook_keys = {}
         host = self.host
         window_module = window_api()
         grouped = data.groupby("filename", dropna=False)

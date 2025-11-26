@@ -14,10 +14,10 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Legends** default to “text colour follows plot” for every plug-in. Legend options (show symbols, placement, orientation, drag, follow colours) are remembered per plug-in between sessions so each workflow keeps its own defaults.
 
 ## Origin export checklist
-- Use the same titles/axis labels as the Matplotlib view (include composition/title/anneal and variable label).
+- Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.
 - Preserve sample labels on X and long name/units/comments rows in the Origin worksheets (baseline, deltas, relative values documented).
 - Match symbol sizes/colours and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
-- Avoid terminal spam (disable tqdm/console progress) and keep graph extents so nothing is cropped after export.
+- Build worksheets with units and comments filled (including baselines/deltas/relative columns) and avoid terminal spam (disable tqdm/console progress); keep graph extents so nothing is cropped after export.
 
 ## Built-in Plug-ins
 

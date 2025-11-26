@@ -14,6 +14,7 @@
 
 ## In Progress
 - Stabilizing VSM Temperature Scan exports (Origin/TXT) and plot embeddings.
+- Stress/Temp plugins: fix Origin export parity (titles on top axis, manual sample labels, delta labels, units/comments in workbooks, no invalid LT errors); stop PyPlot stress sens cropping.
 
 ## Done
 - Added cursor readout scaffolding and duplicate-temperature averaging for VSM Temp Scan; integrated tab-selection fixes to avoid MDI proxy crashes.

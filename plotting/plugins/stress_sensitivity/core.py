@@ -349,7 +349,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
     # Give each sample enough horizontal space so its miniature dependence curve
     # spans ``CURVE_WIDTH`` units.  The figure width scales with ``CURVE_WIDTH``
     # to retain roughly the same level of detail regardless of the setting.
-    fig, ax = plt.subplots(figsize=(max(9, len(samples) * CURVE_WIDTH * 2.5), 6.2))
+    fig, ax = plt.subplots(figsize=(max(10, len(samples) * CURVE_WIDTH * 2.8), 6.8))
 
     y_min, y_max = np.inf, -np.inf
     deltas = []
@@ -423,7 +423,7 @@ def plot_samples(df: pd.DataFrame, var: str, save_flag: bool, out_dir: str) -> T
         text.set_color(to_hex(cast(ColorType, rawcol)))
 
     fig.tight_layout()
-    fig.subplots_adjust(left=0.16, right=0.98, bottom=0.26, top=0.9)
+    fig.subplots_adjust(left=0.18, right=0.99, bottom=0.3, top=0.9)
     apply_readability(ax, globals())
     fname = f"{comp} {title} {anneal} {var}"
     if save_flag:
@@ -634,57 +634,74 @@ def plot_samples_origin(
         except Exception:
             pass
 
+    title_str = f"{comp} {title} {anneal} — {LABELS.get(var, var)}".strip(" —")
+
     try:
         gl.rescale()
+    except Exception:
+        pass
+    try:
         gp.activate()
-        op.lt_exec('page.antialias=1;')
-        op.lt_exec('layer -aa 1;')
-        op.lt_exec('lab -xb "Sample";')
-        op.lt_exec(f'lab -yl "{LABELS[var]}";')
-        esc = (f"{comp} {title} {anneal} — {LABELS[var]}").replace('"', "'")
-        try:
-            gl.set_str('x.top.title$', esc)
-            gl.set_int('x.top.title.show', 1)
-        except Exception:
-            op.lt_exec(f'layer.x.title$=\"{esc}\"; layer.x.title.show=1;')
-        # hide tick labels on top/bottom; we add manual labels later
-        for cmd in (
-            "layer.x.top.showLabels=0;",
-            "layer.x.top.showTickLabels=0;",
-            "layer.x.bottom.showLabels=0;",
-            "layer.x.bottom.showTickLabels=0;",
-        ):
-            try:
-                op.lt_exec(cmd)
-            except Exception:
-                pass
-        op.lt_exec('legend;')
+        op.lt_exec('legend -o;')
     except Exception:
         pass
 
-    # apply X tick labels (samples) and mirror axes like Matplotlib
     try:
-        gl.set_int('x.top', 0); gl.set_int('y.right', 0)
-        gl.set_int('x.top.label.show', 0); gl.set_int('y.right.label.show', 0)
-        gl.set_int('x.top.ticklabels', 0); gl.set_int('y.right.ticklabels', 0)
-        gl.set_int('x.label.show', 0); gl.set_int('x.ticklabels', 0)
+        x_axis = gl.axis('x')
+    except Exception:
+        x_axis = None
+    try:
+        y_axis = gl.axis('y')
+    except Exception:
+        y_axis = None
+
+    try:
+        if x_axis is not None:
+            x_axis.set_limits(0.5, len(samples) + 0.5, 1.0)
+            x_axis.title = ''
     except Exception:
         pass
+    try:
+        if y_axis is not None:
+            y_axis.title = LABELS.get(var, "")
+    except Exception:
+        pass
+
+    for attr in (
+        'x.top', 'y.right',
+        'x.top.label.show', 'y.right.label.show',
+        'x.top.ticklabels', 'y.right.ticklabels',
+        'x.label.show', 'x.ticklabels',
+        'x.bottom.ticklabels', 'x.major.ticklabels',
+    ):
+        try:
+            gl.set_int(attr, 0)
+        except Exception:
+            continue
+
     for idx in range(1, len(samples) + 1):
         try:
             gl.remove_label(f'py_xtick{idx}')
         except Exception:
             pass
+    for name in ('py_xlabel', 'py_title'):
+        try:
+            gl.remove_label(name)
+        except Exception:
+            pass
+
     try:
-        y_axis = gl.axis('y')
         bottom = getattr(y_axis, 'from_', None)
         top = getattr(y_axis, 'to', None)
     except Exception:
-        y_axis = None
         bottom = None
         top = None
-    y_range = (top - bottom) if (top is not None and bottom is not None) else 0
+    y_range = (top - bottom) if (top is not None and bottom is not None) else 1.0
     label_y = float(bottom - 0.08 * y_range) if bottom is not None else 0.0
+    title_y = float((top if top is not None else 0.0) + 0.08 * y_range)
+    title_center = (len(samples) + 1) / 2.0
+
+    manual_labels_added = False
     for idx, sample in enumerate(samples, start=1):
         label = label_map.get(sample, sample)
         try:
@@ -693,12 +710,53 @@ def plot_samples_origin(
             lbl = None
         if lbl is None:
             continue
+        manual_labels_added = True
         try:
             lbl.name = f'py_xtick{idx}'
             lbl.set_int('attach', 0)
             lbl.set_int('horzalign', 1)
             lbl.set_int('vertalign', 2)
             lbl.set_int('fontweight', 700)
+        except Exception:
+            pass
+
+    if y_axis is not None and bottom is not None and top is not None:
+        safe_range = y_range if y_range else 1.0
+        try:
+            y_axis.set_limits(bottom - 0.12 * safe_range, top + 0.05 * safe_range)
+        except Exception:
+            pass
+
+    try:
+        axis_label = gl.add_label(
+            'Sample',
+            float(title_center),
+            float(label_y - 0.08 * y_range),
+        )
+    except Exception:
+        axis_label = None
+    if axis_label is not None:
+        try:
+            axis_label.name = 'py_xlabel'
+            axis_label.set_int('attach', 0)
+            axis_label.set_int('horzalign', 1)
+            axis_label.set_int('vertalign', 2)
+            axis_label.set_int('fontweight', 700)
+        except Exception:
+            pass
+
+    try:
+        manual_title = gl.add_label(title_str, float(title_center), float(title_y))
+    except Exception:
+        manual_title = None
+    if manual_title is not None:
+        try:
+            manual_title.name = 'py_title'
+            manual_title.set_int('attach', 0)
+            manual_title.set_int('horzalign', 1)
+            manual_title.set_int('vertalign', 2)
+            manual_title.set_int('fontweight', 700)
+            manual_title.set_int('fontheight', 22)
         except Exception:
             pass
 
@@ -734,16 +792,36 @@ def plot_samples_origin(
                     "load": "g",
                     "dir": "",
                     "line": "",
+                    "sample_end": "",
+                    "sample_name": "",
+                    "sample_label": "",
+                    "filename": "",
+                }
+                friendly = {
+                    "sample_end": "Sample",
+                    "sample_name": "Sample name",
+                    "sample_label": "Label",
+                    "filename": "Filename",
+                    "dir": "Direction",
+                    "line": "Line",
                 }
                 for col in processed_df.columns:
                     units_map[col] = units_map.get(col, "")
                 for idx, col in enumerate(processed_df.columns):
                     col_obj = cols[idx]
-                    col_obj.lname = col
+                    col_obj.lname = friendly.get(col, col)
+                    base_key = None
                     if col in LABELS:
                         col_obj.units = LABELS[col]
-                    elif col.endswith(("_relative", "_delta", "_baseline")):
-                        col_obj.units = LABELS.get(col.split("_")[0], "")
+                    elif col.startswith("baseline_"):
+                        base_key = col.split("_", 1)[1]
+                        col_obj.units = LABELS.get(base_key, "")
+                    elif col.startswith("delta_"):
+                        base_key = col.split("_", 1)[1]
+                        col_obj.units = LABELS.get(base_key, "")
+                    elif col.endswith("_relative"):
+                        base_key = col.rsplit("_", 1)[0]
+                        col_obj.units = LABELS.get(base_key, "")
                     else:
                         col_obj.units = units_map.get(col, "")
                     if col.startswith("baseline_"):
@@ -777,6 +855,12 @@ def build_workbook_table(
     comp = str(grp["composition"].iat[0]) if "composition" in grp else ""
     title = str(grp["title"].iat[0]) if "title" in grp else ""
     anneal = str(grp["anneal"].iat[0]) if "anneal" in grp else ""
+    if "sample_end" not in grp.columns:
+        grp = grp.copy()
+        if "sample" in grp.columns:
+            grp["sample_end"] = grp["sample"]
+        else:
+            grp["sample_end"] = np.arange(len(grp))
     if "sample_label" not in grp.columns:
         if "sample" in grp.columns:
             grp = grp.copy()
@@ -784,11 +868,14 @@ def build_workbook_table(
         else:
             grp = grp.copy()
             grp["sample_label"] = grp.get("sample_end", "").astype(str)
+    sample_source = grp.copy()
+    if "sample" not in sample_source.columns:
+        sample_source["sample"] = sample_source["sample_end"].astype(str)
+    sample_names = sample_source[["sample_end", "sample"]]
     sample_names = (
-        grp[["sample_end", "sample"]]
+        sample_names.dropna(subset=["sample_end"])
         .drop_duplicates("sample_end")
-        .set_index("sample_end")
-        .get("sample", pd.Series(dtype=str))
+        .set_index("sample_end")["sample"]
     )
 
     work = grp.copy()

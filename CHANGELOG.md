@@ -953,6 +953,14 @@
   available, prompting the Data menu when nothing is imported instead of
   passing empty directory selections to plotting scripts.
 
+# Changelog
+
+## 2025-11-26 09:25 UTC
+
+- Stabilized stress sensitivity plotting: enforced larger embedded canvas sizes to stop cropping, kept legend text following line colours through dark-graph toggles, and guarded temperature dependence workbook registration against missing keys.
+- Reworked stress sensitivity Origin exports to mirror the PyPlot view (title on the top axis, manual sample labels with tick labels hidden, preserved delta markers), and populated workbook long names/units/comments for all processed columns.
+- Documented the Origin export checklist and per-plug-in folder memory defaults so imports/exports remember paths independently.
+
 ## 2025-10-22 11:00 UTC
 
 - Added an output-mode toggle to the Microscope OCR Debug tool so you can switch
