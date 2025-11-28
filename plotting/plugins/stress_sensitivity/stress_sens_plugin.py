@@ -287,7 +287,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
             meta = worksheet.columns.get(column)
             if isinstance(meta, window_module.WorksheetColumnMeta):
                 meta.long_name = long_name
-                meta.units = units_text
+                meta.units = units_text or ""
                 if column.startswith("baseline_"):
                     meta.comments = f"Baseline at {sens_core.BASE_LOAD} g"
                 elif column.startswith("delta_"):
@@ -296,6 +296,14 @@ class StressSensitivityPlugin(PyPlotPlugin):
                     meta.comments = "Value - baseline"
                 elif column == variable:
                     meta.comments = label
+                else:
+                    meta.comments = meta.comments or (long_name or column)
+            elif column in worksheet.dataframe.columns:
+                worksheet.columns[column] = window_module.WorksheetColumnMeta(
+                    long_name=long_name or column,
+                    units=units_text or "",
+                    comments=long_name or column,
+                )
 
     def _remove_managed_workbooks(self, keys: Iterable[str]) -> None:
         host = self.host

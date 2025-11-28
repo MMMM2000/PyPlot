@@ -1,5 +1,11 @@
 # Changelog
 
+## 2025-11-28 12:53 UTC
+- Hardened the PyPlot MDI subwindow handling so maximizing graph tabs (including VSM Temperature Scan plots) no longer raises errors when Qt toggles window states, and defaulted window layout to side-by-side half-width tiles instead of stacked overlaps.
+- Let VSM Temperature Scan canvases grow with the plot window by removing fixed canvas minimums while keeping the half-width default subwindow sizing so plots scale instead of appearing cropped.
+- Cleaned VSM Temperature Scan Origin exports by rescaling layers, disabling speed mode, and mirroring the graph title onto the top X axis (tick labels hidden) to keep titles consistent.
+- Filled Stress Sensitivity workbooks with units/comments metadata for every column so Origin exports retain the annotated headers.
+
 ## 2025-11-25 12:13 UTC
 - Scoped import pickers, TXT exports, and graph saves to remember their last-used folders per plug-in, persisting the history separately instead of sharing one global path.
 - Guarded PyPlot subwindow creation so Temperature Sensitivity plots no longer crash on Qt6 when QMdiSubWindow lacks `setWidgetResizable`.

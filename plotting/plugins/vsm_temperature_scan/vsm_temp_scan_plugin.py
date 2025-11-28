@@ -254,7 +254,10 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout = QtWidgets.QVBoxLayout(tab)
                 layout.setContentsMargins(0, 0, 0, 0)
                 canvas = FigureCanvas(fig)
-                canvas.setMinimumSize(900, 560)
+                canvas.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                )
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan",
@@ -297,7 +300,10 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout = QtWidgets.QVBoxLayout(tab)
                 layout.setContentsMargins(0, 0, 0, 0)
                 canvas = FigureCanvas(fig)
-                canvas.setMinimumSize(900, 560)
+                canvas.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                )
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan_derivative",
@@ -335,7 +341,10 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout = QtWidgets.QVBoxLayout(tab)
                 layout.setContentsMargins(0, 0, 0, 0)
                 canvas = FigureCanvas(fig)
-                canvas.setMinimumSize(900, 560)
+                canvas.setSizePolicy(
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                    QtWidgets.QSizePolicy.Policy.Expanding,
+                )
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan_derivative_smoothed",
@@ -385,7 +394,10 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     layout = QtWidgets.QVBoxLayout(tab)
                     layout.setContentsMargins(0, 0, 0, 0)
                     canvas = FigureCanvas(fig)
-                    canvas.setMinimumSize(900, 560)
+                    canvas.setSizePolicy(
+                        QtWidgets.QSizePolicy.Policy.Expanding,
+                        QtWidgets.QSizePolicy.Policy.Expanding,
+                    )
                     layout.addWidget(canvas)
                     descriptor = window_module.TabDescriptor(
                         kind="vsm_temperature_scan_overlay",

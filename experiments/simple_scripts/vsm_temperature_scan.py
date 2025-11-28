@@ -766,6 +766,32 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
         except Exception:
             pass
         plotted = 0
+
+        def _style_origin_layer(layer: Any, title: str) -> None:
+            """Apply consistent axes, disable speed mode, and mirror the title to the top X axis."""
+
+            try:
+                layer.rescale()
+            except Exception:
+                pass
+            try:
+                layer.set_int("use_speed_mode", 0)
+                layer.set_int("speedmode", 0)
+                layer.set_int("antialias", 1)
+            except Exception:
+                pass
+            try:
+                axis_top = layer.axis(2)
+                axis_top.title = title
+                # Hide top tick labels while keeping the title visible.
+                setattr(axis_top, "show_labels", False)
+                setattr(axis_top, "showLabels", False)
+            except Exception:
+                try:
+                    layer.lt_exec(f"layer.x2.title$=\"{title}\"; layer.x2.showlabels=0;")
+                except Exception:
+                    pass
+
         for entry in dataset:
             series = self._build_series(entry.dataframe.copy())
             if not series:
@@ -817,10 +843,12 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             graph = op.new_graph(template="doubley")
             graphs.append(graph)
             try:
-                graph.set_str("title", f"{entry.sample} - VSM Temperature Scan")
+                graph_title = f"{entry.sample} - VSM Temperature Scan"
+                graph.set_str("title", graph_title)
                 graph.name = f"{entry.sample} - TScan"
                 graph.lname = f"{entry.sample} - TScan"
             except Exception:
+                graph_title = f"{entry.sample} - VSM Temperature Scan"
                 pass
             unique_fields: list[float] = []
             for field_value, _, _, _ in column_pairs:
@@ -862,20 +890,8 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
             for layer, entries in legend_entries.items():
                 self._set_origin_legend(layer, entries)
-            try:
-                for layer in layer_map.values():
-                    try:
-                        layer.rescale()
-                    except Exception:
-                        pass
-                    try:
-                        layer.set_int("use_speed_mode", 0)
-                        layer.set_int("speedmode", 0)
-                        layer.set_int("antialias", 1)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+            for layer in layer_map.values():
+                _style_origin_layer(layer, graph_title)
 
             if self.show_smoothed_plot:
                 smooth_sheet = book.add_sheet()
@@ -913,10 +929,12 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 smooth_graph = op.new_graph(template="doubley")
                 graphs.append(smooth_graph)
                 try:
-                    smooth_graph.set_str("title", f"{entry.sample} - Smoothed Signal X")
+                    smooth_title = f"{entry.sample} - Smoothed Signal X"
+                    smooth_graph.set_str("title", smooth_title)
                     smooth_graph.name = f"{entry.sample} - Smoothed"
                     smooth_graph.lname = f"{entry.sample} - Smoothed"
                 except Exception:
+                    smooth_title = f"{entry.sample} - Smoothed Signal X"
                     pass
                 s_unique: list[float] = []
                 for field_value, _, _, _ in smooth_pairs:
@@ -958,20 +976,8 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                             legend_entries.setdefault(layer, []).append((dataset_index, legend_text))
                 for layer, entries in legend_entries.items():
                     self._set_origin_legend(layer, entries)
-                try:
-                    for layer in s_layer_map.values():
-                        try:
-                            layer.rescale()
-                        except Exception:
-                            pass
-                        try:
-                            layer.set_int("use_speed_mode", 0)
-                            layer.set_int("speedmode", 0)
-                            layer.set_int("antialias", 1)
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                for layer in s_layer_map.values():
+                    _style_origin_layer(layer, smooth_title)
 
             if self.show_derivative and include_raw_derivative:
                 deriv_sheet = book.add_sheet()
@@ -1008,10 +1014,12 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 deriv_graph = op.new_graph()
                 graphs.append(deriv_graph)
                 try:
-                    deriv_graph.set_str("title", f"{entry.sample} - d(Signal X)/dT")
+                    deriv_title = f"{entry.sample} - d(Signal X)/dT"
+                    deriv_graph.set_str("title", deriv_title)
                     deriv_graph.name = f"{entry.sample} - dSignal/dT"
                     deriv_graph.lname = f"{entry.sample} - dSignal/dT"
                 except Exception:
+                    deriv_title = f"{entry.sample} - d(Signal X)/dT"
                     pass
                 layer = deriv_graph[0]
                 try:
@@ -1041,16 +1049,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     self._set_origin_legend(layer, legend_entries.get(layer, []))
                 except Exception:
                     pass
-                try:
-                    layer.rescale()
-                except Exception:
-                    pass
-                try:
-                    layer.set_int("use_speed_mode", 0)
-                    layer.set_int("speedmode", 0)
-                    layer.set_int("antialias", 1)
-                except Exception:
-                    pass
+                _style_origin_layer(layer, deriv_title)
 
                 if self.show_smoothed_derivative and self.smooth_derivative:
                     deriv_sm_sheet = book.add_sheet()
@@ -1087,10 +1086,12 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     deriv_sm_graph = op.new_graph()
                     graphs.append(deriv_sm_graph)
                     try:
-                        deriv_sm_graph.set_str("title", f"{entry.sample} - Smoothed d(Signal X)/dT")
+                        deriv_sm_title = f"{entry.sample} - Smoothed d(Signal X)/dT"
+                        deriv_sm_graph.set_str("title", deriv_sm_title)
                         deriv_sm_graph.name = f"{entry.sample} - dSignal/dT (smoothed)"
                         deriv_sm_graph.lname = f"{entry.sample} - dSignal/dT (smoothed)"
                     except Exception:
+                        deriv_sm_title = f"{entry.sample} - Smoothed d(Signal X)/dT"
                         pass
                     layer = deriv_sm_graph[0]
                     try:
@@ -1120,16 +1121,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         self._set_origin_legend(layer, legend_entries.get(layer, []))
                     except Exception:
                         pass
-                    try:
-                        layer.rescale()
-                    except Exception:
-                        pass
-                    try:
-                        layer.set_int("use_speed_mode", 0)
-                        layer.set_int("speedmode", 0)
-                        layer.set_int("antialias", 1)
-                    except Exception:
-                        pass
+                    _style_origin_layer(layer, deriv_sm_title)
 
             try:
                 book.activate()

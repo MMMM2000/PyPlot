@@ -7701,15 +7701,17 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             tab.setVisible(visible)
         if visible:
+            maximized = bool(getattr(self.tab_widget, "_global_maximized", False))
+            fitter = getattr(self.tab_widget, "_fit_subwindow", None)
             self._hidden_tabs.discard(tab)
             sub = self.tab_widget._subwindow_for(tab)  # type: ignore[attr-defined]
             if sub is not None and sub in self._hidden_subwindows:
                 self._hidden_subwindows.discard(sub)
                 sub.show()
-                if self._global_maximized:
+                if maximized:
                     sub.showMaximized()
-                else:
-                    self._fit_subwindow(sub, preferred_width=sub.width())
+                elif callable(fitter):
+                    fitter(sub, use_half_width=True, preferred_width=None)
         else:
             self._hidden_tabs.add(tab)
 
@@ -8118,7 +8120,9 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                 self.isMaximized() or self.isFullScreen()
             )
             if event.oldState() & QtCore.Qt.WindowState.WindowMinimized:
-                QtCore.QTimer.singleShot(30, self._owner._normalize_docks_initial)  # noqa: SLF001
+                normalizer = getattr(self._owner, "_normalize_docks_initial", None)  # noqa: SLF001
+                if callable(normalizer):
+                    QtCore.QTimer.singleShot(30, normalizer)
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         # hide instead of destroying so the graph can be reopened from Project Explorer
@@ -8168,12 +8172,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._syncing_state = False
         self._hidden_subwindows: set[_ManagedSubWindow] = set()
         self._hidden_tabs: set[QtWidgets.QWidget] = set()
+        self._maximized_hidden: set[_ManagedSubWindow] = set()
         self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
         try:
             self._mdi.setContentsMargins(0, 0, 0, 0)
             self._mdi.setViewportMargins(0, 0, 0, 0)
         except Exception:
             pass
+        self._layout_margin = 6
 
     # ------------------------------------------------------------------ helpers
     def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
@@ -8208,7 +8214,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
         self._blocking = True
         self._mdi.setActiveSubWindow(sub)
-        sub.showNormal()
+        if self._global_maximized:
+            sub.showMaximized()
+        else:
+            sub.showNormal()
         sub.raise_()
         self._blocking = False
         self.currentChanged.emit(index)
@@ -8232,18 +8241,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._syncing_state = True
         try:
             active_sub = active or self._mdi.activeSubWindow()
-            for sub in self._subwindows.values():
-                if sub in self._hidden_subwindows:
-                    continue
-                if self._global_maximized:
-                    sub.show()
-                    sub.showMaximized()
-                    sub.raise_()
-                else:
+            if self._global_maximized:
+                if active_sub is not None and active_sub not in self._hidden_subwindows:
+                    active_sub.show()
+                    active_sub.showMaximized()
+                    active_sub.raise_()
+            else:
+                for sub in self._subwindows.values():
+                    if sub in self._hidden_subwindows:
+                        continue
                     sub.show()
                     sub.showNormal()
-                    self._fit_subwindow(sub, preferred_width=sub.width())
-                    sub.raise_()
+                self._arrange_subwindows()
         finally:
             self._syncing_state = False
 
@@ -8254,39 +8263,84 @@ class _MdiTabProxy(QtWidgets.QWidget):
         use_half_width: bool = True,
         preferred_width: int | None = None,
     ) -> None:
+        if self._global_maximized and preferred_width is None:
+            # Respect maximize state instead of resizing back to windowed dimensions.
+            return
         area_size = self._mdi.viewport().size()
         if not area_size.isValid():
             return
         widget = sub.widget()
         hint = widget.sizeHint() if widget is not None else QtCore.QSize(900, 560)
         min_hint = widget.minimumSizeHint() if widget is not None else hint
-        base_w = max(hint.width(), min_hint.width(), 400)
-        base_h = max(hint.height(), min_hint.height(), 300)
+        min_size = widget.minimumSize() if widget is not None else QtCore.QSize(0, 0)
+        base_w = max(hint.width(), min_hint.width(), min_size.width(), 400)
+        base_h = max(hint.height(), min_hint.height(), min_size.height(), 300)
         aspect = base_w / base_h if base_h else 1.6
         sub.set_aspect_ratio(aspect)
-        if preferred_width is None:
-            target_w = area_size.width() // 2 if use_half_width else area_size.width()
+        available_w = area_size.width()
+        available_h = area_size.height()
+        if available_w <= 0 or available_h <= 0:
+            return
+
+        slot_width = available_w if not use_half_width else max(1, available_w // 2)
+        target_w = slot_width if preferred_width is None else min(preferred_width, available_w)
+        min_width = max(base_w, 400)
+        target_w = max(300, min(target_w, slot_width))
+        if use_half_width:
+            target_w = min(target_w, slot_width)
         else:
-            target_w = preferred_width
-        target_w = max(min(target_w, area_size.width()), 400)
-        target_h = int(target_w / aspect)
-        if target_h > area_size.height():
-            if area_size.height() > 0:
-                scale = area_size.height() / float(target_h)
-                target_w = max(300, int(target_w * scale))
-                target_h = int(target_w / aspect)
+            target_w = max(min_width, target_w)
+
+        target_h = int(target_w / aspect) if aspect else available_h
+        min_height = min(available_h, max(base_h, 220))
+        if available_h >= min_height:
+            target_h = max(target_h, min_height)
+        if target_h > available_h and target_h > 0:
+            scale = available_h / float(target_h)
+            target_w = max(240, int(target_w * scale))
+            target_h = max(200, int(target_h * scale))
         sub.resize(target_w, target_h)
+
+    def _arrange_subwindows(self) -> None:
+        """Lay out visible subwindows side-by-side by default."""
+
+        if self._global_maximized:
+            return
+        viewport = self._mdi.viewport().rect()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
+        visible_widgets = [
+            widget
+            for widget in self._widgets
+            if self._visible.get(widget, True)
+        ]
+        if not visible_widgets:
+            return
+        cols = 1 if len(visible_widgets) == 1 else 2
+        rows = (len(visible_widgets) + cols - 1) // cols
+        slot_w = max(1, viewport.width() // cols)
+        slot_h = max(1, viewport.height() // rows)
+        margin = self._layout_margin
+        for idx, widget in enumerate(visible_widgets):
+            sub = self._subwindow_for(widget)
+            if sub is None or sub in self._hidden_subwindows:
+                continue
+            self._fit_subwindow(sub, use_half_width=(cols > 1), preferred_width=slot_w)
+            max_w = max(1, slot_w - 2 * margin)
+            max_h = max(1, slot_h - 2 * margin)
+            sub.resize(min(sub.width(), max_w), min(sub.height(), max_h))
+            x = viewport.left() + (idx % cols) * slot_w + margin
+            y = viewport.top() + (idx // cols) * slot_h + margin
+            sub.move(x, y)
 
     def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         if source is self._mdi.viewport() and event.type() == QtCore.QEvent.Type.Resize:
             for sub in self._subwindows.values():
                 if sub in self._hidden_subwindows:
                     continue
-                self._fit_subwindow(
-                    sub,
-                    use_half_width=not self._global_maximized,
-                    preferred_width=self._mdi.viewport().width() if self._global_maximized else sub.width(),
-                )
+                if self._global_maximized:
+                    continue
+            self._arrange_subwindows()
         return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
@@ -8343,6 +8397,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._visible[widget] = True
 
         self._activate_index(index)
+        self._arrange_subwindows()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -8456,7 +8511,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 sub.showMaximized()
             else:
                 sub.showNormal()
-                self._fit_subwindow(sub, preferred_width=sub.width())
+                self._arrange_subwindows()
         else:
             self._hidden_tabs.add(widget)
             self._hidden_subwindows.add(sub)
