@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import re
 from dataclasses import dataclass
 from itertools import zip_longest
 from pathlib import Path
@@ -57,6 +58,18 @@ class PlotSeries:
 
 
 VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]
+SAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]+")
+
+
+@dataclass
+class PreparedSeries:
+    """Sorted, de-duplicated temperature segment ready for export/Origin."""
+
+    series: PlotSeries
+    frame: pd.DataFrame
+    section_label: str
+    legend: str
+    color: str
 
 
 class VSMTemperatureScanProcessor(SimpleScriptProcessor):
@@ -115,6 +128,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 self.log(f"{path.name}: no measurement rows found.")
                 continue
             entries.append(VSMEntry(path=path, sample=sample, dataframe=data))
+        entries = self._combine_dual_field_entries(entries)
         if not entries:
             raise RuntimeError("No usable VSM temperature scan data was found.")
         self.log(f"Loaded {len(entries)} dataset(s).")
@@ -252,6 +266,31 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             (entry.field, entry.direction, entry.segment_index): VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)]
             for idx, entry in enumerate(series)
         }
+
+    def _prepare_series(self, series: Sequence[PlotSeries]) -> list[PreparedSeries]:
+        """Return sorted, de-duplicated segments with display metadata."""
+
+        prepared: list[PreparedSeries] = []
+        if not series:
+            return prepared
+        color_map = self.series_color_map(series)
+        for idx, entry_series in enumerate(series):
+            frame, _ = self._dedupe_temperatures(entry_series.frame)
+            frame = frame.sort_values("temperature")
+            section_label = f"Section {entry_series.segment_index + 1}"
+            legend_text = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} ({section_label})"
+            color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
+            color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
+            prepared.append(
+                PreparedSeries(
+                    series=entry_series,
+                    frame=frame,
+                    section_label=section_label,
+                    legend=legend_text,
+                    color=color,
+                )
+            )
+        return prepared
 
     def _build_series(self, frame: pd.DataFrame) -> list[PlotSeries]:
         series: list[PlotSeries] = []
@@ -399,6 +438,99 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             base = f"{base} S{section + 1}"
         return base
 
+    def _field_bucket(self, value: float | None) -> str:
+        if value is None:
+            return "other"
+        magnitude = abs(value)
+        if 5000 <= magnitude <= 15000:
+            return "10k"
+        if 20 <= magnitude <= 150:
+            return "50"
+        return "other"
+
+    def field_axis_order(self, fields: Sequence[float]) -> list[float]:
+        """Prioritize 10 kOe on the left axis and 50 Oe on the right."""
+
+        ordered: list[float] = []
+        seen: set[float] = set()
+
+        def _push(val: float | None) -> None:
+            if val is None:
+                return
+            if val in seen:
+                return
+            seen.add(val)
+            ordered.append(val)
+
+        primary: float | None = None
+        secondary: float | None = None
+        for val in fields:
+            bucket = self._field_bucket(val)
+            if bucket == "10k" and primary is None:
+                primary = val
+            elif bucket == "50" and secondary is None:
+                secondary = val
+
+        _push(primary)
+        _push(secondary)
+        for val in fields:
+            _push(val)
+        return ordered
+
+    def _safe_filename(self, value: str, fallback: str = "export") -> str:
+        cleaned = SAFE_FILENAME_CHARS.sub("_", (value or "").strip())
+        cleaned = re.sub("_+", "_", cleaned).strip("._")
+        return cleaned or fallback
+
+    def _build_export_basename(self, sample: str, prepared: Sequence[PreparedSeries]) -> str:
+        temps = pd.Series(dtype=float)
+        if prepared:
+            frames = [p.frame["temperature"].astype(float) for p in prepared if "temperature" in p.frame]
+            if frames:
+                temps = pd.concat(frames, ignore_index=True)
+        temp_min = float(temps.min()) if not temps.empty else 0.0
+        temp_max = float(temps.max()) if not temps.empty else 0.0
+        temp_token = f"{temp_min:.0f}-{temp_max:.0f}C" if temp_min or temp_max else "temp-NA"
+
+        fields = sorted({float(p.series.field) for p in prepared})
+        if not fields:
+            field_token = "field-NA"
+        elif len(fields) == 1:
+            field_token = f"{fields[0]:.0f}Oe"
+        else:
+            field_token = "multi-" + "-".join(f"{val:.0f}Oe" for val in fields)
+
+        sample_token = self._safe_filename(sample or "sample")
+        base = f"{sample_token}_{temp_token}_{field_token}"
+        return self._safe_filename(base)
+
+    def _dominant_field(self, entry: VSMEntry) -> float | None:
+        series = pd.to_numeric(entry.dataframe.get("field", pd.Series([], dtype=float)), errors="coerce")
+        if series.empty:
+            return None
+        return float(series.median())
+
+    def _combine_dual_field_entries(self, entries: list[VSMEntry]) -> list[VSMEntry]:
+        """Combine 10 kOe + 50 Oe runs for the same sample into one dataset."""
+
+        grouped: dict[str, list[VSMEntry]] = {}
+        for entry in entries:
+            grouped.setdefault(entry.sample, []).append(entry)
+
+        result: list[VSMEntry] = []
+        for sample, group in grouped.items():
+            if len(group) == 2:
+                buckets: set[str] = set()
+                for entry in group:
+                    buckets.add(self._field_bucket(self._dominant_field(entry)))
+                if buckets == {"10k", "50"}:
+                    combined = pd.concat([e.dataframe.copy() for e in group], ignore_index=True)
+                    result.append(VSMEntry(path=group[0].path, sample=sample, dataframe=combined))
+                    self.log(f"Combined 10 kOe + 50 Oe runs for sample {sample} into one plot.")
+                    continue
+            result.extend(group)
+        return result
+
     def _compute_derivative(self, frame: pd.DataFrame, *, smooth: bool | None = None) -> list[float]:
         temps = frame["temperature"].astype(float).to_numpy()
         signals = frame["signal"].astype(float).to_numpy()
@@ -498,6 +630,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             if not series:
                 continue
             color_map = self.series_color_map(series)
+            field_order = self.field_axis_order([s.field for s in series])
             fig, ax_left = plt.subplots(figsize=(9, 5))
             ax_left.set_title(f"{entry.sample} - VSM Temperature Scan")
             ax_left.set_xlabel("Temperature (°C)")
@@ -526,13 +659,18 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 nonlocal ax_right
                 if field in field_axes:
                     return field_axes[field]
-                if not field_axes:
+                primary = field_order[0] if field_order else field
+                secondary = field_order[1] if len(field_order) > 1 else None
+                if field == primary or not field_axes:
                     field_axes[field] = ax_left
                     return ax_left
+                if secondary is None:
+                    secondary = field
                 if ax_right is None:
                     ax_right = ax_left.twinx()
-                field_axes[field] = ax_right
-                secondary_map[ax_right] = field
+                target = ax_right if field == secondary else ax_left if field_axes else ax_right
+                field_axes[field] = target
+                secondary_map[ax_right] = field if target is ax_right else secondary_map.get(ax_right, field)
                 return field_axes[field]
 
             for idx, entry_series in enumerate(series):
@@ -781,6 +919,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             except Exception:
                 pass
             try:
+                layer.lt_exec("layer -s 0;")
+            except Exception:
+                pass
+            try:
                 axis_top = layer.axis(2)
                 axis_top.title = title
                 # Hide top tick labels while keeping the title visible.
@@ -796,48 +938,60 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             series = self._build_series(entry.dataframe.copy())
             if not series:
                 continue
-            color_map = self.series_color_map(series)
+            prepared = self._prepare_series(series)
+            if not prepared:
+                continue
             include_raw_derivative = bool(self.show_derivative)
-            series_info: list[tuple[PlotSeries, str, str, str]] = []
-            for idx, entry_series in enumerate(series):
-                section_label = f"Section {entry_series.segment_index + 1}"
-                legend_text = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} ({section_label})"
-                color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
-                color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
-                series_info.append((entry_series, section_label, legend_text, color))
             book = op.new_book("w")
             book.lname = f"{entry.sample} (TScan)"
             data_sheet = cast(Any, book[0])
             data_sheet.name = "Data"
             col_index = 0
             column_pairs: list[tuple[float, int, str, str]] = []
-            for entry_series, section_label, legend_text, color in series_info:
-                frame, _ = self._dedupe_temperatures(entry_series.frame)
-                frame = frame.sort_values("temperature")
-                temps = frame["temperature"].tolist()
-                signals = frame["signal"].tolist()
+            designations: list[str] = []
+            for item in prepared:
+                frame = item.frame
+                temps = frame["temperature"].astype(float).tolist()
+                signals = frame["signal"].astype(float).tolist()
                 data_sheet.from_list(
                     col_index,
                     temps,
                     lname="Temperature",
                     units="°C",
-                    comments=section_label,
+                    comments=item.section_label,
                     axis="X",
                 )
                 col_x = cast(Any, data_sheet.obj.Columns(col_index))
-                col_x.Type = 3
+                try:
+                    col_x.LongName = "Temperature"
+                    col_x.Units = "°C"
+                    col_x.Type = 3
+                except Exception:
+                    pass
+                designations.append("X")
                 data_sheet.from_list(
                     col_index + 1,
                     signals,
                     lname="Signal X",
                     units="emu",
-                    comments=legend_text,
+                    comments=item.legend,
                     axis="Y",
                 )
                 col_y = cast(Any, data_sheet.obj.Columns(col_index + 1))
-                col_y.Type = 4
-                column_pairs.append((entry_series.field, col_index, legend_text, color))
+                try:
+                    col_y.LongName = "Signal X"
+                    col_y.Units = "emu"
+                    col_y.Type = 4
+                except Exception:
+                    pass
+                designations.append("Y")
+                column_pairs.append((item.series.field, col_index, item.legend, item.color))
                 col_index += 2
+            if designations:
+                try:
+                    data_sheet.cols_axis("".join(designations))
+                except Exception:
+                    pass
 
             graphs: list[Any] = []
             graph = op.new_graph(template="doubley")
@@ -850,10 +1004,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             except Exception:
                 graph_title = f"{entry.sample} - VSM Temperature Scan"
                 pass
-            unique_fields: list[float] = []
-            for field_value, _, _, _ in column_pairs:
-                if field_value not in unique_fields:
-                    unique_fields.append(field_value)
+            unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
             layer_map: Dict[float, Any] = {}
             existing_layers = len(graph)
             for idx, field_value in enumerate(unique_fields):
@@ -898,34 +1049,50 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 smooth_sheet.name = "Smoothed"
                 scol = 0
                 smooth_pairs: list[tuple[float, int, str, str]] = []
-                for entry_series, section_label, legend_text, color in series_info:
-                    base_frame, _ = self._dedupe_temperatures(entry_series.frame)
-                    working = base_frame.sort_values("temperature")
-                    frame = self._smooth_frame(working)
-                    temps = frame["temperature"].tolist()
-                    signals = frame["signal"].tolist()
+                s_designations: list[str] = []
+                for item in prepared:
+                    frame = self._smooth_frame(item.frame)
+                    temps = frame["temperature"].astype(float).tolist()
+                    signals = frame["signal"].astype(float).tolist()
                     smooth_sheet.from_list(
                         scol,
                         temps,
                         lname="Temperature",
                         units="°C",
-                        comments=section_label,
+                        comments=item.section_label,
                         axis="X",
                     )
                     col_x = cast(Any, smooth_sheet.obj.Columns(scol))
-                    col_x.Type = 3
+                    try:
+                        col_x.LongName = "Temperature"
+                        col_x.Units = "°C"
+                        col_x.Type = 3
+                    except Exception:
+                        pass
+                    s_designations.append("X")
                     smooth_sheet.from_list(
                         scol + 1,
                         signals,
                         lname="Signal X (smoothed)",
                         units="emu",
-                        comments=legend_text,
+                        comments=item.legend,
                         axis="Y",
                     )
                     col_y = cast(Any, smooth_sheet.obj.Columns(scol + 1))
-                    col_y.Type = 4
-                    smooth_pairs.append((entry_series.field, scol, legend_text, color))
+                    try:
+                        col_y.LongName = "Signal X (smoothed)"
+                        col_y.Units = "emu"
+                        col_y.Type = 4
+                    except Exception:
+                        pass
+                    s_designations.append("Y")
+                    smooth_pairs.append((item.series.field, scol, item.legend, item.color))
                     scol += 2
+                if s_designations:
+                    try:
+                        smooth_sheet.cols_axis("".join(s_designations))
+                    except Exception:
+                        pass
                 smooth_graph = op.new_graph(template="doubley")
                 graphs.append(smooth_graph)
                 try:
@@ -936,10 +1103,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 except Exception:
                     smooth_title = f"{entry.sample} - Smoothed Signal X"
                     pass
-                s_unique: list[float] = []
-                for field_value, _, _, _ in smooth_pairs:
-                    if field_value not in s_unique:
-                        s_unique.append(field_value)
+                s_unique: list[float] = self.field_axis_order([field for field, _, _, _ in smooth_pairs])
                 s_layer_map: Dict[float, Any] = {}
                 s_existing = len(smooth_graph)
                 for idx, field_value in enumerate(s_unique):
@@ -984,33 +1148,50 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 deriv_sheet.name = "Derivative"
                 col = 0
                 derivative_column_pairs: list[tuple[float, int, str, str]] = []
-                for entry_series, section_label, legend_text, color in series_info:
-                    base_frame, _ = self._dedupe_temperatures(entry_series.frame)
-                    frame = self._smooth_frame(base_frame.sort_values("temperature"))
-                    temps = frame["temperature"].tolist()
+                d_designations: list[str] = []
+                for item in prepared:
+                    frame = self._smooth_frame(item.frame)
+                    temps = frame["temperature"].astype(float).tolist()
                     derivs = self._compute_derivative(frame, smooth=False)
                     deriv_sheet.from_list(
                         col,
                         temps,
                         lname="Temperature",
                         units="°C",
-                        comments=section_label,
+                        comments=item.section_label,
                         axis="X",
                     )
                     col_x = cast(Any, deriv_sheet.obj.Columns(col))
-                    col_x.Type = 3
+                    try:
+                        col_x.LongName = "Temperature"
+                        col_x.Units = "°C"
+                        col_x.Type = 3
+                    except Exception:
+                        pass
+                    d_designations.append("X")
                     deriv_sheet.from_list(
                         col + 1,
                         derivs,
                         lname="dSignal/dT",
                         units="emu/°C",
-                        comments=legend_text,
+                        comments=item.legend,
                         axis="Y",
                     )
                     col_y = cast(Any, deriv_sheet.obj.Columns(col + 1))
-                    col_y.Type = 4
+                    try:
+                        col_y.LongName = "dSignal/dT"
+                        col_y.Units = "emu/°C"
+                        col_y.Type = 4
+                    except Exception:
+                        pass
+                    d_designations.append("Y")
                     col += 2
-                    derivative_column_pairs.append((entry_series.field, col - 2, legend_text, color))
+                    derivative_column_pairs.append((item.series.field, col - 2, item.legend, item.color))
+                if d_designations:
+                    try:
+                        deriv_sheet.cols_axis("".join(d_designations))
+                    except Exception:
+                        pass
                 deriv_graph = op.new_graph()
                 graphs.append(deriv_graph)
                 try:
@@ -1056,33 +1237,50 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     deriv_sm_sheet.name = "Derivative (smoothed)"
                     col = 0
                     derivative_sm_pairs: list[tuple[float, int, str, str]] = []
-                    for entry_series, section_label, legend_text, color in series_info:
-                        base_frame, _ = self._dedupe_temperatures(entry_series.frame)
-                        frame = self._smooth_frame(base_frame.sort_values("temperature"))
-                        temps = frame["temperature"].tolist()
+                    sm_designations: list[str] = []
+                    for item in prepared:
+                        frame = self._smooth_frame(item.frame)
+                        temps = frame["temperature"].astype(float).tolist()
                         derivs = self._compute_derivative(frame, smooth=True)
                         deriv_sm_sheet.from_list(
                             col,
                             temps,
                             lname="Temperature",
                             units="°C",
-                            comments=section_label,
+                            comments=item.section_label,
                             axis="X",
                         )
                         col_x = cast(Any, deriv_sm_sheet.obj.Columns(col))
-                        col_x.Type = 3
+                        try:
+                            col_x.LongName = "Temperature"
+                            col_x.Units = "°C"
+                            col_x.Type = 3
+                        except Exception:
+                            pass
+                        sm_designations.append("X")
                         deriv_sm_sheet.from_list(
                             col + 1,
                             derivs,
                             lname="dSignal/dT (smoothed)",
                             units="emu/°C",
-                            comments=legend_text,
+                            comments=item.legend,
                             axis="Y",
                         )
                         col_y = cast(Any, deriv_sm_sheet.obj.Columns(col + 1))
-                        col_y.Type = 4
+                        try:
+                            col_y.LongName = "dSignal/dT (smoothed)"
+                            col_y.Units = "emu/°C"
+                            col_y.Type = 4
+                        except Exception:
+                            pass
+                        sm_designations.append("Y")
                         col += 2
-                        derivative_sm_pairs.append((entry_series.field, col - 2, legend_text, color))
+                        derivative_sm_pairs.append((item.series.field, col - 2, item.legend, item.color))
+                    if sm_designations:
+                        try:
+                            deriv_sm_sheet.cols_axis("".join(sm_designations))
+                        except Exception:
+                            pass
                     deriv_sm_graph = op.new_graph()
                     graphs.append(deriv_sm_graph)
                     try:
@@ -1144,15 +1342,18 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             series = self._build_series(entry.dataframe.copy())
             if not series:
                 continue
+            prepared = self._prepare_series(series)
+            if not prepared:
+                continue
+            base_name = self._build_export_basename(entry.sample, prepared)
             # Main data export (one file per graph)
-            fname = output_dir / f"{entry.path.stem}_TScan.txt"
+            fname = output_dir / f"{base_name}_TScan.txt"
             headers: List[List[str]] = []
             columns: List[List[str]] = []
-            for entry_series in series:
-                frame, _ = self._dedupe_temperatures(entry_series.frame)
-                frame = frame.sort_values("temperature")
-                temps = [f"{val:.6f}" for val in frame["temperature"].tolist()]
-                signals = [f"{val:.6e}" for val in frame["signal"].tolist()]
+            for item in prepared:
+                frame = item.frame
+                temps = [f"{val:.6f}" for val in frame["temperature"].astype(float).tolist()]
+                signals = [f"{val:.6e}" for val in frame["signal"].astype(float).tolist()]
                 columns.append(temps)
                 columns.append(signals)
                 headers.append(
@@ -1167,11 +1368,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         "emu",
                     ]
                 )
-                legend = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} (Section {entry_series.segment_index + 1})"
                 headers.append(
                     [
-                        f"Section {entry_series.segment_index + 1}",
-                        legend,
+                        item.section_label,
+                        item.legend,
                     ]
                 )
             with fname.open("w", newline="", encoding="utf-8") as handle:
@@ -1187,20 +1387,18 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
             # Derivative export (one file per graph) when enabled
             if self.show_derivative or self.show_smoothed_derivative:
                 if self.show_derivative:
-                    dname = output_dir / f"{entry.path.stem}_TScan_derivative.txt"
+                    dname = output_dir / f"{base_name}_TScan_derivative.txt"
                     d_headers: List[List[str]] = []
                     d_columns: List[List[str]] = []
-                    for entry_series in series:
-                        base_frame, _ = self._dedupe_temperatures(entry_series.frame)
-                        frame = self._smooth_frame(base_frame.sort_values("temperature"))
-                        temps = [f"{val:.6f}" for val in frame["temperature"].tolist()]
+                    for item in prepared:
+                        frame = self._smooth_frame(item.frame)
+                        temps = [f"{val:.6f}" for val in frame["temperature"].astype(float).tolist()]
                         derivs = [f"{val:.6e}" for val in self._compute_derivative(frame, smooth=False)]
                         d_columns.append(temps)
                         d_columns.append(derivs)
                         d_headers.append(["Temperature", "dSignal/dT"])
                         d_headers.append(["°C", "emu/°C"])
-                        legend = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} (Section {entry_series.segment_index + 1})"
-                        d_headers.append([f"Section {entry_series.segment_index + 1}", legend])
+                        d_headers.append([item.section_label, item.legend])
                     with dname.open("w", newline="", encoding="utf-8") as handle:
                         writer = csv.writer(handle, delimiter="\t")
                         if d_headers:
@@ -1210,20 +1408,18 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                             writer.writerow(data_row)
                     self.log(f"Exported {dname.name}")
                 if self.show_smoothed_derivative and self.smooth_derivative:
-                    sdname = output_dir / f"{entry.path.stem}_TScan_derivative_smoothed.txt"
+                    sdname = output_dir / f"{base_name}_TScan_derivative_smoothed.txt"
                     sd_headers: List[List[str]] = []
                     sd_columns: List[List[str]] = []
-                    for entry_series in series:
-                        base_frame, _ = self._dedupe_temperatures(entry_series.frame)
-                        frame = self._smooth_frame(base_frame.sort_values("temperature"))
-                        temps = [f"{val:.6f}" for val in frame["temperature"].tolist()]
+                    for item in prepared:
+                        frame = self._smooth_frame(item.frame)
+                        temps = [f"{val:.6f}" for val in frame["temperature"].astype(float).tolist()]
                         derivs = [f"{val:.6e}" for val in self._compute_derivative(frame, smooth=True)]
                         sd_columns.append(temps)
                         sd_columns.append(derivs)
                         sd_headers.append(["Temperature", "dSignal/dT (smoothed)"])
                         sd_headers.append(["°C", "emu/°C"])
-                        legend = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} (Section {entry_series.segment_index + 1})"
-                        sd_headers.append([f"Section {entry_series.segment_index + 1}", legend])
+                        sd_headers.append([item.section_label, item.legend])
                     with sdname.open("w", newline="", encoding="utf-8") as handle:
                         writer = csv.writer(handle, delimiter="\t")
                         if sd_headers:
@@ -1234,20 +1430,18 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     self.log(f"Exported {sdname.name}")
 
             if self.show_smoothed_plot:
-                sname = output_dir / f"{entry.path.stem}_TScan_smoothed.txt"
+                sname = output_dir / f"{base_name}_TScan_smoothed.txt"
                 s_headers: List[List[str]] = []
                 s_columns: List[List[str]] = []
-                for entry_series in series:
-                    base_frame, _ = self._dedupe_temperatures(entry_series.frame)
-                    frame = self._smooth_frame(base_frame.sort_values("temperature"))
-                    temps = [f"{val:.6f}" for val in frame["temperature"].tolist()]
-                    signals = [f"{val:.6e}" for val in frame["signal"].tolist()]
+                for item in prepared:
+                    frame = self._smooth_frame(item.frame)
+                    temps = [f"{val:.6f}" for val in frame["temperature"].astype(float).tolist()]
+                    signals = [f"{val:.6e}" for val in frame["signal"].astype(float).tolist()]
                     s_columns.append(temps)
                     s_columns.append(signals)
                     s_headers.append(["Temperature", "Signal X (smoothed)"])
                     s_headers.append(["°C", "emu"])
-                    legend = f"{entry_series.field:.0f} Oe{self._direction_label(entry_series.direction, entry_series.segment_index)} (Section {entry_series.segment_index + 1})"
-                    s_headers.append([f"Section {entry_series.segment_index + 1}", legend])
+                    s_headers.append([item.section_label, item.legend])
                 with sname.open("w", newline="", encoding="utf-8") as handle:
                     writer = csv.writer(handle, delimiter="\t")
                     if s_headers:

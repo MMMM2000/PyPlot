@@ -223,6 +223,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 continue
             color_map = self._processor.series_color_map(series)
             include_raw_derivative = bool(self._processor.show_derivative)
+            field_order = self._processor.field_axis_order([s.field for s in series])
             x_label = "Temperature (°C)"
             y_label = "Signal X (emu)"
 
@@ -239,10 +240,20 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
                     color = color_map.get(color_key, VSM_TEMP_SCAN_COLORS[idx % len(VSM_TEMP_SCAN_COLORS)])
                     label = f"{entry_series.field:.0f} Oe{self._processor._direction_label(entry_series.direction, entry_series.segment_index)}"
+                    primary = field_order[0] if field_order else entry_series.field
+                    secondary = field_order[1] if len(field_order) > 1 else None
                     if entry_series.field not in axes_map:
-                        axes_map[entry_series.field] = ax_left if not axes_map else ax_left.twinx()
-                        if axes_map[entry_series.field] is not ax_left:
-                            ax_right = axes_map[entry_series.field]
+                        if entry_series.field == primary or not axes_map:
+                            axes_map[entry_series.field] = ax_left
+                        else:
+                            if ax_right is None:
+                                ax_right = ax_left.twinx()
+                            axes_map[entry_series.field] = ax_right
+                            if ax_right is None:
+                                ax_right = axes_map[entry_series.field]
+                    if secondary is not None and entry_series.field == secondary and ax_right is None:
+                        ax_right = ax_left.twinx()
+                        axes_map[entry_series.field] = ax_right
                     axis = axes_map[entry_series.field]
                     axis.plot(temps, signal, color=color, linewidth=1.4, label=label)
                     ax_left.set_xlabel(x_label)

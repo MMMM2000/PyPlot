@@ -1,5 +1,14 @@
 # Changelog
 
+## 2025-12-03 10:43 UTC
+- Forced VSM Temperature Scan Origin plots to keep symbol size at 1 and auto-stack 10 kOe + 50 Oe runs of the same sample onto one graph (10 kOe on the left Y axis, 50 Oe on the right), sharing the same PyPlot tab.
+- Synced PyPlot subwindows so toggling any graph/workbook to fullscreen locks every window into fullscreen until one is restored to windowed mode.
+- Cascaded new PyPlot subwindows, added a configurable max-visible window cap (Settings → Set max visible windows…), and auto-hide the oldest window when opening a new one from Project Explorer past the limit.
+
+## 2025-12-03 10:23 UTC
+- Fixed VSM Temperature Scan Origin plots by reusing the de-duplicated, temperature-sorted series for XY pairs, explicitly flagging X/Y designations per column, and forcing speed mode off so axes rescale to the true temperature range instead of row indices.
+- Renamed VSM Temperature Scan TXT exports to include the sample name, temperature span, and magnetic field in each filename, keeping derivative/smoothed outputs aligned with the new naming.
+
 ## 2025-11-28 12:53 UTC
 - Hardened the PyPlot MDI subwindow handling so maximizing graph tabs (including VSM Temperature Scan plots) no longer raises errors when Qt toggles window states, and defaulted window layout to side-by-side half-width tiles instead of stacked overlaps.
 - Let VSM Temperature Scan canvases grow with the plot window by removing fixed canvas minimums while keeping the half-width default subwindow sizing so plots scale instead of appearing cropped.

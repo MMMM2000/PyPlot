@@ -2093,7 +2093,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._graph_settings_content: QtWidgets.QWidget | None = None
         self._graph_section_states: dict[QtWidgets.QWidget, _GraphSectionState] = {}
 
+        stored_max_windows = 6
+        if isinstance(self.settings, QtCore.QSettings):
+            try:
+                stored_max_windows = int(self.settings.value("mdi/max_visible", stored_max_windows))
+            except Exception:
+                pass
+        self._max_visible_windows = max(1, stored_max_windows)
+
         self._build_base_ui()
+        try:
+            self.tab_widget.set_max_visible_windows(self._max_visible_windows)
+        except Exception:
+            pass
+        self._ensure_settings_menu()
         self._update_project_title()
         self._update_project_actions()
         developer_options().keep_files_changed.connect(self._handle_keep_files_changed)
@@ -2354,6 +2367,49 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 "Open in Matplotlib",
                 "No visible data series were available to plot.",
             )
+
+    def _ensure_settings_menu(self) -> None:
+        menu_bar = getattr(self, "menuBar", None)
+        if not callable(menu_bar):
+            return
+        bar = menu_bar()
+        if not isinstance(bar, QtWidgets.QMenuBar):
+            return
+        settings_menu: QtWidgets.QMenu | None = None
+        for action in bar.actions():
+            menu = action.menu()
+            if isinstance(menu, QtWidgets.QMenu) and menu.title().replace("&", "").strip().lower() == "settings":
+                settings_menu = menu
+                break
+        if settings_menu is None:
+            settings_menu = bar.addMenu("Settings")
+        if not hasattr(self, "_max_windows_action") or not isinstance(getattr(self, "_max_windows_action"), QtGui.QAction):
+            self._max_windows_action = settings_menu.addAction("Set max visible windows…")
+            self._max_windows_action.triggered.connect(self._prompt_max_visible_windows)
+
+    def _prompt_max_visible_windows(self) -> None:
+        current = int(getattr(self, "_max_visible_windows", 6))
+        value, ok = QtWidgets.QInputDialog.getInt(
+            self,
+            "Maximum visible windows",
+            "Maximum graph/workbook windows to keep visible:",
+            current,
+            1,
+            20,
+            1,
+        )
+        if not ok:
+            return
+        self._max_visible_windows = int(value)
+        try:
+            self.tab_widget.set_max_visible_windows(self._max_visible_windows)
+        except Exception:
+            pass
+        if isinstance(self.settings, QtCore.QSettings):
+            try:
+                self.settings.setValue("mdi/max_visible", int(value))
+            except Exception:
+                pass
 
     def _tab_plugin_name(self, descriptor: TabDescriptor | None = None) -> str | None:
         if descriptor is not None and isinstance(descriptor.metadata, dict):
@@ -8173,6 +8229,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._hidden_subwindows: set[_ManagedSubWindow] = set()
         self._hidden_tabs: set[QtWidgets.QWidget] = set()
         self._maximized_hidden: set[_ManagedSubWindow] = set()
+        self._max_visible_windows: int = 6
+        self._visibility_queue: list[_ManagedSubWindow] = []
         self._mdi.subWindowActivated.connect(self._handle_subwindow_activated)
         try:
             self._mdi.setContentsMargins(0, 0, 0, 0)
@@ -8189,7 +8247,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
         index = self.indexOf(widget) if widget is not None else -1
         if sub is not None:
             self._global_maximized = sub.isMaximized() or sub.isFullScreen()
-            self._apply_global_window_state(active=sub)
+            if self._global_maximized:
+                for other in self._subwindows.values():
+                    if other is sub:
+                        other.show()
+                        other.showMaximized()
+                        self._maximized_hidden.discard(other)
+                    else:
+                        other.hide()
+                        self._maximized_hidden.add(other)
+            else:
+                self._apply_global_window_state(active=sub)
+            self._register_visible(sub)
         if self._global_maximized and sub is not None and not sub.isMaximized():
             self._syncing_state = True
             try:
@@ -8213,9 +8282,20 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if sub is None:
             return
         self._blocking = True
+        if sub in self._hidden_subwindows:
+            self._hidden_subwindows.discard(sub)
+            sub.show()
+            self._register_visible(sub)
         self._mdi.setActiveSubWindow(sub)
         if self._global_maximized:
-            sub.showMaximized()
+            for other in self._subwindows.values():
+                if other is sub:
+                    other.show()
+                    other.showMaximized()
+                    self._maximized_hidden.discard(other)
+                else:
+                    other.hide()
+                    self._maximized_hidden.add(other)
         else:
             sub.showNormal()
         sub.raise_()
@@ -8236,25 +8316,70 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._set_tab_visibility(widget, False)
         if self._mdi.activeSubWindow() is sub:
             self._mdi.setActiveSubWindow(None)
+        try:
+            self._visibility_queue.remove(sub)
+        except ValueError:
+            pass
 
     def _apply_global_window_state(self, *, active: _ManagedSubWindow | None = None) -> None:
         self._syncing_state = True
         try:
             active_sub = active or self._mdi.activeSubWindow()
             if self._global_maximized:
-                if active_sub is not None and active_sub not in self._hidden_subwindows:
-                    active_sub.show()
-                    active_sub.showMaximized()
-                    active_sub.raise_()
+                for sub in self._subwindows.values():
+                    if sub in self._hidden_subwindows:
+                        continue
+                    if sub is active_sub:
+                        sub.show()
+                        sub.showMaximized()
+                        sub.raise_()
+                        self._maximized_hidden.discard(sub)
+                    else:
+                        sub.hide()
+                        self._maximized_hidden.add(sub)
             else:
                 for sub in self._subwindows.values():
                     if sub in self._hidden_subwindows:
                         continue
                     sub.show()
                     sub.showNormal()
+                    self._maximized_hidden.discard(sub)
                 self._arrange_subwindows()
         finally:
             self._syncing_state = False
+
+    def _register_visible(self, sub: _ManagedSubWindow) -> None:
+        if sub in self._hidden_subwindows:
+            return
+        try:
+            self._visibility_queue.remove(sub)
+        except ValueError:
+            pass
+        self._visibility_queue.append(sub)
+        self._enforce_max_visible(active=sub)
+
+    def set_max_visible_windows(self, limit: int) -> None:
+        try:
+            limit = max(1, int(limit))
+        except Exception:
+            return
+        self._max_visible_windows = limit
+        self._enforce_max_visible()
+
+    def _enforce_max_visible(self, *, active: _ManagedSubWindow | None = None) -> None:
+        visible = [sub for sub in self._visibility_queue if sub not in self._hidden_subwindows and not sub.isHidden()]
+        while len(visible) > max(1, self._max_visible_windows):
+            candidate = visible.pop(0)
+            if active is not None and candidate is active:
+                visible.append(candidate)
+                continue
+            candidate.hide()
+            self._hidden_subwindows.add(candidate)
+            try:
+                self._visibility_queue.remove(candidate)
+            except ValueError:
+                pass
+        self._visibility_queue = [sub for sub in self._visibility_queue if sub not in self._hidden_subwindows]
 
     def _fit_subwindow(
         self,
@@ -8316,21 +8441,20 @@ class _MdiTabProxy(QtWidgets.QWidget):
         ]
         if not visible_widgets:
             return
-        cols = 1 if len(visible_widgets) == 1 else 2
-        rows = (len(visible_widgets) + cols - 1) // cols
-        slot_w = max(1, viewport.width() // cols)
-        slot_h = max(1, viewport.height() // rows)
         margin = self._layout_margin
+        offset = 28
+        max_w = max(320, viewport.width() - margin * 2)
+        max_h = max(220, viewport.height() - margin * 2)
         for idx, widget in enumerate(visible_widgets):
             sub = self._subwindow_for(widget)
             if sub is None or sub in self._hidden_subwindows:
                 continue
-            self._fit_subwindow(sub, use_half_width=(cols > 1), preferred_width=slot_w)
-            max_w = max(1, slot_w - 2 * margin)
-            max_h = max(1, slot_h - 2 * margin)
-            sub.resize(min(sub.width(), max_w), min(sub.height(), max_h))
-            x = viewport.left() + (idx % cols) * slot_w + margin
-            y = viewport.top() + (idx // cols) * slot_h + margin
+            sub.showNormal()
+            width = min(sub.width() or max_w, max_w)
+            height = min(sub.height() or max_h, max_h)
+            x = viewport.left() + margin + (idx * offset) % max(1, viewport.width() - width - margin)
+            y = viewport.top() + margin + (idx * offset) % max(1, viewport.height() - height - margin)
+            sub.resize(width, height)
             sub.move(x, y)
 
     def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
@@ -8396,6 +8520,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._icons[widget] = icon
         self._visible[widget] = True
 
+        self._register_visible(sub)
+
         self._activate_index(index)
         self._arrange_subwindows()
         return index
@@ -8445,7 +8571,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
             if sub not in self._mdi.subWindowList():
                 self._mdi.addSubWindow(sub)
             sub.show()
+            self._hidden_subwindows.discard(sub)
             self._activate_index(index)
+            self._register_visible(sub)
         else:
             was_active = self._mdi.activeSubWindow() is sub
             sub.hide()
