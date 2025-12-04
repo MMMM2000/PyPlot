@@ -155,7 +155,15 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                     self.host.tab_widget.removeTab(index)
         self._plot_tabs.clear()
         plots_created = 0
-        for path_str in sorted(self._data_by_file.keys()):
+        paths_sorted = sorted(self._data_by_file.keys())
+        progress = QtWidgets.QProgressDialog(
+            "Generating current annealing plots…", "Cancel", 0, len(paths_sorted), self.host
+        )
+        progress.setWindowModality(QtCore.Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        for idx, path_str in enumerate(paths_sorted, start=1):
+            if progress.wasCanceled():
+                break
             df = self._data_by_file[path_str]
             title = format_annealing_title(Path(path_str).stem)
             try:
@@ -202,6 +210,9 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             self.host._register_plot_tab(tab, canvas, ax, descriptor)
             self._plot_tabs.append(tab)
             plots_created += 1
+            progress.setValue(idx)
+            QtWidgets.QApplication.processEvents(QtCore.QEventLoop.ProcessEventsFlag.AllEvents)
+        progress.setValue(len(paths_sorted))
         if self._plot_tabs:
             setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
             if callable(setter):

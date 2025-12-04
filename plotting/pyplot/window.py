@@ -5326,6 +5326,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 root.setExpanded(True)
                 tree.insertTopLevelItem(0, root)
                 self._graph_tree_root = root
+        else:
+            root.setExpanded(True)
         return root
 
     def _insert_column(self, *, position: Literal["before", "after"]) -> None:
@@ -8330,6 +8332,17 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._layout_margin = 6
 
     # ------------------------------------------------------------------ helpers
+    def _apply_fullscreen_geometry(self, sub: _ManagedSubWindow) -> bool:
+        viewport = self._mdi.viewport() if self._mdi is not None else None
+        if viewport is None:
+            return False
+        rect = viewport.rect()
+        if not rect.isValid() or rect.width() < 40 or rect.height() < 40:
+            return False
+        sub.setGeometry(rect)
+        sub.setWindowState(QtCore.Qt.WindowState.WindowMaximized)
+        return True
+
     def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
         if self._blocking:
             return
@@ -8469,15 +8482,15 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 continue
             if sub is target:
                 sub.show()
-                viewport = self._mdi.viewport() if self._mdi is not None else None
-                if viewport is not None:
-                    rect = viewport.rect()
-                    if rect.isValid():
-                        sub.setGeometry(rect)
-                sub.setWindowState(QtCore.Qt.WindowState.WindowMaximized)
+                applied = self._apply_fullscreen_geometry(sub)
                 sub.showMaximized()
                 sub.raise_()
                 self._maximized_hidden.discard(sub)
+                if not applied:
+                    QtCore.QTimer.singleShot(
+                        0,
+                        lambda s=sub: self._apply_fullscreen_geometry(s),
+                    )
             else:
                 sub.hide()
                 self._maximized_hidden.add(sub)
@@ -8560,12 +8573,12 @@ class _MdiTabProxy(QtWidgets.QWidget):
 
     def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         if source is self._mdi.viewport() and event.type() == QtCore.QEvent.Type.Resize:
-            for sub in self._subwindows.values():
-                if sub in self._hidden_subwindows:
-                    continue
-                if self._global_maximized:
-                    continue
-            self._arrange_subwindows()
+            if self._global_maximized or self._fullscreen_lock:
+                active = self._mdi.activeSubWindow()
+                if active is not None:
+                    self._apply_fullscreen_geometry(active)
+            else:
+                self._arrange_subwindows()
         return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:

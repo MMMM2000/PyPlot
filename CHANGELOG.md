@@ -1,5 +1,12 @@
 # Changelog
 
+## 2025-12-04 15:20 UTC
+
+- Reduced current annealing plot text/marker sizes, tightened layout, and suppressed the Matplotlib “figure.max_open_warning” so large batches render without cropped titles or noisy warnings.
+- Added a progress dialog while plotting current annealing batches and kept the Project Explorer “Plots” branch expanded by default so new graphs are immediately visible.
+- Fixed current annealing Origin exports by wiring in the title formatter used for Matplotlib, restoring Origin export across PyPlot plug-ins.
+- Kept fullscreen graphs pinned to the viewport when switching windows, preventing occasional tiny subwindows while fullscreen mode is active.
+
 ## 2025-12-03 10:43 UTC
 - Forced VSM Temperature Scan Origin plots to keep symbol size at 1 and auto-stack 10 kOe + 50 Oe runs of the same sample onto one graph (10 kOe on the left Y axis, 50 Oe on the right), sharing the same PyPlot tab.
 - Synced PyPlot subwindows so toggling any graph/workbook to fullscreen locks every window into fullscreen until one is restored to windowed mode.
@@ -977,6 +984,15 @@
 - Stabilized stress sensitivity plotting: enforced larger embedded canvas sizes to stop cropping, kept legend text following line colours through dark-graph toggles, and guarded temperature dependence workbook registration against missing keys.
 - Reworked stress sensitivity Origin exports to mirror the PyPlot view (title on the top axis, manual sample labels with tick labels hidden, preserved delta markers), and populated workbook long names/units/comments for all processed columns.
 - Documented the Origin export checklist and per-plug-in folder memory defaults so imports/exports remember paths independently.
+
+# Changelog
+
+## 2025-12-04 15:20 UTC
+
+- Reduced current annealing plot text/marker sizes, tightened layout, and suppressed the Matplotlib “figure.max_open_warning” so large batches render without cropped titles or noisy warnings.
+- Added a progress dialog while plotting current annealing batches and kept the Project Explorer “Plots” branch expanded by default so new graphs are immediately visible.
+- Fixed current annealing Origin exports by wiring in the title formatter used for Matplotlib, restoring Origin export across PyPlot plug-ins.
+- Kept fullscreen graphs pinned to the viewport when switching windows, preventing occasional tiny subwindows while fullscreen mode is active.
 
 ## 2025-10-22 11:00 UTC
 

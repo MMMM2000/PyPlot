@@ -18,6 +18,7 @@ from plotting.shared.backends import wants_matplotlib, wants_origin
 from plotting.shared.utils import save_figure, show_plots, schedule_origin_release
 from plotting.shared.origin import origin_session, hide_origin_workbook
 from plotting.shared.readability import apply_readability_fonts, apply_readability
+from plotting.shared.toolkit import format_annealing_title
 
 # Defaults
 OUTPUT_DIR = os.getcwd()
@@ -28,16 +29,19 @@ PNG_DPI = 1200
 BACKEND = "matplotlib"
 IMPROVE_READABILITY = False
 SHOW_LEGEND = True
-LEGEND_SIZE = 18
+LEGEND_SIZE = 12
 LEGEND_ORIENTATION = "auto"
 LEGEND_SHOW_SYMBOLS = False
-LEGEND_SYMBOL_SIZE = 10.0
-TICK_SIZE = 18
-AXIS_LABEL_SIZE = 18
-TITLE_SIZE = 22
+LEGEND_SYMBOL_SIZE = 8.0
+TICK_SIZE = 12
+AXIS_LABEL_SIZE = 14
+TITLE_SIZE = 18
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
+
+# Relax figure count warning for batch plotting inside PyPlot tabs
+plt.rcParams["figure.max_open_warning"] = 0
 
 ORIGIN_MODES: Tuple[str, str] = ("experimental", "simple")
 ORIGIN_MODE: str = ORIGIN_MODES[1]
@@ -690,8 +694,8 @@ def plot_one(
     currents = df["I_mA"].to_numpy(dtype=float)
     resistances = df["R_Ohm"].to_numpy(dtype=float)
     _, segments = _direction_profile(currents)
-    marker_size = 4.0
-    line_width = 1.6
+    marker_size = 3.0
+    line_width = 1.2
     heating_color = "#dc2626"  # red
     cooling_color = "#2563eb"  # blue
 
@@ -770,17 +774,24 @@ def plot_one(
                 legend_kinds.add(legend_key)
             previous_direction = direction
 
-    ax.set_xlabel("Current (mA)")
-    ax.set_ylabel("Resistance (Ω)")
-    ax.set_title(title)
+    ax.set_xlabel("Current (mA)", fontsize=AXIS_LABEL_SIZE, fontweight="bold")
+    ax.set_ylabel("Resistance (Ω)", fontsize=AXIS_LABEL_SIZE, fontweight="bold")
+    ax.set_title(title, fontsize=TITLE_SIZE, fontweight="bold", pad=12)
     ax.grid(True, ls="--", alpha=0.3)
     if legend_handles:
-        ax.legend(
+        legend = ax.legend(
             handles=legend_handles,
             loc="best",
             labelcolor="linecolor",
-            handlelength=2.5,
+            handlelength=2.0,
+            fontsize=LEGEND_SIZE,
+            framealpha=0.9,
         )
+        if legend is not None and not LEGEND_SHOW_SYMBOLS:
+            for handle in legend.legendHandles:
+                handle.set_marker(None)
+            legend.set_handlelength(0.0)
+    ax.tick_params(axis="both", labelsize=TICK_SIZE)
     fig.tight_layout()
     cfg = dict(globals())
     apply_readability(ax, cfg)
