@@ -585,7 +585,11 @@ class MasterLauncher(QtWidgets.QWidget):
         return True
 
     def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
-        if event.type() == QtCore.QEvent.Type.KeyPress:
+        try:
+            etype = event.type()
+        except RecursionError:
+            return False
+        if etype == QtCore.QEvent.Type.KeyPress and isinstance(event, QtGui.QKeyEvent):
             key_event = cast(QtGui.QKeyEvent, event)
             focus_widget = QtWidgets.QApplication.focusWidget()
             if focus_widget is not None and not self.isAncestorOf(focus_widget):

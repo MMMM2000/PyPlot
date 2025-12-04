@@ -4,6 +4,8 @@
 - Forced VSM Temperature Scan Origin plots to keep symbol size at 1 and auto-stack 10 kOe + 50 Oe runs of the same sample onto one graph (10 kOe on the left Y axis, 50 Oe on the right), sharing the same PyPlot tab.
 - Synced PyPlot subwindows so toggling any graph/workbook to fullscreen locks every window into fullscreen until one is restored to windowed mode.
 - Cascaded new PyPlot subwindows, added a configurable max-visible window cap (Settings → Set max visible windows…), and auto-hide the oldest window when opening a new one from Project Explorer past the limit.
+- Kept fullscreen graphs consistent across tab switches (others hidden, active tab maximized), prevented bottom cropping by resizing to the viewport, and added a Project Explorer context menu to remove imported data directly.
+- Updated project-save defaults to use `<plugin name> <date>.pypj`, aligned default TXT export names with workbook labels, and documented the fullscreen/save/export rules in pyplot.md.
 
 ## 2025-12-03 10:23 UTC
 - Fixed VSM Temperature Scan Origin plots by reusing the de-duplicated, temperature-sorted series for XY pairs, explicitly flagging X/Y designations per column, and forcing speed mode off so axes rescale to the true temperature range instead of row indices.

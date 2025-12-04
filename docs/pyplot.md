@@ -11,7 +11,10 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Undo/Redo** are exposed on the Edit menu (Ctrl+Z / Ctrl+Y). They track tab changes, worksheet tabs, and other session actions.
 - **Saving** uses `.pypj` project files. When a session contains imported data or generated worksheets PyPlot prompts you to save, discard, or cancel if you try to close the window.
 - **Folder memory** is scoped per plug-in. Import file pickers, graph saves, and TXT exports reopen in the last folder used by that plug-in instead of sharing a single global path; plug-ins can also call `PyPlotPlugin.preferred_export_directory(...)` / `remember_export_directory(...)` to share the same history.
+- **Project filenames** default to `<plugin name> YYYY-MM-DD.pypj` (for example, `VSM Temperature Scan 2025-12-03.pypj`). If no plug-in is selected, the suggested name is `pyplot YYYY-MM-DD.pypj`.
 - **Legends** default to “text colour follows plot” for every plug-in. Legend options (show symbols, placement, orientation, drag, follow colours) are remembered per plug-in between sessions so each workflow keeps its own defaults.
+- **Fullscreen**: maximizing any graph/workbook hides the others and maximizes the active subwindow; switching tabs or double-clicking a different graph keeps fullscreen on (only the active window is visible) until you restore a window to normal.
+- **TXT exports**: the default filename mirrors the current workbook/plot label so exported TXT/CSV files match the names shown in the Project Explorer and carry the sample/procedure context baked into those labels.
 
 ## Origin export checklist
 - Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.

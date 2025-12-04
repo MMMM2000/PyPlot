@@ -2718,6 +2718,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return "".join(stem_chars).strip("._") or "series"
 
         default_name = descriptor.root_label or descriptor.title or "graph"
+        tree = getattr(self, "project_tree", None)
+        if isinstance(tree, QtWidgets.QTreeWidget):
+            current = tree.currentItem()
+            if isinstance(current, QtWidgets.QTreeWidgetItem):
+                label = current.text(0).strip()
+                if label:
+                    default_name = label
         suggested = _clean_stem(default_name) + ".txt"
 
         project_path = getattr(self, "_project_path", None)
@@ -3198,6 +3205,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree.header().setStretchLastSection(True)
         self.project_tree.setUniformRowHeights(True)
         self.project_tree.setAnimated(False)
+        self.project_tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
+        self.project_tree.customContextMenuRequested.connect(self._handle_project_context_menu)
         self.project_tree.itemDoubleClicked.connect(self._handle_project_item_double_click)
         self.project_tree.itemActivated.connect(self._handle_project_item_double_click)
         self._ensure_data_root()
@@ -6063,6 +6072,40 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 self._worksheet_tree_items[worksheet.key] = sheet_item
 
         self._sync_shared_action_states()
+
+    def _remove_imported_workbook(self, key: Hashable) -> None:
+        workbook = self._workbooks.get(key)
+        if workbook is None:
+            return
+        folder_item = None
+        item = self._data_workbook_items.pop(key, None)
+        if item is not None:
+            folder_item = item.parent()
+        for sheet_key in list(workbook.worksheets):
+            self._remove_worksheet(sheet_key)
+        with self._suspend_project_tree_updates():
+            if item is not None and folder_item is not None:
+                index = folder_item.indexOfChild(item)
+                if index >= 0:
+                    folder_item.takeChild(index)
+            # Drop empty folder items from Imported Data
+            if folder_item is not None and folder_item is not self._data_tree_root:
+                if folder_item.childCount() == 0:
+                    parent = folder_item.parent()
+                    if parent is not None:
+                        idx = parent.indexOfChild(folder_item)
+                        if idx >= 0:
+                            parent.takeChild(idx)
+                    resolved = None
+                    for path, candidate in list(self._data_folder_items.items()):
+                        if candidate is folder_item:
+                            resolved = path
+                            break
+                    if resolved is not None:
+                        self._data_folder_items.pop(resolved, None)
+        self._workbooks.pop(key, None)
+        self._sync_shared_action_states()
+        self._mark_project_dirty()
         if worksheets:
             self._mark_project_dirty()
             self._session_has_imports = True
@@ -6315,18 +6358,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _default_project_filename(self) -> str:
         """Return a suggested project filename based on the plotter and current date."""
 
-        code = getattr(self, "PROJECT_CODE", None)
-        if isinstance(code, str) and code.strip():
-            prefix = code.strip()
-        else:
-            base_title = getattr(self, "_base_title", "")
-            if isinstance(base_title, str) and base_title.strip():
-                candidate = base_title.strip()
-            else:
-                candidate = self.windowTitle().strip()
-            sanitized = candidate.replace("—", " ").replace("�?", " ").replace("-", " ")
-            parts = [segment for segment in sanitized.replace("/", " ").split() if segment]
-            prefix = "_".join(parts) if parts else self.__class__.__name__
+        plugin_name = getattr(self, "_current_plotter_name", None)
+        if not plugin_name:
+            base_title = getattr(self, "_base_title", "") or "pyplot"
+            plugin_name = base_title.strip() or "pyplot"
+        sanitized = plugin_name.replace("—", " ").replace("�?", " ").replace("-", " ")
+        parts = [segment for segment in sanitized.replace("/", " ").split() if segment]
+        prefix = " ".join(parts) if parts else "pyplot"
         extension = getattr(self, "PROJECT_EXTENSION", "")
         ext = extension if isinstance(extension, str) else ""
         if ext and not ext.startswith("."):
@@ -6919,6 +6957,46 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return None
 
     # Placeholder methods that subclasses may override or extend -----------------
+    def _handle_project_context_menu(self, pos: QtCore.QPoint) -> None:
+        item = self.project_tree.itemAt(pos)
+        if item is None:
+            return
+        payload = self._project_item_payload(item, 0)
+        if payload is None:
+            return
+        role, value = payload
+        menu = QtWidgets.QMenu(self)
+        action_added = False
+        if role in {"worksheet_group", "worksheet"} and self._is_under_data_root(item):
+            remove_action = menu.addAction("Remove imported data")
+            action_added = True
+
+            def _remove() -> None:
+                if role == "worksheet_group":
+                    self._remove_imported_workbook(value)
+                elif role == "worksheet":
+                    self._remove_worksheet(value)
+                    self._remove_imported_workbook(self._worksheet_workbook_key(value))
+
+            remove_action.triggered.connect(_remove)
+        if not action_added:
+            return
+        menu.exec(self.project_tree.viewport().mapToGlobal(pos))
+
+    def _is_under_data_root(self, item: QtWidgets.QTreeWidgetItem) -> bool:
+        cursor = item
+        while cursor is not None:
+            if cursor is self._data_tree_root:
+                return True
+            cursor = cursor.parent()
+        return False
+
+    def _worksheet_workbook_key(self, worksheet_key: Hashable) -> Hashable | None:
+        worksheet = self._worksheets.get(worksheet_key)
+        if worksheet is None:
+            return None
+        return worksheet.workbook_key
+
     def _apply_object_item_visibility(
         self,
         item: QtWidgets.QTreeWidgetItem,
@@ -8142,6 +8220,7 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
         self._aspect_ratio: float | None = None
         self._owner: _MdiTabProxy | None = None
         self._resizing = False
+        self._handling_change = False
         self.setWindowFlag(QtCore.Qt.WindowType.Tool, False)
         set_resizable = getattr(QtWidgets.QMdiSubWindow, "setWidgetResizable", None)
         if callable(set_resizable):
@@ -8167,18 +8246,24 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
-        if (
-            event.type() == QtCore.QEvent.Type.WindowStateChange
-            and self._owner is not None
-            and not self._owner._syncing_state  # noqa: SLF001
-        ):
-            self._owner._handle_subwindow_state_change(  # noqa: SLF001
-                self.isMaximized() or self.isFullScreen()
-            )
-            if event.oldState() & QtCore.Qt.WindowState.WindowMinimized:
-                normalizer = getattr(self._owner, "_normalize_docks_initial", None)  # noqa: SLF001
-                if callable(normalizer):
-                    QtCore.QTimer.singleShot(30, normalizer)
+        if self._handling_change:
+            return
+        self._handling_change = True
+        try:
+            if (
+                event.type() == QtCore.QEvent.Type.WindowStateChange
+                and self._owner is not None
+                and not self._owner._syncing_state  # noqa: SLF001
+            ):
+                self._owner._handle_subwindow_state_change(  # noqa: SLF001
+                    self.isMaximized() or self.isFullScreen()
+                )
+                if event.oldState() & QtCore.Qt.WindowState.WindowMinimized:
+                    normalizer = getattr(self._owner, "_normalize_docks_initial", None)  # noqa: SLF001
+                    if callable(normalizer):
+                        QtCore.QTimer.singleShot(30, normalizer)
+        finally:
+            self._handling_change = False
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         # hide instead of destroying so the graph can be reopened from Project Explorer
@@ -8188,7 +8273,11 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
             self._owner._handle_subwindow_hidden(self)
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
-        if self._resizing or self._aspect_ratio is None or self._owner is None:
+        if self._resizing or self._owner is None:
+            return super().resizeEvent(event)
+        if getattr(self._owner, "_global_maximized", False) or getattr(self._owner, "_fullscreen_lock", False):
+            return super().resizeEvent(event)
+        if self._aspect_ratio is None:
             return super().resizeEvent(event)
         self._resizing = True
         try:
@@ -8225,6 +8314,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._visible: dict[QtWidgets.QWidget, bool] = {}
         self._blocking = False
         self._global_maximized = False
+        self._fullscreen_lock = False
         self._syncing_state = False
         self._hidden_subwindows: set[_ManagedSubWindow] = set()
         self._hidden_tabs: set[QtWidgets.QWidget] = set()
@@ -8246,16 +8336,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
         if sub is not None:
-            self._global_maximized = sub.isMaximized() or sub.isFullScreen()
-            if self._global_maximized:
-                for other in self._subwindows.values():
-                    if other is sub:
-                        other.show()
-                        other.showMaximized()
-                        self._maximized_hidden.discard(other)
-                    else:
-                        other.hide()
-                        self._maximized_hidden.add(other)
+            is_max = sub.isMaximized() or sub.isFullScreen() or self._fullscreen_lock
+            self._global_maximized = is_max
+            if is_max:
+                self._fullscreen_lock = True
+                self._maximize_single(sub)
             else:
                 self._apply_global_window_state(active=sub)
             self._register_visible(sub)
@@ -8287,15 +8372,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             sub.show()
             self._register_visible(sub)
         self._mdi.setActiveSubWindow(sub)
-        if self._global_maximized:
-            for other in self._subwindows.values():
-                if other is sub:
-                    other.show()
-                    other.showMaximized()
-                    self._maximized_hidden.discard(other)
-                else:
-                    other.hide()
-                    self._maximized_hidden.add(other)
+        if self._global_maximized or self._fullscreen_lock:
+            self._maximize_single(sub)
         else:
             sub.showNormal()
         sub.raise_()
@@ -8305,8 +8383,19 @@ class _MdiTabProxy(QtWidgets.QWidget):
     def _handle_subwindow_state_change(self, maximized: bool) -> None:
         if self._syncing_state:
             return
-        self._global_maximized = bool(maximized)
-        self._apply_global_window_state()
+        if maximized:
+            self._fullscreen_lock = True
+            self._global_maximized = True
+            active = self._mdi.activeSubWindow()
+            if active is not None:
+                self._maximize_single(active)
+            else:
+                self._apply_global_window_state()
+        else:
+            # Do not clear fullscreen lock on incidental restores; only a manual restore should clear it.
+            if not self._fullscreen_lock:
+                self._global_maximized = False
+            self._apply_global_window_state()
 
     def _handle_subwindow_hidden(self, sub: _ManagedSubWindow) -> None:
         self._hidden_subwindows.add(sub)
@@ -8325,18 +8414,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._syncing_state = True
         try:
             active_sub = active or self._mdi.activeSubWindow()
-            if self._global_maximized:
-                for sub in self._subwindows.values():
-                    if sub in self._hidden_subwindows:
-                        continue
-                    if sub is active_sub:
-                        sub.show()
-                        sub.showMaximized()
-                        sub.raise_()
-                        self._maximized_hidden.discard(sub)
-                    else:
-                        sub.hide()
-                        self._maximized_hidden.add(sub)
+            if self._global_maximized or self._fullscreen_lock:
+                if active_sub is not None:
+                    self._maximize_single(active_sub)
             else:
                 for sub in self._subwindows.values():
                     if sub in self._hidden_subwindows:
@@ -8380,6 +8460,27 @@ class _MdiTabProxy(QtWidgets.QWidget):
             except ValueError:
                 pass
         self._visibility_queue = [sub for sub in self._visibility_queue if sub not in self._hidden_subwindows]
+
+    def _maximize_single(self, target: _ManagedSubWindow) -> None:
+        self._fullscreen_lock = True
+        self._global_maximized = True
+        for sub in self._subwindows.values():
+            if sub in self._hidden_subwindows:
+                continue
+            if sub is target:
+                sub.show()
+                viewport = self._mdi.viewport() if self._mdi is not None else None
+                if viewport is not None:
+                    rect = viewport.rect()
+                    if rect.isValid():
+                        sub.setGeometry(rect)
+                sub.setWindowState(QtCore.Qt.WindowState.WindowMaximized)
+                sub.showMaximized()
+                sub.raise_()
+                self._maximized_hidden.discard(sub)
+            else:
+                sub.hide()
+                self._maximized_hidden.add(sub)
 
     def _fit_subwindow(
         self,
@@ -8508,7 +8609,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._mdi.addSubWindow(sub)
         self._fit_subwindow(sub)
         if self._global_maximized:
-            sub.showMaximized()
+            self._maximize_single(sub)
         else:
             sub.show()
 
@@ -8523,7 +8624,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._register_visible(sub)
 
         self._activate_index(index)
-        self._arrange_subwindows()
+        if self._global_maximized or self._fullscreen_lock:
+            self._maximize_single(sub)
+        else:
+            self._arrange_subwindows()
         return index
 
     def removeTab(self, index: int) -> None:
@@ -8574,6 +8678,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._hidden_subwindows.discard(sub)
             self._activate_index(index)
             self._register_visible(sub)
+            if self._global_maximized:
+                self._maximize_single(sub)
         else:
             was_active = self._mdi.activeSubWindow() is sub
             sub.hide()
