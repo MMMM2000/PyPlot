@@ -1048,3 +1048,19 @@
   is enabled.
 
 - 2025-12-11 12:05 UTC – Updated strain load calc to use target MPa and dual-support area multiplier; clamp span hides in single mode; reduced table padding to eliminate right blank bar; annealing preview legend markers no longer error.
+
+- 2025-12-11 12:12 UTC – Strain load now requires explicit target stress per mode; clamp span hides in single span; moved saved .pydpj to projects/.
+
+- 2025-12-11 12:44 UTC – Fixed annealing preview legend handling; microscope previews larger for higher-res view; strain load now requires explicit target stress per mode.
+
+- 2025-12-11 13:07 UTC – Adjusted microscope preview sizing to avoid overflow; reduced current density plot padding/tick size for compact view.
+
+- 2025-12-11 13:10 UTC – Strain now reports contraction as negative (uses A−M and dual-point current−initial); default C offset set to 0 for both modes.
+
+- 2025-12-11 13:14 UTC – Strain offset now added to both M and A lengths before computing strain (no longer added after ratio).
+
+- 2025-12-11 13:30 UTC – Fixed strain save crash by reindexing missing columns; added New Project action and optional auto-open last project (Settings → Open last project on startup); store last project path.
+
+- 2025-12-11 13:34 UTC – Added compatibility alias for New Project action to prevent missing attribute errors.
+
+- 2025-12-11 13:37 UTC – Added BuilderWindow-level New Project handler and alias to stop launcher AttributeError.

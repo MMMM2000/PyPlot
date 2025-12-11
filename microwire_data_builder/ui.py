@@ -2860,7 +2860,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(4)
+        layout.setSpacing(2)
 
         self.title_label = QtWidgets.QLabel(title)
         self.title_label.setAlignment(
@@ -2873,7 +2873,7 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         self.subtitle_label.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter
         )
-        self.subtitle_label.setStyleSheet("color: palette(mid); font-size: 11px;")
+        self.subtitle_label.setStyleSheet("color: palette(mid); font-size: 10px;")
         layout.addWidget(self.subtitle_label)
 
         self._stack = QtWidgets.QStackedLayout()
@@ -3105,6 +3105,14 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
                     legend.remove()
                 except Exception:
                     pass
+            try:
+                axes.tick_params(labelsize=8)
+            except Exception:
+                pass
+        try:
+            figure.subplots_adjust(left=0.08, right=0.98, top=0.98, bottom=0.12)
+        except Exception:
+            pass
         return figure
 
 
@@ -3135,6 +3143,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
         splitter.addWidget(self._low_display)
         splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
+        splitter.setSizes([1, 1])
         layout.addWidget(splitter, 1)
 
     def update_selection(
@@ -4315,6 +4324,38 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.data_updated.emit()
         except Exception:
             pass
+
+    def _new_project(self) -> None:
+        if self._dirty:
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Unsaved project")
+            box.setText("Save changes to this Microwire Data Builder project before starting a new one?")
+            save_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Save)
+            discard_btn = box.addButton("Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(save_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                return
+            if clicked is save_btn:
+                self._save_project()
+                if self._dirty:
+                    return
+        self._suppress_dirty = True
+        for section in self.sections.values():
+            if isinstance(section, MiniDatabaseSection):
+                section.reset_to_blank()
+        self._project_path = None
+        self._dirty = False
+        self._suppress_dirty = False
+        self._update_project_title()
+        self._update_project_actions()
+        self._refresh_sections_after_project_load()
+
+    # Compatibility alias used by menu wiring in some launch contexts
+    def new_project(self) -> None:
+        self._new_project()
 
     def has_project_data(self) -> bool:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -5611,14 +5652,15 @@ class MicroscopeSection(MiniDatabaseSection):
         def _make_preview_panel(title: str) -> Tuple[QtWidgets.QVBoxLayout, _MicroscopePreviewLabel]:
             column_layout = QtWidgets.QVBoxLayout()
             column_layout.setContentsMargins(0, 0, 0, 0)
+            column_layout.setSpacing(4)
             caption = QtWidgets.QLabel(title)
             caption.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             caption.setStyleSheet("font-weight: 600;")
             column_layout.addWidget(caption)
             label = _MicroscopePreviewLabel("Select a row to preview.")
-            label.setMinimumSize(480, 360)
+            label.setMinimumSize(640, 480)
             label.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Ignored,
                 QtWidgets.QSizePolicy.Policy.Expanding,
             )
             column_layout.addWidget(label, 1)
@@ -6711,8 +6753,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
         splitter.setChildrenCollapsible(False)
         splitter.setOpaqueResize(False)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
+        splitter.setStretchFactor(0, 2)
+        splitter.setStretchFactor(1, 3)
         layout.addWidget(splitter, 1)
         self._table_splitter = splitter
 
@@ -7552,8 +7594,8 @@ class StrainSection(MiniDatabaseSection):
         self._editing_key: Optional[tuple[str, int, int]] = None
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
         self._strain_offsets: Dict[str, float] = {
-            self.STRAIN_MODE_LINEAR: 7.0,
-            self.STRAIN_MODE_DUAL_SUPPORT: 7.0,
+            self.STRAIN_MODE_LINEAR: 0.0,
+            self.STRAIN_MODE_DUAL_SUPPORT: 0.0,
         }
         self._strain_mode: str = self.STRAIN_MODE_LINEAR
         self._clamp_span_mm: float = 0.0
@@ -8019,6 +8061,9 @@ class StrainSection(MiniDatabaseSection):
             QtWidgets.QMessageBox.warning(self, self.section_title, "Enter a valid diameter.")
             return
         target_stress = float(self.target_stress_spin.value()) if hasattr(self, "target_stress_spin") else None
+        if target_stress is None or target_stress <= 0:
+            QtWidgets.QMessageBox.warning(self, self.section_title, "Set target stress (MPa) before saving.")
+            return
         mass_value = self._calculate_mass(
             d_value,
             area_multiplier=self._cross_section_multiplier(),
@@ -8417,8 +8462,15 @@ class StrainSection(MiniDatabaseSection):
             frame.at[index, self.COLUMN_STRAIN] = None if percent is None else round(percent, 3)
 
     def _save_table(self) -> None:
+        self._ensure_table_structure()
         self._recompute_table_metrics()
-        frame = self.data.table[self.TABLE_COLUMNS].copy()
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame(columns=self.TABLE_COLUMNS)
+        missing = [col for col in self.TABLE_COLUMNS if col not in frame.columns]
+        for col in missing:
+            frame[col] = None
+        frame = frame.reindex(columns=self.TABLE_COLUMNS).copy()
         frame.reset_index(drop=True, inplace=True)
         self.data.table = frame
         self._sync_payload()
@@ -8580,26 +8632,28 @@ class StrainSection(MiniDatabaseSection):
         active_mode = mode or self._strain_mode
         if clamp_span is None and active_mode == self.STRAIN_MODE_DUAL_SUPPORT:
             clamp_span = self._clamp_span()
-        if clamp_span:
-            half_span = clamp_span / 2.0
-            try:
-                initial = math.hypot(half_span, m_length)
-                current = math.hypot(half_span, a_length)
-            except Exception:
-                return None
-            if initial <= 0:
-                return None
-            base_ratio = (initial - current) / initial
-        else:
-            try:
-                base_ratio = (m_length - a_length) / m_length
-            except ZeroDivisionError:
-                return None
         try:
             offset = float(self._current_offset())
         except (TypeError, ValueError):
             offset = 0.0
-        return (base_ratio + offset) * 100
+        m_eff = m_length + offset
+        a_eff = a_length + offset
+        if clamp_span:
+            half_span = clamp_span / 2.0
+            try:
+                initial = math.hypot(half_span, m_eff)
+                current = math.hypot(half_span, a_eff)
+            except Exception:
+                return None
+            if initial <= 0:
+                return None
+            base_ratio = (current - initial) / initial
+        else:
+            try:
+                base_ratio = (a_eff - m_eff) / m_eff
+            except ZeroDivisionError:
+                return None
+        return base_ratio * 100
 
     @staticmethod
     def _calculate_mass(
@@ -8614,9 +8668,9 @@ class StrainSection(MiniDatabaseSection):
         if radius_m <= 0:
             return None
         area = math.pi * radius_m * radius_m * max(1.0, float(area_multiplier))
-        stress_pa = 1.0e11  # backward-compatible default
-        if isinstance(target_stress_mpa, (int, float)) and target_stress_mpa > 0:
-            stress_pa = float(target_stress_mpa) * 1e6
+        if not isinstance(target_stress_mpa, (int, float)) or target_stress_mpa <= 0:
+            return None
+        stress_pa = float(target_stress_mpa) * 1e6
         return stress_pa * area / 9.80665 * 1000.0
 
 
@@ -8639,7 +8693,7 @@ class AssemblySection(QtWidgets.QWidget):
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
+        layout.setSpacing(4)
 
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -9250,6 +9304,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._recent_projects: List[str] = []
         self._recent_projects_menu: QtWidgets.QMenu | None = None
         self._load_recent_projects_setting()
+        raw_auto = self.settings.value(self._project_settings_key("auto_open_last"), False)
+        self._auto_open_last: bool = bool(raw_auto)
+        self._auto_open_last_action: QtGui.QAction | None = None
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
@@ -9449,6 +9506,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)
+        self._setup_settings_menu(menu_bar)
         self._update_project_actions()
         self._suppress_dirty = True
         for section in self.sections.values():
@@ -9458,6 +9516,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._dirty = False
         self._set_initial_geometry()
         self._retabify_primary_docks()
+        QtCore.QTimer.singleShot(0, self._maybe_auto_open_last_project)
 
     def _dock_switcher_supported(self) -> bool:
         override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
@@ -9746,6 +9805,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         file_menu = menu_bar.findChild(QtWidgets.QMenu, "mw_shared_file")
         if file_menu is None:
             return
+        new_action = QtGui.QAction("New Project", self)
+        try:
+            new_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.New))
+        except Exception:
+            pass
+        new_action.triggered.connect(self._new_project)
         open_action = QtGui.QAction("Open Project…", self)
         try:
             open_action.setShortcut(QtGui.QKeySequence(QtGui.QKeySequence.StandardKey.Open))
@@ -9781,12 +9846,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 insert_before = action
                 break
         if insert_before is not None:
+            file_menu.insertAction(insert_before, new_action)
             file_menu.insertAction(insert_before, save_as_action)
             file_menu.insertAction(insert_before, save_action)
             file_menu.insertSeparator(insert_before)
             file_menu.insertMenu(insert_before, recent_menu)
             file_menu.insertAction(insert_before, open_action)
         else:
+            file_menu.addAction(new_action)
             file_menu.addAction(open_action)
             file_menu.addMenu(recent_menu)
             file_menu.addSeparator()
@@ -9802,6 +9869,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._save_project_action.setEnabled(has_data)
         if self._save_project_as_action is not None:
             self._save_project_as_action.setEnabled(has_data)
+
+    def _setup_settings_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        settings_menu = menu_bar.addMenu("Settings")
+        auto_open_action = QtGui.QAction("Open last project on startup", self)
+        auto_open_action.setCheckable(True)
+        auto_open_action.setChecked(self._auto_open_last)
+        auto_open_action.toggled.connect(self._toggle_auto_open_last)
+        settings_menu.addAction(auto_open_action)
+        self._auto_open_last_action = auto_open_action
 
     def _mark_dirty(self) -> None:
         if self._suppress_dirty:
@@ -9905,6 +9981,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._project_path = target
         self._remember_project_directory(target.parent)
         self._remember_recent_project(target)
+        try:
+            self.settings.setValue(self._project_settings_key("last_path"), str(target))
+        except Exception:
+            pass
         self._update_project_actions()
         self._dirty = False
         self.logger.info("Project saved to %s", target)
@@ -9947,6 +10027,65 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._recent_projects = []
         self._save_recent_projects_setting()
         self._update_recent_projects_menu()
+
+    def _toggle_auto_open_last(self, enabled: bool) -> None:
+        self._auto_open_last = bool(enabled)
+        try:
+            self.settings.setValue(self._project_settings_key("auto_open_last"), int(bool(enabled)))
+        except Exception:
+            pass
+
+    def _maybe_auto_open_last_project(self) -> None:
+        if not self._auto_open_last:
+            return
+        last_path = self.settings.value(self._project_settings_key("last_path"), "")
+        candidate: Optional[Path] = None
+        if isinstance(last_path, str) and last_path:
+            path_obj = Path(last_path)
+            if path_obj.exists():
+                candidate = path_obj
+        if candidate is None and self._recent_projects:
+            fallback = Path(self._recent_projects[0])
+            if fallback.exists():
+                candidate = fallback
+        if candidate is None:
+            return
+        try:
+            self._load_project_from_path(candidate)
+        except Exception:
+            self.logger.exception("Failed to auto-open last project %s", candidate)
+
+    def _new_project(self) -> None:
+        if getattr(self, "_dirty", False):
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Unsaved project")
+            box.setText("Save changes to this Microwire Data Builder project before starting a new one?")
+            save_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Save)
+            discard_btn = box.addButton("Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(save_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                return
+            if clicked is save_btn:
+                self._save_project()
+                if getattr(self, "_dirty", False):
+                    return
+        self._suppress_dirty = True
+        for section in self.sections.values():
+            if isinstance(section, MiniDatabaseSection):
+                section.reset_to_blank()
+        self._project_path = None
+        self._dirty = False
+        self._suppress_dirty = False
+        self._update_project_title()
+        self._update_project_actions()
+        self._refresh_sections_after_project_load()
+
+    # Compatibility alias used by menu wiring in some launch contexts
+    def new_project(self) -> None:
+        self._new_project()
 
     def _remember_recent_project(self, path: Path) -> None:
         try:
@@ -10054,6 +10193,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._project_path = target
         self._remember_project_directory(target.parent)
         self._remember_recent_project(target)
+        try:
+            self.settings.setValue(self._project_settings_key("last_path"), str(target))
+        except Exception:
+            pass
         self._refresh_sections_after_project_load()
         self._update_project_actions()
         self._dirty = False

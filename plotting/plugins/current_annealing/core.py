@@ -796,7 +796,6 @@ def plot_one(
                     handle.set_marker("")
                 except Exception:
                     pass
-            legend.set_handlelength(0.0)
     ax.tick_params(axis="both", labelsize=TICK_SIZE)
     fig.tight_layout()
     cfg = dict(globals())
