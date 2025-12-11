@@ -788,8 +788,14 @@ def plot_one(
             framealpha=0.9,
         )
         if legend is not None and not LEGEND_SHOW_SYMBOLS:
-            for handle in legend.legendHandles:
-                handle.set_marker(None)
+            handles_attr = getattr(legend, "legendHandles", None)
+            if handles_attr is None:
+                handles_attr = getattr(legend, "legend_handles", [])
+            for handle in handles_attr:
+                try:
+                    handle.set_marker("")
+                except Exception:
+                    pass
             legend.set_handlelength(0.0)
     ax.tick_params(axis="both", labelsize=TICK_SIZE)
     fig.tight_layout()

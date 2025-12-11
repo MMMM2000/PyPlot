@@ -57,8 +57,22 @@ fig_size = plt.rcParams["figure.figsize"]
 fig_size[0] = 19 #19
 fig_size[1] = 10 #10
 plt.rcParams["figure.figsize"] = fig_size
-plt.rcParams["font.family"] = "Palatino Linotype"
-plt.rcParams["font.size"] = 14
+plt.rcParams["font.family"] = ["sans-serif"]
+plt.rcParams["font.size"] = 12
+
+def _apply_app_font_to_matplotlib(app: QtWidgets.QApplication | None = None) -> None:
+    """Keep Matplotlib fonts aligned with the active Qt application font."""
+
+    app = app or QtWidgets.QApplication.instance()
+    if app is None:
+        return
+    font = app.font()
+    family = font.family()
+    if family:
+        plt.rcParams["font.family"] = [family]
+    size = font.pointSize()
+    if size > 0:
+        plt.rcParams["font.size"] = max(10, size)
 
 def _default_download_dir() -> str:
     home = Path.home()
@@ -87,6 +101,8 @@ DEFAULT_PRESET = {
     "composition": "Ni51Fe26Ga21",
     "microwire": "1_2",
     "sample": "s1",
+    "load": "",
+    "notes": "",
     "custom_name": "",
 }
 
@@ -184,6 +200,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def __init__(self):
         super().__init__()
+        _apply_app_font_to_matplotlib()
         self.ui = cast(Any, Ui_MainWindow())
         self.ui.setupUi(self)
         self.history_settings = QtCore.QSettings("microwire", "naming_history")
@@ -378,7 +395,14 @@ class MainWindow(QtWidgets.QMainWindow):
         # Name builder and planned duration estimation
         if hasattr(self.ui, 'comboBox_name_preset'):
             self.ui.comboBox_name_preset.currentIndexChanged.connect(self.update_file_name_from_preset)
-        for name in ('lineEdit_composition','lineEdit_microwire','lineEdit_sample','lineEdit_custom_name'):
+        for name in (
+            'lineEdit_composition',
+            'lineEdit_microwire',
+            'lineEdit_sample',
+            'lineEdit_load',
+            'lineEdit_notes',
+            'lineEdit_custom_name',
+        ):
             if hasattr(self.ui, name):
                 getattr(self.ui, name).textChanged.connect(self.update_file_name_from_preset)
         if hasattr(self.ui, 'lineEdit_composition'):
@@ -1610,14 +1634,18 @@ class MainWindow(QtWidgets.QMainWindow):
             comp = getattr(self.ui, 'lineEdit_composition', None)
             wire = getattr(self.ui, 'lineEdit_microwire', None)
             sample = getattr(self.ui, 'lineEdit_sample', None)
+            load = getattr(self.ui, 'lineEdit_load', None)
+            notes = getattr(self.ui, 'lineEdit_notes', None)
             comp_s = comp.text().strip() if comp is not None else ''
             wire_s = wire.text().strip() if wire is not None else ''
             sample_s = sample.text().strip() if sample is not None else ''
+            load_s = " ".join(load.text().split()) if load is not None else ''
+            notes_s = " ".join(notes.text().split()) if notes is not None else ''
             try:
                 max_mA = int(self.ui.spinBox_max_current.value())
             except Exception:
                 max_mA = 0
-            parts = [p for p in [comp_s, wire_s, sample_s, f"{max_mA}mA"] if p]
+            parts = [p for p in [comp_s, wire_s, sample_s, load_s, f"{max_mA}mA", notes_s] if p]
             base = " ".join(parts) if parts else "anneal_log"
             # Show only preset fields
             for name in (
@@ -1625,11 +1653,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 'lineEdit_microwire',
                 'lineEdit_sample',
                 'sample_row_widget',
+                'lineEdit_load',
+                'lineEdit_notes',
             ):
                 widget = getattr(self.ui, name, None)
                 if widget is not None:
                     widget.setVisible(True)
-            for name in ('label_composition', 'label_microwire', 'label_sample'):
+            for name in ('label_composition', 'label_microwire', 'label_sample', 'label_load', 'label_notes'):
                 label = getattr(self.ui, name, None)
                 if label is not None:
                     label.setVisible(True)
@@ -1646,11 +1676,13 @@ class MainWindow(QtWidgets.QMainWindow):
                 'lineEdit_microwire',
                 'lineEdit_sample',
                 'sample_row_widget',
+                'lineEdit_load',
+                'lineEdit_notes',
             ):
                 widget = getattr(self.ui, name, None)
                 if widget is not None:
                     widget.setVisible(False)
-            for name in ('label_composition', 'label_microwire', 'label_sample'):
+            for name in ('label_composition', 'label_microwire', 'label_sample', 'label_load', 'label_notes'):
                 label = getattr(self.ui, name, None)
                 if label is not None:
                     label.setVisible(False)
@@ -1670,6 +1702,10 @@ class MainWindow(QtWidgets.QMainWindow):
         s.setValue("composition", self.ui.lineEdit_composition.text())
         s.setValue("microwire", self.ui.lineEdit_microwire.text())
         s.setValue("sample", self.ui.lineEdit_sample.text())
+        load = getattr(self.ui, 'lineEdit_load', None)
+        s.setValue("load", load.text() if load is not None else "")
+        notes = getattr(self.ui, 'lineEdit_notes', None)
+        s.setValue("notes", notes.text() if notes is not None else "")
         s.setValue("custom_name", self.ui.lineEdit_custom_name.text())
 
     def restore_name_preset(self):
@@ -1678,6 +1714,10 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.lineEdit_composition.blockSignals(True)
             self.ui.lineEdit_microwire.blockSignals(True)
             self.ui.lineEdit_sample.blockSignals(True)
+            if hasattr(self.ui, 'lineEdit_load'):
+                self.ui.lineEdit_load.blockSignals(True)
+            if hasattr(self.ui, 'lineEdit_notes'):
+                self.ui.lineEdit_notes.blockSignals(True)
             self.ui.lineEdit_custom_name.blockSignals(True)
         except Exception:
             pass
@@ -1686,12 +1726,20 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.lineEdit_composition.setText(s.value("composition", DEFAULT_PRESET["composition"]))
         self.ui.lineEdit_microwire.setText(s.value("microwire", DEFAULT_PRESET["microwire"]))
         self.ui.lineEdit_sample.setText(s.value("sample", DEFAULT_PRESET["sample"]))
+        if hasattr(self.ui, 'lineEdit_load'):
+            self.ui.lineEdit_load.setText(s.value("load", DEFAULT_PRESET["load"]))
+        if hasattr(self.ui, 'lineEdit_notes'):
+            self.ui.lineEdit_notes.setText(s.value("notes", DEFAULT_PRESET["notes"]))
         self.ui.lineEdit_custom_name.setText(s.value("custom_name", DEFAULT_PRESET["custom_name"]))
         try:
             self.ui.comboBox_name_preset.blockSignals(False)
             self.ui.lineEdit_composition.blockSignals(False)
             self.ui.lineEdit_microwire.blockSignals(False)
             self.ui.lineEdit_sample.blockSignals(False)
+            if hasattr(self.ui, 'lineEdit_load'):
+                self.ui.lineEdit_load.blockSignals(False)
+            if hasattr(self.ui, 'lineEdit_notes'):
+                self.ui.lineEdit_notes.blockSignals(False)
             self.ui.lineEdit_custom_name.blockSignals(False)
         except Exception:
             pass
@@ -2819,6 +2867,7 @@ def main() -> QtWidgets.QWidget:
         qt_app = cast(QtWidgets.QApplication, app)
 
     ensure_app_theme(qt_app)
+    _apply_app_font_to_matplotlib(qt_app)
 
     window = MainWindow()
     window.showMaximized()

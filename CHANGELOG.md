@@ -1,5 +1,18 @@
 # Changelog
 
+## 2025-12-11 08:43 UTC
+
+- Added an optional Notes field to the Current Annealing file name preset, persisting it with other preset fields and appending it to generated log names when provided.
+- Matched the Current Annealing plots to the application font so graph text now aligns visually with the rest of the UI.
+- Added a Load (MPa) field to the Current Annealing preset so applied load can be captured and included in the default log name.
+- Tightened Microwire Data Builder tables so they respect the visible viewport instead of overflowing past the screen or leaving unused right-hand gutters.
+- Added a dual-support strain mode with clamp-span input that doubles the effective cross-section for stress calculations and recomputes shortening from the A/B/C geometry.
+- Microwire Data Builder now launches maximized, caps tables to the visible area, prompts to save on close when there are changes, and keeps connected folder paths inside saved projects (per-machine paths remain absolute).
+- Fixed current annealing previews by handling Matplotlib legend handles safely, so saved projects and refreshed folders render graphs again.
+- Assembly tab content now renders correctly instead of appearing blank, and strain offsets persist per calc mode with clamp span disabled for single-span mode.
+- Microscope tab can defer OCR: load entries first, then trigger OCR manually with the new button; OCR no longer blocks manual logging.
+- Microwire Data Builder now opens at a screen-aware size (no over-wide/short initial window) and caps table widths to the available display.
+
 ## 2025-12-04 15:20 UTC
 
 - Reduced current annealing plot text/marker sizes, tightened layout, and suppressed the Matplotlib “figure.max_open_warning” so large batches render without cropped titles or noisy warnings.
@@ -1033,3 +1046,5 @@
 - Introduced a manual workbook editor with create/add/delete/reorder column
   capabilities and persistent import folder history when "Keep File Selections"
   is enabled.
+
+- 2025-12-11 12:05 UTC – Updated strain load calc to use target MPa and dual-support area multiplier; clamp span hides in single mode; reduced table padding to eliminate right blank bar; annealing preview legend markers no longer error.

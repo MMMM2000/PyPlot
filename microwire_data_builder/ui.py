@@ -3532,6 +3532,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data = self.store.load()
         self.model = DataFrameModel(self.data.table)
         self.table_view: QtWidgets.QTableView | None = None
+        self._table_splitter: QtWidgets.QSplitter | None = None
         self._cancel_requested = False
         self.log_emitted.connect(self._dispatch_log)
         self._worker_thread: QtCore.QThread | None = None
@@ -3600,6 +3601,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._reset_progress_ui()
         self._hook_table_selection()
         self._update_open_sources_enabled()
+        try:
+            if hasattr(self, "_sanitize_graph_columns"):
+                self._sanitize_graph_columns()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI helpers
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
@@ -3625,12 +3631,19 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return
+        table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         try:
             table.setIconSize(
                 QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
             )
         except Exception:
             pass
+        header = table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
         table.setVerticalScrollMode(
             QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
@@ -3701,15 +3714,27 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                     screen_rect = screen.availableGeometry()
         except Exception:
             screen_rect = None
+        try:
+            table.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+        except Exception:
+            pass
         if screen_rect is not None:
-            max_width = max(480, screen_rect.width() - 220)
-            constrained = min(total_width, max_width)
-            table.setMinimumWidth(constrained)
-            table.setMaximumWidth(max_width)
-            splitter = self._table_splitter
-            if isinstance(splitter, QtWidgets.QSplitter):
-                remaining = max(screen_rect.width() - constrained, 320)
-                splitter.setSizes([constrained, remaining])
+            max_width = max(640, screen_rect.width() - 200)
+        else:
+            max_width = 1600
+        desired = total_width if total_width > 0 else table.sizeHint().width()
+        constrained = max(240, min(desired, max_width))
+        table.setMinimumWidth(0)
+        table.setMaximumWidth(16777215)
+        splitter = self._table_splitter
+        if isinstance(splitter, QtWidgets.QSplitter):
+            available = screen_rect.width() if screen_rect is not None else constrained * 2
+            left = max(320, int(available * 0.7))
+            right = max(240, available - left)
+            splitter.setSizes([left, right])
 
     def _update_source_button(self) -> None:
         has_sources = self.sources_list.count() > 0
@@ -4190,6 +4215,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._update_open_sources_enabled()
         try:
             self.data_updated.emit()
+        except Exception:
+            pass
+        try:
+            if hasattr(self, "_sanitize_graph_columns"):
+                self._sanitize_graph_columns()
         except Exception:
             pass
 
@@ -5206,12 +5236,19 @@ class AnnealingSection(MiniDatabaseSection):
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(key)
-        if not records:
-            self._pixmap_cache[cache_key] = None
-            return None
-        high_record, low_record = _select_high_low_pair(records)
-        target = high_record if column == "Graph — 1000 mA" else low_record
-        pixmap = _render_measurement_pixmap(target, self.logger)
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            high_record, low_record = _select_high_low_pair(records)
+            target = high_record if column == "Graph — 1000 mA" else low_record
+            pixmap = _render_measurement_pixmap(target, self.logger)
+        if pixmap is None:
+            path_value = row.get(column)
+            if isinstance(path_value, str) and path_value:
+                candidate = Path(path_value)
+                if candidate.exists():
+                    loaded = QtGui.QPixmap(str(candidate))
+                    if not loaded.isNull():
+                        pixmap = loaded
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
 
@@ -5464,6 +5501,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._expected_keys_current: Set[Tuple[str, int, int]] = set()
         self._prepopulated_keys: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
+        self._force_ocr_next = False
         super().__init__(logger, log_callback, parent)
 
         self._missing_summary_label = QtWidgets.QLabel("", self)
@@ -5477,6 +5515,16 @@ class MicroscopeSection(MiniDatabaseSection):
         self._missing_list.setVisible(False)
         self._missing_list.itemActivated.connect(self._handle_missing_item_activated)
         self.main_layout.insertWidget(3, self._missing_list)
+        if hasattr(self, "controls_layout"):
+            try:
+                self.defer_ocr_checkbox = QtWidgets.QCheckBox("Defer OCR")
+                self.defer_ocr_checkbox.setChecked(True)
+                self.controls_layout.addWidget(self.defer_ocr_checkbox)
+                self.run_ocr_button = QtWidgets.QPushButton("Run OCR now")
+                self.run_ocr_button.clicked.connect(self._trigger_ocr_run)
+                self.controls_layout.addWidget(self.run_ocr_button)
+            except Exception:
+                pass
 
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
@@ -5530,9 +5578,13 @@ class MicroscopeSection(MiniDatabaseSection):
         table.setModel(self.model)
         header = table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(False)
+            header.setStretchLastSection(True)
             header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
             header.setMinimumSectionSize(90)
+        table.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
             QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
@@ -5660,13 +5712,33 @@ class MicroscopeSection(MiniDatabaseSection):
                 total_width += v_header.width()
         for index in range(column_count):
             total_width += table.columnWidth(index)
+        max_width = None
+        try:
+            window = self.window()
+            if isinstance(window, QtWidgets.QWidget):
+                screen = QtGui.QGuiApplication.screenAt(
+                    window.mapToGlobal(window.rect().center())
+                )
+                if screen is None:
+                    screen = QtGui.QGuiApplication.primaryScreen()
+                if screen is not None:
+                    max_width = max(640, screen.availableGeometry().width() - 200)
+        except Exception:
+            max_width = None
         if total_width > 0:
-            table.setMinimumWidth(total_width)
+            if max_width is None:
+                target = total_width
+            else:
+                target = min(total_width, max_width)
+            table.setMinimumWidth(max(360, int(target)))
+            table.setMaximumWidth(16777215)
         splitter = self._table_splitter
         if isinstance(splitter, QtWidgets.QSplitter) and column_count:
             sizes = splitter.sizes()
             total = sum(sizes) if sizes and any(sizes) else total_width + 360
             table_target = max(total_width, int(total * 0.55))
+            if max_width is not None:
+                table_target = min(table_target, max_width)
             preview_target = max(320, total - table_target)
             splitter.setSizes([table_target, preview_target])
 
@@ -6020,16 +6092,27 @@ class MicroscopeSection(MiniDatabaseSection):
         hidden = "_core_image" if column == MICROSCOPE_IMAGE_COLUMNS[0] else "_glass_image"
         path_value = row.get(hidden)
         pixmap: Optional[QtGui.QPixmap] = None
+        candidates: List[Path] = []
         if path_value:
             try:
-                candidate = Path(path_value)
+                candidates.append(Path(path_value))
             except Exception:
-                candidate = None
+                pass
+        extras = row.get("_images")
+        if isinstance(extras, (list, tuple)):
+            for entry in extras:
+                try:
+                    candidates.append(Path(entry))
+                except Exception:
+                    continue
+        if not candidates:
+            candidates = self._row_sources(row)
+        for candidate in candidates:
             if candidate and candidate.exists():
                 loaded = QtGui.QPixmap(str(candidate))
                 if not loaded.isNull():
-
                     pixmap = loaded
+                    break
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
 
@@ -6069,13 +6152,19 @@ class MicroscopeSection(MiniDatabaseSection):
             ("_glass_image", self.glass_preview_label),
         ):
             path_value = row.get(column_name)
+            candidate = None
             if path_value:
                 try:
                     candidate = Path(path_value)
                 except Exception:
                     candidate = None
-            else:
-                candidate = None
+            if (candidate is None or not candidate.exists()) and row.get("_images"):
+                try:
+                    fallback = Path(row["_images"][0])
+                    if fallback.exists():
+                        candidate = fallback
+                except Exception:
+                    candidate = None
             if candidate and candidate.exists():
                 pixmap = QtGui.QPixmap(str(candidate))
                 if not pixmap.isNull():
@@ -6224,6 +6313,10 @@ class MicroscopeSection(MiniDatabaseSection):
         self.mark_reviewed_button.setText("Update review" if is_reviewed else "Mark reviewed")
         self.clear_review_button.setEnabled(is_reviewed)
 
+    def _trigger_ocr_run(self) -> None:
+        self._force_ocr_next = True
+        self.refresh()
+
     def _store_overrides(self) -> None:
         self.data.extra["overrides"] = self._overrides
         self.store.save(self.data)
@@ -6355,6 +6448,8 @@ class MicroscopeSection(MiniDatabaseSection):
     ) -> SectionProcessResult:
         self._refresh_validations()
         unique_paths = list(dict.fromkeys(Path(p) for p in paths))
+        run_ocr = self._force_ocr_next or not getattr(self, "defer_ocr_checkbox", QtWidgets.QCheckBox()).isChecked()
+        self._force_ocr_next = False
 
         def _progress(idx: int, total: int) -> None:
             self._check_cancelled()
@@ -6412,6 +6507,21 @@ class MicroscopeSection(MiniDatabaseSection):
             if cache_entry is None:
                 continue
             cache_lookup[path_key] = cache_entry
+
+        if not run_ocr:
+            self._prepare_initial_table(expected_keys)
+            processed: Dict[str, float] = {}
+            for path in unique_paths:
+                try:
+                    processed[str(path)] = float(path.stat().st_mtime)
+                except OSError:
+                    continue
+            return SectionProcessResult(
+                table=self.data.table,
+                processed=processed,
+                payloads=self.data.extra.get("payloads", {}),
+                extra=self.data.extra,
+            )
 
         index, cache_map = _group_microscope_measurements(
             unique_paths,
@@ -7402,7 +7512,10 @@ class StrainSection(MiniDatabaseSection):
     COLUMN_DRAW = "Draw"
     COLUMN_PIECE = "Piece"
     COLUMN_D = MICROSCOPE_D_COLUMN
+    COLUMN_MODE = "Calc mode"
+    COLUMN_CLAMP_SPAN = "Clamp span (mm)"
     COLUMN_MASS = "m"
+    COLUMN_TARGET_STRESS = "Target stress (MPa)"
     COLUMN_M_LENGTH = "M length"
     COLUMN_A_LENGTH = "A length"
     COLUMN_STRAIN = "Strain"
@@ -7413,13 +7526,18 @@ class StrainSection(MiniDatabaseSection):
         COLUMN_DRAW,
         COLUMN_PIECE,
         COLUMN_D,
+        COLUMN_MODE,
+        COLUMN_CLAMP_SPAN,
         COLUMN_MASS,
+        COLUMN_TARGET_STRESS,
         COLUMN_M_LENGTH,
         COLUMN_A_LENGTH,
         COLUMN_STRAIN,
         COLUMN_BROKE,
     ]
     HIDDEN_COLUMNS = (COLUMN_DRAW, COLUMN_PIECE, COLUMN_BROKE)
+    STRAIN_MODE_LINEAR = "linear"
+    STRAIN_MODE_DUAL_SUPPORT = "dual_support"
 
     def __init__(
         self,
@@ -7433,7 +7551,12 @@ class StrainSection(MiniDatabaseSection):
         self._editing_index: Optional[int] = None
         self._editing_key: Optional[tuple[str, int, int]] = None
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
-        self._strain_offset: float = 7.0
+        self._strain_offsets: Dict[str, float] = {
+            self.STRAIN_MODE_LINEAR: 7.0,
+            self.STRAIN_MODE_DUAL_SUPPORT: 7.0,
+        }
+        self._strain_mode: str = self.STRAIN_MODE_LINEAR
+        self._clamp_span_mm: float = 0.0
         super().__init__(logger, log_callback, parent)
         self.source_button.hide()
         self.refresh_button.hide()
@@ -7442,20 +7565,7 @@ class StrainSection(MiniDatabaseSection):
         self.sources_list.hide()
         self.sources_list.setMaximumWidth(0)
         self.status_label.setWordWrap(True)
-        stored_offset = None
-        if isinstance(self.data.extra, dict):
-            stored_offset = self.data.extra.get("strain_offset")
-        if isinstance(stored_offset, (int, float)):
-            self._strain_offset = float(stored_offset)
-        else:
-            if not isinstance(self.data.extra, dict):
-                self.data.extra = {}
-            self.data.extra["strain_offset"] = self._strain_offset
-            self.store.save(self.data)
-        if hasattr(self, "strain_offset_spin"):
-            blocked = self.strain_offset_spin.blockSignals(True)
-            self.strain_offset_spin.setValue(self._strain_offset)
-            self.strain_offset_spin.blockSignals(blocked)
+        self._reload_strain_settings_from_extra()
         self._ensure_table_structure()
         self._refresh_table_view()
         self._load_reference_data()
@@ -7463,6 +7573,43 @@ class StrainSection(MiniDatabaseSection):
         if hasattr(self, "composition_combo"):
             self._update_composition_suggestions()
         self._update_status()
+
+    def _reload_strain_settings_from_extra(self) -> None:
+        if not isinstance(self.data.extra, dict):
+            self.data.extra = {}
+        stored_offsets = self.data.extra.get("strain_offsets")
+        if isinstance(stored_offsets, dict):
+            for mode, value in stored_offsets.items():
+                if isinstance(value, (int, float)) and mode in self._strain_offsets:
+                    self._strain_offsets[mode] = float(value)
+        stored_offset = self.data.extra.get("strain_offset")
+        if isinstance(stored_offset, (int, float)):
+            self._strain_offsets[self.STRAIN_MODE_LINEAR] = float(stored_offset)
+        stored_mode = self.data.extra.get("strain_mode")
+        stored_span = self.data.extra.get("clamp_span_mm")
+        self._strain_mode = stored_mode if isinstance(stored_mode, str) and stored_mode else self.STRAIN_MODE_LINEAR
+        self._clamp_span_mm = float(stored_span) if isinstance(stored_span, (int, float)) else 0.0
+        self.data.extra["strain_offsets"] = dict(self._strain_offsets)
+        self.data.extra["strain_mode"] = self._strain_mode
+        self.data.extra["clamp_span_mm"] = self._clamp_span_mm
+        try:
+            self.store.save(self.data)
+        except Exception:
+            pass
+        if hasattr(self, "strain_offset_spin"):
+            blocked = self.strain_offset_spin.blockSignals(True)
+            self.strain_offset_spin.setValue(self._current_offset())
+            self.strain_offset_spin.blockSignals(blocked)
+        if hasattr(self, "strain_mode_combo"):
+            blocked = self.strain_mode_combo.blockSignals(True)
+            idx = max(0, self.strain_mode_combo.findData(self._strain_mode))
+            self.strain_mode_combo.setCurrentIndex(idx)
+            self.strain_mode_combo.blockSignals(blocked)
+        if hasattr(self, "clamp_span_spin"):
+            blocked = self.clamp_span_spin.blockSignals(True)
+            self.clamp_span_spin.setValue(max(0.0, self._clamp_span_mm))
+            self.clamp_span_spin.blockSignals(blocked)
+        self._update_strain_mode_visibility()
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         container = QtWidgets.QWidget(parent)
@@ -7475,7 +7622,7 @@ class StrainSection(MiniDatabaseSection):
         form_layout.setContentsMargins(0, 0, 0, 0)
         form_layout.setSpacing(12)
 
-        def _add_field(label_text: str, widget: QtWidgets.QWidget) -> None:
+        def _add_field(label_text: str, widget: QtWidgets.QWidget) -> QtWidgets.QLabel:
             field_box = QtWidgets.QWidget(form_container)
             column = QtWidgets.QVBoxLayout(field_box)
             column.setContentsMargins(0, 0, 0, 0)
@@ -7487,6 +7634,7 @@ class StrainSection(MiniDatabaseSection):
             column.addWidget(label)
             column.addWidget(widget)
             form_layout.addWidget(field_box)
+            return label
 
         self.composition_combo = QtWidgets.QComboBox(form_container)
         self.composition_combo.setEditable(True)
@@ -7503,6 +7651,23 @@ class StrainSection(MiniDatabaseSection):
         self.microwire_combo = QtWidgets.QComboBox(form_container)
         self.microwire_combo.currentIndexChanged.connect(self._microwire_changed)
         _add_field("Microwire", self.microwire_combo)
+
+        self.strain_mode_combo = QtWidgets.QComboBox(form_container)
+        self.strain_mode_combo.addItem("Single span (straight pull)", self.STRAIN_MODE_LINEAR)
+        self.strain_mode_combo.addItem(
+            "Dual-point load (A/B supports)",
+            self.STRAIN_MODE_DUAL_SUPPORT,
+        )
+        self.strain_mode_combo.currentIndexChanged.connect(self._strain_mode_changed)
+        _add_field(self.COLUMN_MODE, self.strain_mode_combo)
+
+        self.target_stress_spin = QtWidgets.QDoubleSpinBox(form_container)
+        self.target_stress_spin.setDecimals(2)
+        self.target_stress_spin.setRange(0.0, 1_000_000.0)
+        self.target_stress_spin.setSingleStep(5.0)
+        self.target_stress_spin.setSuffix(" MPa")
+        self.target_stress_spin.valueChanged.connect(self._update_mass_display)
+        _add_field(self.COLUMN_TARGET_STRESS, self.target_stress_spin)
 
         self.d_edit = QtWidgets.QLineEdit(form_container)
         self.d_edit.setPlaceholderText("auto")
@@ -7527,9 +7692,17 @@ class StrainSection(MiniDatabaseSection):
         self.strain_offset_spin.setDecimals(6)
         self.strain_offset_spin.setRange(-1000.0, 1000.0)
         self.strain_offset_spin.setSingleStep(0.1)
-        self.strain_offset_spin.setValue(self._strain_offset)
         self.strain_offset_spin.valueChanged.connect(self._strain_offset_changed)
         _add_field("C offset", self.strain_offset_spin)
+
+        self.clamp_span_spin = QtWidgets.QDoubleSpinBox(form_container)
+        self.clamp_span_spin.setDecimals(3)
+        self.clamp_span_spin.setRange(0.0, 1_000_000.0)
+        self.clamp_span_spin.setSingleStep(1.0)
+        self.clamp_span_spin.setSuffix(" mm")
+        self.clamp_span_spin.valueChanged.connect(self._clamp_span_changed)
+        self.clamp_span_label = _add_field(self.COLUMN_CLAMP_SPAN, self.clamp_span_spin)
+        self.clamp_span_container = self.clamp_span_spin.parent()
 
         self.strain_display = QtWidgets.QLineEdit(form_container)
         self.strain_display.setReadOnly(True)
@@ -7584,6 +7757,20 @@ class StrainSection(MiniDatabaseSection):
 
         return container
 
+    def reset_to_blank(self) -> None:  # type: ignore[override]
+        super().reset_to_blank()
+        self._reload_strain_settings_from_extra()
+        self._recompute_table_metrics()
+        self._refresh_table_view()
+        self._update_status()
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        self._reload_strain_settings_from_extra()
+        self._recompute_table_metrics()
+        self._refresh_table_view()
+        self._update_status()
+
     def _update_status(self) -> None:
         entries = len(self.data.table.index) if isinstance(self.data.table, pd.DataFrame) else 0
         entry_word = "entry" if entries == 1 else "entries"
@@ -7594,7 +7781,10 @@ class StrainSection(MiniDatabaseSection):
             suffix = f"{available} microwire(s) awaiting strain logging."
         else:
             suffix = "All processed microwires are represented."
-        self.status_label.setText(f"{entries} strain {entry_word} stored. {suffix}")
+        warning = ""
+        if self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT and not self._clamp_span():
+            warning = " Set clamp span for dual-point stress mode."
+        self.status_label.setText(f"{entries} strain {entry_word} stored. {suffix}{warning}")
         if hasattr(self, "export_button"):
             self.export_button.setEnabled(entries > 0)
         if hasattr(self, "delete_button"):
@@ -7644,7 +7834,12 @@ class StrainSection(MiniDatabaseSection):
 
     def _update_mass_display(self) -> None:
         value = _parse_strain_float(self.d_edit.text())
-        mass = self._calculate_mass(value)
+        target = _parse_strain_float(self.target_stress_spin.value() if hasattr(self, "target_stress_spin") else None)
+        mass = self._calculate_mass(
+            value,
+            area_multiplier=self._cross_section_multiplier(),
+            target_stress_mpa=target,
+        )
         if mass is None:
             self.mass_display.setText("")
         else:
@@ -7730,6 +7925,17 @@ class StrainSection(MiniDatabaseSection):
         self.d_edit.setText("" if d_value is None else f"{d_value:.4f}")
         mass_value = _parse_strain_float(row.get(self.COLUMN_MASS))
         self.mass_display.setText("" if mass_value is None else f"{mass_value:.6f}")
+        mode_value = str(row.get(self.COLUMN_MODE) or "").strip()
+        if hasattr(self, "strain_mode_combo") and mode_value:
+            idx = self.strain_mode_combo.findData(mode_value)
+            if idx >= 0:
+                self.strain_mode_combo.setCurrentIndex(idx)
+        span_value = _parse_strain_float(row.get(self.COLUMN_CLAMP_SPAN))
+        if hasattr(self, "clamp_span_spin"):
+            self.clamp_span_spin.setValue(span_value if span_value is not None else 0.0)
+        target_stress = _parse_strain_float(row.get(self.COLUMN_TARGET_STRESS))
+        if hasattr(self, "target_stress_spin"):
+            self.target_stress_spin.setValue(target_stress if target_stress is not None else 0.0)
         m_length = _parse_strain_float(row.get(self.COLUMN_M_LENGTH))
         self.M_length_edit.setText("" if m_length is None else f"{m_length:.4f}")
         a_entry = row.get(self.COLUMN_A_LENGTH)
@@ -7747,6 +7953,8 @@ class StrainSection(MiniDatabaseSection):
         self._suspend_auto_fill = False
         self.add_update_button.setText("Update entry")
         self._update_status()
+        self._update_mass_display()
+        self._update_strain_mode_visibility()
 
     def _clear_form(self) -> None:
         self._editing_index = None
@@ -7810,7 +8018,12 @@ class StrainSection(MiniDatabaseSection):
         if d_value is None or d_value <= 0:
             QtWidgets.QMessageBox.warning(self, self.section_title, "Enter a valid diameter.")
             return
-        mass_value = self._calculate_mass(d_value)
+        target_stress = float(self.target_stress_spin.value()) if hasattr(self, "target_stress_spin") else None
+        mass_value = self._calculate_mass(
+            d_value,
+            area_multiplier=self._cross_section_multiplier(),
+            target_stress_mpa=target_stress,
+        )
 
         m_length = _parse_strain_float(self.M_length_edit.text())
         a_text = self.A_length_edit.text().strip()
@@ -7835,7 +8048,10 @@ class StrainSection(MiniDatabaseSection):
             self.COLUMN_DRAW: key[1],
             self.COLUMN_PIECE: key[2],
             self.COLUMN_D: d_value,
+            self.COLUMN_MODE: self._strain_mode,
+            self.COLUMN_CLAMP_SPAN: self._clamp_span_mm if self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT else None,
             self.COLUMN_MASS: mass_value,
+            self.COLUMN_TARGET_STRESS: target_stress,
             self.COLUMN_M_LENGTH: m_length,
             self.COLUMN_A_LENGTH: a_display,
             self.COLUMN_STRAIN: strain_display if broke else (None if strain_percent is None else round(strain_percent, 3)),
@@ -7900,8 +8116,11 @@ class StrainSection(MiniDatabaseSection):
             [
                 self.COLUMN_COMPOSITION,
                 self.COLUMN_MICROWIRE,
+                self.COLUMN_MODE,
+                self.COLUMN_CLAMP_SPAN,
                 self.COLUMN_D,
                 self.COLUMN_MASS,
+                self.COLUMN_TARGET_STRESS,
                 self.COLUMN_M_LENGTH,
                 self.COLUMN_A_LENGTH,
                 self.COLUMN_STRAIN,
@@ -8124,6 +8343,10 @@ class StrainSection(MiniDatabaseSection):
             for column in self.TABLE_COLUMNS:
                 if column not in frame.columns:
                     frame[column] = pd.Series([None] * len(frame))
+            if self.COLUMN_MODE in frame.columns and frame[self.COLUMN_MODE].isna().all():
+                frame[self.COLUMN_MODE] = self._strain_mode
+            if self.COLUMN_CLAMP_SPAN in frame.columns and frame[self.COLUMN_CLAMP_SPAN].isna().all():
+                frame[self.COLUMN_CLAMP_SPAN] = None
             frame = frame[self.TABLE_COLUMNS]
         self.data.table = frame.reset_index(drop=True)
         self._migrate_rows()
@@ -8148,13 +8371,27 @@ class StrainSection(MiniDatabaseSection):
                 frame.at[index, self.COLUMN_BROKE] = True
             elif broke and a_value != "-":
                 frame.at[index, self.COLUMN_A_LENGTH] = "-"
+            mode_value = str(row.get(self.COLUMN_MODE) or "").strip()
+            if not mode_value:
+                frame.at[index, self.COLUMN_MODE] = self._strain_mode
+            clamp_span_value = row.get(self.COLUMN_CLAMP_SPAN)
+            if pd.isna(clamp_span_value):
+                frame.at[index, self.COLUMN_CLAMP_SPAN] = None
         self._recompute_table_metrics()
 
     def _recompute_table_metrics(self) -> None:
         frame = self.data.table
         for index, row in frame.iterrows():
+            mode_value = str(row.get(self.COLUMN_MODE) or "").strip() or self.STRAIN_MODE_LINEAR
+            clamp_span_value = _parse_strain_float(row.get(self.COLUMN_CLAMP_SPAN))
+            multiplier = 2.0 if mode_value == self.STRAIN_MODE_DUAL_SUPPORT else 1.0
             d_value = _parse_strain_float(row.get(self.COLUMN_D))
-            mass = self._calculate_mass(d_value)
+            target_stress = _parse_strain_float(row.get(self.COLUMN_TARGET_STRESS))
+            mass = self._calculate_mass(
+                d_value,
+                area_multiplier=multiplier,
+                target_stress_mpa=target_stress,
+            )
             frame.at[index, self.COLUMN_MASS] = None if mass is None else round(mass, 6)
             broke = bool(row.get(self.COLUMN_BROKE))
             a_value = row.get(self.COLUMN_A_LENGTH)
@@ -8171,7 +8408,12 @@ class StrainSection(MiniDatabaseSection):
             if m_length in (None, 0) or a_length is None:
                 frame.at[index, self.COLUMN_STRAIN] = None
                 continue
-            percent = self._compute_strain_percent(m_length, a_length)
+            percent = self._compute_strain_percent(
+                m_length,
+                a_length,
+                mode=mode_value,
+                clamp_span=clamp_span_value,
+            )
             frame.at[index, self.COLUMN_STRAIN] = None if percent is None else round(percent, 3)
 
     def _save_table(self) -> None:
@@ -8212,27 +8454,27 @@ class StrainSection(MiniDatabaseSection):
             broke = bool(row.get(self.COLUMN_BROKE))
             if isinstance(a_value, str) and a_value.strip() in {"-", "broke"}:
                 broke = True
-                a_length = None
-            else:
-                a_length = _parse_strain_float(a_value)
-            strain_value = row.get(self.COLUMN_STRAIN)
-            if broke:
-                percent = None
-            else:
-                percent = _parse_strain_float(strain_value)
-                if percent is None and m_length not in (None, 0) and a_length is not None:
-                    percent = self._compute_strain_percent(m_length, a_length)
-            records[(composition, draw_int, piece_int)] = StrainRecord(
-                composition=composition,
-                draw=draw_int,
-                piece=piece_int,
-                microwire_label=label,
-                m_length=m_length,
-                a_length=a_length,
-                percent=percent,
-                broke=broke,
-                source=Path("manual_entry"),
-            )
+            a_length = None
+        else:
+            a_length = _parse_strain_float(a_value)
+        strain_value = row.get(self.COLUMN_STRAIN)
+        if broke:
+            percent = None
+        else:
+            percent = _parse_strain_float(strain_value)
+            if percent is None and m_length not in (None, 0) and a_length is not None:
+                percent = self._compute_strain_percent(m_length, a_length)
+        records[(composition, draw_int, piece_int)] = StrainRecord(
+            composition=composition,
+            draw=draw_int,
+            piece=piece_int,
+            microwire_label=label,
+            m_length=m_length,
+            a_length=a_length,
+            percent=percent,
+            broke=broke,
+            source=Path("manual_entry"),
+        )
         return records
 
     def _sync_payload(self) -> None:
@@ -8245,10 +8487,48 @@ class StrainSection(MiniDatabaseSection):
         self.store.save_payload("strain_records", records)
 
     def _strain_offset_changed(self, value: float) -> None:
-        self._strain_offset = float(value)
+        self._strain_offsets[self._strain_mode] = float(value)
         if not isinstance(self.data.extra, dict):
             self.data.extra = {}
-        self.data.extra["strain_offset"] = self._strain_offset
+        self.data.extra["strain_offsets"] = dict(self._strain_offsets)
+        self.data.extra["strain_offset"] = self._strain_offsets.get(self.STRAIN_MODE_LINEAR, value)
+        self._recompute_table_metrics()
+        self._refresh_table_view()
+        self._sync_payload()
+        self.store.save(self.data)
+        self._update_status()
+        self._update_strain_mode_visibility()
+        self._update_strain_display()
+        self._update_mass_display()
+        self._update_strain_mode_visibility()
+
+    def _strain_mode_changed(self, _: int) -> None:
+        mode = self.strain_mode_combo.currentData()
+        if not isinstance(mode, str) or not mode:
+            mode = self.STRAIN_MODE_LINEAR
+        self._strain_mode = mode
+        if not isinstance(self.data.extra, dict):
+            self.data.extra = {}
+        self.data.extra["strain_mode"] = self._strain_mode
+        self.data.extra["strain_offsets"] = dict(self._strain_offsets)
+        self._recompute_table_metrics()
+        self._refresh_table_view()
+        self._sync_payload()
+        self.store.save(self.data)
+        self._update_status()
+        self._update_strain_mode_visibility()
+        if hasattr(self, "strain_offset_spin"):
+            blocked = self.strain_offset_spin.blockSignals(True)
+            self.strain_offset_spin.setValue(self._current_offset())
+            self.strain_offset_spin.blockSignals(blocked)
+        self._update_strain_display()
+        self._update_mass_display()
+
+    def _clamp_span_changed(self, value: float) -> None:
+        self._clamp_span_mm = float(value)
+        if not isinstance(self.data.extra, dict):
+            self.data.extra = {}
+        self.data.extra["clamp_span_mm"] = self._clamp_span_mm
         self._recompute_table_metrics()
         self._refresh_table_view()
         self._sync_payload()
@@ -8256,32 +8536,88 @@ class StrainSection(MiniDatabaseSection):
         self._update_status()
         self._update_strain_display()
 
+    def _clamp_span(self) -> Optional[float]:
+        try:
+            span = float(self._clamp_span_mm)
+        except (TypeError, ValueError):
+            return None
+        return span if span > 0 else None
+
+    def _cross_section_multiplier(self) -> float:
+        return 2.0 if self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT else 1.0
+
+    def _current_offset(self) -> float:
+        return float(self._strain_offsets.get(self._strain_mode, 0.0))
+
+    def _update_strain_mode_visibility(self) -> None:
+        if hasattr(self, "clamp_span_spin"):
+            visible = self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT
+            self.clamp_span_spin.setVisible(visible)
+            label = getattr(self, "clamp_span_label", None)
+            if isinstance(label, QtWidgets.QWidget):
+                label.setVisible(visible)
+            parent = getattr(self, "clamp_span_container", None)
+            if not isinstance(parent, QtWidgets.QWidget):
+                parent = self.clamp_span_spin.parent()
+            if isinstance(parent, QtWidgets.QWidget):
+                parent.setVisible(visible)
+        if hasattr(self, "A_length_edit"):
+            placeholder = "mm or '-' if broke"
+            if self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT and self._clamp_span() is None:
+                placeholder = "mm or '-' (set clamp span)"
+            self.A_length_edit.setPlaceholderText(placeholder)
+
     def _compute_strain_percent(
         self,
         m_length: Optional[float],
         a_length: Optional[float],
+        *,
+        mode: Optional[str] = None,
+        clamp_span: Optional[float] = None,
     ) -> Optional[float]:
         if m_length in (None, 0) or a_length is None:
             return None
+        active_mode = mode or self._strain_mode
+        if clamp_span is None and active_mode == self.STRAIN_MODE_DUAL_SUPPORT:
+            clamp_span = self._clamp_span()
+        if clamp_span:
+            half_span = clamp_span / 2.0
+            try:
+                initial = math.hypot(half_span, m_length)
+                current = math.hypot(half_span, a_length)
+            except Exception:
+                return None
+            if initial <= 0:
+                return None
+            base_ratio = (initial - current) / initial
+        else:
+            try:
+                base_ratio = (m_length - a_length) / m_length
+            except ZeroDivisionError:
+                return None
         try:
-            base_ratio = (m_length - a_length) / m_length
-        except ZeroDivisionError:
-            return None
-        try:
-            offset = float(self._strain_offset)
+            offset = float(self._current_offset())
         except (TypeError, ValueError):
             offset = 0.0
         return (base_ratio + offset) * 100
 
     @staticmethod
-    def _calculate_mass(d_um: Optional[float]) -> Optional[float]:
+    def _calculate_mass(
+        d_um: Optional[float],
+        *,
+        area_multiplier: float = 1.0,
+        target_stress_mpa: Optional[float] = None,
+    ) -> Optional[float]:
         if d_um is None or d_um <= 0:
             return None
         radius_m = (d_um * 1e-6) / 2.0
         if radius_m <= 0:
             return None
-        area = math.pi * radius_m * radius_m
-        return area * 1.0e11 / 9.80665
+        area = math.pi * radius_m * radius_m * max(1.0, float(area_multiplier))
+        stress_pa = 1.0e11  # backward-compatible default
+        if isinstance(target_stress_mpa, (int, float)) and target_stress_mpa > 0:
+            stress_pa = float(target_stress_mpa) * 1e6
+        return stress_pa * area / 9.80665 * 1000.0
 
 
 class AssemblySection(QtWidgets.QWidget):
@@ -8300,6 +8636,103 @@ class AssemblySection(QtWidgets.QWidget):
         self.logger = logger
         self._log_callback = log_callback
         self._console_callback = console_callback
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+
+        self.output_dir_edit = QtWidgets.QLineEdit(str(Path.cwd()))
+        browse_button = QtWidgets.QPushButton("Browse…")
+        browse_button.clicked.connect(self._choose_output_dir)
+        dir_row = QtWidgets.QHBoxLayout()
+        dir_row.addWidget(self.output_dir_edit)
+        dir_row.addWidget(browse_button)
+        dir_container = QtWidgets.QWidget()
+        dir_container.setLayout(dir_row)
+        form.addRow("Output directory", dir_container)
+
+        self.output_name_edit = QtWidgets.QLineEdit(DEFAULT_OUTPUT_NAME)
+        form.addRow("Output name", self.output_name_edit)
+
+        layout.addLayout(form)
+
+        options_layout = QtWidgets.QHBoxLayout()
+        self.csv_checkbox = QtWidgets.QCheckBox("Export CSV")
+        self.csv_checkbox.setChecked(True)
+        options_layout.addWidget(self.csv_checkbox)
+        self.excel_checkbox = QtWidgets.QCheckBox("Export Excel")
+        options_layout.addWidget(self.excel_checkbox)
+        self.plots_checkbox = QtWidgets.QCheckBox("Create Matplotlib plots")
+        options_layout.addWidget(self.plots_checkbox)
+        self.origin_checkbox = QtWidgets.QCheckBox("Export Origin workbooks")
+        options_layout.addWidget(self.origin_checkbox)
+        options_layout.addStretch(1)
+        layout.addLayout(options_layout)
+
+        section_box = QtWidgets.QGroupBox("Include sections")
+        section_layout = QtWidgets.QHBoxLayout(section_box)
+        self.section_checkboxes: Dict[str, QtWidgets.QCheckBox] = {}
+        for key, label in (
+            ("fabrication", "Fabrication"),
+            ("annealing", "Current annealing"),
+            ("microscope", "Microscope"),
+            ("videos", "Videos"),
+            ("strain", "Strain"),
+        ):
+            checkbox = QtWidgets.QCheckBox(label)
+            checkbox.setChecked(True)
+            section_layout.addWidget(checkbox)
+            self.section_checkboxes[key] = checkbox
+        section_layout.addStretch(1)
+        layout.addWidget(section_box)
+
+        self.status_label = QtWidgets.QLabel("Ready to assemble once all sections are processed.")
+        layout.addWidget(self.status_label)
+
+        self.preview_model = DataFrameModel()
+        self.preview_table = QtWidgets.QTableView()
+        self.preview_table.setModel(self.preview_model)
+        self.preview_table.setAlternatingRowColors(True)
+        self.preview_table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        self.preview_table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        header = self.preview_table.horizontalHeader()
+        if header is not None:
+            header.setStretchLastSection(True)
+            header.setSectionsMovable(True)
+            header.setSectionsClickable(True)
+        self.preview_table.setVerticalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        self.preview_table.setHorizontalScrollMode(
+            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        )
+        preview_bar = self.preview_table.verticalScrollBar()
+        if preview_bar is not None:
+            preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
+        layout.addWidget(self.preview_table, 1)
+        self.preview_table.show()
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.addStretch(1)
+        self.export_preview_button = QtWidgets.QPushButton("Export worksheet...")
+        self.export_preview_button.clicked.connect(self._export_preview_worksheet)
+        self.export_preview_button.setEnabled(False)
+        button_row.addWidget(self.export_preview_button)
+        self.preview_button = QtWidgets.QPushButton("Preview database")
+        self.preview_button.clicked.connect(self._preview)
+        button_row.addWidget(self.preview_button)
+        self.combine_button = QtWidgets.QPushButton("Combine database")
+        self.combine_button.clicked.connect(self._combine)
+        button_row.addWidget(self.combine_button)
+        layout.addLayout(button_row)
 
     def set_console_callback(self, callback: Callable[[pd.DataFrame], None]) -> None:
         self._console_callback = callback
@@ -8831,6 +9264,8 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
         self._retabbing_docks = False
         self._retabify_pending = False
+        self._dirty = False
+        self._suppress_dirty = False
 
         self.log_view = QtWidgets.QPlainTextEdit(self)
         self.log_view.setReadOnly(True)
@@ -8921,6 +9356,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._handle_fabrication_sources_changed
         )
         self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        try:
+            if hasattr(self.annealing_section, "_sanitize_graph_columns"):
+                self.annealing_section._sanitize_graph_columns()
+            if hasattr(self.annealing_section, "_refresh_record_groups"):
+                self.annealing_section._refresh_record_groups()
+        except Exception:
+            pass
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Section", "Status / Source"])
@@ -8934,7 +9376,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             section.status_changed.connect(partial(self._handle_section_status_changed, key))
             section.sources_changed.connect(partial(self._handle_section_sources_changed, key))
             try:
-                section.data_updated.connect(self._update_project_actions)
+                section.data_updated.connect(self._handle_section_data_updated)
             except Exception:
                 pass
             initial_sources: Iterable[str] = []
@@ -8953,6 +9395,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.log_dock.setObjectName("builderMessageLogDock")
         self.log_dock.setWidget(self.log_view)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, self.log_dock)
+        self.log_dock.setMinimumWidth(260)
         self.log_dock.visibilityChanged.connect(self._handle_log_visibility)
         self.log_dock.hide()
         self._update_log_highlight()
@@ -9007,15 +9450,39 @@ class BuilderWindow(QtWidgets.QMainWindow):
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)
         self._update_project_actions()
+        self._suppress_dirty = True
         for section in self.sections.values():
             if isinstance(section, MiniDatabaseSection):
                 section.reset_to_blank()
-        self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
+        self._suppress_dirty = False
+        self._dirty = False
+        self._set_initial_geometry()
         self._retabify_primary_docks()
 
     def _dock_switcher_supported(self) -> bool:
         override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
         return override.strip().lower() not in {"1", "true", "yes", "on"}
+
+    def _set_initial_geometry(self) -> None:
+        """Resize and position the window within the visible screen."""
+
+        try:
+            screen = QtGui.QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
+            if screen is None:
+                screen = QtGui.QGuiApplication.primaryScreen()
+        except Exception:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        available = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1600, 900)
+        max_w = max(960, available.width() - 120)
+        max_h = max(720, available.height() - 120)
+        width = min(max_w, int(available.width() * 0.9))
+        height = min(max_h, int(available.height() * 0.88))
+        self.setMinimumSize(880, 640)
+        self.resize(width, height)
+        target_x = available.left() + max(0, (available.width() - width) // 2)
+        target_y = available.top() + max(0, (available.height() - height) // 2)
+        self.move(target_x, target_y)
+        self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
 
     def _create_dock_switcher(
         self,
@@ -9169,6 +9636,27 @@ class BuilderWindow(QtWidgets.QMainWindow):
         super().showEvent(event)
         QtCore.QTimer.singleShot(0, self._clamp_to_available_geometry)
 
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        if self._dirty:
+            box = QtWidgets.QMessageBox(self)
+            box.setWindowTitle("Unsaved project")
+            box.setText("Save changes to this Microwire Data Builder project before closing?")
+            save_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Save)
+            discard_btn = box.addButton("Discard", QtWidgets.QMessageBox.ButtonRole.DestructiveRole)
+            cancel_btn = box.addButton(QtWidgets.QMessageBox.StandardButton.Cancel)
+            box.setDefaultButton(save_btn)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is cancel_btn:
+                event.ignore()
+                return
+            if clicked is save_btn:
+                self._save_project()
+                if self._dirty:
+                    event.ignore()
+                    return
+        super().closeEvent(event)
+
     def _clamp_to_available_geometry(self) -> None:
         if getattr(self, "_clamp_active", False):
             return
@@ -9245,6 +9733,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if sources:
             item.setExpanded(False)
         self._update_project_actions()
+        self._mark_dirty()
+
+    def _handle_section_data_updated(self) -> None:
+        self._mark_dirty()
+        self._update_project_actions()
 
     def _project_settings_key(self, name: str) -> str:
         return f"project/{name}"
@@ -9309,6 +9802,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._save_project_action.setEnabled(has_data)
         if self._save_project_as_action is not None:
             self._save_project_as_action.setEnabled(has_data)
+
+    def _mark_dirty(self) -> None:
+        if self._suppress_dirty:
+            return
+        self._dirty = True
 
     def _has_project_data_to_save(self) -> bool:
         for section in self.sections.values():
@@ -9408,6 +9906,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._remember_project_directory(target.parent)
         self._remember_recent_project(target)
         self._update_project_actions()
+        self._dirty = False
         self.logger.info("Project saved to %s", target)
         QtWidgets.QMessageBox.information(
             self,
@@ -9507,7 +10006,18 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._load_project_from_path(target)
 
     def _load_project_from_path(self, target: Path) -> None:
+        progress_dialog: Optional[QtWidgets.QProgressDialog] = None
         try:
+            progress_dialog = QtWidgets.QProgressDialog("Loading project…", "", 0, 0, self)
+            progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
+            progress_dialog.setCancelButton(None)
+            progress_dialog.setMinimumDuration(200)
+            progress_dialog.show()
+            QtWidgets.QApplication.processEvents()
+        except Exception:
+            progress_dialog = None
+        try:
+            self._suppress_dirty = True
             payload = json.loads(target.read_text(encoding="utf-8"))
         except Exception as exc:
             QtWidgets.QMessageBox.critical(
@@ -9515,6 +10025,9 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 "Open Project",
                 f"Failed to read project file:\n{exc}",
             )
+            self._suppress_dirty = False
+            if progress_dialog is not None:
+                progress_dialog.cancel()
             return
 
         if payload.get("kind") != self.PROJECT_KIND:
@@ -9543,12 +10056,16 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._remember_recent_project(target)
         self._refresh_sections_after_project_load()
         self._update_project_actions()
+        self._dirty = False
         self.logger.info("Project loaded from %s", target)
         QtWidgets.QMessageBox.information(
             self,
             "Open Project",
             f"Loaded project from {target}",
         )
+        self._suppress_dirty = False
+        if progress_dialog is not None:
+            progress_dialog.cancel()
 
     def _refresh_sections_after_project_load(self) -> None:
         for key, section in self.sections.items():
@@ -9617,7 +10134,10 @@ def main() -> QtWidgets.QWidget | None:
     def _launch() -> None:
         window = BuilderWindow()
         window_holder["window"] = window
-        window.show()
+        try:
+            window.showMaximized()
+        except Exception:
+            window.show()
         placeholder.close()
 
     if owns_app:

@@ -410,12 +410,38 @@ class Ui_MainWindow(object):
         sample_row.addWidget(self.lineEdit_sample)
         sample_row.setStretch(0, 1)
         name_grid.addWidget(self.sample_row_widget, 3, 1)
+        self.lineEdit_load = InfoLineEdit("Applied load in MPa, e.g., 30 MPa")
+        try:
+            self.lineEdit_load.set_validation(
+                r"^[A-Za-z0-9 _.,+-]*$",
+                "Use letters, numbers, spaces, and the characters '._+-'",
+            )  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.lineEdit_load.setMinimumWidth(300)
+        self.lineEdit_load.setPlaceholderText("Load, e.g., 30 MPa")
+        self.label_load = QtWidgets.QLabel("Load:")
+        name_grid.addWidget(self.label_load, 4, 0)
+        name_grid.addWidget(self.lineEdit_load, 4, 1)
+        self.lineEdit_notes = InfoLineEdit("Optional notes to append to the preset name")
+        try:
+            self.lineEdit_notes.set_validation(
+                r"^[A-Za-z0-9 _.,+-]*$",
+                "Use letters, numbers, spaces, and the characters '._+-'",
+            )  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        self.lineEdit_notes.setMinimumWidth(300)
+        self.lineEdit_notes.setPlaceholderText("Notes, e.g., rough pass, test sweep")
+        self.label_notes = QtWidgets.QLabel("Notes:")
+        name_grid.addWidget(self.label_notes, 5, 0)
+        name_grid.addWidget(self.lineEdit_notes, 5, 1)
         # Field for the "Custom" preset
         self.lineEdit_custom_name = InfoLineEdit("Custom file name (safe characters)")
         self.lineEdit_custom_name.setMinimumWidth(300)
         self.label_custom_name = QtWidgets.QLabel("Custom name:")
-        name_grid.addWidget(self.label_custom_name, 4, 0)
-        name_grid.addWidget(self.lineEdit_custom_name, 4, 1)
+        name_grid.addWidget(self.label_custom_name, 6, 0)
+        name_grid.addWidget(self.lineEdit_custom_name, 6, 1)
         # Hidden by default; shown only when "Custom" preset is selected
         self.label_custom_name.hide()
         self.lineEdit_custom_name.hide()
@@ -426,13 +452,13 @@ class Ui_MainWindow(object):
                 QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Minimum,
             ),
-            5,
+            7,
             0,
         )
         self.pushButton_reset_preset = QtWidgets.QPushButton("Reset")
         name_grid.addWidget(
             self.pushButton_reset_preset,
-            5,
+            7,
             1,
             1,
             1,
