@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, ClassVar, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, cast
 
 try:
     from .ocr import ORIGINAL_HOME as OCR_ORIGINAL_HOME
@@ -93,7 +93,6 @@ MICROSCOPE_TABLE_COLUMNS = [
     MICROSCOPE_D_COLUMN,
     MICROSCOPE_CAP_D_COLUMN,
     "d/D",
-    "Reviewed",
     MICROSCOPE_IMAGE_COLUMNS[0],
     MICROSCOPE_IMAGE_COLUMNS[1],
     "_key",
@@ -2284,12 +2283,22 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         self._decoration_provider: Optional[
             Callable[[pd.Series, str], Optional[QtGui.QPixmap | QtGui.QImage]]
         ] = None
+        self._background_provider: Optional[
+            Callable[[pd.Series, str], Optional[QtGui.QBrush]]
+        ] = None
+        self._foreground_provider: Optional[
+            Callable[[pd.Series, str], Optional[QtGui.QBrush]]
+        ] = None
         self._editable_columns: set[str] = set()
 
     def set_frame(self, frame: pd.DataFrame | None) -> None:
         self.beginResetModel()
         self._frame = frame.copy() if frame is not None else pd.DataFrame()
         self.endResetModel()
+        try:
+            self.layoutChanged.emit()
+        except Exception:
+            pass
 
     def set_decoration_provider(
         self,
@@ -2300,6 +2309,18 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             self.layoutChanged.emit()
         except Exception:
             pass
+
+    def set_background_provider(
+        self,
+        provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QBrush]]],
+    ) -> None:
+        self._background_provider = provider
+
+    def set_foreground_provider(
+        self,
+        provider: Optional[Callable[[pd.Series, str], Optional[QtGui.QBrush]]],
+    ) -> None:
+        self._foreground_provider = provider
 
     def set_editable_columns(self, columns: Iterable[str]) -> None:
         self._editable_columns = {str(column) for column in columns}
@@ -2360,6 +2381,48 @@ class DataFrameModel(QtCore.QAbstractTableModel):
             if isinstance(value, QtGui.QImage):
                 return QtGui.QPixmap.fromImage(value)
             return None
+        if role == QtCore.Qt.ItemDataRole.ForegroundRole:
+            provider = getattr(self, "_foreground_provider", None)
+            if provider is not None:
+                try:
+                    column_label = str(self._frame.columns[index.column()])
+                    row_series = self._frame.iloc[index.row()]
+                except Exception:
+                    pass
+                else:
+                    brush = provider(row_series, column_label)
+                    if brush is not None:
+                        return brush
+            try:
+                column_label = str(self._frame.columns[index.column()])
+            except Exception:
+                column_label = ""
+            if column_label.lower() == "reviewed":
+                ok = bool(value)
+                fg = QtGui.QColor("#10b981" if ok else "#ef4444")
+                return QtGui.QBrush(fg)
+            return None
+        if role == QtCore.Qt.ItemDataRole.BackgroundRole:
+            provider = getattr(self, "_background_provider", None)
+            if provider is not None:
+                try:
+                    column_label = str(self._frame.columns[index.column()])
+                    row_series = self._frame.iloc[index.row()]
+                except Exception:
+                    pass
+                else:
+                    brush = provider(row_series, column_label)
+                    if brush is not None:
+                        return brush
+            try:
+                column_label = str(self._frame.columns[index.column()])
+            except Exception:
+                column_label = ""
+            if column_label.lower() == "reviewed":
+                ok = bool(value)
+                bg = QtGui.QColor("#07351f" if ok else "#3a0a0a")
+                return QtGui.QBrush(bg)
+            return None
         if role not in (
             QtCore.Qt.ItemDataRole.DisplayRole,
             QtCore.Qt.ItemDataRole.EditRole,
@@ -2407,7 +2470,7 @@ class DataFrameModel(QtCore.QAbstractTableModel):
         if isinstance(value, QtCore.QVariant):  # pragma: no cover - PyQt guard
             value = value.value()
         if isinstance(value, str):
-            text = value.strip()
+            text = value.replace(",", ".").strip()
             if not text:
                 coerced: Any = None
             else:
@@ -3351,6 +3414,76 @@ class _SectionWorker(QtCore.QObject):
                 pass
 
 
+class _PendingScanWorker(QtCore.QObject):
+    """Background worker that counts pending files for a section."""
+
+    finished = QtCore.pyqtSignal(int)
+    failed = QtCore.pyqtSignal(object)
+
+    def __init__(
+        self,
+        sources: list[str],
+        processed: dict[str, float],
+        supported_suffixes: tuple[str, ...],
+        recursive_search: bool,
+    ) -> None:
+        super().__init__()
+        self._sources = [str(source) for source in sources]
+        self._processed = dict(processed)
+        self._supported_suffixes = tuple(supported_suffixes)
+        self._recursive_search = bool(recursive_search)
+
+    @QtCore.pyqtSlot()
+    def run(self) -> None:  # pragma: no cover - runs in worker thread
+        try:
+            count = self._compute_pending_count()
+        except Exception as exc:
+            try:
+                self.failed.emit(exc)
+            except Exception:
+                pass
+        else:
+            try:
+                self.finished.emit(int(count))
+            except Exception:
+                pass
+
+    def _compute_pending_count(self) -> int:
+        candidates: Dict[str, Path] = {}
+        suffixes = {s.lower() for s in self._supported_suffixes}
+        for source in self._sources:
+            root = Path(source).expanduser()
+            if not root.exists():
+                continue
+            try:
+                iterator: Iterable[Path] = (
+                    root.rglob("*") if self._recursive_search else root.glob("*")
+                )
+            except Exception:
+                continue
+            for path in iterator:
+                if not path.is_file():
+                    continue
+                if suffixes and path.suffix.lower() not in suffixes:
+                    continue
+                try:
+                    resolved = str(path.resolve())
+                except Exception:
+                    resolved = str(path)
+                candidates.setdefault(resolved, path)
+        pending_count = 0
+        processed = self._processed
+        for path in candidates.values():
+            key = str(path)
+            try:
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if float(processed.get(key, -1.0)) != float(mtime):
+                pending_count += 1
+        return pending_count
+
+
 def _microscope_index_to_frame(
     index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
     overrides: Dict[str, Dict[str, float]],
@@ -3404,7 +3537,6 @@ def _microscope_index_to_frame(
                 MICROSCOPE_D_COLUMN: d_value,
                 MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
-                "Reviewed": False,
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -3547,6 +3679,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self._worker_thread: QtCore.QThread | None = None
         self._worker: Optional["_SectionWorker"] = None
         self._active_candidates: List[Path] = []
+        self._pending_count_cache: int | None = None
+        self._pending_scan_in_progress = False
+        self._pending_scan_generation = 0
+        self._pending_scan_thread: QtCore.QThread | None = None
+        self._pending_scan_worker: Optional[_PendingScanWorker] = None
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -3764,6 +3901,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             self.store.save(self.data)
         except Exception:
             pass
+        self._invalidate_pending_cache()
         self.model.set_frame(self.data.table)
         self._populate_sources_list()
         self._auto_fit_columns()
@@ -4065,6 +4203,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 sources.append(item.text())
         self.data.sources = sources
         self.store.save(self.data)
+        self._invalidate_pending_cache()
         try:
             self.sources_changed.emit(list(sources))
         except Exception:
@@ -4176,16 +4315,84 @@ class MiniDatabaseSection(QtWidgets.QWidget):
                 pending.append(path)
         return pending
 
+    def _invalidate_pending_cache(self) -> None:
+        self._pending_count_cache = None
+        self._pending_scan_in_progress = False
+        self._pending_scan_generation += 1
+
+    def _request_pending_scan(self) -> None:
+        if self._pending_scan_in_progress:
+            return
+        if not self.data.sources:
+            self._pending_count_cache = 0
+            return
+        self._pending_scan_generation += 1
+        generation = self._pending_scan_generation
+        worker = _PendingScanWorker(
+            list(self.data.sources),
+            dict(self.data.processed),
+            tuple(self.supported_suffixes),
+            bool(self.recursive_search),
+        )
+        thread = QtCore.QThread(self)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(partial(self._handle_pending_scan_finished, generation, thread, worker))
+        worker.failed.connect(partial(self._handle_pending_scan_failed, generation, thread, worker))
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._pending_scan_thread = thread
+        self._pending_scan_worker = worker
+        self._pending_scan_in_progress = True
+        thread.start()
+
+    def _handle_pending_scan_finished(
+        self,
+        generation: int,
+        thread: QtCore.QThread,
+        worker: _PendingScanWorker,
+        count: int,
+    ) -> None:
+        if generation != self._pending_scan_generation:
+            return
+        self._pending_scan_in_progress = False
+        self._pending_count_cache = int(count)
+        self._pending_scan_thread = None
+        self._pending_scan_worker = None
+        self._update_status()
+
+    def _handle_pending_scan_failed(
+        self,
+        generation: int,
+        thread: QtCore.QThread,
+        worker: _PendingScanWorker,
+        exc: object,
+    ) -> None:
+        if generation != self._pending_scan_generation:
+            return
+        self._pending_scan_in_progress = False
+        self._pending_scan_thread = None
+        self._pending_scan_worker = None
+        self.logger.debug("%s pending scan failed", self.section_key, exc_info=exc)
+        self._update_status()
+
     def _update_status(self) -> None:
         sources_count = len(self.data.sources)
-        pending = self._pending_paths() if sources_count else []
+        pending_count = self._pending_count_cache
         if sources_count == 0:
             message = "Connect one or more folders to begin."
             self.refresh_button.setEnabled(False)
+            self._pending_count_cache = 0
         else:
             self.refresh_button.setEnabled(True)
-            if pending:
-                message = f"⚠️ {len(pending)} new or updated file(s) pending processing."
+            if pending_count is None:
+                message = "Scanning for new or updated files…"
+                if not self._pending_scan_in_progress:
+                    self._request_pending_scan()
+            elif pending_count:
+                message = f"⚠️ {pending_count} new or updated file(s) pending processing."
             elif not self.data.table.empty:
                 message = f"Up to date ({len(self.data.table)} record(s))."
             else:
@@ -5485,11 +5692,18 @@ class _MicroscopePreviewLabel(QtWidgets.QLabel):
         super().__init__(placeholder, parent)
         self._placeholder = placeholder
         self._pixmap: Optional[QtGui.QPixmap] = None
+        self._scale_timer = QtCore.QTimer(self)
+        self._scale_timer.setSingleShot(True)
+        self._scale_timer.timeout.connect(self._update_scaled_pixmap)
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
         self.setWordWrap(True)
 
     def set_placeholder(self) -> None:
+        try:
+            self._scale_timer.stop()
+        except Exception:
+            pass
         self._pixmap = None
         super().setPixmap(QtGui.QPixmap())
         super().setText(self._placeholder)
@@ -5499,11 +5713,18 @@ class _MicroscopePreviewLabel(QtWidgets.QLabel):
             self.set_placeholder()
             return
         self._pixmap = QtGui.QPixmap(pixmap)
-        self._update_scaled_pixmap()
+        self._schedule_scaled_pixmap()
 
     def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # pragma: no cover - Qt callback
         super().resizeEvent(event)
-        if self._pixmap is not None:
+        self._schedule_scaled_pixmap()
+
+    def _schedule_scaled_pixmap(self) -> None:
+        if self._pixmap is None:
+            return
+        try:
+            self._scale_timer.start(0)
+        except Exception:
             self._update_scaled_pixmap()
 
     def _update_scaled_pixmap(self) -> None:
@@ -5543,19 +5764,12 @@ class MicroscopeSection(MiniDatabaseSection):
         self._prepopulated_keys: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._force_ocr_next = False
+        self._active_column: str = ""
         super().__init__(logger, log_callback, parent)
 
-        self._missing_summary_label = QtWidgets.QLabel("", self)
-        self._missing_summary_label.setObjectName("microscopeMissingSummaryLabel")
-        self._missing_summary_label.setStyleSheet("font-weight: 500;")
-        self._missing_summary_label.hide()
-        self.main_layout.insertWidget(2, self._missing_summary_label)
-
-        self._missing_list = QtWidgets.QListWidget(self)
-        self._missing_list.setObjectName("microscopeMissingList")
-        self._missing_list.setVisible(False)
-        self._missing_list.itemActivated.connect(self._handle_missing_item_activated)
-        self.main_layout.insertWidget(3, self._missing_list)
+        # Removed the missing-items list UI; missing values are visible in the table.
+        self._missing_summary_label = None  # type: ignore[assignment]
+        self._missing_list = None  # type: ignore[assignment]
         if hasattr(self, "controls_layout"):
             try:
                 self.defer_ocr_checkbox = QtWidgets.QCheckBox("Defer OCR")
@@ -5567,6 +5781,35 @@ class MicroscopeSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+        self._load_extra_state()
+
+        # Always normalise the table after load so legacy "Reviewed" columns
+        # are removed even when there are no overrides/validations stored.
+        self._apply_overrides_to_table()
+        self._update_hidden_columns()
+        self._update_missing_summary()
+        self.partial_row_ready.connect(self._apply_partial_row)
+        self._update_review_buttons()
+        QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
+        self._install_diameter_handlers()
+        self.model.set_editable_columns({MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN})
+        self.model.set_background_provider(self._background_brush_for_cell)
+        self.model.set_foreground_provider(self._foreground_brush_for_cell)
+        try:
+            self.model.dataChanged.connect(self._handle_cell_edited)
+        except Exception:
+            pass
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        self._load_extra_state()
+        self._apply_overrides_to_table()
+        self._update_hidden_columns()
+        self._update_missing_summary()
+        self._update_review_buttons()
+        QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
+
+    def _load_extra_state(self) -> None:
         stored_overrides = self.data.extra.get("overrides")
         if isinstance(stored_overrides, dict):
             self._overrides = {
@@ -5574,11 +5817,10 @@ class MicroscopeSection(MiniDatabaseSection):
                 for key, value in stored_overrides.items()
                 if isinstance(value, dict)
             }
-        if not self.data.table.empty:
-            self._apply_overrides_to_table()
 
         stored_cache = self.data.extra.get("ocr_cache")
         if isinstance(stored_cache, dict):
+            cache: Dict[str, MicroscopeCacheEntry] = {}
             for key, payload in stored_cache.items():
                 entry: Optional[MicroscopeCacheEntry]
                 if isinstance(payload, MicroscopeCacheEntry):
@@ -5589,7 +5831,8 @@ class MicroscopeSection(MiniDatabaseSection):
                     entry = None
                 if entry is None:
                     continue
-                self._ocr_cache[str(key)] = entry
+                cache[str(key)] = entry
+            self._ocr_cache = cache
 
         stored_validated = self.data.extra.get("validated")
         if isinstance(stored_validated, dict):
@@ -5599,13 +5842,6 @@ class MicroscopeSection(MiniDatabaseSection):
                     continue
                 cleaned[str(key)] = dict(payload)
             self._validated = cleaned
-            if not self.data.table.empty:
-                self._apply_overrides_to_table()
-        self._update_hidden_columns()
-        self._update_missing_summary()
-        self.partial_row_ready.connect(self._apply_partial_row)
-        self._update_review_buttons()
-        QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
 
     def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, parent)
@@ -5620,18 +5856,23 @@ class MicroscopeSection(MiniDatabaseSection):
         header = table.horizontalHeader()
         if header is not None:
             header.setStretchLastSection(True)
-            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Interactive)
-            header.setMinimumSectionSize(90)
+            header.setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+            header.setMinimumSectionSize(60)
         table.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
             QtWidgets.QSizePolicy.Policy.Expanding,
         )
         table.setAlternatingRowColors(True)
         table.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
         )
         table.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.DoubleClicked
+            | QtWidgets.QAbstractItemView.EditTrigger.EditKeyPressed
+            | QtWidgets.QAbstractItemView.EditTrigger.AnyKeyPressed
         )
         table.setSortingEnabled(True)
         v_header = table.verticalHeader()
@@ -5643,35 +5884,58 @@ class MicroscopeSection(MiniDatabaseSection):
         selection_model = table.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_selection_changed)
+            selection_model.currentChanged.connect(self._handle_current_changed)
+        table.installEventFilter(self)
 
         preview_container = QtWidgets.QWidget(splitter)
+        preview_container.setMinimumWidth(360)
         preview_layout = QtWidgets.QVBoxLayout(preview_container)
         preview_layout.setContentsMargins(0, 0, 0, 0)
         preview_layout.setSpacing(6)
 
-        def _make_preview_panel(title: str) -> Tuple[QtWidgets.QVBoxLayout, _MicroscopePreviewLabel]:
-            column_layout = QtWidgets.QVBoxLayout()
+        scroll = QtWidgets.QScrollArea(preview_container)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(QtCore.Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Ignored,
+        )
+        scroll.setMinimumHeight(0)
+        preview_layout.addWidget(scroll, 1)
+
+        stack_widget = QtWidgets.QWidget()
+        stack_layout = QtWidgets.QVBoxLayout(stack_widget)
+        stack_layout.setContentsMargins(0, 0, 0, 0)
+        stack_layout.setSpacing(8)
+
+        def _make_preview_panel(title: str) -> tuple[QtWidgets.QWidget, _MicroscopePreviewLabel]:
+            panel = QtWidgets.QWidget(stack_widget)
+            panel.setSizePolicy(
+                QtWidgets.QSizePolicy.Policy.Expanding,
+                QtWidgets.QSizePolicy.Policy.Expanding,
+            )
+            column_layout = QtWidgets.QVBoxLayout(panel)
             column_layout.setContentsMargins(0, 0, 0, 0)
             column_layout.setSpacing(4)
-            caption = QtWidgets.QLabel(title)
+            caption = QtWidgets.QLabel(title, panel)
             caption.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
             caption.setStyleSheet("font-weight: 600;")
             column_layout.addWidget(caption)
-            label = _MicroscopePreviewLabel("Select a row to preview.")
-            label.setMinimumSize(640, 480)
+            label = _MicroscopePreviewLabel("Select a row to preview.", panel)
+            label.setMinimumSize(320, 240)
             label.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Ignored,
+                QtWidgets.QSizePolicy.Policy.Expanding,
                 QtWidgets.QSizePolicy.Policy.Expanding,
             )
+            label.setScaledContents(False)
             column_layout.addWidget(label, 1)
-            return column_layout, label
+            stack_layout.addWidget(panel, 1)
+            return panel, label
 
-        image_row = QtWidgets.QHBoxLayout()
-        core_panel, self.core_preview_label = _make_preview_panel("Core image")
-        glass_panel, self.glass_preview_label = _make_preview_panel("Glass image")
-        image_row.addLayout(core_panel)
-        image_row.addLayout(glass_panel)
-        preview_layout.addLayout(image_row)
+        self.core_preview_panel, self.core_preview_label = _make_preview_panel("Core image")
+        self.glass_preview_panel, self.glass_preview_label = _make_preview_panel("Glass image")
+        scroll.setWidget(stack_widget)
 
         form = QtWidgets.QFormLayout()
         form.setContentsMargins(0, 0, 0, 0)
@@ -5681,6 +5945,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self.d_edit.setPlaceholderText("auto")
         self.D_edit = QtWidgets.QLineEdit()
         self.D_edit.setPlaceholderText("auto")
+        self.d_edit.returnPressed.connect(self._apply_override)
+        self.D_edit.returnPressed.connect(self._apply_override)
         form.addRow(MICROSCOPE_D_COLUMN, self.d_edit)
         form.addRow(MICROSCOPE_CAP_D_COLUMN, self.D_edit)
         preview_layout.addLayout(form)
@@ -5710,8 +5976,6 @@ class MicroscopeSection(MiniDatabaseSection):
         self._prepopulated_keys.clear()
         self._expected_keys_current = set()
         self._pixmap_cache.clear()
-        self._missing_list.clear()
-        self._missing_summary_label.hide()
         self._update_missing_summary()
         self._update_review_buttons()
 
@@ -5768,20 +6032,30 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             max_width = None
         if total_width > 0:
-            if max_width is None:
-                target = total_width
-            else:
-                target = min(total_width, max_width)
-            table.setMinimumWidth(max(360, int(target)))
-            table.setMaximumWidth(16777215)
+            preview_min = 360
+            table_min = 480
+            available_width = (
+                max_width
+                if max_width is not None
+                else total_width + preview_min + 200
+            )
+            available_width = max(available_width, table_min + preview_min + 80)
+            table_target = min(max(total_width, table_min), available_width - preview_min)
+            preview_target = max(preview_min, available_width - table_target)
+            if preview_target < preview_min and available_width > preview_min:
+                preview_target = preview_min
+                table_target = max(table_min, available_width - preview_target)
+            table.setMinimumWidth(table_min)
+            table.setMaximumWidth(max(table_min, available_width - preview_min))
         splitter = self._table_splitter
         if isinstance(splitter, QtWidgets.QSplitter) and column_count:
             sizes = splitter.sizes()
-            total = sum(sizes) if sizes and any(sizes) else total_width + 360
-            table_target = max(total_width, int(total * 0.55))
+            total = sum(sizes) if sizes and any(sizes) else (total_width + 360)
             if max_width is not None:
-                table_target = min(table_target, max_width)
-            preview_target = max(320, total - table_target)
+                total = max(total, max_width)
+            table_target = min(max(total_width, 480), total - 360)
+            preview_target = total - table_target
+            preview_target = max(preview_target, 360)
             splitter.setSizes([table_target, preview_target])
 
     def _expected_microwire_keys(self) -> Set[Tuple[str, int, int]]:
@@ -5853,7 +6127,6 @@ class MicroscopeSection(MiniDatabaseSection):
                     MICROSCOPE_D_COLUMN: None,
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
-                    "Reviewed": False,
                     MICROSCOPE_IMAGE_COLUMNS[0]: None,
                     MICROSCOPE_IMAGE_COLUMNS[1]: None,
                     "_key": key_str,
@@ -5948,7 +6221,6 @@ class MicroscopeSection(MiniDatabaseSection):
             MICROSCOPE_D_COLUMN: d_value,
             MICROSCOPE_CAP_D_COLUMN: D_value,
             "d/D": ratio,
-            "Reviewed": bool(self._validated.get(key_str)),
             MICROSCOPE_IMAGE_COLUMNS[0]: None,
             MICROSCOPE_IMAGE_COLUMNS[1]: None,
             "_key": key_str,
@@ -5985,6 +6257,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._update_missing_summary()
 
     def _update_missing_summary(self) -> None:
+        if getattr(self, "_missing_list", None) is None:
+            return
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         missing_entries: List[Tuple[str, str]] = []
         missing_d = 0
@@ -6031,23 +6305,274 @@ class MicroscopeSection(MiniDatabaseSection):
         else:
             self._missing_list.setVisible(False)
 
+    def _install_diameter_handlers(self) -> None:
+        for edit in (self.d_edit, self.D_edit):
+            try:
+                edit.textEdited.connect(partial(self._normalize_decimal_input, edit))
+            except Exception:
+                pass
+            for key, handler in (
+                (QtCore.Qt.Key.Key_Up, self._select_previous_row),
+                (QtCore.Qt.Key.Key_Down, self._select_next_row),
+            ):
+                shortcut = QtGui.QShortcut(QtGui.QKeySequence(key), edit)
+                shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetShortcut)
+                shortcut.activated.connect(handler)
+
+    def _normalize_decimal_input(self, edit: QtWidgets.QLineEdit, text: str) -> None:
+        normalized = text.replace(",", ".")
+        if normalized == text:
+            return
+        cursor = edit.cursorPosition()
+        delta = len(normalized) - len(text)
+        blocker = QtCore.QSignalBlocker(edit)
+        try:
+            edit.setText(normalized)
+        finally:
+            del blocker
+        try:
+            edit.setCursorPosition(max(0, cursor + delta))
+        except Exception:
+            pass
+
+    def _normalized_decimal_text(self, edit: QtWidgets.QLineEdit) -> str:
+        return edit.text().replace(",", ".").strip()
+
+    def _select_previous_row(self) -> None:
+        self._move_selection(-1)
+
+    def _select_next_row(self) -> None:
+        self._move_selection(1)
+
+    def _move_selection(self, offset: int) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = self.table_view.model()
+        selection = self.table_view.selectionModel()
+        if model is None or selection is None:
+            return
+        row_count = model.rowCount()
+        if row_count <= 0:
+            return
+        current_index = selection.currentIndex()
+        current_row = current_index.row() if current_index.isValid() else 0
+        current_col = current_index.column() if current_index.isValid() else 0
+        new_row = max(0, min(row_count - 1, current_row + offset))
+        target_index = model.index(new_row, max(0, current_col))
+        if target_index.isValid():
+            selection.setCurrentIndex(
+                target_index,
+                QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+            )
+        try:
+            self.table_view.scrollTo(
+                model.index(new_row, max(0, current_col)),
+            QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+        )
+        except Exception:
+            pass
+        self._focus_d_input(select_all=True)
+
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:
+        if obj is self.table_view and event.type() == QtCore.QEvent.Type.KeyPress:
+            key_event = cast(QtGui.QKeyEvent, event)
+            key = key_event.key()
+            if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                index = self._current_index()
+                if index.isValid():
+                    try:
+                        column_label = str(self.model.frame().columns[index.column()])
+                    except Exception:
+                        column_label = ""
+                    if column_label in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}:
+                        if (
+                            isinstance(self.table_view, QtWidgets.QTableView)
+                            and self.table_view.state()
+                            == QtWidgets.QAbstractItemView.State.EditingState
+                        ):
+                            key_value = self._selected_key
+                            if not key_value:
+                                row = self._selected_row()
+                                raw_key = row.get("_key") if row is not None else None
+                                if raw_key is not None:
+                                    key_value = str(raw_key)
+                            if key_value:
+                                callback = lambda k=key_value, col=column_label: self._mark_reviewed_and_advance_for_key(
+                                    k, col
+                                )
+                            else:
+                                callback = lambda col=column_label: self._mark_reviewed_and_advance(col)
+                            QtCore.QTimer.singleShot(0, callback)
+                            return False
+                        self._mark_reviewed_and_advance(column_label)
+                        return True
+        return super().eventFilter(obj, event)
+
+    def _mark_reviewed_and_advance_for_key(self, key: str, column_label: str) -> None:
+        self._select_row_for_key(key, column_label=column_label)
+        self._mark_reviewed_and_advance(column_label)
+
+    def _mark_reviewed_and_advance(self, column_label: str) -> None:
+        index = self._current_index()
+        if not index.isValid():
+            return
+        self._mark_reviewed(auto=True, columns={column_label})
+        self._advance_after_review(index, column_label)
+
+    def _advance_after_review(self, index: QtCore.QModelIndex, column_label: str) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = self.table_view.model()
+        selection = self.table_view.selectionModel()
+        if model is None or selection is None:
+            return
+        columns = list(self.model.frame().columns)
+        try:
+            d_col = columns.index(MICROSCOPE_D_COLUMN)
+            D_col = columns.index(MICROSCOPE_CAP_D_COLUMN)
+        except ValueError:
+            return
+        row_count = model.rowCount()
+        if row_count <= 0:
+            return
+        target_row = index.row()
+        target_col = index.column()
+        if column_label == MICROSCOPE_D_COLUMN:
+            target_col = D_col
+        elif column_label == MICROSCOPE_CAP_D_COLUMN and target_row + 1 < row_count:
+            target_row += 1
+            target_col = d_col
+        target = model.index(target_row, target_col)
+        if not target.isValid():
+            return
+        selection.setCurrentIndex(
+            target,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
+        try:
+            self.table_view.scrollTo(
+                target,
+                QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+        except Exception:
+            pass
+        try:
+            self.table_view.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+
+    def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        missing_images = self._row_missing_images(row)
+        if missing_images:
+            return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
+        key = str(row.get("_key", ""))
+        if column in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}:
+            reviewed = self._is_cell_reviewed(key, column)
+            return QtGui.QBrush(QtGui.QColor("#0f3b26" if reviewed else "#3a0a0a"))
+        return None
+
+    def _foreground_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
+        missing_images = self._row_missing_images(row)
+        if missing_images:
+            return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
+        key = str(row.get("_key", ""))
+        if column in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}:
+            reviewed = self._is_cell_reviewed(key, column)
+            return QtGui.QBrush(QtGui.QColor("#22c55e" if reviewed else "#ef4444"))
+        return None
+
+    def _is_cell_reviewed(self, key: str, column: str) -> bool:
+        entry = self._validated.get(key)
+        if not isinstance(entry, dict):
+            return False
+        has_flags = "d_reviewed" in entry or "D_reviewed" in entry
+        if column == MICROSCOPE_D_COLUMN:
+            return bool(entry.get("d_reviewed")) if has_flags else True
+        if column == MICROSCOPE_CAP_D_COLUMN:
+            return bool(entry.get("D_reviewed")) if has_flags else True
+        return False
+
+    def _row_missing_images(self, row: pd.Series) -> bool:
+        core_present = bool(row.get("_core_image"))
+        glass_present = bool(row.get("_glass_image"))
+        extras = row.get("_images")
+        if not core_present and isinstance(extras, (list, tuple)) and extras:
+            core_present = True
+        if not glass_present and isinstance(extras, (list, tuple)) and extras:
+            glass_present = True
+        return not (core_present and glass_present)
+
+    def _handle_cell_edited(
+        self,
+        top_left: QtCore.QModelIndex,
+        bottom_right: QtCore.QModelIndex,
+        roles: list[int] | None = None,
+    ) -> None:
+        if roles and QtCore.Qt.ItemDataRole.EditRole not in roles and QtCore.Qt.ItemDataRole.DisplayRole not in roles:
+            return
+        frame = self.model.frame()
+        self.data.table = frame.copy()
+        edited_rows = range(top_left.row(), bottom_right.row() + 1)
+        for row_idx in edited_rows:
+            try:
+                row = frame.iloc[row_idx]
+            except Exception:
+                continue
+            key = str(row.get("_key", ""))
+            override: Dict[str, float] = {}
+            d_val = row.get(MICROSCOPE_D_COLUMN)
+            D_val = row.get(MICROSCOPE_CAP_D_COLUMN)
+            if isinstance(d_val, (int, float)) and math.isfinite(float(d_val)):
+                override["d"] = float(d_val)
+            if isinstance(D_val, (int, float)) and math.isfinite(float(D_val)):
+                override["D"] = float(D_val)
+            if override:
+                self._overrides[key] = override
+            elif key in self._overrides:
+                self._overrides.pop(key, None)
+        self._store_overrides()
+
+    def _restore_selection(self) -> None:
+        key = self._selected_key
+        if not key:
+            return
+        active_column = self._active_column
+        QtCore.QTimer.singleShot(0, lambda k=key, col=active_column: self._select_row_for_key(k, col))
+
     def _handle_missing_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
         key = item.data(QtCore.Qt.ItemDataRole.UserRole)
         if isinstance(key, str):
             self._select_row_for_key(key)
 
-    def _select_row_for_key(self, key: str) -> None:
-        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+    def _select_row_for_key(self, key: str, column_label: str | None = None) -> None:
+        frame = self.model.frame()
         if frame.empty or "_key" not in frame.columns:
             return
-        matches = frame.index[frame["_key"] == key].tolist()
-        if not matches:
+        row_idx = None
+        try:
+            mask = frame["_key"] == key
+            row_idx = next(
+                idx for idx, matched in enumerate(mask.tolist()) if bool(matched)
+            )
+        except Exception:
+            row_idx = None
+        if row_idx is None:
             return
-        row_idx = matches[0]
         if isinstance(self.table_view, QtWidgets.QTableView):
-            self.table_view.selectRow(row_idx)
+            model = self.table_view.model()
+            col_idx = 0
+            if column_label and hasattr(frame, "columns") and column_label in frame.columns:
+                col_idx = list(frame.columns).index(column_label)
+            target = model.index(row_idx, col_idx) if model is not None else None
+            if target is not None and target.isValid():
+                selection = self.table_view.selectionModel()
+                if selection is not None:
+                    selection.setCurrentIndex(
+                        target,
+                        QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+                    )
             self.table_view.scrollTo(
-                self.table_view.model().index(row_idx, 0),
+                self.table_view.model().index(row_idx, col_idx),
                 QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
             )
 
@@ -6085,7 +6610,7 @@ class MicroscopeSection(MiniDatabaseSection):
         model = self.table_view.model()
         if model is None:
             return
-        hidden_columns = ["_key", "_images", "_core_image", "_glass_image"]
+        hidden_columns = ["_key", "_images", "_core_image", "_glass_image", "Reviewed"]
         hidden_columns.extend(MICROSCOPE_IMAGE_COLUMNS)
         for column_name in hidden_columns:
             try:
@@ -6151,34 +6676,62 @@ class MicroscopeSection(MiniDatabaseSection):
             candidates = self._row_sources(row)
         for candidate in candidates:
             if candidate and candidate.exists():
-                loaded = QtGui.QPixmap(str(candidate))
-                if not loaded.isNull():
-                    pixmap = loaded
+                reader = QtGui.QImageReader(str(candidate))
+                reader.setAutoTransform(True)
+                reader.setQuality(100)
+                image = reader.read()
+                if not image.isNull():
+                    pixmap = QtGui.QPixmap.fromImage(image)
                     break
         self._pixmap_cache[cache_key] = pixmap
         return pixmap
 
-    def _selected_row(self) -> Optional[pd.Series]:
+    def _current_index(self) -> QtCore.QModelIndex:
         if not isinstance(self.table_view, QtWidgets.QTableView):
-            return None
+            return QtCore.QModelIndex()
         selection = self.table_view.selectionModel()
         if selection is None:
+            return QtCore.QModelIndex()
+        index = selection.currentIndex()
+        return index if index.isValid() else QtCore.QModelIndex()
+
+    def _selected_row(self) -> Optional[pd.Series]:
+        index = self._current_index()
+        if not index.isValid():
             return None
-        indexes = selection.selectedRows()
-        if not indexes:
-            return None
-        row = indexes[0].row()
         try:
-            return self.data.table.iloc[row]
+            return self.model.frame().iloc[index.row()]
         except Exception:
             return None
 
+    def _focus_d_input(self, select_all: bool = False) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        try:
+            table.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            if select_all:
+                index = self._current_index()
+                if index.isValid():
+                    table.setCurrentIndex(index)
+        except Exception:
+            pass
+
+    def _handle_current_changed(self, current: QtCore.QModelIndex, _: QtCore.QModelIndex) -> None:
+        self._handle_selection_changed()
+
     def _handle_selection_changed(self, *_: Any) -> None:
+        index = self._current_index()
         row = self._selected_row()
         if row is None:
             self._selected_key = None
+            self._active_column = ""
             for label in (self.core_preview_label, self.glass_preview_label):
                 label.set_placeholder()
+                label.show()
+            if hasattr(self, "core_preview_panel") and hasattr(self, "glass_preview_panel"):
+                self.core_preview_panel.show()
+                self.glass_preview_panel.show()
             self.d_edit.clear()
             self.D_edit.clear()
             self._update_review_buttons()
@@ -6189,10 +6742,29 @@ class MicroscopeSection(MiniDatabaseSection):
         D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
         self.d_edit.setText("" if d_value is None or (isinstance(d_value, float) and math.isnan(d_value)) else f"{float(d_value):.3f}")
         self.D_edit.setText("" if D_value is None or (isinstance(D_value, float) and math.isnan(D_value)) else f"{float(D_value):.3f}")
-        for column_name, label in (
-            ("_core_image", self.core_preview_label),
-            ("_glass_image", self.glass_preview_label),
+
+        active_column = ""
+        if index.isValid():
+            try:
+                active_column = str(self.model.frame().columns[index.column()])
+            except Exception:
+                active_column = ""
+        self._active_column = active_column
+
+        if active_column == MICROSCOPE_D_COLUMN:
+            show_core, show_glass = True, False
+        elif active_column == MICROSCOPE_CAP_D_COLUMN:
+            show_core, show_glass = False, True
+        else:
+            show_core = show_glass = True
+
+        for column_name, label, should_show in (
+            ("_core_image", self.core_preview_label, show_core),
+            ("_glass_image", self.glass_preview_label, show_glass),
         ):
+            if not should_show:
+                label.set_placeholder()
+                continue
             path_value = row.get(column_name)
             candidate = None
             if path_value:
@@ -6208,18 +6780,29 @@ class MicroscopeSection(MiniDatabaseSection):
                 except Exception:
                     candidate = None
             if candidate and candidate.exists():
-                pixmap = QtGui.QPixmap(str(candidate))
+                reader = QtGui.QImageReader(str(candidate))
+                reader.setAutoTransform(True)
+                reader.setQuality(100)
+                image = reader.read()
+                pixmap = QtGui.QPixmap.fromImage(image) if not image.isNull() else QtGui.QPixmap()
                 if not pixmap.isNull():
                     label.set_preview(pixmap)
                     continue
             label.set_placeholder()
+        if hasattr(self, "core_preview_panel") and hasattr(self, "glass_preview_panel"):
+            self.core_preview_panel.setVisible(show_core)
+            self.glass_preview_panel.setVisible(show_glass)
+        else:
+            self.core_preview_label.setVisible(show_core)
+            self.glass_preview_label.setVisible(show_glass)
+
         self._update_review_buttons()
 
     def _apply_override(self) -> None:
         if not self._selected_key:
             return
-        d_text = self.d_edit.text().strip()
-        D_text = self.D_edit.text().strip()
+        d_text = self._normalized_decimal_text(self.d_edit)
+        D_text = self._normalized_decimal_text(self.D_edit)
         override: Dict[str, float] = {}
         if d_text:
             try:
@@ -6238,6 +6821,13 @@ class MicroscopeSection(MiniDatabaseSection):
         else:
             self._overrides.pop(self._selected_key, None)
         self._store_overrides()
+        columns: set[str] = set()
+        if "d" in override:
+            columns.add(MICROSCOPE_D_COLUMN)
+        if "D" in override:
+            columns.add(MICROSCOPE_CAP_D_COLUMN)
+        if columns:
+            self._mark_reviewed(auto=True, columns=columns)
 
     def _clear_override(self) -> None:
         if not self._selected_key:
@@ -6248,20 +6838,31 @@ class MicroscopeSection(MiniDatabaseSection):
         self.d_edit.clear()
         self.D_edit.clear()
 
-    def _mark_reviewed(self) -> None:
+    def _mark_reviewed(
+        self,
+        *,
+        auto: bool = False,
+        columns: set[str] | None = None,
+        allow_without_sources: bool = True,
+    ) -> None:
         if not self._selected_key:
             return
         row = self._selected_row()
         if row is None:
             return
+        key = self._selected_key
         sources = self._row_sources(row)
-        if not sources:
-            QtWidgets.QMessageBox.warning(
-                self,
-                self.section_title,
-                "No source images are associated with the selected row; cannot mark as reviewed.",
-            )
+        if not sources and not allow_without_sources:
+            if auto:
+                self.logger.warning("Auto-review skipped for %s due to missing sources", key)
+            else:
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    self.section_title,
+                    "No source images are associated with the selected row; cannot mark as reviewed.",
+                )
             return
+
         metadata: List[Dict[str, Any]] = []
         for source in sources:
             try:
@@ -6276,22 +6877,38 @@ class MicroscopeSection(MiniDatabaseSection):
                     "size": int(stat.st_size),
                 }
             )
-        if not metadata:
+        if not metadata and not allow_without_sources:
             QtWidgets.QMessageBox.warning(
                 self,
                 self.section_title,
                 "The source files for this row are not accessible; review status was not updated.",
             )
             return
-        entry: Dict[str, Any] = {"sources": metadata}
+
+        existing = self._validated.get(key, {})
+        entry: Dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+        if metadata:
+            entry["sources"] = metadata
+        else:
+            entry.setdefault("sources", [])
+        if allow_without_sources and not sources:
+            entry["allow_without_sources"] = True
+
         d_value = row.get(MICROSCOPE_D_COLUMN)
         if isinstance(d_value, (int, float)) and math.isfinite(float(d_value)):
             entry["d"] = float(d_value)
         D_value = row.get(MICROSCOPE_CAP_D_COLUMN)
         if isinstance(D_value, (int, float)) and math.isfinite(float(D_value)):
             entry["D"] = float(D_value)
+
+        columns_to_mark = columns or {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}
+        if MICROSCOPE_D_COLUMN in columns_to_mark:
+            entry["d_reviewed"] = True
+        if MICROSCOPE_CAP_D_COLUMN in columns_to_mark:
+            entry["D_reviewed"] = True
+
         entry["timestamp"] = datetime.utcnow().isoformat() + "Z"
-        self._validated[self._selected_key] = entry
+        self._validated[key] = entry
         self._store_validation()
         self._update_review_buttons()
 
@@ -6307,19 +6924,48 @@ class MicroscopeSection(MiniDatabaseSection):
         self.data.extra["validated"] = self._validated
         if persist:
             self.store.save(self.data)
-        self._apply_overrides_to_table()
+        self._refresh_review_display()
         self._update_review_buttons()
         try:
             self.data_updated.emit()
         except Exception:
             pass
 
+    def _refresh_review_display(self) -> None:
+        try:
+            rows = self.model.rowCount()
+            cols = self.model.columnCount()
+        except Exception:
+            rows = cols = 0
+        if rows <= 0 or cols <= 0:
+            return
+        try:
+            self.model.dataChanged.emit(
+                self.model.index(0, 0),
+                self.model.index(rows - 1, cols - 1),
+                [
+                    QtCore.Qt.ItemDataRole.BackgroundRole,
+                    QtCore.Qt.ItemDataRole.ForegroundRole,
+                ],
+            )
+        except Exception:
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+        if isinstance(self.table_view, QtWidgets.QTableView):
+            try:
+                self.table_view.viewport().update()
+            except Exception:
+                pass
+
     def _refresh_validations(self) -> None:
         changed = False
         for key, payload in list(self._validated.items()):
             entry_changed = False
             sources = payload.get("sources")
-            if not isinstance(sources, list) or not sources:
+            allow_without_sources = bool(payload.get("allow_without_sources"))
+            if not isinstance(sources, list) or (not sources and not allow_without_sources):
                 entry_changed = True
             else:
                 for source in sources:
@@ -6350,10 +6996,17 @@ class MicroscopeSection(MiniDatabaseSection):
         if not hasattr(self, "mark_reviewed_button"):
             return
         has_selection = bool(self._selected_key)
-        is_reviewed = bool(has_selection and self._validated.get(self._selected_key or ""))
+        key = self._selected_key or ""
+        has_any_review = bool(has_selection and self._validated.get(key))
+        if has_selection:
+            d_reviewed = self._is_cell_reviewed(key, MICROSCOPE_D_COLUMN)
+            D_reviewed = self._is_cell_reviewed(key, MICROSCOPE_CAP_D_COLUMN)
+            is_reviewed = d_reviewed and D_reviewed
+        else:
+            is_reviewed = False
         self.mark_reviewed_button.setEnabled(has_selection)
         self.mark_reviewed_button.setText("Update review" if is_reviewed else "Mark reviewed")
-        self.clear_review_button.setEnabled(is_reviewed)
+        self.clear_review_button.setEnabled(has_any_review)
 
     def _trigger_ocr_run(self) -> None:
         self._force_ocr_next = True
@@ -6369,11 +7022,12 @@ class MicroscopeSection(MiniDatabaseSection):
             self.data_updated.emit()
         except Exception:
             pass
+        self._restore_selection()
+        self._ensure_table_autosized()
 
     def _apply_overrides_to_table(self) -> None:
         frame = self.data.table.copy()
-        if "Reviewed" not in frame.columns:
-            frame["Reviewed"] = False
+        frame = frame.drop(columns=["Reviewed"], errors="ignore")
         if frame.empty:
             self.model.set_frame(frame)
             return
@@ -6394,7 +7048,6 @@ class MicroscopeSection(MiniDatabaseSection):
                     ratio = float(d_value) / float(D_value)
                 except ZeroDivisionError:
                     ratio = None
-            frame.at[index, "Reviewed"] = bool(self._validated.get(key))
             frame.at[index, MICROSCOPE_D_COLUMN] = d_value
             frame.at[index, MICROSCOPE_CAP_D_COLUMN] = D_value
             frame.at[index, "d/D"] = round(ratio, 3) if ratio is not None else None
@@ -6403,6 +7056,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._auto_fit_columns()
         self._update_missing_summary()
         self._update_review_buttons()
+        self._restore_selection()
 
     def refresh(self) -> None:
         self._refresh_validations()
@@ -6462,7 +7116,6 @@ class MicroscopeSection(MiniDatabaseSection):
                 MICROSCOPE_D_COLUMN: None,
                 MICROSCOPE_CAP_D_COLUMN: None,
                 "d/D": None,
-                "Reviewed": False,
                 MICROSCOPE_IMAGE_COLUMNS[0]: None,
                 MICROSCOPE_IMAGE_COLUMNS[1]: None,
                 "_key": key,
@@ -6588,10 +7241,6 @@ class MicroscopeSection(MiniDatabaseSection):
         }
         self._overrides = filtered_overrides
         table = _microscope_index_to_frame(index, filtered_overrides)
-        if "Reviewed" not in table.columns:
-            table["Reviewed"] = False
-        if "_key" in table.columns:
-            table["Reviewed"] = table["_key"].apply(lambda value: bool(self._validated.get(str(value))))
 
         processed: Dict[str, float] = {}
         for path in unique_paths:
@@ -9339,11 +9988,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
             if scrollbar is not None:
                 scrollbar.setValue(scrollbar.maximum())
             if level >= logging.ERROR:
-                dock = getattr(self, "log_dock", None)
-                if isinstance(dock, QtWidgets.QDockWidget) and dock.isVisible() and self.isActiveWindow():
-                    self._log_has_unread_errors = False
-                else:
-                    self._log_has_unread_errors = True
+                self._log_has_unread_errors = True
             self._update_log_highlight()
 
         self._log_handler = QtLogHandler(_append_log)
@@ -9351,17 +9996,28 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if self._log_handler not in self.logger.handlers:
             self.logger.addHandler(self._log_handler)
 
+        def _pump_events() -> None:
+            try:
+                QtWidgets.QApplication.processEvents(
+                    QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+                )
+            except Exception:
+                pass
+
         self.annealing_section = AnnealingSection(self.logger, _append_log)
         self.tab_widget.addTab(self.annealing_section, "Current annealing")
         self.sections["annealing"] = self.annealing_section
+        _pump_events()
 
         self.fabrication_section = FabricationSection(self.logger, _append_log)
         self.tab_widget.addTab(self.fabrication_section, "Fabrication")
         self.sections["fabrication"] = self.fabrication_section
+        _pump_events()
 
         self.microscope_section = MicroscopeSection(self.logger, _append_log)
         self.tab_widget.addTab(self.microscope_section, "Microscope")
         self.sections["microscope"] = self.microscope_section
+        _pump_events()
 
         self.current_density_section = CurrentDensitySection(
             self.annealing_section,
@@ -9371,10 +10027,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         self.tab_widget.addTab(self.current_density_section, "Current density")
         self.sections["current_density"] = self.current_density_section
+        _pump_events()
 
         self.video_section = VideoSection(self.logger, _append_log)
         self.tab_widget.addTab(self.video_section, "Videos")
         self.sections["videos"] = self.video_section
+        _pump_events()
 
         self._developer_options = developer_options()
         self._ocr_debug_supported = all(
@@ -9399,6 +10057,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.strain_section = StrainSection(self.logger, _append_log)
         self.tab_widget.addTab(self.strain_section, "Strain")
         self.sections["strain"] = self.strain_section
+        _pump_events()
 
         assembly = AssemblySection(
             self.sections,
@@ -9408,6 +10067,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         self.assembly_section = assembly
         self.tab_widget.addTab(assembly, "Assemble")
+        _pump_events()
 
         self.fabrication_section.sources_changed.connect(
             self._handle_fabrication_sources_changed
@@ -9532,16 +10192,15 @@ class BuilderWindow(QtWidgets.QMainWindow):
         except Exception:
             screen = QtGui.QGuiApplication.primaryScreen()
         available = screen.availableGeometry() if screen is not None else QtCore.QRect(0, 0, 1600, 900)
-        max_w = max(960, available.width() - 120)
-        max_h = max(720, available.height() - 120)
-        width = min(max_w, int(available.width() * 0.9))
-        height = min(max_h, int(available.height() * 0.88))
-        self.setMinimumSize(880, 640)
+        max_w = max(1100, available.width() - 120)
+        max_h = max(760, available.height() - 180)
+        width = min(max_w, int(available.width() * 0.88))
+        height = min(max_h, int(available.height() * 0.86))
+        self.setMinimumSize(960, 640)
         self.resize(width, height)
         target_x = available.left() + max(0, (available.width() - width) // 2)
         target_y = available.top() + max(0, (available.height() - height) // 2)
         self.move(target_x, target_y)
-        self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
 
     def _create_dock_switcher(
         self,
@@ -9601,9 +10260,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._log_highlight_active = highlight
         if highlight:
             dock.setStyleSheet(
-                "QDockWidget#builderMessageLogDock { border: 1px solid #c62828; }"
+                """
+                QDockWidget#builderMessageLogDock {
+                    border: 1px solid #c62828;
+                }
+                QDockWidget#builderMessageLogDock::title {
+                    background: #c62828;
+                    color: #ffffff;
+                    padding-left: 8px;
+                }
+                """
             )
-            self.log_view.setStyleSheet("background-color: #ffebee;")
+            self.log_view.setStyleSheet(
+                "background-color: #2b0b0b; color: #ffeaea; border: 1px solid #c62828;"
+            )
         else:
             dock.setStyleSheet("")
             self.log_view.setStyleSheet("")
@@ -9730,15 +10400,33 @@ class BuilderWindow(QtWidgets.QMainWindow):
         available = screen.availableGeometry()
         self._clamp_active = True
         try:
+            geom = self.geometry()
             frame = self.frameGeometry()
-            target_width = min(frame.width(), available.width())
-            target_height = min(frame.height(), available.height())
-            if target_width != frame.width() or target_height != frame.height():
-                self.resize(target_width, target_height)
-                frame = self.frameGeometry()
-            bounded_x = max(available.left(), min(frame.left(), available.right() - frame.width()))
-            bounded_y = max(available.top(), min(frame.top(), available.bottom() - frame.height()))
-            self.move(bounded_x, bounded_y)
+
+            new_width = geom.width()
+            new_height = geom.height()
+            if new_width > available.width():
+                new_width = available.width()
+            if new_height > available.height():
+                new_height = available.height()
+
+            bottom_margin = max(0, frame.bottom() - geom.bottom())
+            max_height = available.bottom() - geom.y() + 1 - bottom_margin
+            if max_height < new_height:
+                new_height = max(0, int(max_height))
+
+            new_width = max(new_width, self.minimumWidth())
+            new_height = max(new_height, self.minimumHeight())
+            if new_width != geom.width() or new_height != geom.height():
+                self.resize(new_width, new_height)
+                geom = self.geometry()
+
+            max_x = available.right() - geom.width() + 1
+            max_y = available.bottom() - geom.height() + 1
+            bounded_x = min(max(geom.x(), available.left()), max_x)
+            bounded_y = min(max(geom.y(), available.top()), max_y)
+            if bounded_x != geom.x() or bounded_y != geom.y():
+                self.move(bounded_x, bounded_y)
         finally:
             self._clamp_active = False
 
@@ -10146,69 +10834,108 @@ class BuilderWindow(QtWidgets.QMainWindow):
 
     def _load_project_from_path(self, target: Path) -> None:
         progress_dialog: Optional[QtWidgets.QProgressDialog] = None
+        total_steps = max(len(self.sections), 1)
+        last_pump = 0.0
+
+        def _pump_events(step: int | None = None, label: str | None = None) -> None:
+            """Keep the UI responsive while loading a project."""
+
+            nonlocal last_pump
+            if progress_dialog is not None:
+                try:
+                    if label:
+                        progress_dialog.setLabelText(label)
+                    if step is not None:
+                        progress_dialog.setValue(step)
+                except Exception:
+                    pass
+            now = time.monotonic()
+            if last_pump == 0.0 or now - last_pump >= 0.05:
+                try:
+                    QtWidgets.QApplication.processEvents(
+                        QtCore.QEventLoop.ProcessEventsFlag.AllEvents
+                    )
+                except Exception:
+                    pass
+                last_pump = now
+
         try:
-            progress_dialog = QtWidgets.QProgressDialog("Loading project…", "", 0, 0, self)
+            progress_dialog = QtWidgets.QProgressDialog(
+                "Loading project…", "", 0, total_steps, self
+            )
             progress_dialog.setWindowModality(QtCore.Qt.WindowModality.ApplicationModal)
             progress_dialog.setCancelButton(None)
-            progress_dialog.setMinimumDuration(200)
+            progress_dialog.setMinimumDuration(150)
+            progress_dialog.setAutoClose(False)
+            progress_dialog.setAutoReset(False)
             progress_dialog.show()
-            QtWidgets.QApplication.processEvents()
+            _pump_events(0, "Loading project…")
         except Exception:
             progress_dialog = None
+
+        self._suppress_dirty = True
         try:
-            self._suppress_dirty = True
             payload = json.loads(target.read_text(encoding="utf-8"))
+            _pump_events(0)
+
+            if payload.get("kind") != self.PROJECT_KIND:
+                QtWidgets.QMessageBox.critical(
+                    self,
+                    "Open Project",
+                    "The selected file is not a Microwire Data Builder project.",
+                )
+                return
+
+            sections_payload = payload.get("sections", {})
+            if not isinstance(sections_payload, Mapping):
+                sections_payload = {}
+
+            for index, (key, section) in enumerate(self.sections.items(), start=1):
+                label = getattr(section, "section_title", key)
+                _pump_events(index - 1, f"Loading {label}…")
+                if isinstance(section, MiniDatabaseSection):
+                    section.reset_to_blank()
+                    section_payload = sections_payload.get(key)
+                    try:
+                        section.import_project_payload(section_payload or {})
+                    except Exception as exc:
+                        self.logger.error("Failed to load section %s from project: %s", key, exc)
+                _pump_events(index)
+
+            self._project_path = target
+            self._remember_project_directory(target.parent)
+            self._remember_recent_project(target)
+            try:
+                self.settings.setValue(self._project_settings_key("last_path"), str(target))
+            except Exception:
+                pass
+            self._refresh_sections_after_project_load()
+            self._update_project_actions()
+            self._dirty = False
+            self.logger.info("Project loaded from %s", target)
+            _pump_events(total_steps, "Finishing…")
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open Project",
+                f"Loaded project from {target}",
+            )
         except Exception as exc:
+            self.logger.exception("Failed to load project %s", target, exc_info=exc)
             QtWidgets.QMessageBox.critical(
                 self,
                 "Open Project",
-                f"Failed to read project file:\n{exc}",
+                f"Failed to load project file:\n{exc}",
             )
+        finally:
             self._suppress_dirty = False
             if progress_dialog is not None:
-                progress_dialog.cancel()
-            return
-
-        if payload.get("kind") != self.PROJECT_KIND:
-            QtWidgets.QMessageBox.critical(
-                self,
-                "Open Project",
-                "The selected file is not a Microwire Data Builder project.",
-            )
-            return
-
-        sections_payload = payload.get("sections", {})
-        if not isinstance(sections_payload, Mapping):
-            sections_payload = {}
-
-        for key, section in self.sections.items():
-            if isinstance(section, MiniDatabaseSection):
-                section.reset_to_blank()
-                section_payload = sections_payload.get(key)
                 try:
-                    section.import_project_payload(section_payload or {})
-                except Exception as exc:
-                    self.logger.error("Failed to load section %s from project: %s", key, exc)
-
-        self._project_path = target
-        self._remember_project_directory(target.parent)
-        self._remember_recent_project(target)
-        try:
-            self.settings.setValue(self._project_settings_key("last_path"), str(target))
-        except Exception:
-            pass
-        self._refresh_sections_after_project_load()
-        self._update_project_actions()
-        self._dirty = False
-        self.logger.info("Project loaded from %s", target)
-        QtWidgets.QMessageBox.information(
-            self,
-            "Open Project",
-            f"Loaded project from {target}",
-        )
-        self._suppress_dirty = False
-        if progress_dialog is not None:
-            progress_dialog.cancel()
+                    progress_dialog.close()
+                except Exception:
+                    try:
+                        progress_dialog.cancel()
+                    except Exception:
+                        pass
 
     def _refresh_sections_after_project_load(self) -> None:
         for key, section in self.sections.items():
@@ -10278,7 +11005,7 @@ def main() -> QtWidgets.QWidget | None:
         window = BuilderWindow()
         window_holder["window"] = window
         try:
-            window.showMaximized()
+            window.show()
         except Exception:
             window.show()
         placeholder.close()

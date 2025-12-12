@@ -15,6 +15,12 @@
 ## In Progress
 - Stabilizing VSM Temperature Scan exports (Origin/TXT) and plot embeddings.
 - Stress/Temp plugins: fix Origin export parity (titles on top axis, manual sample labels, delta labels, units/comments in workbooks, no invalid LT errors); stop PyPlot stress sens cropping.
+- Monitor Microwire Data Builder project-load responsiveness after the new progress/pumping change.
+- Verify Data Builder launch responsiveness with background pending scans and confirm fullscreen shows bottom controls.
+- Verify Microwire microscope overrides: auto-review on override, d-field focus, comma normalization, arrow navigation, and preview sizing.
+- Check Microwire microscope UI colours (reviewed green/red, error log highlighting) and preview/table splitter spacing on varied screens.
+- Confirm Microwire microscope stacked previews, column auto-fit, and bottom control visibility after resizing/fullscreen.
+- Validate microscope inline editing/review workflow: Enter navigation (`d`→`D`→next row), project-persisted per-cell review flags, row highlighting for missing images, core/glass preview swapping without zoom, and no `QWindowsWindow::setGeometry` warnings when maximizing.
 
 ## Done
 - Added cursor readout scaffolding and duplicate-temperature averaging for VSM Temp Scan; integrated tab-selection fixes to avoid MDI proxy crashes.

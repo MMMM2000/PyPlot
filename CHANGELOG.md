@@ -1,5 +1,45 @@
 # Changelog
 
+## 2025-12-12 11:58 UTC
+
+- Fixed Microscope preview panels occasionally rendering too small by letting the visible preview expand to fill the available space, and corrected Data Builder window geometry clamping so maximizing no longer triggers `QWindowsWindow::setGeometry` warnings or hides the bottom controls.
+
+## 2025-12-12 10:28 UTC
+
+- Microscope tab now debounces preview scaling to avoid the zoom-in effect, hides the unused preview panel completely (no leftover space when on `d`/`D`), advances selection on Enter (`d`→`D`, `D`→next row `d`), and reloads per-cell review state correctly when opening saved projects.
+
+## 2025-12-12 08:56 UTC
+
+- Microscope tab removes the missing‑wires list and row‑level Reviewed column, supports per‑cell review (Enter only greens the active `d` or `D` cell), and lowers splitter/preview minimums so fullscreen keeps bottom buttons visible.
+
+## 2025-12-12 09:34 UTC
+
+- Ensured legacy Reviewed columns are always stripped on load and allowed the microscope preview scroll area to shrink further so bottom controls stay visible when the window is maximized.
+
+## 2025-12-12 08:07 UTC
+
+- Data Builder sections now scan for pending files in the background to keep launch/project load responsive, fixed a microscope table crash on key handling, and reduced preview minimum heights so fullscreen no longer crops the bottom controls.
+
+## 2025-12-11 18:14 UTC
+
+- Microscope table now edits `d`/`D` inline with cell navigation, enter-to-review, and per-cell green/red colouring (reviewed/unreviewed) while rows missing images are highlighted red; previews flip between core/glass based on the active cell, hiding the Reviewed column and reducing reliance on the side inputs.
+
+## 2025-12-11 15:01 UTC
+
+- Microwire microscope tab now auto-resizes columns to their content, stacks high-quality preview images vertically inside a scroll area, allows a narrower table to free space for previews, and relaxes window sizing to prevent bottom controls from being cropped in fullscreen.
+
+## 2025-12-11 14:51 UTC
+
+- Microwire Data Builder microscope table now colours reviewed flags green/red, keeps the Message Log chrome red when errors occur, reserves space for preview images, and tames window sizing/splitter widths to stay within the visible screen.
+
+## 2025-12-11 14:39 UTC
+
+- Microwire Data Builder microscope rows keep selection while applying/clearing overrides, auto-mark overrides as reviewed, focus the `d` input with arrow-key row navigation and comma/dot normalization, and shrink preview panels to stay within the screen.
+
+## 2025-12-11 14:26 UTC
+
+- Microwire Data Builder project loads now show progress and keep the UI responsive while restoring sections, avoiding the Windows “Not Responding” pause when opening saved projects.
+
 ## 2025-12-11 08:43 UTC
 
 - Added an optional Notes field to the Current Annealing file name preset, persisting it with other preset fields and appending it to generated log names when provided.
