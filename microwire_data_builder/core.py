@@ -4506,10 +4506,16 @@ def build_database(
         row["Notes"] = _compose_notes(draw_info, piece_info)
         phase_entry = phase_points_map.get(f"{composition}|{draw_x}|{piece_y}", {})
         if phase_entry:
-            if "As" in phase_entry:
-                row["As (mA)"] = phase_entry["As"]
-            if "Ms" in phase_entry:
-                row["Ms (mA)"] = phase_entry["Ms"]
+            as_value = phase_entry.get("As1")
+            if as_value is None:
+                as_value = phase_entry.get("As")
+            if as_value is not None:
+                row["As (mA)"] = as_value
+            ms_value = phase_entry.get("Ms1")
+            if ms_value is None:
+                ms_value = phase_entry.get("Ms")
+            if ms_value is not None:
+                row["Ms (mA)"] = ms_value
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None

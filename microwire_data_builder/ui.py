@@ -106,18 +106,53 @@ ANNEALING_GRAPH_HEIGHT = 200
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
-ANNEALING_AS_COLUMN = "As (mA)"
-ANNEALING_MS_COLUMN = "Ms (mA)"
+ANNEALING_AS_COLUMN = "As1 (mA)"
+ANNEALING_AF1_COLUMN = "Af1 (mA)"
+ANNEALING_MS_COLUMN = "Ms1 (mA)"
+ANNEALING_MF1_COLUMN = "Mf1 (mA)"
+ANNEALING_AS2_COLUMN = "As2 (mA)"
+ANNEALING_AF2_COLUMN = "Af2 (mA)"
+ANNEALING_MS2_COLUMN = "Ms2 (mA)"
+ANNEALING_MF2_COLUMN = "Mf2 (mA)"
 CURRENT_DENSITY_AS_DENSITY_COLUMN = "As current density (A/mm^2)"
 CURRENT_DENSITY_MS_DENSITY_COLUMN = "Ms current density (A/mm^2)"
+CURRENT_DENSITY_AS_DELTA_COLUMN = "As2-As1 (mA)"
+CURRENT_DENSITY_AF_DELTA_COLUMN = "Af2-Af1 (mA)"
+CURRENT_DENSITY_MS_DELTA_COLUMN = "Ms2-Ms1 (mA)"
+CURRENT_DENSITY_MF_DELTA_COLUMN = "Mf2-Mf1 (mA)"
+CURRENT_DENSITY_MF_AF1_DELTA_COLUMN = "Mf1-Af1 (mA)"
+CURRENT_DENSITY_MF_AF2_DELTA_COLUMN = "Mf2-Af2 (mA)"
+PHASE_POINT_LABELS = ("As1", "Af1", "Ms1", "Mf1", "As2", "Af2", "Ms2", "Mf2")
+PHASE_POINT_COLUMN_MAP = {
+    "As1": ANNEALING_AS_COLUMN,
+    "Af1": ANNEALING_AF1_COLUMN,
+    "Ms1": ANNEALING_MS_COLUMN,
+    "Mf1": ANNEALING_MF1_COLUMN,
+    "As2": ANNEALING_AS2_COLUMN,
+    "Af2": ANNEALING_AF2_COLUMN,
+    "Ms2": ANNEALING_MS2_COLUMN,
+    "Mf2": ANNEALING_MF2_COLUMN,
+}
 CURRENT_DENSITY_COLUMNS = [
     "Composition",
     "Microwire",
     MICROSCOPE_D_COLUMN,
     ANNEALING_AS_COLUMN,
+    ANNEALING_AF1_COLUMN,
     ANNEALING_MS_COLUMN,
+    ANNEALING_MF1_COLUMN,
+    ANNEALING_AS2_COLUMN,
+    ANNEALING_AF2_COLUMN,
+    ANNEALING_MS2_COLUMN,
+    ANNEALING_MF2_COLUMN,
     CURRENT_DENSITY_AS_DENSITY_COLUMN,
     CURRENT_DENSITY_MS_DENSITY_COLUMN,
+    CURRENT_DENSITY_AS_DELTA_COLUMN,
+    CURRENT_DENSITY_AF_DELTA_COLUMN,
+    CURRENT_DENSITY_MS_DELTA_COLUMN,
+    CURRENT_DENSITY_MF_DELTA_COLUMN,
+    CURRENT_DENSITY_MF_AF1_DELTA_COLUMN,
+    CURRENT_DENSITY_MF_AF2_DELTA_COLUMN,
     "Setpoints (mA)",
     "Sources",
     "Notes",
@@ -5143,11 +5178,7 @@ class AnnealingSection(MiniDatabaseSection):
             for key, payload in stored_phase_points.items():
                 if not isinstance(key, str) or not isinstance(payload, dict):
                     continue
-                entry: Dict[str, float] = {}
-                for label in ("As", "Ms"):
-                    value = payload.get(label)
-                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
-                        entry[label] = float(value)
+                entry = self._clean_phase_points_payload(payload)
                 if entry:
                     cleaned[key] = entry
             self._phase_points = cleaned
@@ -5273,12 +5304,30 @@ class AnnealingSection(MiniDatabaseSection):
         if hasattr(self, "export_button"):
             self.export_button.setEnabled(has_rows)
 
+    def _clean_phase_points_payload(self, payload: Dict[str, Any]) -> Dict[str, float]:
+        entry: Dict[str, float] = {}
+        for label in PHASE_POINT_LABELS + ("As", "Ms"):
+            value = payload.get(label)
+            if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                entry[label] = float(value)
+        if "As1" not in entry and "As" in entry:
+            entry["As1"] = entry["As"]
+        if "Ms1" not in entry and "Ms" in entry:
+            entry["Ms1"] = entry["Ms"]
+        if "As1" in entry:
+            entry["As"] = entry["As1"]
+        if "Ms1" in entry:
+            entry["Ms"] = entry["Ms1"]
+        return entry
+
     def _store_phase_points(self) -> None:
         snapshot: Dict[str, Dict[str, float]] = {}
         for key, payload in self._phase_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
-            snapshot[key] = {label: float(value) for label, value in payload.items() if isinstance(value, (int, float))}
+            cleaned = self._clean_phase_points_payload(payload)
+            if cleaned:
+                snapshot[key] = cleaned
         self.data.extra["phase_points"] = snapshot
         try:
             self.store.save(self.data)
@@ -5290,16 +5339,7 @@ class AnnealingSection(MiniDatabaseSection):
         for key, payload in self._phase_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
-            cleaned: Dict[str, float] = {}
-            for label, value in payload.items():
-                if label not in {"As", "Ms"}:
-                    continue
-                try:
-                    numeric = float(value)
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(numeric):
-                    cleaned[label] = numeric
+            cleaned = self._clean_phase_points_payload(payload)
             if cleaned:
                 snapshot[key] = cleaned
         return snapshot
@@ -5308,8 +5348,9 @@ class AnnealingSection(MiniDatabaseSection):
         self,
         key: str,
         *,
-        as_value: Optional[float],
-        ms_value: Optional[float],
+        as_value: Optional[float] = None,
+        ms_value: Optional[float] = None,
+        phase_values: Optional[Dict[str, Optional[float]]] = None,
     ) -> None:
         key_text = str(key).strip()
         if not key_text:
@@ -5325,12 +5366,23 @@ class AnnealingSection(MiniDatabaseSection):
                 return None
             return numeric if math.isfinite(numeric) else None
 
-        as_clean = _clean(as_value)
-        ms_clean = _clean(ms_value)
-        if as_clean is not None:
-            entry["As"] = as_clean
-        if ms_clean is not None:
-            entry["Ms"] = ms_clean
+        phase_values = phase_values or {}
+        for label in PHASE_POINT_LABELS:
+            cleaned = _clean(phase_values.get(label))
+            if cleaned is not None:
+                entry[label] = cleaned
+        if "As1" not in entry:
+            as_clean = _clean(as_value)
+            if as_clean is not None:
+                entry["As1"] = as_clean
+        if "Ms1" not in entry:
+            ms_clean = _clean(ms_value)
+            if ms_clean is not None:
+                entry["Ms1"] = ms_clean
+        if "As1" in entry:
+            entry["As"] = entry["As1"]
+        if "Ms1" in entry:
+            entry["Ms"] = entry["Ms1"]
         if entry:
             self._phase_points[key_text] = entry
         elif key_text in self._phase_points:
@@ -5765,6 +5817,9 @@ class MicroscopeSection(MiniDatabaseSection):
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._force_ocr_next = False
         self._active_column: str = ""
+        self._pending_advance_key: str | None = None
+        self._pending_advance_column: str | None = None
+        self._pending_advance_review: bool = False
         super().__init__(logger, log_callback, parent)
 
         # Removed the missing-items list UI; missing values are visible in the table.
@@ -5945,8 +6000,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self.d_edit.setPlaceholderText("auto")
         self.D_edit = QtWidgets.QLineEdit()
         self.D_edit.setPlaceholderText("auto")
-        self.d_edit.returnPressed.connect(self._apply_override)
-        self.D_edit.returnPressed.connect(self._apply_override)
+        self.d_edit.returnPressed.connect(partial(self._apply_override, MICROSCOPE_D_COLUMN))
+        self.D_edit.returnPressed.connect(partial(self._apply_override, MICROSCOPE_CAP_D_COLUMN))
         form.addRow(MICROSCOPE_D_COLUMN, self.d_edit)
         form.addRow(MICROSCOPE_CAP_D_COLUMN, self.D_edit)
         preview_layout.addLayout(form)
@@ -6396,13 +6451,11 @@ class MicroscopeSection(MiniDatabaseSection):
                                 raw_key = row.get("_key") if row is not None else None
                                 if raw_key is not None:
                                     key_value = str(raw_key)
-                            if key_value:
-                                callback = lambda k=key_value, col=column_label: self._mark_reviewed_and_advance_for_key(
-                                    k, col
-                                )
-                            else:
-                                callback = lambda col=column_label: self._mark_reviewed_and_advance(col)
-                            QtCore.QTimer.singleShot(0, callback)
+                            self._queue_advance_after_restore(
+                                key_value,
+                                column_label,
+                                mark_review=True,
+                            )
                             return False
                         self._mark_reviewed_and_advance(column_label)
                         return True
@@ -6532,12 +6585,43 @@ class MicroscopeSection(MiniDatabaseSection):
                 self._overrides.pop(key, None)
         self._store_overrides()
 
-    def _restore_selection(self) -> None:
-        key = self._selected_key
-        if not key:
+    def _queue_advance_after_restore(
+        self,
+        key: Optional[str],
+        column_label: str,
+        *,
+        mark_review: bool,
+    ) -> None:
+        if not column_label:
             return
-        active_column = self._active_column
-        QtCore.QTimer.singleShot(0, lambda k=key, col=active_column: self._select_row_for_key(k, col))
+        self._pending_advance_key = str(key) if key else None
+        self._pending_advance_column = column_label
+        self._pending_advance_review = bool(mark_review)
+
+    def _restore_selection(self) -> None:
+        key = self._pending_advance_key or self._selected_key
+        if not key:
+            self._pending_advance_key = None
+            self._pending_advance_column = None
+            self._pending_advance_review = False
+            return
+        active_column = self._pending_advance_column or self._active_column
+
+        def _restore() -> None:
+            self._select_row_for_key(key, active_column)
+            self._selected_key = key
+            if self._pending_advance_column:
+                column_label = self._pending_advance_column
+                if self._pending_advance_review:
+                    self._mark_reviewed(auto=True, columns={column_label})
+                index = self._current_index()
+                if index.isValid():
+                    self._advance_after_review(index, column_label)
+                self._pending_advance_key = None
+                self._pending_advance_column = None
+                self._pending_advance_review = False
+
+        QtCore.QTimer.singleShot(0, _restore)
 
     def _handle_missing_item_activated(self, item: QtWidgets.QListWidgetItem) -> None:
         key = item.data(QtCore.Qt.ItemDataRole.UserRole)
@@ -6798,9 +6882,15 @@ class MicroscopeSection(MiniDatabaseSection):
 
         self._update_review_buttons()
 
-    def _apply_override(self) -> None:
+    def _apply_override(self, advance_column: str | None = None) -> None:
         if not self._selected_key:
             return
+        if advance_column:
+            self._queue_advance_after_restore(
+                self._selected_key,
+                advance_column,
+                mark_review=False,
+            )
         d_text = self._normalized_decimal_text(self.d_edit)
         D_text = self._normalized_decimal_text(self.D_edit)
         override: Dict[str, float] = {}
@@ -7396,7 +7486,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         layout.addWidget(self.status_label)
 
         self.model = DataFrameModel(self._current_frame)
-        self.model.set_editable_columns({ANNEALING_AS_COLUMN, ANNEALING_MS_COLUMN})
+        self.model.set_editable_columns(set(PHASE_POINT_COLUMN_MAP.values()))
         self.model.dataChanged.connect(self._handle_model_data_changed)
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal, self)
@@ -7498,7 +7588,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             ms_series = pd.to_numeric(frame[ANNEALING_MS_COLUMN], errors="coerce")
             annotated = int((as_series.notna() & ms_series.notna()).sum())
         status_text = (
-            f"{annotated} of {total} microwire(s) have As/Ms annotated."
+            f"{annotated} of {total} microwire(s) have As1/Ms1 annotated."
             if total
             else "No overlapping microscope and annealing data yet."
         )
@@ -7608,7 +7698,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             columns_slice = frame.columns[top_left.column() : bottom_right.column() + 1]
         except Exception:
             columns_slice = []
-        relevant = {ANNEALING_AS_COLUMN, ANNEALING_MS_COLUMN}
+        relevant = set(PHASE_POINT_COLUMN_MAP.values())
         if not any(column in relevant for column in columns_slice):
             return
         setter = getattr(self._annealing_section, "set_phase_points_for_key", None)
@@ -7622,20 +7712,25 @@ class CurrentDensitySection(QtWidgets.QWidget):
             key = str(key_raw).strip() if key_raw not in (None, "", float("nan")) else ""
             if not key:
                 continue
-            as_value = self._coerce_phase_value(series.get(ANNEALING_AS_COLUMN))
-            ms_value = self._coerce_phase_value(series.get(ANNEALING_MS_COLUMN))
+            phase_values = {
+                label: self._coerce_phase_value(series.get(column))
+                for label, column in PHASE_POINT_COLUMN_MAP.items()
+            }
             try:
                 if callable(setter):
-                    setter(key, as_value=as_value, ms_value=ms_value)
+                    setter(key, phase_values=phase_values)
                     setter_used = True
                 else:
                     phase_points = getattr(self._annealing_section, "_phase_points", {})
                     if isinstance(phase_points, dict):
                         entry: Dict[str, float] = {}
-                        if as_value is not None:
-                            entry["As"] = as_value
-                        if ms_value is not None:
-                            entry["Ms"] = ms_value
+                        for label, value in phase_values.items():
+                            if value is not None:
+                                entry[label] = value
+                        if "As1" in entry:
+                            entry["As"] = entry["As1"]
+                        if "Ms1" in entry:
+                            entry["Ms"] = entry["Ms1"]
                         if entry:
                             phase_points[key] = entry
                         elif key in phase_points:
@@ -7672,13 +7767,22 @@ class CurrentDensitySection(QtWidgets.QWidget):
         selection_model = table.selectionModel()
         if selection_model is None:
             return
-        column_index = self._column_index_for_kind(kind)
-        if column_index is None:
-            return
         frame = self.model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
         current_index = selection_model.currentIndex()
+        column_index = None
+        if current_index.isValid():
+            try:
+                current_label = str(frame.columns[current_index.column()])
+            except Exception:
+                current_label = ""
+            if current_label in PHASE_POINT_COLUMN_MAP.values():
+                column_index = current_index.column()
+        if column_index is None:
+            column_index = self._column_index_for_kind(kind)
+        if column_index is None:
+            return
         row = current_index.row() if current_index.isValid() else None
         if row is None:
             rows = selection_model.selectedRows()
@@ -7781,14 +7885,30 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 microwire_label = micro_info.get("label") or _microwire_label(draw, piece)
             except Exception:
                 microwire_label = micro_info.get("label") or f"{draw}/{piece}"
-            as_value = phase_info.get("As")
-            ms_value = phase_info.get("Ms")
-            as_density = self._compute_density(as_value, area_mm2)
-            ms_density = self._compute_density(ms_value, area_mm2)
-            if as_value is None:
-                notes.append("As missing")
-            if ms_value is None:
-                notes.append("Ms missing")
+            as1_value = phase_info.get("As1")
+            if as1_value is None:
+                as1_value = phase_info.get("As")
+            af1_value = phase_info.get("Af1")
+            ms1_value = phase_info.get("Ms1")
+            if ms1_value is None:
+                ms1_value = phase_info.get("Ms")
+            mf1_value = phase_info.get("Mf1")
+            as2_value = phase_info.get("As2")
+            af2_value = phase_info.get("Af2")
+            ms2_value = phase_info.get("Ms2")
+            mf2_value = phase_info.get("Mf2")
+            as_density = self._compute_density(as1_value, area_mm2)
+            ms_density = self._compute_density(ms1_value, area_mm2)
+            as_delta = self._compute_delta(as2_value, as1_value)
+            af_delta = self._compute_delta(af2_value, af1_value)
+            ms_delta = self._compute_delta(ms2_value, ms1_value)
+            mf_delta = self._compute_delta(mf2_value, mf1_value)
+            mf1_af1 = self._compute_delta(mf1_value, af1_value)
+            mf2_af2 = self._compute_delta(mf2_value, af2_value)
+            if as1_value is None:
+                notes.append("As1 missing")
+            if ms1_value is None:
+                notes.append("Ms1 missing")
             if not setpoints:
                 notes.append("No setpoint data")
             rows.append(
@@ -7796,10 +7916,22 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     "Composition": composition_label,
                     "Microwire": microwire_label,
                     MICROSCOPE_D_COLUMN: diameter_um,
-                    ANNEALING_AS_COLUMN: as_value,
-                    ANNEALING_MS_COLUMN: ms_value,
+                    ANNEALING_AS_COLUMN: as1_value,
+                    ANNEALING_AF1_COLUMN: af1_value,
+                    ANNEALING_MS_COLUMN: ms1_value,
+                    ANNEALING_MF1_COLUMN: mf1_value,
+                    ANNEALING_AS2_COLUMN: as2_value,
+                    ANNEALING_AF2_COLUMN: af2_value,
+                    ANNEALING_MS2_COLUMN: ms2_value,
+                    ANNEALING_MF2_COLUMN: mf2_value,
                     CURRENT_DENSITY_AS_DENSITY_COLUMN: as_density,
                     CURRENT_DENSITY_MS_DENSITY_COLUMN: ms_density,
+                    CURRENT_DENSITY_AS_DELTA_COLUMN: as_delta,
+                    CURRENT_DENSITY_AF_DELTA_COLUMN: af_delta,
+                    CURRENT_DENSITY_MS_DELTA_COLUMN: ms_delta,
+                    CURRENT_DENSITY_MF_DELTA_COLUMN: mf_delta,
+                    CURRENT_DENSITY_MF_AF1_DELTA_COLUMN: mf1_af1,
+                    CURRENT_DENSITY_MF_AF2_DELTA_COLUMN: mf2_af2,
                     "Setpoints (mA)": self._format_setpoints(setpoints),
                     "Sources": self._summarise_sources(sources),
                     "Notes": "; ".join(notes) if notes else "",
@@ -7909,13 +8041,27 @@ class CurrentDensitySection(QtWidgets.QWidget):
             except ValueError:
                 continue
             cleaned: Dict[str, float] = {}
-            for label in ("As", "Ms"):
+            for label in PHASE_POINT_LABELS:
                 try:
                     numeric = float(payload.get(label))
                 except (TypeError, ValueError):
                     continue
                 if math.isfinite(numeric):
                     cleaned[label] = numeric
+            if "As1" not in cleaned:
+                try:
+                    numeric = float(payload.get("As"))
+                except (TypeError, ValueError):
+                    numeric = None
+                if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
+                    cleaned["As1"] = float(numeric)
+            if "Ms1" not in cleaned:
+                try:
+                    numeric = float(payload.get("Ms"))
+                except (TypeError, ValueError):
+                    numeric = None
+                if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
+                    cleaned["Ms1"] = float(numeric)
             if cleaned:
                 result[(composition, draw, piece)] = cleaned
         return result
@@ -7996,6 +8142,14 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return None
         current_A = setpoint_mA / 1000.0
         return current_A / area_mm2
+
+    @staticmethod
+    def _compute_delta(value_2: Optional[float], value_1: Optional[float]) -> Optional[float]:
+        if value_2 is None or value_1 is None:
+            return None
+        if not (math.isfinite(value_2) and math.isfinite(value_1)):
+            return None
+        return value_2 - value_1
 
     @staticmethod
     def _format_setpoints(values: Sequence[float]) -> str:
@@ -8206,7 +8360,7 @@ class StrainSection(MiniDatabaseSection):
     COLUMN_MODE = "Calc mode"
     COLUMN_CLAMP_SPAN = "Clamp span (mm)"
     COLUMN_MASS = "m"
-    COLUMN_TARGET_STRESS = "Target stress (MPa)"
+    COLUMN_TARGET_STRESS = "Stress (MPa)"
     COLUMN_M_LENGTH = "M length"
     COLUMN_A_LENGTH = "A length"
     COLUMN_STRAIN = "Strain"
@@ -8242,6 +8396,7 @@ class StrainSection(MiniDatabaseSection):
         self._editing_index: Optional[int] = None
         self._editing_key: Optional[tuple[str, int, int]] = None
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
+        self._mass_override_active = False
         self._strain_offsets: Dict[str, float] = {
             self.STRAIN_MODE_LINEAR: 0.0,
             self.STRAIN_MODE_DUAL_SUPPORT: 0.0,
@@ -8357,16 +8512,17 @@ class StrainSection(MiniDatabaseSection):
         self.target_stress_spin.setRange(0.0, 1_000_000.0)
         self.target_stress_spin.setSingleStep(5.0)
         self.target_stress_spin.setSuffix(" MPa")
-        self.target_stress_spin.valueChanged.connect(self._update_mass_display)
+        self.target_stress_spin.valueChanged.connect(self._handle_stress_changed)
         _add_field(self.COLUMN_TARGET_STRESS, self.target_stress_spin)
 
         self.d_edit = QtWidgets.QLineEdit(form_container)
         self.d_edit.setPlaceholderText("auto")
-        self.d_edit.textChanged.connect(self._update_mass_display)
+        self.d_edit.textChanged.connect(self._handle_d_changed)
         _add_field(self.COLUMN_D, self.d_edit)
 
         self.mass_display = QtWidgets.QLineEdit(form_container)
-        self.mass_display.setReadOnly(True)
+        self.mass_display.setPlaceholderText("auto")
+        self.mass_display.editingFinished.connect(self._update_stress_from_mass)
         _add_field(self.COLUMN_MASS, self.mass_display)
 
         self.M_length_edit = QtWidgets.QLineEdit(form_container)
@@ -8513,7 +8669,7 @@ class StrainSection(MiniDatabaseSection):
             self._selected_wire_key = None
             if not self._suspend_auto_fill:
                 self.d_edit.clear()
-                self._update_mass_display()
+                self._refresh_mass_or_stress()
             return
         self._selected_wire_key = (comp, key[0], key[1])
         if self._suspend_auto_fill:
@@ -8521,9 +8677,23 @@ class StrainSection(MiniDatabaseSection):
         d_value = self._d_lookup.get(self._selected_wire_key)
         if d_value is not None:
             self.d_edit.setText(f"{d_value:.4f}")
+        self._refresh_mass_or_stress()
+
+    def _handle_stress_changed(self, _: float) -> None:
+        self._mass_override_active = False
         self._update_mass_display()
 
+    def _handle_d_changed(self, _: str) -> None:
+        self._refresh_mass_or_stress()
+
+    def _refresh_mass_or_stress(self) -> None:
+        if self._mass_override_active:
+            self._update_stress_from_mass()
+        else:
+            self._update_mass_display()
+
     def _update_mass_display(self) -> None:
+        self._mass_override_active = False
         value = _parse_strain_float(self.d_edit.text())
         target = _parse_strain_float(self.target_stress_spin.value() if hasattr(self, "target_stress_spin") else None)
         mass = self._calculate_mass(
@@ -8531,10 +8701,32 @@ class StrainSection(MiniDatabaseSection):
             area_multiplier=self._cross_section_multiplier(),
             target_stress_mpa=target,
         )
+        blocker = QtCore.QSignalBlocker(self.mass_display)
         if mass is None:
             self.mass_display.setText("")
         else:
             self.mass_display.setText(f"{mass:.6f}")
+        del blocker
+
+    def _update_stress_from_mass(self) -> None:
+        mass_value = _parse_strain_float(self.mass_display.text())
+        if mass_value is None:
+            self._mass_override_active = False
+            self._update_mass_display()
+            return
+        d_value = _parse_strain_float(self.d_edit.text())
+        stress = self._calculate_stress(
+            d_value,
+            area_multiplier=self._cross_section_multiplier(),
+            mass_g=mass_value,
+        )
+        if stress is None:
+            return
+        self._mass_override_active = True
+        if hasattr(self, "target_stress_spin"):
+            blocker = QtCore.QSignalBlocker(self.target_stress_spin)
+            self.target_stress_spin.setValue(max(0.0, float(stress)))
+            del blocker
 
     def _update_strain_display(self) -> None:
         text = self.A_length_edit.text().strip()
@@ -8613,9 +8805,13 @@ class StrainSection(MiniDatabaseSection):
                 self.microwire_combo.insertItem(0, microwire, (key[1], key[2]))
                 self.microwire_combo.setCurrentIndex(0)
         d_value = _parse_strain_float(row.get(self.COLUMN_D))
+        d_block = QtCore.QSignalBlocker(self.d_edit)
         self.d_edit.setText("" if d_value is None else f"{d_value:.4f}")
+        del d_block
         mass_value = _parse_strain_float(row.get(self.COLUMN_MASS))
+        mass_block = QtCore.QSignalBlocker(self.mass_display)
         self.mass_display.setText("" if mass_value is None else f"{mass_value:.6f}")
+        del mass_block
         mode_value = str(row.get(self.COLUMN_MODE) or "").strip()
         if hasattr(self, "strain_mode_combo") and mode_value:
             idx = self.strain_mode_combo.findData(mode_value)
@@ -8626,7 +8822,9 @@ class StrainSection(MiniDatabaseSection):
             self.clamp_span_spin.setValue(span_value if span_value is not None else 0.0)
         target_stress = _parse_strain_float(row.get(self.COLUMN_TARGET_STRESS))
         if hasattr(self, "target_stress_spin"):
+            stress_block = QtCore.QSignalBlocker(self.target_stress_spin)
             self.target_stress_spin.setValue(target_stress if target_stress is not None else 0.0)
+            del stress_block
         m_length = _parse_strain_float(row.get(self.COLUMN_M_LENGTH))
         self.M_length_edit.setText("" if m_length is None else f"{m_length:.4f}")
         a_entry = row.get(self.COLUMN_A_LENGTH)
@@ -8644,7 +8842,8 @@ class StrainSection(MiniDatabaseSection):
         self._suspend_auto_fill = False
         self.add_update_button.setText("Update entry")
         self._update_status()
-        self._update_mass_display()
+        self._mass_override_active = mass_value is not None
+        self._refresh_mass_or_stress()
         self._update_strain_mode_visibility()
 
     def _clear_form(self) -> None:
@@ -8658,6 +8857,11 @@ class StrainSection(MiniDatabaseSection):
         self.microwire_combo.clear()
         self.d_edit.clear()
         self.mass_display.clear()
+        if hasattr(self, "target_stress_spin"):
+            stress_block = QtCore.QSignalBlocker(self.target_stress_spin)
+            self.target_stress_spin.setValue(0.0)
+            del stress_block
+        self._mass_override_active = False
         self.M_length_edit.clear()
         self.A_length_edit.clear()
         self.strain_display.clear()
@@ -8709,15 +8913,35 @@ class StrainSection(MiniDatabaseSection):
         if d_value is None or d_value <= 0:
             QtWidgets.QMessageBox.warning(self, self.section_title, "Enter a valid diameter.")
             return
-        target_stress = float(self.target_stress_spin.value()) if hasattr(self, "target_stress_spin") else None
-        if target_stress is None or target_stress <= 0:
-            QtWidgets.QMessageBox.warning(self, self.section_title, "Set target stress (MPa) before saving.")
-            return
-        mass_value = self._calculate_mass(
-            d_value,
-            area_multiplier=self._cross_section_multiplier(),
-            target_stress_mpa=target_stress,
-        )
+        stress_value = float(self.target_stress_spin.value()) if hasattr(self, "target_stress_spin") else None
+        mass_value = _parse_strain_float(self.mass_display.text())
+        if mass_value is not None and mass_value > 0:
+            computed_stress = self._calculate_stress(
+                d_value,
+                area_multiplier=self._cross_section_multiplier(),
+                mass_g=mass_value,
+            )
+            if computed_stress is None or computed_stress <= 0:
+                QtWidgets.QMessageBox.warning(
+                    self, self.section_title, "Enter a valid weight to compute stress."
+                )
+                return
+            stress_value = float(computed_stress)
+            self._mass_override_active = True
+            if hasattr(self, "target_stress_spin"):
+                blocked = QtCore.QSignalBlocker(self.target_stress_spin)
+                self.target_stress_spin.setValue(stress_value)
+                del blocked
+        else:
+            if stress_value is None or stress_value <= 0:
+                QtWidgets.QMessageBox.warning(self, self.section_title, "Set stress (MPa) before saving.")
+                return
+            mass_value = self._calculate_mass(
+                d_value,
+                area_multiplier=self._cross_section_multiplier(),
+                target_stress_mpa=stress_value,
+            )
+            self._mass_override_active = False
 
         m_length = _parse_strain_float(self.M_length_edit.text())
         a_text = self.A_length_edit.text().strip()
@@ -8745,7 +8969,7 @@ class StrainSection(MiniDatabaseSection):
             self.COLUMN_MODE: self._strain_mode,
             self.COLUMN_CLAMP_SPAN: self._clamp_span_mm if self._strain_mode == self.STRAIN_MODE_DUAL_SUPPORT else None,
             self.COLUMN_MASS: mass_value,
-            self.COLUMN_TARGET_STRESS: target_stress,
+            self.COLUMN_TARGET_STRESS: stress_value,
             self.COLUMN_M_LENGTH: m_length,
             self.COLUMN_A_LENGTH: a_display,
             self.COLUMN_STRAIN: strain_display if broke else (None if strain_percent is None else round(strain_percent, 3)),
@@ -8820,6 +9044,18 @@ class StrainSection(MiniDatabaseSection):
                 self.COLUMN_STRAIN,
             ]
         ].copy()
+        mode_labels = {
+            self.STRAIN_MODE_LINEAR: "Single span",
+            self.STRAIN_MODE_DUAL_SUPPORT: "Dual span",
+        }
+        if self.COLUMN_MODE in frame.columns:
+            def _label_mode(value: object) -> object:
+                if value is None:
+                    return ""
+                text = str(value).strip()
+                return mode_labels.get(text, value)
+
+            frame[self.COLUMN_MODE] = frame[self.COLUMN_MODE].map(_label_mode)
         try:
             frame.to_excel(export_path, index=False)
         except Exception as exc:
@@ -9007,14 +9243,35 @@ class StrainSection(MiniDatabaseSection):
         if isinstance(frame, pd.DataFrame) and not frame.empty:
             for _, row in frame.iterrows():
                 composition = str(row.get("Composition") or "").strip()
-                draw = row.get("Draw")
-                piece = row.get("Piece")
-                if not composition:
-                    continue
-                try:
-                    draw_int = int(float(draw))
-                    piece_int = int(float(piece))
-                except (TypeError, ValueError):
+                draw_int: Optional[int] = None
+                piece_int: Optional[int] = None
+                key_text = row.get("_key")
+                if isinstance(key_text, str) and "|" in key_text:
+                    parts = key_text.split("|")
+                    if len(parts) == 3:
+                        if not composition:
+                            composition = parts[0].strip()
+                        try:
+                            draw_int = int(parts[1])
+                            piece_int = int(parts[2])
+                        except (TypeError, ValueError):
+                            draw_int = None
+                            piece_int = None
+                if draw_int is None or piece_int is None:
+                    draw = row.get("Draw")
+                    piece = row.get("Piece")
+                    if draw is not None and piece is not None:
+                        try:
+                            draw_int = int(float(draw))
+                            piece_int = int(float(piece))
+                        except (TypeError, ValueError):
+                            draw_int = None
+                            piece_int = None
+                if (draw_int is None or piece_int is None) and row.get("Microwire"):
+                    parsed = _microwire_tuple_from_label(str(row.get("Microwire") or ""))
+                    if parsed:
+                        draw_int, piece_int = int(parsed[0]), int(parsed[1])
+                if not composition or draw_int is None or piece_int is None:
                     continue
                 d_value = _parse_strain_float(row.get(MICROSCOPE_D_COLUMN))
                 if d_value is None:
@@ -9030,6 +9287,7 @@ class StrainSection(MiniDatabaseSection):
             frame = frame.copy()
             legacy_map = {
                 "Strain (%)": self.COLUMN_STRAIN,
+                "Target stress (MPa)": self.COLUMN_TARGET_STRESS,
             }
             for old, new in legacy_map.items():
                 if old in frame.columns and new not in frame.columns:
@@ -9080,13 +9338,25 @@ class StrainSection(MiniDatabaseSection):
             clamp_span_value = _parse_strain_float(row.get(self.COLUMN_CLAMP_SPAN))
             multiplier = 2.0 if mode_value == self.STRAIN_MODE_DUAL_SUPPORT else 1.0
             d_value = _parse_strain_float(row.get(self.COLUMN_D))
-            target_stress = _parse_strain_float(row.get(self.COLUMN_TARGET_STRESS))
-            mass = self._calculate_mass(
-                d_value,
-                area_multiplier=multiplier,
-                target_stress_mpa=target_stress,
-            )
-            frame.at[index, self.COLUMN_MASS] = None if mass is None else round(mass, 6)
+            mass_value = _parse_strain_float(row.get(self.COLUMN_MASS))
+            stress_value = _parse_strain_float(row.get(self.COLUMN_TARGET_STRESS))
+            if mass_value is not None:
+                stress_value = self._calculate_stress(
+                    d_value,
+                    area_multiplier=multiplier,
+                    mass_g=mass_value,
+                )
+                frame.at[index, self.COLUMN_TARGET_STRESS] = (
+                    None if stress_value is None else round(stress_value, 3)
+                )
+                frame.at[index, self.COLUMN_MASS] = round(mass_value, 6)
+            else:
+                mass = self._calculate_mass(
+                    d_value,
+                    area_multiplier=multiplier,
+                    target_stress_mpa=stress_value,
+                )
+                frame.at[index, self.COLUMN_MASS] = None if mass is None else round(mass, 6)
             broke = bool(row.get(self.COLUMN_BROKE))
             a_value = row.get(self.COLUMN_A_LENGTH)
             if isinstance(a_value, str) and a_value.strip() in {"-", "broke"}:
@@ -9200,7 +9470,7 @@ class StrainSection(MiniDatabaseSection):
         self._update_status()
         self._update_strain_mode_visibility()
         self._update_strain_display()
-        self._update_mass_display()
+        self._refresh_mass_or_stress()
         self._update_strain_mode_visibility()
 
     def _strain_mode_changed(self, _: int) -> None:
@@ -9223,7 +9493,7 @@ class StrainSection(MiniDatabaseSection):
             self.strain_offset_spin.setValue(self._current_offset())
             self.strain_offset_spin.blockSignals(blocked)
         self._update_strain_display()
-        self._update_mass_display()
+        self._refresh_mass_or_stress()
 
     def _clamp_span_changed(self, value: float) -> None:
         self._clamp_span_mm = float(value)
@@ -9322,6 +9592,25 @@ class StrainSection(MiniDatabaseSection):
         stress_pa = float(target_stress_mpa) * 1e6
         return stress_pa * area / 9.80665 * 1000.0
 
+    @staticmethod
+    def _calculate_stress(
+        d_um: Optional[float],
+        *,
+        area_multiplier: float = 1.0,
+        mass_g: Optional[float] = None,
+    ) -> Optional[float]:
+        if d_um is None or d_um <= 0:
+            return None
+        if not isinstance(mass_g, (int, float)) or mass_g <= 0:
+            return None
+        radius_m = (d_um * 1e-6) / 2.0
+        if radius_m <= 0:
+            return None
+        area = math.pi * radius_m * radius_m * max(1.0, float(area_multiplier))
+        mass_kg = float(mass_g) / 1000.0
+        stress_pa = mass_kg * 9.80665 / area
+        return stress_pa / 1e6
+
 
 class AssemblySection(QtWidgets.QWidget):
     """Final step that merges prepared mini-databases into a spreadsheet."""
@@ -9339,6 +9628,8 @@ class AssemblySection(QtWidgets.QWidget):
         self.logger = logger
         self._log_callback = log_callback
         self._console_callback = console_callback
+        self._cached_annealing_records: List[MeasurementRecord] = []
+        self._cached_annealing_groups: Dict[str, List[MeasurementRecord]] = {}
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -9396,6 +9687,22 @@ class AssemblySection(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("Ready to assemble once all sections are processed.")
         layout.addWidget(self.status_label)
 
+        graph_row = QtWidgets.QHBoxLayout()
+        self.graph_preview_checkbox = QtWidgets.QCheckBox("Show annealing graphs in preview")
+        self.graph_preview_checkbox.setChecked(True)
+        self.graph_preview_checkbox.toggled.connect(self._update_preview_graph_visibility)
+        graph_row.addWidget(self.graph_preview_checkbox)
+        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
+        self.open_high_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_high_plot_button)
+        self.open_low_plot_button = QtWidgets.QPushButton("Open low mA graph")
+        self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
+        self.open_low_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_low_plot_button)
+        graph_row.addStretch(1)
+        layout.addLayout(graph_row)
+
         self.preview_model = DataFrameModel()
         self.preview_table = QtWidgets.QTableView()
         self.preview_table.setModel(self.preview_model)
@@ -9422,6 +9729,9 @@ class AssemblySection(QtWidgets.QWidget):
             preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
         layout.addWidget(self.preview_table, 1)
         self.preview_table.show()
+        selection_model = self.preview_table.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._update_preview_graph_buttons)
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
@@ -9496,6 +9806,22 @@ class AssemblySection(QtWidgets.QWidget):
         self.status_label = QtWidgets.QLabel("Ready to assemble once all sections are processed.")
         layout.addWidget(self.status_label)
 
+        graph_row = QtWidgets.QHBoxLayout()
+        self.graph_preview_checkbox = QtWidgets.QCheckBox("Show annealing graphs in preview")
+        self.graph_preview_checkbox.setChecked(True)
+        self.graph_preview_checkbox.toggled.connect(self._update_preview_graph_visibility)
+        graph_row.addWidget(self.graph_preview_checkbox)
+        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
+        self.open_high_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_high_plot_button)
+        self.open_low_plot_button = QtWidgets.QPushButton("Open low mA graph")
+        self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
+        self.open_low_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_low_plot_button)
+        graph_row.addStretch(1)
+        layout.addLayout(graph_row)
+
         self.preview_model = DataFrameModel()
         self.preview_table = QtWidgets.QTableView()
         self.preview_table.setModel(self.preview_model)
@@ -9522,6 +9848,9 @@ class AssemblySection(QtWidgets.QWidget):
             preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
         layout.addWidget(self.preview_table, 1)
         self.preview_table.show()
+        selection_model = self.preview_table.selectionModel()
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._update_preview_graph_buttons)
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
@@ -9606,6 +9935,8 @@ class AssemblySection(QtWidgets.QWidget):
             annealing_records = list(annealing_records_payload)
         if require_payloads and not annealing_records:
             missing.append("annealing")
+        self._cached_annealing_records = list(annealing_records)
+        self._cached_annealing_groups = self._group_annealing_records(annealing_records)
 
         microscope_index: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
         overrides: Dict[str, Dict[str, float]] = {}
@@ -9667,6 +9998,8 @@ class AssemblySection(QtWidgets.QWidget):
             self.preview_table.resizeColumnsToContents()
         except Exception:
             pass
+        self._update_preview_graph_visibility()
+        self._update_preview_graph_buttons()
         if self._console_callback is not None and isinstance(frame, pd.DataFrame):
             try:
                 self._console_callback(frame.copy())
@@ -9678,6 +10011,140 @@ class AssemblySection(QtWidgets.QWidget):
         )
         if hasattr(self, "export_preview_button"):
             self.export_preview_button.setEnabled(row_count > 0)
+
+    def _group_annealing_records(
+        self,
+        records: Sequence[MeasurementRecord],
+    ) -> Dict[str, List[MeasurementRecord]]:
+        grouped: Dict[str, List[MeasurementRecord]] = {}
+        for record in records:
+            metadata = getattr(record, "metadata", None)
+            if metadata is None:
+                continue
+            composition = getattr(metadata, "composition_token", None)
+            draw = getattr(metadata, "draw_x", None)
+            piece = getattr(metadata, "piece_y", None)
+            if composition is None or draw is None or piece is None:
+                continue
+            try:
+                key = f"{composition}|{int(draw)}|{int(piece)}"
+            except (TypeError, ValueError):
+                continue
+            grouped.setdefault(key, []).append(record)
+        return grouped
+
+    def _selected_preview_row_index(self) -> Optional[int]:
+        if not isinstance(self.preview_table, QtWidgets.QTableView):
+            return None
+        selection = self.preview_table.selectionModel()
+        if selection is None:
+            return None
+        rows = selection.selectedRows()
+        if not rows:
+            return None
+        return rows[0].row()
+
+    def _selected_preview_row(self) -> Optional[pd.Series]:
+        frame = self.preview_model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        row_index = self._selected_preview_row_index()
+        if row_index is None or row_index < 0 or row_index >= len(frame.index):
+            return None
+        try:
+            return frame.iloc[row_index]
+        except Exception:
+            return None
+
+    def _update_preview_graph_buttons(self, *_: Any) -> None:
+        row_index = self._selected_preview_row_index()
+        enabled = row_index is not None
+        if hasattr(self, "open_high_plot_button"):
+            self.open_high_plot_button.setEnabled(enabled)
+        if hasattr(self, "open_low_plot_button"):
+            self.open_low_plot_button.setEnabled(enabled)
+
+    def _update_preview_graph_visibility(self) -> None:
+        if not isinstance(self.preview_table, QtWidgets.QTableView):
+            return
+        frame = self.preview_model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        show = True
+        if hasattr(self, "graph_preview_checkbox"):
+            show = self.graph_preview_checkbox.isChecked()
+        for column_name in ("Figure — 1000 mA", "Figure — low mA"):
+            if column_name not in frame.columns:
+                continue
+            try:
+                idx = int(frame.columns.get_loc(column_name))
+            except Exception:
+                continue
+            self.preview_table.setColumnHidden(idx, not show)
+
+    def _open_preview_graph(self, kind: str) -> None:
+        row = self._selected_preview_row()
+        if row is None:
+            return
+        composition = str(row.get("Composition") or "").strip()
+        microwire = str(row.get("Microwire") or "").strip()
+        if not composition or not microwire:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "Select a microwire row with annealing data first.",
+            )
+            return
+        parsed = _microwire_tuple_from_label(microwire)
+        if parsed is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "Unable to parse the microwire label for this row.",
+            )
+            return
+        draw, piece = parsed
+        key = f"{composition}|{int(draw)}|{int(piece)}"
+        groups = self._cached_annealing_groups
+        if not groups:
+            payload = self._load_payload("annealing", "annealing_records")
+            if isinstance(payload, list):
+                self._cached_annealing_records = list(payload)
+                self._cached_annealing_groups = self._group_annealing_records(payload)
+                groups = self._cached_annealing_groups
+        records = groups.get(key, [])
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No annealing records found for the selected microwire.",
+            )
+            return
+        high_record, low_record = _select_high_low_pair(records)
+        record = high_record if kind == "high" else low_record
+        label = "1000 mA" if kind == "high" else "low mA"
+        if record is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                f"No {label} measurement available for this microwire.",
+            )
+            return
+        self._show_annealing_record(record, label)
+
+    def _show_annealing_record(self, record: MeasurementRecord, label: str) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Annealing graph — {label}")
+        dialog.resize(960, 640)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        display = _AnnealingPlotDisplay(f"Graph — {label}", self.logger, dialog)
+        display.set_record(
+            record,
+            setpoint=_extract_setpoint(record),
+            description="No annealing measurement available for this microwire.",
+        )
+        layout.addWidget(display, 1)
+        dialog.exec()
 
     def _current_preview_column_order(self) -> List[str]:
         header = self.preview_table.horizontalHeader()
@@ -10389,6 +10856,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
     def _clamp_to_available_geometry(self) -> None:
         if getattr(self, "_clamp_active", False):
             return
+        if self.isMaximized() or self.isFullScreen():
+            return
+        if self.windowState() & (
+            QtCore.Qt.WindowState.WindowMaximized | QtCore.Qt.WindowState.WindowFullScreen
+        ):
+            return
         try:
             screen = QtGui.QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
             if screen is None:
@@ -10402,6 +10875,13 @@ class BuilderWindow(QtWidgets.QMainWindow):
         try:
             geom = self.geometry()
             frame = self.frameGeometry()
+
+            if (
+                geom.width() >= available.width() - 2
+                and geom.height() >= available.height() - 2
+            ):
+                self.setGeometry(available)
+                return
 
             new_width = geom.width()
             new_height = geom.height()

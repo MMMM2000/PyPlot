@@ -1,7 +1,7 @@
 {
   "version": 1,
   "kind": "MicrowireDataBuilder",
-  "saved_at": "2025-12-12 09:29",
+  "saved_at": "2026-01-01 15:17",
   "sections": {
     "annealing": {
       "section": "annealing",
@@ -629,7 +629,127 @@
         "payloads": {
           "annealing_records": "annealing_records"
         },
-        "phase_points": {}
+        "phase_points": {
+          "Ni50Fe26Ga24|2|2": {
+            "As1": 21.49703508771931,
+            "Af1": 26.955562032884927,
+            "Ms1": 9.114406078724462,
+            "Mf1": 7.55902325195151,
+            "As": 21.49703508771931,
+            "Ms": 9.114406078724462
+          },
+          "Ni50Fe27Ga23|2|6": {
+            "As1": 29.855915130377035,
+            "Af1": 31.651430825444272,
+            "Ms1": 5.716204118917122,
+            "Mf1": 3.9206884238498647,
+            "As": 29.855915130377035,
+            "Ms": 5.716204118917122
+          },
+          "Ni50Fe27Ga23|5|4": {
+            "As1": 65.76453579139682,
+            "Af1": 72.65867297791071,
+            "Ms1": 27.911820295631973,
+            "Mf1": 22.31846371034712,
+            "As": 65.76453579139682,
+            "Ms": 27.911820295631973
+          },
+          "Ni50Fe27Ga23|6|2": {
+            "As1": 34.605301943198846,
+            "Af1": 39.11228749377184,
+            "As": 34.605301943198846
+          },
+          "Ni50Fe27Ga23|6|4": {
+            "As1": 23.445645573824944,
+            "Af1": 29.132249128051836,
+            "Ms1": 8.253697392459738,
+            "Mf1": 5.182101312074407,
+            "As": 23.445645573824944,
+            "Ms": 8.253697392459738
+          },
+          "Ni50Fe27Ga23|6|6": {
+            "As1": 37.467853512705574,
+            "Af1": 46.76682710513209,
+            "Ms1": 16.82695000830428,
+            "Mf1": 10.979868128217907,
+            "As": 37.467853512705574,
+            "Ms": 16.82695000830428
+          },
+          "Ni50Fe27Ga23|7|1": {
+            "As1": 40.547734429496764,
+            "Af1": 42.10077877429002,
+            "Ms1": 9.06328998505232,
+            "Mf1": 6.874909317389145,
+            "As": 40.547734429496764,
+            "Ms": 9.06328998505232
+          },
+          "Ni50Fe27Ga23|10|1": {
+            "As1": 24.119531971433332,
+            "Af1": 27.061049991695725,
+            "As": 24.119531971433332
+          },
+          "Ni50Fe27Ga23|10|4": {
+            "As1": 21.997109948513575,
+            "Af1": 25.821843381498113,
+            "As": 21.997109948513575
+          },
+          "Ni50Fe27Ga23|11|1": {
+            "As1": 50.005346786248126,
+            "Af1": 60.52573874771637,
+            "Ms1": 19.253431821956518,
+            "Mf1": 15.43834462713834,
+            "As": 50.005346786248126,
+            "Ms": 19.253431821956518
+          },
+          "Ni50Fe27Ga24|6|2": {
+            "As1": 31.308556552067763,
+            "Af1": 36.77738897193159,
+            "Ms1": 10.413489287493771,
+            "Mf1": 4.480322039528317,
+            "As": 31.308556552067763,
+            "Ms": 10.413489287493771
+          },
+          "Ni51Fe25Ga24|1|5": {
+            "As1": 20.740415545590455,
+            "Af1": 23.08094369706031,
+            "Ms1": 5.228679953496102,
+            "Mf1": 2.8881518020262424,
+            "As": 20.740415545590455,
+            "Ms": 5.228679953496102
+          },
+          "Ni52Fe15Ga27Co6|1|1": {
+            "As1": 62.941996844378004,
+            "Af1": 66.7088528483641,
+            "Ms1": 47.87457282843386,
+            "Mf1": 43.308686762996196,
+            "As": 62.941996844378004,
+            "Ms": 47.87457282843386
+          },
+          "Ni52Fe15Ga27Co6|2|1": {
+            "As1": 34.135436306261425,
+            "Af1": 36.093330343796744,
+            "Ms1": 27.11005181863481,
+            "Mf1": 24.691476831091215,
+            "As": 34.135436306261425,
+            "Ms": 27.11005181863481
+          },
+          "Ni53Fe16Ga27Co4|1|2": {
+            "As1": 35.63555156950676,
+            "Af1": 39.676448430493295,
+            "Ms1": 26.60667264573993,
+            "Mf1": 22.755192825112115,
+            "As": 35.63555156950676,
+            "Ms": 26.60667264573993
+          },
+          "Ni54Fe17Ga27Co2|1|2": {
+            "As1": 33.807795382826804,
+            "Af1": 37.72182959641259,
+            "Ms1": 19.837704035874463,
+            "Mf1": 17.188203952831756,
+            "As": 33.807795382826804,
+            "Ms": 19.837704035874463
+          }
+        }
       },
       "sources": [
         "G:\\My Drive\\1 Projects\\Praha\\current annealing data"
@@ -2235,9 +2355,9 @@
         {
           "Composition": "Ni49Fe28Ga21Si2",
           "Microwire": "1/5",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 10.3,
+          "D (µm)": 60.1,
+          "d/D": 0.171,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni49Fe28Ga21Si2|1|5",
@@ -2508,9 +2628,9 @@
         {
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "6/6",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 15.2,
+          "D (µm)": 47.1,
+          "d/D": 0.323,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni50Fe27Ga23|6|6",
@@ -2524,9 +2644,9 @@
         {
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "7/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 9.9,
+          "D (µm)": 45.4,
+          "d/D": 0.218,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni50Fe27Ga23|7|1",
@@ -2540,9 +2660,9 @@
         {
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "9/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 10.9,
+          "D (µm)": 67.6,
+          "d/D": 0.161,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni50Fe27Ga23|9|1",
@@ -2556,9 +2676,9 @@
         {
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "9/3",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 15.6,
+          "D (µm)": 23.9,
+          "d/D": 0.653,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni50Fe27Ga23|9|3",
@@ -2585,9 +2705,9 @@
         {
           "Composition": "Ni50Fe28Ga22",
           "Microwire": "2/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 11.3,
+          "D (µm)": 42.8,
+          "d/D": 0.264,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni50Fe28Ga22|2|1",
@@ -2601,9 +2721,9 @@
         {
           "Composition": "Ni51Fe25Ga24",
           "Microwire": "1/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 11.2,
+          "D (µm)": 37.5,
+          "d/D": 0.299,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni51Fe25Ga24|1|1",
@@ -2617,9 +2737,9 @@
         {
           "Composition": "Ni51Fe25Ga24",
           "Microwire": "1/5",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 7.8,
+          "D (µm)": 27.5,
+          "d/D": 0.284,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni51Fe25Ga24|1|5",
@@ -2633,9 +2753,9 @@
         {
           "Composition": "Ni51Fe26Ga21",
           "Microwire": "1/2",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 11.6,
+          "D (µm)": 57.1,
+          "d/D": 0.203,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni51Fe26Ga21|1|2",
@@ -2649,9 +2769,9 @@
         {
           "Composition": "Ni52Fe15Ga27Co6",
           "Microwire": "1/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 17.5,
+          "D (µm)": 64.1,
+          "d/D": 0.273,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni52Fe15Ga27Co6|1|1",
@@ -2665,9 +2785,9 @@
         {
           "Composition": "Ni52Fe15Ga27Co6",
           "Microwire": "2/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 5.9,
+          "D (µm)": 65.6,
+          "d/D": 0.09,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni52Fe15Ga27Co6|2|1",
@@ -2682,9 +2802,9 @@
         {
           "Composition": "Ni52Fe21Ga27",
           "Microwire": "2/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 11.7,
+          "D (µm)": 35.5,
+          "d/D": 0.33,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni52Fe21Ga27|2|1",
@@ -2698,9 +2818,9 @@
         {
           "Composition": "Ni53Fe16Ga27Co4",
           "Microwire": "1/2",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 9.4,
+          "D (µm)": 55.1,
+          "d/D": 0.171,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni53Fe16Ga27Co4|1|2",
@@ -2714,9 +2834,9 @@
         {
           "Composition": "Ni54Fe17Ga27Co2",
           "Microwire": "1/2",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 11.7,
+          "D (µm)": 44.6,
+          "d/D": 0.262,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni54Fe17Ga27Co2|1|2",
@@ -2730,9 +2850,9 @@
         {
           "Composition": "Ni54Fe19Ga27",
           "Microwire": "1/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 14.3,
+          "D (µm)": 48.9,
+          "d/D": 0.292,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni54Fe19Ga27|1|1",
@@ -2746,9 +2866,9 @@
         {
           "Composition": "Ni55Fe18Ga27",
           "Microwire": "4/1",
-          "d (µm)": null,
-          "D (µm)": null,
-          "d/D": null,
+          "d (µm)": 15.3,
+          "D (µm)": 104.9,
+          "d/D": 0.146,
           "d (µm) image": null,
           "D (µm) image": null,
           "_key": "Ni55Fe18Ga27|4|1",
@@ -2825,6 +2945,70 @@
           "Ni48Fe25Ga27|2|3": {
             "d": 8.1,
             "D": 42.4
+          },
+          "Ni49Fe28Ga21Si2|1|5": {
+            "d": 10.3,
+            "D": 60.1
+          },
+          "Ni50Fe27Ga23|6|6": {
+            "d": 15.2,
+            "D": 47.1
+          },
+          "Ni50Fe27Ga23|7|1": {
+            "d": 9.9,
+            "D": 45.4
+          },
+          "Ni50Fe27Ga23|9|1": {
+            "d": 10.9,
+            "D": 67.6
+          },
+          "Ni50Fe27Ga23|9|3": {
+            "d": 15.6,
+            "D": 23.9
+          },
+          "Ni50Fe28Ga22|2|1": {
+            "d": 11.3,
+            "D": 42.8
+          },
+          "Ni51Fe25Ga24|1|1": {
+            "d": 11.2,
+            "D": 37.5
+          },
+          "Ni51Fe25Ga24|1|5": {
+            "d": 7.8,
+            "D": 27.5
+          },
+          "Ni51Fe26Ga21|1|2": {
+            "d": 11.6,
+            "D": 57.1
+          },
+          "Ni52Fe15Ga27Co6|1|1": {
+            "d": 17.5,
+            "D": 64.1
+          },
+          "Ni52Fe15Ga27Co6|2|1": {
+            "d": 5.9,
+            "D": 65.6
+          },
+          "Ni52Fe21Ga27|2|1": {
+            "d": 11.7,
+            "D": 35.5
+          },
+          "Ni53Fe16Ga27Co4|1|2": {
+            "d": 9.4,
+            "D": 55.1
+          },
+          "Ni54Fe17Ga27Co2|1|2": {
+            "d": 11.7,
+            "D": 44.6
+          },
+          "Ni54Fe19Ga27|1|1": {
+            "d": 14.3,
+            "D": 48.9
+          },
+          "Ni55Fe18Ga27|4|1": {
+            "d": 15.3,
+            "D": 104.9
           }
         },
         "ocr_cache": {
@@ -6749,6 +6933,774 @@
             "D_reviewed": true,
             "timestamp": "2025-12-12T09:29:22.013202Z",
             "d_reviewed": true
+          },
+          "Ni48Fe29Ga19Si4|1|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Si4 1_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Si4 1_1 core.jpg",
+                "mtime": 1758812738.0,
+                "size": 891212
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Si4 1_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Si4 1_1 glass.jpg",
+                "mtime": 1758812800.0,
+                "size": 904978
+              }
+            ],
+            "d": 14.5,
+            "D": 43.5,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:06.344835Z",
+            "D_reviewed": true
+          },
+          "Ni48Fe29Ga19Sn4|2|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Sn4 2_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Sn4 2_1 core.jpg",
+                "mtime": 1758791234.0,
+                "size": 887946
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Sn4 2_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Sn4 2_1 glass.jpg",
+                "mtime": 1758791612.0,
+                "size": 927611
+              }
+            ],
+            "d": 10.5,
+            "D": 41.3,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:09.942766Z",
+            "D_reviewed": true
+          },
+          "Ni49Fe25Ga26|1|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_2 core.jpg",
+                "mtime": 1758792502.0,
+                "size": 883608
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_2 glass.jpg",
+                "mtime": 1758792648.0,
+                "size": 845734
+              }
+            ],
+            "d": 11.1,
+            "D": 34.1,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:14.149247Z",
+            "D_reviewed": true
+          },
+          "Ni49Fe25Ga26|1|3": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_3 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_3 core.jpg",
+                "mtime": 1758792886.0,
+                "size": 883974
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_3 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_3 glass.jpg",
+                "mtime": 1758792970.0,
+                "size": 915776
+              }
+            ],
+            "d": 10.8,
+            "D": 35.9,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:18.046066Z",
+            "D_reviewed": true
+          },
+          "Ni49Fe28Ga21Si2|1|5": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_5 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_5 core.jpg",
+                "mtime": 1758813198.0,
+                "size": 869875
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_5 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_5 glass.jpg",
+                "mtime": 1758813258.0,
+                "size": 895174
+              }
+            ],
+            "d": 10.3,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:33.911208Z",
+            "D": 60.1,
+            "D_reviewed": true
+          },
+          "Ni49Fe28Ga21Si2|1|9": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_9 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_9 core.jpg",
+                "mtime": 1758812970.0,
+                "size": 880765
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_9 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_9 glass.jpg",
+                "mtime": 1758813032.0,
+                "size": 899399
+              }
+            ],
+            "d": 11.2,
+            "D": 71.2,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:42.001207Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe25Ga25|2|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_1 core.jpg",
+                "mtime": 1758804396.0,
+                "size": 794295
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_1 glass.jpg",
+                "mtime": 1758804478.0,
+                "size": 824510
+              }
+            ],
+            "d": 9.3,
+            "D": 59.9,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:45.716816Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe25Ga25|2|3": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_3 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_3 core.jpg",
+                "mtime": 1758804888.0,
+                "size": 815319
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_3 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_3 glass.jpg",
+                "mtime": 1758805012.0,
+                "size": 827282
+              }
+            ],
+            "d": 19.6,
+            "D": 54.0,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:48.535912Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe25Ga25|3|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 3_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 3_1 core.jpg",
+                "mtime": 1758803440.0,
+                "size": 810036
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 3_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 3_1 glass.jpg",
+                "mtime": 1758803536.0,
+                "size": 838379
+              }
+            ],
+            "d": 12.5,
+            "D": 42.5,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:51.640039Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe26Ga24|1|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 1_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 1_2 core.jpg",
+                "mtime": 1758801036.0,
+                "size": 791393
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 1_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 1_2 glass.jpg",
+                "mtime": 1758801154.0,
+                "size": 823053
+              }
+            ],
+            "d": 8.3,
+            "D": 25.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:56.098393Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe26Ga24|2|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_2 core.jpg",
+                "mtime": 1758802746.0,
+                "size": 801969
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_2 glass.jpg",
+                "mtime": 1758802880.0,
+                "size": 830347
+              }
+            ],
+            "d": 7.5,
+            "D": 56.1,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:00:59.591920Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe26Ga24|2|4": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_4 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_4 core.jpg",
+                "mtime": 1758804100.0,
+                "size": 796952
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_4 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_4 glass.jpg",
+                "mtime": 1758804196.0,
+                "size": 831075
+              }
+            ],
+            "d": 10.0,
+            "D": 73.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:02.329832Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|10|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_1 core.jpg",
+                "mtime": 1758814272.0,
+                "size": 881455
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_1 glass.jpg",
+                "mtime": 1758814350.0,
+                "size": 941070
+              }
+            ],
+            "d": 12.4,
+            "D": 96.8,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:05.538063Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|10|4": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_4 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_4 core.jpg",
+                "mtime": 1758813764.0,
+                "size": 822788
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_4 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_4 glass.jpg",
+                "mtime": 1758813842.0,
+                "size": 849749
+              }
+            ],
+            "d": 13.7,
+            "D": 70.8,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:08.357817Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|10|5": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_5 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_5 core.jpg",
+                "mtime": 1758814486.0,
+                "size": 831974
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_5 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_5 glass.jpg",
+                "mtime": 1758814548.0,
+                "size": 874110
+              }
+            ],
+            "d": 14.2,
+            "D": 101.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:11.082827Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|11|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 11_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 11_1 core.jpg",
+                "mtime": 1758812494.0,
+                "size": 822058
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 11_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 11_1 glass.jpg",
+                "mtime": 1758812556.0,
+                "size": 857009
+              }
+            ],
+            "d": 14.0,
+            "D": 48.7,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:13.869698Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|12|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 12_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 12_2 core.jpg",
+                "mtime": 1758812196.0,
+                "size": 881173
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 12_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 12_2 glass.jpg",
+                "mtime": 1758812334.0,
+                "size": 906620
+              }
+            ],
+            "d": 19.1,
+            "D": 58.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:16.376521Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|2|6": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6 core.jpg",
+                "mtime": 1758802416.0,
+                "size": 794786
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6 glass.jpg",
+                "mtime": 1758802508.0,
+                "size": 826374
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6.jpg",
+                "mtime": 1758802344.0,
+                "size": 731852
+              }
+            ],
+            "d": 9.2,
+            "D": 32.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:18.902609Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|5|4": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 5_4 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 5_4 core.jpg",
+                "mtime": 1758813434.0,
+                "size": 830787
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 5_4 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 5_4 glass.jpg",
+                "mtime": 1758813516.0,
+                "size": 917496
+              }
+            ],
+            "d": 19.4,
+            "D": 58.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:21.438187Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|6|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_2 core.jpg",
+                "mtime": 1758803932.0,
+                "size": 797411
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_2 glass.jpg",
+                "mtime": 1758803770.0,
+                "size": 830877
+              }
+            ],
+            "d": 11.3,
+            "D": 55.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:23.969730Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|6|4": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_4 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_4 core.jpg",
+                "mtime": 1758805830.0,
+                "size": 799078
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_4 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_4 glass.jpg",
+                "mtime": 1758806000.0,
+                "size": 836848
+              }
+            ],
+            "d": 7.8,
+            "D": 66.7,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:01:27.707051Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|6|6": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_6 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_6 core.jpg",
+                "mtime": 1758801404.0,
+                "size": 810027
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_6 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_6 glass.jpg",
+                "mtime": 1758801614.0,
+                "size": 868579
+              }
+            ],
+            "d": 15.2,
+            "D": 47.1,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:03:19.064706Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|7|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 7_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 7_1 core.jpg",
+                "mtime": 1758809304.0,
+                "size": 865175
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 7_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 7_1 glass.jpg",
+                "mtime": 1758809384.0,
+                "size": 898219
+              }
+            ],
+            "d": 9.9,
+            "D": 45.4,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:03:20.692120Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|9|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_1 core.jpg",
+                "mtime": 1758815142.0,
+                "size": 835010
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_1 glass.jpg",
+                "mtime": 1758888566.0,
+                "size": 858952
+              }
+            ],
+            "d": 10.9,
+            "D": 67.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:03:22.086481Z",
+            "D_reviewed": true
+          },
+          "Ni51Fe25Ga24|1|5": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_5 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_5 core.jpg",
+                "mtime": 1758798596.0,
+                "size": 801878
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_5 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_5 glass.jpg",
+                "mtime": 1758799034.0,
+                "size": 831900
+              }
+            ],
+            "d": 7.8,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:11.661825Z",
+            "D": 27.5,
+            "D_reviewed": true
+          },
+          "Ni50Fe27Ga23|9|3": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_3 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_3 core.jpg",
+                "mtime": 1758814030.0,
+                "size": 803952
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_3 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_3 glass.jpg",
+                "mtime": 1758814100.0,
+                "size": 954840
+              }
+            ],
+            "d": 15.6,
+            "D": 23.9,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:06:59.452054Z",
+            "D_reviewed": true
+          },
+          "Ni50Fe28Ga22|2|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe28Ga22 2_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe28Ga22 2_1 core.jpg",
+                "mtime": 1758801976.0,
+                "size": 836713
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe28Ga22 2_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe28Ga22 2_1 glass.jpg",
+                "mtime": 1758802208.0,
+                "size": 825792
+              }
+            ],
+            "d": 11.3,
+            "D": 42.8,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:02.264026Z",
+            "D_reviewed": true
+          },
+          "Ni51Fe25Ga24|1|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_1 core.jpg",
+                "mtime": 1758793904.0,
+                "size": 837528
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_1 glass.jpg",
+                "mtime": 1758793994.0,
+                "size": 848965
+              }
+            ],
+            "d": 11.2,
+            "D": 37.5,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:03.615077Z",
+            "D_reviewed": true
+          },
+          "Ni51Fe26Ga21|1|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe26Ga21 1_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe26Ga21 1_2 core.jpg",
+                "mtime": 1758814980.0,
+                "size": 831675
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe26Ga21 1_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe26Ga21 1_2 glass.jpg",
+                "mtime": 1758814850.0,
+                "size": 868174
+              }
+            ],
+            "d": 11.6,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:23.400292Z",
+            "D": 57.1,
+            "D_reviewed": true
+          },
+          "Ni52Fe15Ga27Co6|1|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 1_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 1_1 core.jpg",
+                "mtime": 1758811580.0,
+                "size": 815496
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 1_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 1_1 glass.jpg",
+                "mtime": 1758811664.0,
+                "size": 840927
+              }
+            ],
+            "d": 17.5,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:32.968325Z",
+            "D": 64.1,
+            "D_reviewed": true
+          },
+          "Ni52Fe15Ga27Co6|2|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1 core.jpg",
+                "mtime": 1758810612.0,
+                "size": 818682
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1 glass.jpg",
+                "mtime": 1758810828.0,
+                "size": 814495
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1.jpg",
+                "mtime": 1758810946.0,
+                "size": 851762
+              }
+            ],
+            "d": 5.9,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:43.454432Z",
+            "D": 65.6,
+            "D_reviewed": true
+          },
+          "Ni52Fe21Ga27|2|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe21Ga27 2_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe21Ga27 2_1 core.jpg",
+                "mtime": 1758799624.0,
+                "size": 810426
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe21Ga27 2_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe21Ga27 2_1 glass.jpg",
+                "mtime": 1758799834.0,
+                "size": 833886
+              }
+            ],
+            "d": 11.7,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:07:53.172270Z",
+            "D": 35.5,
+            "D_reviewed": true
+          },
+          "Ni53Fe16Ga27Co4|1|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni53Fe16Ga27Co4 1_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni53Fe16Ga27Co4 1_2 core.jpg",
+                "mtime": 1758811358.0,
+                "size": 827810
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni53Fe16Ga27Co4 1_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni53Fe16Ga27Co4 1_2 glass.jpg",
+                "mtime": 1758811436.0,
+                "size": 849576
+              }
+            ],
+            "d": 9.4,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:08:01.735874Z",
+            "D": 55.1,
+            "D_reviewed": true
+          },
+          "Ni54Fe17Ga27Co2|1|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe17Ga27Co2 1_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe17Ga27Co2 1_2 core.jpg",
+                "mtime": 1758811142.0,
+                "size": 863110
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe17Ga27Co2 1_2 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe17Ga27Co2 1_2 glass.jpg",
+                "mtime": 1758811226.0,
+                "size": 893294
+              }
+            ],
+            "d": 11.7,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:08:11.106802Z",
+            "D": 44.6,
+            "D_reviewed": true
+          },
+          "Ni54Fe19Ga27|1|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe19Ga27 1_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe19Ga27 1_1 core.jpg",
+                "mtime": 1758806346.0,
+                "size": 800699
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe19Ga27 1_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe19Ga27 1_1 glass.jpg",
+                "mtime": 1758806524.0,
+                "size": 834505
+              }
+            ],
+            "d": 14.3,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:08:20.500402Z",
+            "D": 48.9,
+            "D_reviewed": true
+          },
+          "Ni55Fe18Ga27|4|1": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 core.jpg",
+                "mtime": 1758808050.0,
+                "size": 841911
+              },
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 glass.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 glass.jpg",
+                "mtime": 1758808194.0,
+                "size": 913660
+              }
+            ],
+            "d": 15.3,
+            "d_reviewed": true,
+            "timestamp": "2025-12-31T11:08:31.533698Z",
+            "D": 104.9,
+            "D_reviewed": true
           }
         }
       },
@@ -6795,21 +7747,42 @@
         "Draw",
         "Piece",
         "d (µm)",
+        "Calc mode",
+        "Clamp span (mm)",
         "m",
+        "Stress (MPa)",
         "M length",
         "A length",
         "Strain",
         "Broke"
       ],
-      "rows": [],
-      "index": [],
+      "rows": [
+        {
+          "Composition": "Ni47Fe30Ga17Si6",
+          "Microwire": "1/1",
+          "Draw": 1,
+          "Piece": 1,
+          "d (µm)": 18.9,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.860835,
+          "Stress (MPa)": 100.0,
+          "M length": 23.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        }
+      ],
+      "index": [
+        0
+      ],
       "extra": {
         "strain_offset": 7.0,
         "payloads": {
           "strain_records": "strain_records"
         },
-        "strain_mode": "dual_support",
-        "clamp_span_mm": 30.0,
+        "strain_mode": "linear",
+        "clamp_span_mm": 0.0,
         "strain_offsets": {
           "linear": 7.0,
           "dual_support": 1.0

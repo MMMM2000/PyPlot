@@ -1,5 +1,22 @@
 # Changelog
 
+## 2025-12-31 12:53 UTC
+
+- Data Builder fullscreen snapping now fills the available screen instead of leaving a top gap.
+- Current density adds Mf1-Af1 and Mf2-Af2 delta columns alongside the other repeat-measurement deltas.
+- Strain section auto-fills d from microscope keys, allows manual weight edits that recompute stress, and labels stress explicitly in the worksheet export.
+- Assemble preview adds toggleable annealing graph visibility plus buttons to open the selected 1000 mA/low mA plots on demand.
+
+## 2025-12-31 11:14 UTC
+
+- Data Builder no longer clamps window geometry while maximized/fullscreen, keeping fullscreen sizing intact.
+- Microscope manual entries now advance to the next cell on Enter instead of jumping to the table start.
+- Current density value picks respect the selected phase column (Af1/Af2/etc.) instead of overwriting As1.
+
+## 2025-12-31 10:33 UTC
+
+- Current density section now captures As1/Af1/Ms1/Mf1 and As2/Af2/Ms2/Mf2 phase points with delta columns for repeat measurements.
+
 ## 2025-12-12 11:58 UTC
 
 - Fixed Microscope preview panels occasionally rendering too small by letting the visible preview expand to fill the available space, and corrected Data Builder window geometry clamping so maximizing no longer triggers `QWindowsWindow::setGeometry` warnings or hides the bottom controls.
