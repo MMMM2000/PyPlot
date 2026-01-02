@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import base64
+import html
+import io
 import json
 import logging
 import math
@@ -32,7 +34,6 @@ import matplotlib.pyplot as plt
 
 from plotting.plugins.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot.window import _DockSwitcherWidget
-from plotting.pyplot.console import PythonConsoleWidget
 from plotting.shared.utils import (
     ensure_app_theme,
     install_standard_menu,
@@ -58,6 +59,12 @@ from .core import (
     VideoMetricsSummary,
     FabricationIndex,
     StrainRecord,
+    VsmHysteresisRecord,
+    VsmTemperatureScanRecord,
+    DmaIsoStressRecord,
+    VSM_HYSTERESIS_COLUMN,
+    VSM_TEMPERATURE_SCAN_COLUMN,
+    DMA_ISOSTRESS_COLUMN,
     build_database,
     build_fabrication_index,
     _normalise_output_name,
@@ -80,6 +87,27 @@ from .core import (
     _format_dimension_display,
     _clean_str,
 )
+
+try:
+    from experiments.simple_scripts.vsm_temperature_scan import VSMTemperatureScanProcessor
+except Exception:  # pragma: no cover - optional dependency
+    VSMTemperatureScanProcessor = None  # type: ignore[assignment]
+
+try:
+    from experiments.simple_scripts.dma_isostress import parse_dma_txt
+except Exception:  # pragma: no cover - optional dependency
+    parse_dma_txt = None  # type: ignore[assignment]
+
+try:
+    from plotting.plugins.vsm_hysteresis.vsm_hysteresis_loops import (
+        _read_vsm_file,
+        _parse_temperature,
+        _parse_angle,
+    )
+except Exception:  # pragma: no cover - optional dependency
+    _read_vsm_file = None  # type: ignore[assignment]
+    _parse_temperature = None  # type: ignore[assignment]
+    _parse_angle = None  # type: ignore[assignment]
 
 
 MICROSCOPE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
@@ -106,6 +134,8 @@ ANNEALING_GRAPH_HEIGHT = 200
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
+GRAPH_PREVIEW_WIDTH = 720
+GRAPH_PREVIEW_HEIGHT = 420
 ANNEALING_AS_COLUMN = "As1 (mA)"
 ANNEALING_AF1_COLUMN = "Af1 (mA)"
 ANNEALING_MS_COLUMN = "Ms1 (mA)"
@@ -2825,6 +2855,221 @@ def _render_measurement_pixmap(
             plt.close(figure)
 
 
+def _figure_to_pixmap(
+    figure: Optional["plt.Figure"],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> Optional[QtGui.QPixmap]:
+    if figure is None:
+        return None
+    canvas_agg: FigureCanvasAgg | None = None
+    try:
+        canvas_agg = FigureCanvasAgg(figure)
+        canvas_agg.draw()
+        width, height = canvas_agg.get_width_height()
+        buffer = canvas_agg.buffer_rgba()
+        format_candidates: list[QtGui.QImage.Format | int] = []
+        for attr in ("Format_RGBA8888", "Format_RGBA8888_Premultiplied", "Format_ARGB32"):
+            candidate = None
+            try:
+                candidate = getattr(QtGui.QImage.Format, attr)
+            except AttributeError:
+                candidate = getattr(QtGui.QImage, attr, None)
+            if candidate is not None:
+                format_candidates.append(candidate)
+        if not format_candidates:
+            try:
+                fallback = QtGui.QImage.Format.Format_ARGB32
+            except AttributeError:
+                fallback = getattr(QtGui.QImage, "Format_ARGB32", None)
+            if fallback is None:
+                fallback = QtGui.QImage.Format_ARGB32  # type: ignore[attr-defined]
+            format_candidates.append(fallback)
+
+        image: QtGui.QImage | None = None
+        for fmt in format_candidates:
+            try:
+                candidate = QtGui.QImage(buffer, width, height, 4 * width, fmt)
+            except TypeError:
+                continue
+            if not candidate.isNull():
+                image = candidate
+                break
+        if image is None:
+            return None
+        pixmap = QtGui.QPixmap.fromImage(image.copy())
+        return pixmap.scaled(
+            width_px,
+            height_px,
+            QtCore.Qt.AspectRatioMode.KeepAspectRatio,
+            QtCore.Qt.TransformationMode.SmoothTransformation,
+        )
+    except Exception:
+        logger.exception("Failed to render graph preview")
+        return None
+    finally:
+        if figure is not None:
+            plt.close(figure)
+
+
+def _figure_to_data_uri(
+    figure: Optional["plt.Figure"],
+    logger: logging.Logger,
+) -> Optional[str]:
+    if figure is None:
+        return None
+    buffer = io.BytesIO()
+    try:
+        figure.savefig(buffer, format="png", dpi=96)
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
+    except Exception:
+        logger.exception("Failed to render graph preview for HTML export")
+        return None
+    finally:
+        buffer.close()
+        plt.close(figure)
+
+
+def _choose_axis_column(columns: Sequence[str], preferences: Sequence[str]) -> Optional[str]:
+    if not columns:
+        return None
+    for pref in preferences:
+        pref_lower = pref.lower()
+        for column in columns:
+            if pref_lower in column.lower():
+                return column
+    return columns[0] if columns else None
+
+
+def _plot_vsm_hysteresis_figure(
+    record: VsmHysteresisRecord,
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> Optional["plt.Figure"]:
+    frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        return None
+    columns = [str(column) for column in frame.columns]
+    x_column = _choose_axis_column(
+        columns,
+        ["Applied Field", "Applied Field For Plot", "Applied Field [Oe]", "Field"],
+    )
+    y_column = _choose_axis_column(
+        columns,
+        [
+            "Signal X direction [emu]",
+            "Signal parallel with sample",
+            "Signal Magnitude",
+            "Moment [emu]",
+            "Signal",
+        ],
+    )
+    if not x_column or not y_column:
+        logger.debug("VSM hysteresis plot missing axis columns: %s", ", ".join(columns))
+        return None
+    plot_df = frame[[x_column, y_column]].apply(pd.to_numeric, errors="coerce").dropna()
+    if plot_df.empty:
+        return None
+    figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    figure = plt.Figure(figsize=figsize)
+    ax = figure.add_subplot(111)
+    ax.plot(plot_df[x_column], plot_df[y_column], linewidth=1.2)
+    title = record.sample or Path(record.path).stem
+    details: list[str] = []
+    if isinstance(record.temperature, (int, float)) and math.isfinite(record.temperature):
+        details.append(f"T{record.temperature:g}C")
+    if isinstance(record.angle, (int, float)) and math.isfinite(record.angle):
+        details.append(f"a{record.angle:g}deg")
+    if details:
+        title = f"{title} ({', '.join(details)})"
+    ax.set_title(title)
+    ax.set_xlabel(x_column)
+    ax.set_ylabel(y_column)
+    figure.tight_layout()
+    return figure
+
+
+def _plot_vsm_temperature_scan_figure(
+    record: VsmTemperatureScanRecord,
+    processor: VSMTemperatureScanProcessor,
+    *,
+    width_px: int,
+    height_px: int,
+) -> Optional["plt.Figure"]:
+    frame = record.data if isinstance(record.data, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        return None
+    series = processor._build_series(frame.copy())
+    if not series:
+        return None
+    color_map = processor.series_color_map(series)
+    field_order = processor.field_axis_order([entry.field for entry in series])
+    figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    figure = plt.Figure(figsize=figsize)
+    ax_left = figure.add_subplot(111)
+    ax_right = None
+    axes_map: Dict[float, Any] = {}
+    for idx, entry_series in enumerate(series):
+        frame = entry_series.frame
+        temps = frame["temperature"]
+        signal = frame["signal"]
+        color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
+        color = color_map.get(color_key, plt.rcParams["axes.prop_cycle"].by_key()["color"][idx % 10])
+        label = f"{entry_series.field:.0f} Oe{processor._direction_label(entry_series.direction, entry_series.segment_index)}"
+        primary = field_order[0] if field_order else entry_series.field
+        secondary = field_order[1] if len(field_order) > 1 else None
+        if entry_series.field not in axes_map:
+            if entry_series.field == primary or not axes_map:
+                axes_map[entry_series.field] = ax_left
+            else:
+                if ax_right is None:
+                    ax_right = ax_left.twinx()
+                axes_map[entry_series.field] = ax_right
+        if secondary is not None and entry_series.field == secondary and ax_right is None:
+            ax_right = ax_left.twinx()
+            axes_map[entry_series.field] = ax_right
+        axis = axes_map[entry_series.field]
+        axis.plot(temps, signal, color=color, linewidth=1.4, label=label)
+    title = record.sample or Path(record.path).stem
+    ax_left.set_title(f"{title} - VSM Temperature Scan")
+    ax_left.set_xlabel("Temperature (°C)")
+    ax_left.set_ylabel("Signal X (emu)")
+    if ax_right is not None:
+        ax_right.set_ylabel("Signal X (emu) (secondary)")
+    ax_left.legend(loc="best")
+    figure.tight_layout()
+    return figure
+
+
+def _plot_dma_iso_stress_figure(
+    record: DmaIsoStressRecord,
+    *,
+    width_px: int,
+    height_px: int,
+) -> Optional["plt.Figure"]:
+    datasets = record.datasets or {}
+    if not datasets:
+        return None
+    figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
+    figure = plt.Figure(figsize=figsize)
+    ax = figure.add_subplot(111)
+    for stress in sorted(datasets):
+        temps, strains = datasets[stress]
+        ax.plot(temps, strains, linewidth=1.4, label=f"{stress} MPa")
+    title = record.sample or Path(record.path).stem
+    ax.set_title(f"{title} - DMA Iso-Stress")
+    ax.set_xlabel("Temperature (°C)")
+    ax.set_ylabel("Strain (%)")
+    ax.legend(loc="best")
+    figure.tight_layout()
+    return figure
+
+
 def _annealing_records_to_frame(
     records: List[MeasurementRecord],
     logger: logging.Logger,
@@ -3212,6 +3457,193 @@ class _AnnealingPlotDisplay(QtWidgets.QWidget):
         except Exception:
             pass
         return figure
+
+
+@dataclass
+class _GraphPreviewItem:
+    title: str
+    pixmap: QtGui.QPixmap
+
+
+class _GraphGalleryWidget(QtWidgets.QWidget):
+    def __init__(
+        self,
+        placeholder: str,
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        self._placeholder = QtWidgets.QLabel(placeholder)
+        self._placeholder.setAlignment(
+            QtCore.Qt.AlignmentFlag.AlignCenter
+        )
+        self._placeholder.setWordWrap(True)
+        layout.addWidget(self._placeholder, 1)
+
+        self._scroll = QtWidgets.QScrollArea(self)
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setVisible(False)
+        container = QtWidgets.QWidget(self._scroll)
+        self._scroll.setWidget(container)
+        self._items_layout = QtWidgets.QVBoxLayout(container)
+        self._items_layout.setContentsMargins(0, 0, 0, 0)
+        self._items_layout.setSpacing(10)
+        layout.addWidget(self._scroll, 1)
+
+    def clear(self, message: str) -> None:
+        self._set_placeholder(message)
+
+    def set_items(self, items: Sequence[_GraphPreviewItem], empty_message: str) -> None:
+        if not items:
+            self._set_placeholder(empty_message)
+            return
+        self._clear_items()
+        for item in items:
+            card = QtWidgets.QWidget(self._scroll)
+            card_layout = QtWidgets.QVBoxLayout(card)
+            card_layout.setContentsMargins(0, 0, 0, 0)
+            card_layout.setSpacing(4)
+            label = QtWidgets.QLabel(item.title, card)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            card_layout.addWidget(label)
+            image = QtWidgets.QLabel(card)
+            image.setPixmap(item.pixmap)
+            image.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
+            card_layout.addWidget(image)
+            self._items_layout.addWidget(card)
+        self._items_layout.addStretch(1)
+        self._scroll.setVisible(True)
+        self._placeholder.setVisible(False)
+
+    def _clear_items(self) -> None:
+        while self._items_layout.count():
+            item = self._items_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+                widget.deleteLater()
+
+    def _set_placeholder(self, message: str) -> None:
+        self._clear_items()
+        self._placeholder.setText(message)
+        self._placeholder.setVisible(True)
+        self._scroll.setVisible(False)
+
+
+class _GraphGalleryDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        title: str,
+        items: Sequence[_GraphPreviewItem],
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        empty_message: str = "No graphs available.",
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(980, 720)
+        layout = QtWidgets.QVBoxLayout(self)
+        gallery = _GraphGalleryWidget(empty_message, self)
+        gallery.set_items(items, empty_message)
+        layout.addWidget(gallery, 1)
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Close
+        )
+        button_box.rejected.connect(self.reject)
+        button_box.accepted.connect(self.accept)
+        layout.addWidget(button_box)
+
+
+_VSM_TEMP_PROCESSOR: VSMTemperatureScanProcessor | None = None
+
+
+def _get_vsm_temp_processor(logger: logging.Logger) -> Optional[VSMTemperatureScanProcessor]:
+    global _VSM_TEMP_PROCESSOR
+    if _VSM_TEMP_PROCESSOR is not None:
+        return _VSM_TEMP_PROCESSOR
+    if VSMTemperatureScanProcessor is None:
+        logger.warning("VSM temperature scan parser is not available.")
+        return None
+    try:
+        _VSM_TEMP_PROCESSOR = VSMTemperatureScanProcessor()
+    except Exception:
+        logger.exception("Failed to initialize VSM temperature scan processor.")
+        _VSM_TEMP_PROCESSOR = None
+    return _VSM_TEMP_PROCESSOR
+
+
+def _vsm_hysteresis_preview_items(
+    records: Sequence[VsmHysteresisRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> List[_GraphPreviewItem]:
+    items: List[_GraphPreviewItem] = []
+    for record in records:
+        figure = _plot_vsm_hysteresis_figure(
+            record,
+            logger,
+            width_px=width_px,
+            height_px=height_px,
+        )
+        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        if pixmap is None:
+            continue
+        title = _record_label_for_display(record) or record.sample
+        items.append(_GraphPreviewItem(title, pixmap))
+    return items
+
+
+def _vsm_temperature_preview_items(
+    records: Sequence[VsmTemperatureScanRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> List[_GraphPreviewItem]:
+    processor = _get_vsm_temp_processor(logger)
+    if processor is None:
+        return []
+    items: List[_GraphPreviewItem] = []
+    for record in records:
+        figure = _plot_vsm_temperature_scan_figure(
+            record,
+            processor,
+            width_px=width_px,
+            height_px=height_px,
+        )
+        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        if pixmap is None:
+            continue
+        title = _record_label_for_display(record) or record.sample
+        items.append(_GraphPreviewItem(title, pixmap))
+    return items
+
+
+def _dma_iso_stress_preview_items(
+    records: Sequence[DmaIsoStressRecord],
+    logger: logging.Logger,
+    *,
+    width_px: int,
+    height_px: int,
+) -> List[_GraphPreviewItem]:
+    items: List[_GraphPreviewItem] = []
+    for record in records:
+        figure = _plot_dma_iso_stress_figure(
+            record,
+            width_px=width_px,
+            height_px=height_px,
+        )
+        pixmap = _figure_to_pixmap(figure, logger, width_px=width_px, height_px=height_px)
+        if pixmap is None:
+            continue
+        title = _record_label_for_display(record) or record.sample
+        items.append(_GraphPreviewItem(title, pixmap))
+    return items
 
 
 class AnnealingPlotPanel(QtWidgets.QWidget):
@@ -3678,6 +4110,165 @@ def _apply_microscope_overrides(
     return result
 
 
+def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
+    for source in sources:
+        root = Path(source).expanduser()
+        try:
+            rel = path.resolve().relative_to(root.resolve())
+        except Exception:
+            continue
+        parts = rel.parts
+        if len(parts) >= 2:
+            return parts[0]
+        if len(parts) == 1:
+            return path.stem
+    parent = path.parent.name
+    return parent if parent else path.stem
+
+
+def _microwire_key_from_path(path: Path, sample: str) -> Optional[Tuple[str, int, int]]:
+    key = _microscope_key(path)
+    if key is None and sample:
+        try:
+            key = _microscope_key(Path(sample))
+        except Exception:
+            key = None
+    return key
+
+
+def _microwire_info_from_key(
+    key: Optional[Tuple[str, int, int]],
+) -> Tuple[Optional[str], Optional[str]]:
+    if key is None:
+        return None, None
+    composition, draw, piece = key
+    if not composition:
+        return None, None
+    try:
+        microwire = _microwire_label(int(draw), int(piece))
+    except Exception:
+        microwire = f"{draw}/{piece}"
+    return str(composition), microwire
+
+
+def _record_label_for_display(record: object) -> str:
+    label = getattr(record, "label", None)
+    if isinstance(label, str) and label.strip():
+        return label.strip()
+    path = getattr(record, "path", None)
+    if isinstance(path, Path):
+        return path.stem
+    if isinstance(path, str):
+        return Path(path).stem
+    sample = getattr(record, "sample", None)
+    return str(sample).strip() if sample else ""
+
+
+def _record_key_for_group(record: object) -> Optional[Tuple[str, int, int]]:
+    key = getattr(record, "key", None)
+    if isinstance(key, tuple) and len(key) == 3:
+        try:
+            return (str(key[0]), int(key[1]), int(key[2]))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _row_to_microwire_key(row: pd.Series) -> Optional[str]:
+    composition = str(row.get("Composition") or "").strip()
+    microwire = str(row.get("Microwire") or "").strip()
+    if not composition or not microwire:
+        return None
+    parsed = _microwire_tuple_from_label(microwire)
+    if parsed is None:
+        return None
+    draw, piece = parsed
+    try:
+        return f"{composition}|{int(draw)}|{int(piece)}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _group_graph_records_by_key(records: Sequence[object]) -> Dict[str, List[object]]:
+    grouped: Dict[str, List[object]] = {}
+    for record in records:
+        key = _record_key_for_group(record)
+        if key is None:
+            sample = getattr(record, "sample", None)
+            if isinstance(sample, str) and sample.strip():
+                try:
+                    key = _microscope_key(Path(sample))
+                except Exception:
+                    key = None
+        if key is None:
+            continue
+        try:
+            group_key = f"{str(key[0])}|{int(key[1])}|{int(key[2])}"
+        except (TypeError, ValueError):
+            continue
+        grouped.setdefault(group_key, []).append(record)
+    return grouped
+
+
+def _graph_records_to_frame(
+    records: Sequence[object],
+    graph_column: str,
+) -> pd.DataFrame:
+    columns = [
+        "Sample",
+        "Composition",
+        "Microwire",
+        graph_column,
+        "_group_key",
+        "_sources",
+    ]
+    if not records:
+        return pd.DataFrame(columns=columns)
+    grouped: Dict[str, List[object]] = {}
+    for record in records:
+        sample = getattr(record, "sample", None)
+        if not isinstance(sample, str) or not sample.strip():
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                sample = path.stem
+            elif isinstance(path, str):
+                sample = Path(path).stem
+            else:
+                sample = "sample"
+        grouped.setdefault(sample, []).append(record)
+    rows: List[Dict[str, Any]] = []
+    for sample, group in sorted(grouped.items()):
+        key: Optional[Tuple[str, int, int]] = None
+        for record in group:
+            key = _record_key_for_group(record)
+            if key is not None:
+                break
+        composition, microwire = _microwire_info_from_key(key)
+        labels: List[str] = []
+        sources: List[str] = []
+        for record in group:
+            label = _record_label_for_display(record)
+            if label and label not in labels:
+                labels.append(label)
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                sources.append(str(path))
+            elif isinstance(path, str):
+                sources.append(path)
+        group_key = f"{key[0]}|{key[1]}|{key[2]}" if key is not None else ""
+        rows.append(
+            {
+                "Sample": sample,
+                "Composition": composition,
+                "Microwire": microwire,
+                graph_column: labels,
+                "_group_key": group_key,
+                "_sources": list(dict.fromkeys(sources)),
+            }
+        )
+    return pd.DataFrame(rows, columns=columns)
+
+
 
 class MiniDatabaseSection(QtWidgets.QWidget):
     """Base widget for mini-database sections that process a subset of data."""
@@ -3710,7 +4301,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.table_view: QtWidgets.QTableView | None = None
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._cancel_requested = False
-        self.log_emitted.connect(self._dispatch_log)
+        self.log_emitted.connect(
+            self._dispatch_log,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self._worker_thread: QtCore.QThread | None = None
         self._worker: Optional["_SectionWorker"] = None
         self._active_candidates: List[Path] = []
@@ -3835,6 +4429,21 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if vertical_bar is not None:
             vertical_bar.setSingleStep(self._SCROLL_SINGLE_STEP)
 
+    def _close_active_editor(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        editor = table.focusWidget()
+        if editor is None or editor is table:
+            return
+        try:
+            table.closeEditor(
+                editor,
+                QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint,
+            )
+        except Exception:
+            pass
+
     def _auto_fit_columns(self) -> None:
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
@@ -3861,9 +4470,10 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         graph_width = max(int(icon_width), ANNEALING_GRAPH_WIDTH) + 80
         for idx, column_name in enumerate(frame.columns):
             label = str(column_name)
+            label_lower = label.lower()
             if (
-                "Graph" not in label
-                and "Figure" not in label
+                "graph" not in label_lower
+                and "figure" not in label_lower
                 and label not in MICROSCOPE_IMAGE_COLUMNS
             ):
                 continue
@@ -3937,6 +4547,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         except Exception:
             pass
         self._invalidate_pending_cache()
+        self._close_active_editor()
         self.model.set_frame(self.data.table)
         self._populate_sources_list()
         self._auto_fit_columns()
@@ -4713,6 +5324,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         self.data.processed = result.processed
         self.data.table = result.table
         self.store.save(self.data)
+        self._close_active_editor()
         self.model.set_frame(result.table)
         self._auto_fit_columns()
         self._update_status()
@@ -5820,6 +6432,8 @@ class MicroscopeSection(MiniDatabaseSection):
         self._pending_advance_key: str | None = None
         self._pending_advance_column: str | None = None
         self._pending_advance_review: bool = False
+        self._pending_partial_rows: List[dict] = []
+        self._pending_partial_flush = False
         super().__init__(logger, log_callback, parent)
 
         # Removed the missing-items list UI; missing values are visible in the table.
@@ -5843,7 +6457,10 @@ class MicroscopeSection(MiniDatabaseSection):
         self._apply_overrides_to_table()
         self._update_hidden_columns()
         self._update_missing_summary()
-        self.partial_row_ready.connect(self._apply_partial_row)
+        self.partial_row_ready.connect(
+            self._apply_partial_row,
+            QtCore.Qt.ConnectionType.QueuedConnection,
+        )
         self._update_review_buttons()
         QtCore.QTimer.singleShot(0, self._ensure_table_autosized)
         self._install_diameter_handlers()
@@ -5941,6 +6558,27 @@ class MicroscopeSection(MiniDatabaseSection):
             selection_model.selectionChanged.connect(self._handle_selection_changed)
             selection_model.currentChanged.connect(self._handle_current_changed)
         table.installEventFilter(self)
+        table.setTabKeyNavigation(False)
+        self._tab_forward_shortcut = QtGui.QShortcut(
+            QtGui.QKeySequence(QtCore.Qt.Key.Key_Tab),
+            table,
+        )
+        self._tab_forward_shortcut.setContext(
+            QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._tab_forward_shortcut.activated.connect(
+            lambda: self._advance_d_column(True)
+        )
+        self._tab_backward_shortcut = QtGui.QShortcut(
+            QtGui.QKeySequence(QtCore.Qt.Key.Key_Backtab),
+            table,
+        )
+        self._tab_backward_shortcut.setContext(
+            QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut
+        )
+        self._tab_backward_shortcut.activated.connect(
+            lambda: self._advance_d_column(False)
+        )
 
         preview_container = QtWidgets.QWidget(splitter)
         preview_container.setMinimumWidth(360)
@@ -6136,7 +6774,30 @@ class MicroscopeSection(MiniDatabaseSection):
                 keys.add((str(composition), int(draw), int(piece)))
             except (TypeError, ValueError):
                 continue
+        keys.update(self._extra_expected_keys())
         return keys
+
+    def _extra_expected_keys(self) -> Set[Tuple[str, int, int]]:
+        extra: Set[Tuple[str, int, int]] = set()
+        tokens = set(self._overrides.keys()) | set(self._validated.keys())
+        for token in tokens:
+            if not token:
+                continue
+            parts = str(token).split("|")
+            if len(parts) != 3:
+                continue
+            composition = parts[0].strip()
+            try:
+                draw = int(parts[1])
+                piece = int(parts[2])
+            except ValueError:
+                continue
+            if composition:
+                extra.add((composition, draw, piece))
+        return extra
+
+    def _protected_key_tokens(self) -> Set[str]:
+        return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
 
     def _prepare_initial_table(self, expected_keys: Set[Tuple[str, int, int]]) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
@@ -6146,6 +6807,7 @@ class MicroscopeSection(MiniDatabaseSection):
             frame = frame.copy()
         if expected_keys:
             allowed = {f"{composition}|{draw}|{piece}" for composition, draw, piece in expected_keys}
+            allowed.update(self._protected_key_tokens())
             if "_key" in frame.columns:
                 try:
                     mask = frame["_key"].astype(str).isin(allowed)
@@ -6191,7 +6853,10 @@ class MicroscopeSection(MiniDatabaseSection):
                 }
             )
         if new_rows:
-            frame = pd.concat([frame, pd.DataFrame(new_rows)], ignore_index=True, sort=False)
+            if frame.empty:
+                frame = pd.DataFrame(new_rows)
+            else:
+                frame = pd.concat([frame, pd.DataFrame(new_rows)], ignore_index=True, sort=False)
         frame = frame.loc[:, MICROSCOPE_TABLE_COLUMNS]
         frame = frame.sort_values(["Composition", "Microwire"]).reset_index(drop=True)
         self.data.table = frame
@@ -6206,6 +6871,25 @@ class MicroscopeSection(MiniDatabaseSection):
         except (TypeError, ValueError):
             return False
         return math.isfinite(numeric) and numeric > 0
+
+    def _validated_value(self, key: str, column: str) -> Optional[float]:
+        entry = self._validated.get(key)
+        if not isinstance(entry, dict):
+            return None
+        has_flags = "d_reviewed" in entry or "D_reviewed" in entry
+        if column == MICROSCOPE_D_COLUMN:
+            if has_flags and not entry.get("d_reviewed"):
+                return None
+            value = entry.get("d")
+        elif column == MICROSCOPE_CAP_D_COLUMN:
+            if has_flags and not entry.get("D_reviewed"):
+                return None
+            value = entry.get("D")
+        else:
+            return None
+        if not self._is_valid_diameter(value):
+            return None
+        return float(value)
 
     def _record_to_row(
         self,
@@ -6228,6 +6912,10 @@ class MicroscopeSection(MiniDatabaseSection):
                     d_value = float(core_detection.value)
                 except (TypeError, ValueError):
                     d_value = None
+        if d_value is None:
+            validated = self._validated_value(key_str, MICROSCOPE_D_COLUMN)
+            if validated is not None:
+                d_value = validated
 
         D_value = override.get("D")
         if D_value is None:
@@ -6241,6 +6929,10 @@ class MicroscopeSection(MiniDatabaseSection):
                     D_value = float(glass_detection.value)
                 except (TypeError, ValueError):
                     D_value = None
+        if D_value is None:
+            validated = self._validated_value(key_str, MICROSCOPE_CAP_D_COLUMN)
+            if validated is not None:
+                D_value = validated
 
         ratio = None
         if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
@@ -6285,6 +6977,36 @@ class MicroscopeSection(MiniDatabaseSection):
         }
 
     def _apply_partial_row(self, row: dict) -> None:
+        table = self.table_view
+        if (
+            isinstance(table, QtWidgets.QTableView)
+            and table.state() == QtWidgets.QAbstractItemView.State.EditingState
+        ):
+            self._pending_partial_rows.append(row)
+            if not self._pending_partial_flush:
+                self._pending_partial_flush = True
+                QtCore.QTimer.singleShot(0, self._flush_pending_partial_rows)
+            return
+        self._apply_partial_row_now(row)
+
+    def _flush_pending_partial_rows(self) -> None:
+        self._pending_partial_flush = False
+        table = self.table_view
+        if (
+            isinstance(table, QtWidgets.QTableView)
+            and table.state() == QtWidgets.QAbstractItemView.State.EditingState
+        ):
+            self._pending_partial_flush = True
+            QtCore.QTimer.singleShot(50, self._flush_pending_partial_rows)
+            return
+        if not self._pending_partial_rows:
+            return
+        pending = list(self._pending_partial_rows)
+        self._pending_partial_rows.clear()
+        for row in pending:
+            self._apply_partial_row_now(row)
+
+    def _apply_partial_row_now(self, row: dict) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             frame = pd.DataFrame(columns=row.keys())
@@ -6301,7 +7023,10 @@ class MicroscopeSection(MiniDatabaseSection):
                     frame[column] = pd.Series([None] * len(frame))
                 frame.at[idx, column] = value
         else:
-            frame = pd.concat([frame, pd.DataFrame([row])], ignore_index=True, sort=False)
+            if frame.empty:
+                frame = pd.DataFrame([row])
+            else:
+                frame = pd.concat([frame, pd.DataFrame([row])], ignore_index=True, sort=False)
         for column in MICROSCOPE_TABLE_COLUMNS:
             if column not in frame.columns:
                 frame[column] = pd.Series([None] * len(frame))
@@ -6514,12 +7239,86 @@ class MicroscopeSection(MiniDatabaseSection):
         except Exception:
             pass
 
+    def _close_table_editor(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        editor = table.focusWidget()
+        if editor is None or editor is table:
+            return
+        try:
+            table.closeEditor(
+                editor,
+                QtWidgets.QAbstractItemDelegate.EndEditHint.NoHint,
+            )
+        except Exception:
+            pass
+
+    def _advance_d_column(self, forward: bool) -> None:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return
+        model = self.table_view.model()
+        selection = self.table_view.selectionModel()
+        if model is None or selection is None:
+            return
+        frame = self.model.frame()
+        columns = list(frame.columns) if hasattr(frame, "columns") else []
+        try:
+            d_col = columns.index(MICROSCOPE_D_COLUMN)
+            D_col = columns.index(MICROSCOPE_CAP_D_COLUMN)
+        except ValueError:
+            return
+        row_count = model.rowCount()
+        if row_count <= 0:
+            return
+        current = selection.currentIndex()
+        row = current.row() if current.isValid() else 0
+        col = current.column() if current.isValid() else d_col
+        if forward:
+            if col == d_col:
+                target_row, target_col = row, D_col
+            elif col == D_col:
+                target_row = min(row + 1, row_count - 1)
+                target_col = d_col
+            else:
+                target_row, target_col = row, d_col
+        else:
+            if col == D_col:
+                target_row, target_col = row, d_col
+            elif col == d_col:
+                target_row = max(row - 1, 0)
+                target_col = D_col if row > 0 else d_col
+            else:
+                target_row, target_col = row, d_col
+        target = model.index(target_row, target_col)
+        if not target.isValid():
+            return
+        self._close_table_editor()
+        selection.setCurrentIndex(
+            target,
+            QtCore.QItemSelectionModel.SelectionFlag.ClearAndSelect,
+        )
+        try:
+            self.table_view.scrollTo(
+                target,
+                QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter,
+            )
+        except Exception:
+            pass
+        try:
+            self.table_view.edit(target)
+        except Exception:
+            pass
+
     def _background_brush_for_cell(self, row: pd.Series, column: str) -> Optional[QtGui.QBrush]:
         missing_images = self._row_missing_images(row)
         if missing_images:
             return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
         key = str(row.get("_key", ""))
         if column in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}:
+            value = row.get(column)
+            if not self._is_valid_diameter(value):
+                return QtGui.QBrush(QtGui.QColor("#3a0a0a"))
             reviewed = self._is_cell_reviewed(key, column)
             return QtGui.QBrush(QtGui.QColor("#0f3b26" if reviewed else "#3a0a0a"))
         return None
@@ -6530,6 +7329,9 @@ class MicroscopeSection(MiniDatabaseSection):
             return QtGui.QBrush(QtGui.QColor("#ffd6d6"))
         key = str(row.get("_key", ""))
         if column in {MICROSCOPE_D_COLUMN, MICROSCOPE_CAP_D_COLUMN}:
+            value = row.get(column)
+            if not self._is_valid_diameter(value):
+                return QtGui.QBrush(QtGui.QColor("#ef4444"))
             reviewed = self._is_cell_reviewed(key, column)
             return QtGui.QBrush(QtGui.QColor("#22c55e" if reviewed else "#ef4444"))
         return None
@@ -6540,10 +7342,17 @@ class MicroscopeSection(MiniDatabaseSection):
             return False
         has_flags = "d_reviewed" in entry or "D_reviewed" in entry
         if column == MICROSCOPE_D_COLUMN:
-            return bool(entry.get("d_reviewed")) if has_flags else True
-        if column == MICROSCOPE_CAP_D_COLUMN:
-            return bool(entry.get("D_reviewed")) if has_flags else True
-        return False
+            reviewed = bool(entry.get("d_reviewed")) if has_flags else True
+        elif column == MICROSCOPE_CAP_D_COLUMN:
+            reviewed = bool(entry.get("D_reviewed")) if has_flags else True
+        else:
+            return False
+        if not reviewed:
+            return False
+        row = self._row_for_key(key)
+        if row is not None and not self._is_valid_diameter(row.get(column)):
+            return False
+        return True
 
     def _row_missing_images(self, row: pd.Series) -> bool:
         core_present = bool(row.get("_core_image"))
@@ -6555,6 +7364,48 @@ class MicroscopeSection(MiniDatabaseSection):
             glass_present = True
         return not (core_present and glass_present)
 
+    def _row_for_key(self, key: str) -> Optional[pd.Series]:
+        frame = self.model.frame()
+        if frame.empty or "_key" not in frame.columns:
+            return None
+        try:
+            matches = frame.index[frame["_key"] == key].tolist()
+        except Exception:
+            return None
+        if not matches:
+            return None
+        try:
+            return frame.iloc[matches[0]]
+        except Exception:
+            return None
+
+    def _sync_review_flags_for_row(self, key: str, row: pd.Series) -> bool:
+        entry = self._validated.get(key)
+        if not isinstance(entry, dict):
+            return False
+        changed = False
+        if not self._is_valid_diameter(row.get(MICROSCOPE_D_COLUMN)):
+            if "d_reviewed" in entry:
+                entry.pop("d_reviewed", None)
+                changed = True
+            if "d" in entry:
+                entry.pop("d", None)
+                changed = True
+        if not self._is_valid_diameter(row.get(MICROSCOPE_CAP_D_COLUMN)):
+            if "D_reviewed" in entry:
+                entry.pop("D_reviewed", None)
+                changed = True
+            if "D" in entry:
+                entry.pop("D", None)
+                changed = True
+        if not changed:
+            return False
+        if not entry.get("d_reviewed") and not entry.get("D_reviewed"):
+            self._validated.pop(key, None)
+        else:
+            self._validated[key] = entry
+        return True
+
     def _handle_cell_edited(
         self,
         top_left: QtCore.QModelIndex,
@@ -6565,6 +7416,7 @@ class MicroscopeSection(MiniDatabaseSection):
             return
         frame = self.model.frame()
         self.data.table = frame.copy()
+        validation_changed = False
         edited_rows = range(top_left.row(), bottom_right.row() + 1)
         for row_idx in edited_rows:
             try:
@@ -6583,7 +7435,11 @@ class MicroscopeSection(MiniDatabaseSection):
                 self._overrides[key] = override
             elif key in self._overrides:
                 self._overrides.pop(key, None)
+            if self._sync_review_flags_for_row(key, row):
+                validation_changed = True
         self._store_overrides()
+        if validation_changed:
+            self._store_validation()
 
     def _queue_advance_after_restore(
         self,
@@ -6925,6 +7781,9 @@ class MicroscopeSection(MiniDatabaseSection):
         if self._selected_key in self._overrides:
             self._overrides.pop(self._selected_key, None)
             self._store_overrides()
+        row = self._row_for_key(self._selected_key)
+        if row is not None and self._sync_review_flags_for_row(self._selected_key, row):
+            self._store_validation()
         self.d_edit.clear()
         self.D_edit.clear()
 
@@ -7000,7 +7859,19 @@ class MicroscopeSection(MiniDatabaseSection):
         entry["timestamp"] = datetime.utcnow().isoformat() + "Z"
         self._validated[key] = entry
         self._store_validation()
-        self._update_review_buttons()
+        override_changed = False
+        override_entry = dict(self._overrides.get(key, {}))
+        if MICROSCOPE_D_COLUMN in columns_to_mark and self._is_valid_diameter(d_value):
+            if override_entry.get("d") != float(d_value):
+                override_entry["d"] = float(d_value)
+                override_changed = True
+        if MICROSCOPE_CAP_D_COLUMN in columns_to_mark and self._is_valid_diameter(D_value):
+            if override_entry.get("D") != float(D_value):
+                override_entry["D"] = float(D_value)
+                override_changed = True
+        if override_changed:
+            self._overrides[key] = override_entry
+            self._store_overrides()
 
     def _clear_review(self) -> None:
         if not self._selected_key:
@@ -7132,6 +8003,14 @@ class MicroscopeSection(MiniDatabaseSection):
                     d_value = override.get("d")
                 if "D" in override:
                     D_value = override.get("D")
+            if not self._is_valid_diameter(d_value):
+                validated = self._validated_value(key, MICROSCOPE_D_COLUMN)
+                if validated is not None:
+                    d_value = validated
+            if not self._is_valid_diameter(D_value):
+                validated = self._validated_value(key, MICROSCOPE_CAP_D_COLUMN)
+                if validated is not None:
+                    D_value = validated
             ratio = None
             if isinstance(d_value, (int, float)) and isinstance(D_value, (int, float)) and D_value:
                 try:
@@ -8345,6 +9224,579 @@ class VideoSection(MiniDatabaseSection):
         return sources
 
 
+class VsmHysteresisSection(MiniDatabaseSection):
+    section_key = "vsm_hysteresis"
+    section_title = "VSM hysteresis loops"
+    supported_suffixes = (".dat", ".vsm-hys-data", ".txt", ".csv")
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
+        self._record_groups: Dict[str, List[VsmHysteresisRecord]] = {}
+        self._table_splitter: QtWidgets.QSplitter | None = None
+        super().__init__(logger, log_callback, parent)
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
+        self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
+        self.open_graphs_button.clicked.connect(self._open_selected_graphs)
+        self.controls_layout.addWidget(self.open_graphs_button)
+        header = self.table_view.verticalHeader() if self.table_view is not None else None
+        if header is not None:
+            default_height = ANNEALING_GRAPH_HEIGHT + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        if _read_vsm_file is None:
+            raise RuntimeError("VSM hysteresis parser is not available.")
+        records: List[VsmHysteresisRecord] = []
+        processed: Dict[str, float] = {}
+        total = len(paths)
+        for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
+            try:
+                frame = _read_vsm_file(Path(path))
+            except Exception:
+                self.logger.exception("Failed to parse %s", path)
+                frame = pd.DataFrame()
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped {Path(path).name}")
+                    except Exception:
+                        pass
+                continue
+            sample = _sample_from_path(Path(path), self.data.sources)
+            key = _microwire_key_from_path(Path(path), sample)
+            temperature = _parse_temperature(Path(path)) if callable(_parse_temperature) else None
+            angle = _parse_angle(Path(path)) if callable(_parse_angle) else None
+            label_parts: List[str] = []
+            if isinstance(temperature, (int, float)) and math.isfinite(temperature):
+                label_parts.append(f"T{temperature:g}C")
+            if isinstance(angle, (int, float)) and math.isfinite(angle):
+                label_parts.append(f"a{angle:g}deg")
+            label = " ".join(label_parts) if label_parts else Path(path).stem
+            records.append(
+                VsmHysteresisRecord(
+                    path=Path(path),
+                    sample=sample,
+                    data=frame,
+                    temperature=temperature,
+                    angle=angle,
+                    key=key,
+                    label=label,
+                )
+            )
+            try:
+                processed[str(path)] = float(Path(path).stat().st_mtime)
+            except OSError:
+                processed[str(path)] = 0.0
+            if progress is not None:
+                try:
+                    progress(idx, total, f"Parsed {Path(path).name}")
+                except Exception:
+                    pass
+        table = _graph_records_to_frame(records, VSM_HYSTERESIS_COLUMN)
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"vsm_hysteresis_records": records},
+        )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._refresh_record_groups()
+
+    def _refresh_record_groups(self) -> None:
+        grouped: Dict[str, List[VsmHysteresisRecord]] = {}
+        try:
+            payload = self.store.load_payload("vsm_hysteresis_records")
+        except Exception:
+            payload = None
+        if isinstance(payload, list):
+            for record in payload:
+                sample = getattr(record, "sample", None)
+                if isinstance(sample, str) and sample.strip():
+                    grouped.setdefault(sample, []).append(record)
+        self._record_groups = grouped
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column != VSM_HYSTERESIS_COLUMN:
+            return None
+        sample = row.get("Sample")
+        if not isinstance(sample, str) or not sample:
+            return None
+        cache_key = f"{sample}|{column}"
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(sample, [])
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            items = _vsm_hysteresis_preview_items(
+                [records[0]],
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            if items:
+                pixmap = items[0].pixmap
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _open_selected_graphs(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        records: List[VsmHysteresisRecord] = []
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            sample = series.get("Sample")
+            if not isinstance(sample, str) or not sample:
+                continue
+            records.extend(self._record_groups.get(sample, []))
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No graphs are available for the selected rows.",
+            )
+            return
+        items = _vsm_hysteresis_preview_items(
+            records,
+            self.logger,
+            width_px=GRAPH_PREVIEW_WIDTH,
+            height_px=GRAPH_PREVIEW_HEIGHT,
+        )
+        dialog = _GraphGalleryDialog(
+            "VSM hysteresis graphs",
+            items,
+            parent=self,
+            empty_message="No VSM hysteresis graphs available.",
+        )
+        dialog.exec()
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw = row.get("_sources")
+        if isinstance(raw, (list, tuple, set)):
+            for entry in raw:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
+
+
+class VsmTemperatureScanSection(MiniDatabaseSection):
+    section_key = "vsm_temperature_scan"
+    section_title = "VSM temperature scan"
+    supported_suffixes = (".vsm-tscn-data", ".txt", ".csv")
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
+        self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._table_splitter: QtWidgets.QSplitter | None = None
+        super().__init__(logger, log_callback, parent)
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
+        self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
+        self.open_graphs_button.clicked.connect(self._open_selected_graphs)
+        self.controls_layout.addWidget(self.open_graphs_button)
+        header = self.table_view.verticalHeader() if self.table_view is not None else None
+        if header is not None:
+            default_height = ANNEALING_GRAPH_HEIGHT + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        processor = _get_vsm_temp_processor(self.logger)
+        if processor is None:
+            raise RuntimeError("VSM temperature scan parser is not available.")
+        records: List[VsmTemperatureScanRecord] = []
+        processed: Dict[str, float] = {}
+        total = len(paths)
+        for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
+            try:
+                frame, _ = processor._parse_file(Path(path))
+            except Exception:
+                self.logger.exception("Failed to parse %s", path)
+                frame = pd.DataFrame()
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped {Path(path).name}")
+                    except Exception:
+                        pass
+                continue
+            sample = _sample_from_path(Path(path), self.data.sources)
+            key = _microwire_key_from_path(Path(path), sample)
+            label = Path(path).stem
+            records.append(
+                VsmTemperatureScanRecord(
+                    path=Path(path),
+                    sample=sample,
+                    data=frame,
+                    key=key,
+                    label=label,
+                )
+            )
+            try:
+                processed[str(path)] = float(Path(path).stat().st_mtime)
+            except OSError:
+                processed[str(path)] = 0.0
+            if progress is not None:
+                try:
+                    progress(idx, total, f"Parsed {Path(path).name}")
+                except Exception:
+                    pass
+        table = _graph_records_to_frame(records, VSM_TEMPERATURE_SCAN_COLUMN)
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"vsm_temperature_scan_records": records},
+        )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._refresh_record_groups()
+
+    def _refresh_record_groups(self) -> None:
+        grouped: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        try:
+            payload = self.store.load_payload("vsm_temperature_scan_records")
+        except Exception:
+            payload = None
+        if isinstance(payload, list):
+            for record in payload:
+                sample = getattr(record, "sample", None)
+                if isinstance(sample, str) and sample.strip():
+                    grouped.setdefault(sample, []).append(record)
+        self._record_groups = grouped
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column != VSM_TEMPERATURE_SCAN_COLUMN:
+            return None
+        sample = row.get("Sample")
+        if not isinstance(sample, str) or not sample:
+            return None
+        cache_key = f"{sample}|{column}"
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(sample, [])
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            items = _vsm_temperature_preview_items(
+                [records[0]],
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            if items:
+                pixmap = items[0].pixmap
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _open_selected_graphs(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        records: List[VsmTemperatureScanRecord] = []
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            sample = series.get("Sample")
+            if not isinstance(sample, str) or not sample:
+                continue
+            records.extend(self._record_groups.get(sample, []))
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No graphs are available for the selected rows.",
+            )
+            return
+        items = _vsm_temperature_preview_items(
+            records,
+            self.logger,
+            width_px=GRAPH_PREVIEW_WIDTH,
+            height_px=GRAPH_PREVIEW_HEIGHT,
+        )
+        dialog = _GraphGalleryDialog(
+            "VSM temperature scan graphs",
+            items,
+            parent=self,
+            empty_message="No VSM temperature scan graphs available.",
+        )
+        dialog.exec()
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw = row.get("_sources")
+        if isinstance(raw, (list, tuple, set)):
+            for entry in raw:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
+
+
+class DmaIsoStressSection(MiniDatabaseSection):
+    section_key = "dma_iso_stress"
+    section_title = "DMA iso-stress"
+    supported_suffixes = (".txt",)
+
+    def __init__(
+        self,
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
+        self._record_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._table_splitter: QtWidgets.QSplitter | None = None
+        super().__init__(logger, log_callback, parent)
+        if isinstance(self.model, DataFrameModel):
+            self.model.set_decoration_provider(self._preview_decoration)
+        self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
+        self.open_graphs_button.clicked.connect(self._open_selected_graphs)
+        self.controls_layout.addWidget(self.open_graphs_button)
+        header = self.table_view.verticalHeader() if self.table_view is not None else None
+        if header is not None:
+            default_height = ANNEALING_GRAPH_HEIGHT + 24
+            header.setDefaultSectionSize(default_height)
+            header.setMinimumSectionSize(default_height)
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        if parse_dma_txt is None:
+            raise RuntimeError("DMA iso-stress parser is not available.")
+        records: List[DmaIsoStressRecord] = []
+        processed: Dict[str, float] = {}
+        total = len(paths)
+        for idx, path in enumerate(paths, start=1):
+            self._check_cancelled()
+            try:
+                datasets = parse_dma_txt(Path(path))
+            except Exception:
+                self.logger.exception("Failed to parse %s", path)
+                datasets = {}
+            if not datasets:
+                if progress is not None:
+                    try:
+                        progress(idx, total, f"Skipped {Path(path).name}")
+                    except Exception:
+                        pass
+                continue
+            sample = _sample_from_path(Path(path), self.data.sources)
+            key = _microwire_key_from_path(Path(path), sample)
+            label = Path(path).stem
+            records.append(
+                DmaIsoStressRecord(
+                    path=Path(path),
+                    sample=sample,
+                    datasets=datasets,
+                    key=key,
+                    label=label,
+                )
+            )
+            try:
+                processed[str(path)] = float(Path(path).stat().st_mtime)
+            except OSError:
+                processed[str(path)] = 0.0
+            if progress is not None:
+                try:
+                    progress(idx, total, f"Parsed {Path(path).name}")
+                except Exception:
+                    pass
+        table = _graph_records_to_frame(records, DMA_ISOSTRESS_COLUMN)
+        return SectionProcessResult(
+            table=table,
+            processed=processed,
+            payloads={"dma_iso_stress_records": records},
+        )
+
+    def refresh(self) -> None:
+        super().refresh()
+        self._refresh_record_groups()
+        self._hide_columns(["_group_key", "_sources"])
+
+    def _handle_worker_finished(self, result: SectionProcessResult) -> None:
+        super()._handle_worker_finished(result)
+        self._refresh_record_groups()
+
+    def _refresh_record_groups(self) -> None:
+        grouped: Dict[str, List[DmaIsoStressRecord]] = {}
+        try:
+            payload = self.store.load_payload("dma_iso_stress_records")
+        except Exception:
+            payload = None
+        if isinstance(payload, list):
+            for record in payload:
+                sample = getattr(record, "sample", None)
+                if isinstance(sample, str) and sample.strip():
+                    grouped.setdefault(sample, []).append(record)
+        self._record_groups = grouped
+        self._pixmap_cache.clear()
+        if isinstance(self.model, DataFrameModel):
+            try:
+                self.model.layoutChanged.emit()
+            except Exception:
+                pass
+
+    def _preview_decoration(
+        self,
+        row: pd.Series,
+        column: str,
+    ) -> Optional[QtGui.QPixmap]:
+        if column != DMA_ISOSTRESS_COLUMN:
+            return None
+        sample = row.get("Sample")
+        if not isinstance(sample, str) or not sample:
+            return None
+        cache_key = f"{sample}|{column}"
+        if cache_key in self._pixmap_cache:
+            return self._pixmap_cache[cache_key]
+        records = self._record_groups.get(sample, [])
+        pixmap: Optional[QtGui.QPixmap] = None
+        if records:
+            items = _dma_iso_stress_preview_items(
+                [records[0]],
+                self.logger,
+                width_px=ANNEALING_GRAPH_WIDTH,
+                height_px=ANNEALING_GRAPH_HEIGHT,
+            )
+            if items:
+                pixmap = items[0].pixmap
+        self._pixmap_cache[cache_key] = pixmap
+        return pixmap
+
+    def _open_selected_graphs(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their graphs.",
+            )
+            return
+        records: List[DmaIsoStressRecord] = []
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            sample = series.get("Sample")
+            if not isinstance(sample, str) or not sample:
+                continue
+            records.extend(self._record_groups.get(sample, []))
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No graphs are available for the selected rows.",
+            )
+            return
+        items = _dma_iso_stress_preview_items(
+            records,
+            self.logger,
+            width_px=GRAPH_PREVIEW_WIDTH,
+            height_px=GRAPH_PREVIEW_HEIGHT,
+        )
+        dialog = _GraphGalleryDialog(
+            "DMA iso-stress graphs",
+            items,
+            parent=self,
+            empty_message="No DMA iso-stress graphs available.",
+        )
+        dialog.exec()
+
+    def _row_sources(self, row: pd.Series) -> List[Path]:
+        sources: List[Path] = []
+        raw = row.get("_sources")
+        if isinstance(raw, (list, tuple, set)):
+            for entry in raw:
+                if not entry:
+                    continue
+                try:
+                    sources.append(Path(entry))
+                except Exception:
+                    continue
+        return sources
+
 
 class StrainSection(MiniDatabaseSection):
     section_key = "strain"
@@ -8397,6 +9849,7 @@ class StrainSection(MiniDatabaseSection):
         self._editing_key: Optional[tuple[str, int, int]] = None
         self._selected_wire_key: Optional[tuple[str, int, int]] = None
         self._mass_override_active = False
+        self._suppress_table_selection = False
         self._strain_offsets: Dict[str, float] = {
             self.STRAIN_MODE_LINEAR: 0.0,
             self.STRAIN_MODE_DUAL_SUPPORT: 0.0,
@@ -8559,6 +10012,24 @@ class StrainSection(MiniDatabaseSection):
 
         layout.addWidget(form_container)
 
+        self.setTabOrder(self.composition_combo, self.microwire_combo)
+        self.setTabOrder(self.microwire_combo, self.strain_mode_combo)
+        self.setTabOrder(self.strain_mode_combo, self.target_stress_spin)
+        self.setTabOrder(self.target_stress_spin, self.d_edit)
+        self.setTabOrder(self.d_edit, self.mass_display)
+        self.setTabOrder(self.mass_display, self.M_length_edit)
+        self.setTabOrder(self.M_length_edit, self.A_length_edit)
+        self.setTabOrder(self.A_length_edit, self.strain_offset_spin)
+        self.setTabOrder(self.strain_offset_spin, self.clamp_span_spin)
+        self.setTabOrder(self.clamp_span_spin, self.strain_display)
+
+        enter_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Return), form_container)
+        enter_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        enter_shortcut.activated.connect(self._save_entry)
+        enter_keypad_shortcut = QtGui.QShortcut(QtGui.QKeySequence(QtCore.Qt.Key.Key_Enter), form_container)
+        enter_keypad_shortcut.setContext(QtCore.Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        enter_keypad_shortcut.activated.connect(self._save_entry)
+
         button_row = QtWidgets.QHBoxLayout()
         self.add_update_button = QtWidgets.QPushButton("Add entry")
         self.add_update_button.clicked.connect(self._save_entry)
@@ -8601,6 +10072,9 @@ class StrainSection(MiniDatabaseSection):
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_table_selection)
         layout.addWidget(self.table_view, 1)
+
+        self._configure_combo_popup(self.composition_combo)
+        self._configure_combo_popup(self.microwire_combo)
 
         return container
 
@@ -8745,6 +10219,8 @@ class StrainSection(MiniDatabaseSection):
         self.strain_display.setText(f"{percent:.3f}")
 
     def _handle_table_selection(self, *_: Any) -> None:
+        if getattr(self, "_suppress_table_selection", False):
+            return
         self._load_row(self._selected_row_index())
 
     def _selected_row_index(self) -> Optional[int]:
@@ -8976,18 +10452,33 @@ class StrainSection(MiniDatabaseSection):
             self.COLUMN_BROKE: broke,
         }
 
-        if self._editing_index is not None and 0 <= self._editing_index < len(self.data.table.index):
+        updating_existing = self._editing_index is not None and 0 <= self._editing_index < len(self.data.table.index)
+        if updating_existing:
             idx = self._editing_index
         else:
             idx = len(self.data.table.index)
         self.data.table.loc[idx, :] = row_data
-        self._editing_index = idx
-        self._editing_key = key
-        self._save_table()
-        self._select_key(key)
+        self._editing_index = idx if updating_existing else None
+        self._editing_key = key if updating_existing else None
+        suppress_selection = not updating_existing
+        if suppress_selection:
+            self._suppress_table_selection = True
+        try:
+            self._save_table()
+        finally:
+            if suppress_selection:
+                QtCore.QTimer.singleShot(0, self._resume_table_selection)
+        if updating_existing:
+            self._select_key(key)
+        else:
+            self._clear_form()
+            QtCore.QTimer.singleShot(0, self._focus_entry_selector)
         self.log(
             f"Strain: recorded {composition} {label}"
         )
+
+    def _resume_table_selection(self) -> None:
+        self._suppress_table_selection = False
 
     def _delete_selected(self) -> None:
         row_index = self._selected_row_index()
@@ -9090,6 +10581,7 @@ class StrainSection(MiniDatabaseSection):
             completer.setCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
             completer.setModel(QtCore.QStringListModel(available, completer))
         self._update_microwire_options()
+        self._configure_combo_popup(self.composition_combo)
 
     def _update_microwire_options(self) -> None:
         if not hasattr(self, "microwire_combo"):
@@ -9122,6 +10614,44 @@ class StrainSection(MiniDatabaseSection):
             self.microwire_combo.setCurrentIndex(0)
         self.microwire_combo.blockSignals(was_blocked)
         self._microwire_changed()
+        self._configure_combo_popup(self.microwire_combo)
+
+    def _focus_entry_selector(self) -> None:
+        if not hasattr(self, "composition_combo"):
+            return
+        try:
+            self.composition_combo.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+        except Exception:
+            pass
+        self._configure_combo_popup(self.composition_combo)
+        try:
+            self.composition_combo.showPopup()
+        except Exception:
+            pass
+
+    def _configure_combo_popup(self, combo: QtWidgets.QComboBox) -> None:
+        view = combo.view()
+        if view is None:
+            return
+        try:
+            screen = QtGui.QGuiApplication.screenAt(
+                combo.mapToGlobal(combo.rect().center())
+            )
+            if screen is None:
+                screen = QtGui.QGuiApplication.primaryScreen()
+        except Exception:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        available_height = screen.availableGeometry().height() if screen is not None else 900
+        max_height = max(200, available_height - 240)
+        model = view.model()
+        row_count = model.rowCount() if model is not None else 0
+        row_height = view.sizeHintForRow(0)
+        if row_height <= 0:
+            row_height = view.fontMetrics().height() + 8
+        max_items = max(6, max(1, min(row_count or 12, max_height // row_height)))
+        combo.setMaxVisibleItems(max_items)
+        target_height = min(max_height, row_height * max_items + view.frameWidth() * 2)
+        view.setMinimumHeight(max(120, int(target_height)))
 
     def _refresh_table_view(self) -> None:
         self.model.set_frame(self.data.table)
@@ -9612,6 +11142,867 @@ class StrainSection(MiniDatabaseSection):
         return stress_pa / 1e6
 
 
+class _ColumnSelectionDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        column_groups: Mapping[str, Sequence[str]],
+        selected: Set[str],
+        mandatory: Set[str],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Select columns")
+        self._mandatory = set(mandatory)
+        self._column_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        self._updating = False
+
+        layout = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel(
+            "Choose which columns to include in the assembled output."
+        )
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderLabel("Columns")
+        layout.addWidget(self.tree, 1)
+
+        selected_columns = set(selected) | self._mandatory
+        for group_label, columns in column_groups.items():
+            if not columns:
+                continue
+            group_item = QtWidgets.QTreeWidgetItem([group_label])
+            group_item.setFlags(
+                group_item.flags()
+                | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                | QtCore.Qt.ItemFlag.ItemIsAutoTristate
+            )
+            self.tree.addTopLevelItem(group_item)
+            for column in columns:
+                item = QtWidgets.QTreeWidgetItem([column])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, column)
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                state = (
+                    QtCore.Qt.CheckState.Checked
+                    if column in selected_columns
+                    else QtCore.Qt.CheckState.Unchecked
+                )
+                item.setCheckState(0, state)
+                group_item.addChild(item)
+                self._column_items[column] = item
+            self._sync_group_state(group_item)
+
+        self.tree.expandAll()
+        self.tree.itemChanged.connect(self._handle_item_changed)
+
+        button_row = QtWidgets.QHBoxLayout()
+        select_all_button = QtWidgets.QPushButton("Select all")
+        select_all_button.clicked.connect(self._select_all)
+        button_row.addWidget(select_all_button)
+        select_none_button = QtWidgets.QPushButton("Select none")
+        select_none_button.clicked.connect(self._select_none)
+        button_row.addWidget(select_none_button)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def selected_columns(self) -> Set[str]:
+        selected: Set[str] = set(self._mandatory)
+        for column, item in self._column_items.items():
+            if item.checkState(0) == QtCore.Qt.CheckState.Checked:
+                selected.add(column)
+        return selected
+
+    def _select_all(self) -> None:
+        self._set_all(QtCore.Qt.CheckState.Checked)
+
+    def _select_none(self) -> None:
+        self._set_all(QtCore.Qt.CheckState.Unchecked)
+
+    def _set_all(self, state: QtCore.Qt.CheckState) -> None:
+        self._updating = True
+        for column, item in self._column_items.items():
+            if column in self._mandatory:
+                item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+            else:
+                item.setCheckState(0, state)
+        for index in range(self.tree.topLevelItemCount()):
+            group_item = self.tree.topLevelItem(index)
+            if group_item is not None:
+                self._sync_group_state(group_item)
+        self._updating = False
+
+    def _handle_item_changed(self, item: QtWidgets.QTreeWidgetItem, _: int) -> None:
+        if self._updating:
+            return
+        column = item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+        if column is None:
+            state = item.checkState(0)
+            self._updating = True
+            for idx in range(item.childCount()):
+                child = item.child(idx)
+                if child is None:
+                    continue
+                column_name = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if column_name in self._mandatory:
+                    child.setCheckState(0, QtCore.Qt.CheckState.Checked)
+                else:
+                    child.setCheckState(0, state)
+            self._sync_group_state(item)
+            self._updating = False
+            return
+        if column in self._mandatory and item.checkState(0) != QtCore.Qt.CheckState.Checked:
+            self._updating = True
+            item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+            self._updating = False
+        parent = item.parent()
+        if parent is not None:
+            self._updating = True
+            self._sync_group_state(parent)
+            self._updating = False
+
+    def _sync_group_state(self, group_item: QtWidgets.QTreeWidgetItem) -> None:
+        total = group_item.childCount()
+        if total == 0:
+            group_item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+            return
+        checked = 0
+        for idx in range(total):
+            child = group_item.child(idx)
+            if child is None:
+                continue
+            if child.checkState(0) == QtCore.Qt.CheckState.Checked:
+                checked += 1
+        if checked == 0:
+            state = QtCore.Qt.CheckState.Unchecked
+        elif checked == total:
+            state = QtCore.Qt.CheckState.Checked
+        else:
+            state = QtCore.Qt.CheckState.PartiallyChecked
+        group_item.setCheckState(0, state)
+
+
+class _SortSpecDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        columns: Sequence[str],
+        sort_spec: Sequence[Tuple[str, bool]],
+        parent: QtWidgets.QWidget | None = None,
+        *,
+        default_column: Optional[str] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Sort columns")
+        self._columns = [str(column) for column in columns]
+        self._rows: List[Tuple[QtWidgets.QWidget, QtWidgets.QComboBox, QtWidgets.QComboBox]] = []
+
+        layout = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel("Define the sort priority for the preview/export.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self._rows_layout = QtWidgets.QVBoxLayout()
+        layout.addLayout(self._rows_layout)
+
+        if sort_spec:
+            for column, ascending in sort_spec:
+                self._add_row(column, ascending)
+        else:
+            fallback = (
+                default_column
+                if default_column in self._columns
+                else (self._columns[0] if self._columns else "")
+            )
+            if fallback:
+                self._add_row(fallback, True)
+
+        control_row = QtWidgets.QHBoxLayout()
+        add_button = QtWidgets.QPushButton("Add level")
+        add_button.clicked.connect(self._add_default_row)
+        control_row.addWidget(add_button)
+        clear_button = QtWidgets.QPushButton("Clear")
+        clear_button.clicked.connect(self._clear_rows)
+        control_row.addWidget(clear_button)
+        control_row.addStretch(1)
+        layout.addLayout(control_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def sort_spec(self) -> List[Tuple[str, bool]]:
+        spec: List[Tuple[str, bool]] = []
+        seen: Set[str] = set()
+        for _, column_combo, order_combo in self._rows:
+            column = column_combo.currentText().strip()
+            if not column or column in seen:
+                continue
+            ascending = order_combo.currentIndex() == 0
+            spec.append((column, ascending))
+            seen.add(column)
+        return spec
+
+    def _add_default_row(self) -> None:
+        if not self._columns:
+            return
+        self._add_row(self._columns[0], True)
+
+    def _add_row(self, column: str, ascending: bool) -> None:
+        row_widget = QtWidgets.QWidget(self)
+        row_layout = QtWidgets.QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+
+        column_combo = QtWidgets.QComboBox()
+        column_combo.addItems(self._columns)
+        if column in self._columns:
+            column_combo.setCurrentText(column)
+        row_layout.addWidget(column_combo, 2)
+
+        order_combo = QtWidgets.QComboBox()
+        order_combo.addItems(["Ascending", "Descending"])
+        order_combo.setCurrentIndex(0 if ascending else 1)
+        row_layout.addWidget(order_combo, 1)
+
+        remove_button = QtWidgets.QPushButton("Remove")
+        remove_button.clicked.connect(lambda: self._remove_row(row_widget))
+        row_layout.addWidget(remove_button)
+
+        self._rows_layout.addWidget(row_widget)
+        self._rows.append((row_widget, column_combo, order_combo))
+
+    def _remove_row(self, row_widget: QtWidgets.QWidget) -> None:
+        self._rows = [row for row in self._rows if row[0] is not row_widget]
+        row_widget.setParent(None)
+        row_widget.deleteLater()
+
+    def _clear_rows(self) -> None:
+        for row_widget, _, _ in list(self._rows):
+            self._remove_row(row_widget)
+
+
+class CompareSection(MiniDatabaseSection):
+    section_key = "compare"
+    section_title = "Compare"
+    supported_suffixes: tuple[str, ...] = ()
+    recursive_search = False
+
+    def __init__(
+        self,
+        sections: Dict[str, MiniDatabaseSection],
+        logger: logging.Logger,
+        log_callback: Callable[[int, str], None],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        self.sections = sections
+        self._cached_annealing_records: List[MeasurementRecord] = []
+        self._cached_annealing_groups: Dict[str, List[MeasurementRecord]] = {}
+        self._cached_vsm_hysteresis_records: List[VsmHysteresisRecord] = []
+        self._cached_vsm_hysteresis_groups: Dict[str, List[VsmHysteresisRecord]] = {}
+        self._cached_vsm_temperature_records: List[VsmTemperatureScanRecord] = []
+        self._cached_vsm_temperature_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._cached_dma_isostress_records: List[DmaIsoStressRecord] = []
+        self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._row_keys: Set[str] = set()
+        self._compare_columns: List[str] = []
+        super().__init__(logger, log_callback, parent)
+        self.source_button.hide()
+        self.open_sources_button.hide()
+        self.refresh_button.hide()
+        self.stop_button.hide()
+        self.progress_bar.hide()
+        self.progress_label.hide()
+        self.progress_eta_label.hide()
+
+        self.remove_button = QtWidgets.QPushButton("Remove selected")
+        self.remove_button.clicked.connect(self._remove_selected)
+        self.controls_layout.addWidget(self.remove_button)
+        self.clear_button = QtWidgets.QPushButton("Clear")
+        self.clear_button.clicked.connect(self._clear_compare)
+        self.controls_layout.addWidget(self.clear_button)
+
+        graph_row = QtWidgets.QHBoxLayout()
+        self.graph_panel_checkbox = QtWidgets.QCheckBox("Show graph preview panel")
+        self.graph_panel_checkbox.setChecked(False)
+        self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
+        graph_row.addWidget(self.graph_panel_checkbox)
+        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
+        self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
+        self.open_high_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_high_plot_button)
+        self.open_low_plot_button = QtWidgets.QPushButton("Open low mA graph")
+        self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
+        self.open_low_plot_button.setEnabled(False)
+        graph_row.addWidget(self.open_low_plot_button)
+        self.open_vsm_hysteresis_button = QtWidgets.QPushButton("Open VSM hyst graphs")
+        self.open_vsm_hysteresis_button.clicked.connect(
+            lambda: self._open_preview_graph("vsm_hysteresis")
+        )
+        self.open_vsm_hysteresis_button.setEnabled(False)
+        graph_row.addWidget(self.open_vsm_hysteresis_button)
+        self.open_vsm_temperature_button = QtWidgets.QPushButton("Open VSM temp graphs")
+        self.open_vsm_temperature_button.clicked.connect(
+            lambda: self._open_preview_graph("vsm_temperature")
+        )
+        self.open_vsm_temperature_button.setEnabled(False)
+        graph_row.addWidget(self.open_vsm_temperature_button)
+        self.open_dma_button = QtWidgets.QPushButton("Open DMA iso-stress graphs")
+        self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
+        self.open_dma_button.setEnabled(False)
+        graph_row.addWidget(self.open_dma_button)
+        graph_row.addStretch(1)
+        self.main_layout.insertLayout(3, graph_row)
+
+        selection_model = self.table_view.selectionModel() if self.table_view is not None else None
+        if selection_model is not None:
+            selection_model.selectionChanged.connect(self._update_preview_graph_buttons)
+            selection_model.selectionChanged.connect(self._update_graph_preview_panel)
+        self._update_preview_graph_buttons()
+        self._update_status()
+
+    def create_right_panel(self, parent: QtWidgets.QWidget) -> QtWidgets.QWidget:
+        table = QtWidgets.QTableView(parent)
+        table.setModel(self.model)
+        table.horizontalHeader().setStretchLastSection(True)
+        table.setAlternatingRowColors(True)
+        table.setSelectionBehavior(
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
+        )
+        table.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        table.setSortingEnabled(True)
+        self.table_view = table
+
+        self.graph_preview_panel = QtWidgets.QWidget(parent)
+        graph_layout = QtWidgets.QVBoxLayout(self.graph_preview_panel)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_layout.setSpacing(6)
+        self.graph_preview_tabs = QtWidgets.QTabWidget(self.graph_preview_panel)
+        graph_layout.addWidget(self.graph_preview_tabs, 1)
+
+        annealing_tab = QtWidgets.QWidget(self.graph_preview_panel)
+        annealing_layout = QtWidgets.QVBoxLayout(annealing_tab)
+        annealing_layout.setContentsMargins(0, 0, 0, 0)
+        annealing_layout.setSpacing(6)
+        self.high_preview_display = _AnnealingPlotDisplay(
+            "Graph — 1000 mA", self.logger, annealing_tab
+        )
+        annealing_layout.addWidget(self.high_preview_display, 1)
+        self.low_preview_display = _AnnealingPlotDisplay(
+            "Graph — low mA", self.logger, annealing_tab
+        )
+        annealing_layout.addWidget(self.low_preview_display, 1)
+        self.graph_preview_tabs.addTab(annealing_tab, "Annealing")
+
+        self.vsm_hysteresis_gallery = _GraphGalleryWidget(
+            "Select a row to preview VSM hysteresis graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.vsm_hysteresis_gallery, "VSM hyst")
+        self.vsm_temperature_gallery = _GraphGalleryWidget(
+            "Select a row to preview VSM temperature scans.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.vsm_temperature_gallery, "VSM temp")
+        self.dma_iso_gallery = _GraphGalleryWidget(
+            "Select a row to preview DMA iso-stress graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
+        self.graph_preview_panel.setVisible(False)
+
+        self.preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.preview_splitter.addWidget(table)
+        self.preview_splitter.addWidget(self.graph_preview_panel)
+        self.preview_splitter.setStretchFactor(0, 3)
+        self.preview_splitter.setStretchFactor(1, 2)
+        self._table_splitter = self.preview_splitter
+        container = QtWidgets.QWidget(parent)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.preview_splitter, 1)
+        return container
+
+    def _load_payload(self, section_key: str, name: str) -> Any:
+        section = self.sections.get(section_key)
+        if section is None:
+            return None
+        return section.store.load_payload(name)
+
+    def _row_key(self, row: pd.Series) -> str:
+        key = _row_to_microwire_key(row)
+        if key:
+            return key
+        payload = {str(k): str(v) for k, v in row.to_dict().items()}
+        return json.dumps(payload, sort_keys=True)
+
+    def _rebuild_row_keys(self, frame: pd.DataFrame) -> None:
+        self._row_keys = {self._row_key(row) for _, row in frame.iterrows()}
+
+    def _apply_compare_frame(self, frame: pd.DataFrame) -> None:
+        extra = {
+            "compare_keys": list(self._row_keys),
+            "compare_columns": list(self._compare_columns),
+        }
+        self.apply_data(MiniDatabaseData(table=frame, extra=extra))
+
+    def _update_status(self) -> None:
+        frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+        count = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
+        if count:
+            message = f"{count} microwire(s) selected for comparison."
+        else:
+            message = "Select rows in Assemble to compare."
+        self.status_label.setText(message)
+        try:
+            self.status_changed.emit(message)
+        except Exception:
+            pass
+
+    def process(
+        self,
+        paths: List[Path],
+        progress: Optional[Callable[[int, int, Optional[str]], None]] = None,
+    ) -> SectionProcessResult:
+        _ = paths, progress
+        return SectionProcessResult(table=self.model.frame(), processed={}, payloads={})
+
+    def refresh(self) -> None:
+        return
+
+    def add_rows_from_frame(self, frame: pd.DataFrame, row_indices: Sequence[int]) -> int:
+        if not isinstance(frame, pd.DataFrame) or frame.empty or not row_indices:
+            return 0
+        current = self.model.frame()
+        if not isinstance(current, pd.DataFrame):
+            current = pd.DataFrame()
+        new_rows: List[Dict[str, Any]] = []
+        for idx in row_indices:
+            if idx < 0 or idx >= len(frame.index):
+                continue
+            row = frame.iloc[idx]
+            key = self._row_key(row)
+            if key in self._row_keys:
+                continue
+            self._row_keys.add(key)
+            new_rows.append(row.to_dict())
+        if not new_rows:
+            return 0
+        new_frame = pd.DataFrame(new_rows)
+        combined = (
+            pd.concat([current, new_frame], ignore_index=True)
+            if not current.empty
+            else new_frame
+        )
+        columns = list(self._compare_columns or combined.columns)
+        for column in combined.columns:
+            if column not in columns:
+                columns.append(column)
+        self._compare_columns = columns
+        combined = combined.reindex(columns=columns)
+        self._apply_compare_frame(combined)
+        try:
+            if self.table_view is not None:
+                selection = self.table_view.selectionModel()
+                if selection is not None:
+                    selection.clearSelection()
+                start = max(len(combined.index) - len(new_rows), 0)
+                for row_idx in range(start, len(combined.index)):
+                    self.table_view.selectRow(row_idx)
+        except Exception:
+            pass
+        return len(new_rows)
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        extra = self.data.extra if isinstance(self.data.extra, dict) else {}
+        keys = extra.get("compare_keys")
+        if isinstance(keys, list):
+            self._row_keys = {str(key) for key in keys}
+        else:
+            frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+            self._rebuild_row_keys(frame)
+        columns = extra.get("compare_columns")
+        if isinstance(columns, list) and columns:
+            self._compare_columns = [str(col) for col in columns]
+        else:
+            frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
+            self._compare_columns = [str(col) for col in frame.columns]
+        self._update_status()
+        self._update_preview_graph_buttons()
+        self._update_graph_preview_panel()
+
+    def _selected_preview_row_index(self) -> Optional[int]:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return None
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return None
+        rows = selection.selectedRows()
+        if not rows:
+            return None
+        return rows[0].row()
+
+    def _selected_preview_row(self) -> Optional[pd.Series]:
+        row_index = self._selected_preview_row_index()
+        if row_index is None:
+            return None
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return None
+        if row_index >= len(frame.index):
+            return None
+        try:
+            return frame.iloc[row_index]
+        except Exception:
+            return None
+
+    def _update_preview_graph_buttons(self, *_: Any) -> None:
+        row = self._selected_preview_row()
+        key = _row_to_microwire_key(row) if row is not None else None
+        enabled = row is not None and key is not None
+        self.open_high_plot_button.setEnabled(enabled)
+        self.open_low_plot_button.setEnabled(enabled)
+        self.open_vsm_hysteresis_button.setEnabled(
+            bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+        )
+        self.open_vsm_temperature_button.setEnabled(
+            bool(enabled and self._ensure_vsm_temperature_groups().get(key or "", []))
+        )
+        self.open_dma_button.setEnabled(
+            bool(enabled and self._ensure_dma_isostress_groups().get(key or "", []))
+        )
+
+    def _toggle_graph_preview_panel(self, checked: bool) -> None:
+        if not hasattr(self, "graph_preview_panel"):
+            return
+        self.graph_preview_panel.setVisible(bool(checked))
+        splitter = getattr(self, "preview_splitter", None)
+        if isinstance(splitter, QtWidgets.QSplitter):
+            if checked:
+                sizes = splitter.sizes()
+                if sizes and sizes[1] == 0:
+                    total = sum(sizes) or 1
+                    splitter.setSizes([int(total * 0.6), int(total * 0.4)])
+            else:
+                splitter.setSizes([1, 0])
+        self._update_graph_preview_panel()
+
+    def _update_graph_preview_panel(self, *_: Any) -> None:
+        if not getattr(self, "graph_preview_panel", None):
+            return
+        if not self.graph_preview_panel.isVisible():
+            return
+        row = self._selected_preview_row()
+        if row is None:
+            self.high_preview_display.set_record(
+                None,
+                setpoint=None,
+                description="Select a row to preview the annealing measurement.",
+            )
+            self.low_preview_display.set_record(
+                None,
+                setpoint=None,
+                description="Select a row to preview the annealing measurement.",
+            )
+            self.vsm_hysteresis_gallery.clear("Select a row to preview VSM hysteresis graphs.")
+            self.vsm_temperature_gallery.clear("Select a row to preview VSM temperature scans.")
+            self.dma_iso_gallery.clear("Select a row to preview DMA iso-stress graphs.")
+            return
+        key = _row_to_microwire_key(row)
+        if not key:
+            message = "Select a microwire row with annealing data first."
+            self.high_preview_display.set_record(
+                None, setpoint=None, description=message
+            )
+            self.low_preview_display.set_record(None, setpoint=None, description=message)
+            self.vsm_hysteresis_gallery.clear(message)
+            self.vsm_temperature_gallery.clear(message)
+            self.dma_iso_gallery.clear(message)
+            return
+
+        records = self._ensure_annealing_groups().get(key, [])
+        if records:
+            high_record, low_record = _select_high_low_pair(records)
+            self.high_preview_display.set_record(
+                high_record,
+                setpoint=_extract_setpoint(high_record),
+                description="No 1000 mA measurement available for this microwire.",
+            )
+            self.low_preview_display.set_record(
+                low_record,
+                setpoint=_extract_setpoint(low_record),
+                description="No low mA measurement available for this microwire.",
+            )
+        else:
+            message = "No annealing records found for this microwire."
+            self.high_preview_display.set_record(
+                None, setpoint=None, description=message
+            )
+            self.low_preview_display.set_record(None, setpoint=None, description=message)
+
+        vsm_records = self._ensure_vsm_hysteresis_groups().get(key, [])
+        vsm_items = _vsm_hysteresis_preview_items(
+            vsm_records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        self.vsm_hysteresis_gallery.set_items(
+            vsm_items, "No VSM hysteresis graphs available for this microwire."
+        )
+
+        vsm_temp_records = self._ensure_vsm_temperature_groups().get(key, [])
+        vsm_temp_items = _vsm_temperature_preview_items(
+            vsm_temp_records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        self.vsm_temperature_gallery.set_items(
+            vsm_temp_items, "No VSM temperature scans available for this microwire."
+        )
+
+        dma_records = self._ensure_dma_isostress_groups().get(key, [])
+        dma_items = _dma_iso_stress_preview_items(
+            dma_records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        self.dma_iso_gallery.set_items(
+            dma_items, "No DMA iso-stress graphs available for this microwire."
+        )
+
+    def _open_preview_graph(self, kind: str) -> None:
+        row = self._selected_preview_row()
+        if row is None:
+            return
+        key = _row_to_microwire_key(row)
+        if not key:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "Select a microwire row with annealing data first.",
+            )
+            return
+        if kind in {"high", "low"}:
+            records = self._ensure_annealing_groups().get(key, [])
+            if not records:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Microwire Data Builder",
+                    "No annealing records found for the selected microwire.",
+                )
+                return
+            high_record, low_record = _select_high_low_pair(records)
+            record = high_record if kind == "high" else low_record
+            label = "1000 mA" if kind == "high" else "low mA"
+            if record is None:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Microwire Data Builder",
+                    f"No {label} measurement available for this microwire.",
+                )
+                return
+            self._show_annealing_record(record, label)
+            return
+
+        if kind == "vsm_hysteresis":
+            records = self._ensure_vsm_hysteresis_groups().get(key, [])
+            title = "VSM hysteresis graphs"
+            items = _vsm_hysteresis_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No VSM hysteresis graphs available."
+        elif kind == "vsm_temperature":
+            records = self._ensure_vsm_temperature_groups().get(key, [])
+            title = "VSM temperature scan graphs"
+            items = _vsm_temperature_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No VSM temperature scan graphs available."
+        else:
+            records = self._ensure_dma_isostress_groups().get(key, [])
+            title = "DMA iso-stress graphs"
+            items = _dma_iso_stress_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No DMA iso-stress graphs available."
+        if not records:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                empty_message,
+            )
+            return
+        dialog = _GraphGalleryDialog(
+            title,
+            items,
+            parent=self,
+            empty_message=empty_message,
+        )
+        dialog.exec()
+
+    def _show_annealing_record(self, record: MeasurementRecord, label: str) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Annealing graph — {label}")
+        dialog.resize(960, 640)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        display = _AnnealingPlotDisplay(f"Graph — {label}", self.logger, dialog)
+        display.set_record(
+            record,
+            setpoint=_extract_setpoint(record),
+            description="No annealing measurement available for this microwire.",
+        )
+        layout.addWidget(display, 1)
+        dialog.exec()
+
+    def _ensure_annealing_groups(self) -> Dict[str, List[MeasurementRecord]]:
+        groups = self._cached_annealing_groups
+        if not groups:
+            payload = self._load_payload("annealing", "annealing_records")
+            if isinstance(payload, list):
+                self._cached_annealing_records = list(payload)
+                self._cached_annealing_groups = self._group_annealing_records(payload)
+                groups = self._cached_annealing_groups
+        return groups
+
+    def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
+        groups = self._cached_vsm_hysteresis_groups
+        if not groups:
+            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
+            if isinstance(payload, list):
+                records = list(payload)
+                self._cached_vsm_hysteresis_records = records
+                self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
+                groups = self._cached_vsm_hysteresis_groups
+        return groups
+
+    def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
+        groups = self._cached_vsm_temperature_groups
+        if not groups:
+            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
+            if isinstance(payload, list):
+                records = list(payload)
+                self._cached_vsm_temperature_records = records
+                self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
+                groups = self._cached_vsm_temperature_groups
+        return groups
+
+    def _ensure_dma_isostress_groups(self) -> Dict[str, List[DmaIsoStressRecord]]:
+        groups = self._cached_dma_isostress_groups
+        if not groups:
+            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
+            if isinstance(payload, list):
+                records = list(payload)
+                self._cached_dma_isostress_records = records
+                self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
+                groups = self._cached_dma_isostress_groups
+        return groups
+
+    def _group_annealing_records(
+        self,
+        records: Sequence[MeasurementRecord],
+    ) -> Dict[str, List[MeasurementRecord]]:
+        grouped: Dict[str, List[MeasurementRecord]] = {}
+        for record in records:
+            metadata = getattr(record, "metadata", None)
+            if metadata is None:
+                continue
+            composition = getattr(metadata, "composition_token", None)
+            draw = getattr(metadata, "draw_x", None)
+            piece = getattr(metadata, "piece_y", None)
+            if composition is None or draw is None or piece is None:
+                continue
+            try:
+                key = f"{composition}|{int(draw)}|{int(piece)}"
+            except (TypeError, ValueError):
+                continue
+            grouped.setdefault(key, []).append(record)
+        return grouped
+
+    def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
+        groups = self._cached_vsm_hysteresis_groups
+        if not groups:
+            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
+            if isinstance(payload, list):
+                records = list(payload)
+                self._cached_vsm_hysteresis_records = records
+                self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
+                groups = self._cached_vsm_hysteresis_groups
+        return groups
+
+    def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
+        groups = self._cached_vsm_temperature_groups
+        if not groups:
+            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
+            if isinstance(payload, list):
+                records = list(payload)
+                self._cached_vsm_temperature_records = records
+                self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
+                groups = self._cached_vsm_temperature_groups
+        return groups
+
+    def _ensure_dma_isostress_groups(self) -> Dict[str, List[DmaIsoStressRecord]]:
+        groups = self._cached_dma_isostress_groups
+        if not groups:
+            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
+            if isinstance(payload, list):
+                records = list(payload)
+                self._cached_dma_isostress_records = records
+                self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
+                groups = self._cached_dma_isostress_groups
+        return groups
+
+    def _remove_selected(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to remove.",
+            )
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        drop_index = [frame.index[idx] for idx in rows if idx < len(frame.index)]
+        updated = frame.drop(index=drop_index).reset_index(drop=True)
+        self._rebuild_row_keys(updated)
+        self._compare_columns = [str(col) for col in updated.columns]
+        self._apply_compare_frame(updated)
+        self._update_preview_graph_buttons()
+        self._update_graph_preview_panel()
+
+    def _clear_compare(self) -> None:
+        self._row_keys = set()
+        self._compare_columns = []
+        self._apply_compare_frame(pd.DataFrame())
+        self._update_preview_graph_buttons()
+        self._update_graph_preview_panel()
+
+
 class AssemblySection(QtWidgets.QWidget):
     """Final step that merges prepared mini-databases into a spreadsheet."""
 
@@ -9620,16 +12011,28 @@ class AssemblySection(QtWidgets.QWidget):
         sections: Dict[str, MiniDatabaseSection],
         logger: logging.Logger,
         log_callback: Callable[[int, str], None],
-        console_callback: Optional[Callable[[pd.DataFrame], None]] = None,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.sections = sections
         self.logger = logger
         self._log_callback = log_callback
-        self._console_callback = console_callback
         self._cached_annealing_records: List[MeasurementRecord] = []
         self._cached_annealing_groups: Dict[str, List[MeasurementRecord]] = {}
+        self._cached_vsm_hysteresis_records: List[VsmHysteresisRecord] = []
+        self._cached_vsm_hysteresis_groups: Dict[str, List[VsmHysteresisRecord]] = {}
+        self._cached_vsm_temperature_records: List[VsmTemperatureScanRecord] = []
+        self._cached_vsm_temperature_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._cached_dma_isostress_records: List[DmaIsoStressRecord] = []
+        self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._compare_section: Optional["CompareSection"] = None
+        self._raw_preview_frame: Optional[pd.DataFrame] = None
+        self._preview_row_index_map: List[int] = []
+        self._selected_columns: Optional[Set[str]] = None
+        self._column_order: List[str] = []
+        self._sort_spec: List[Tuple[str, bool]] = []
+        self._mandatory_columns: Set[str] = {"Composition", "Microwire"}
+        self._known_columns: Set[str] = set()
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -9664,6 +12067,8 @@ class AssemblySection(QtWidgets.QWidget):
         options_layout.addWidget(self.plots_checkbox)
         self.origin_checkbox = QtWidgets.QCheckBox("Export Origin workbooks")
         options_layout.addWidget(self.origin_checkbox)
+        self.html_checkbox = QtWidgets.QCheckBox("Export HTML (self-contained)")
+        options_layout.addWidget(self.html_checkbox)
         options_layout.addStretch(1)
         layout.addLayout(options_layout)
 
@@ -9675,6 +12080,9 @@ class AssemblySection(QtWidgets.QWidget):
             ("annealing", "Current annealing"),
             ("microscope", "Microscope"),
             ("videos", "Videos"),
+            ("vsm_hysteresis", "VSM hysteresis"),
+            ("vsm_temperature_scan", "VSM temperature scan"),
+            ("dma_iso_stress", "DMA iso-stress"),
             ("strain", "Strain"),
         ):
             checkbox = QtWidgets.QCheckBox(label)
@@ -9688,10 +12096,10 @@ class AssemblySection(QtWidgets.QWidget):
         layout.addWidget(self.status_label)
 
         graph_row = QtWidgets.QHBoxLayout()
-        self.graph_preview_checkbox = QtWidgets.QCheckBox("Show annealing graphs in preview")
-        self.graph_preview_checkbox.setChecked(True)
-        self.graph_preview_checkbox.toggled.connect(self._update_preview_graph_visibility)
-        graph_row.addWidget(self.graph_preview_checkbox)
+        self.graph_panel_checkbox = QtWidgets.QCheckBox("Show graph preview panel")
+        self.graph_panel_checkbox.setChecked(False)
+        self.graph_panel_checkbox.toggled.connect(self._toggle_graph_preview_panel)
+        graph_row.addWidget(self.graph_panel_checkbox)
         self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
         self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
         self.open_high_plot_button.setEnabled(False)
@@ -9700,8 +12108,45 @@ class AssemblySection(QtWidgets.QWidget):
         self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
         self.open_low_plot_button.setEnabled(False)
         graph_row.addWidget(self.open_low_plot_button)
+        self.open_vsm_hysteresis_button = QtWidgets.QPushButton("Open VSM hyst graphs")
+        self.open_vsm_hysteresis_button.clicked.connect(
+            lambda: self._open_preview_graph("vsm_hysteresis")
+        )
+        self.open_vsm_hysteresis_button.setEnabled(False)
+        graph_row.addWidget(self.open_vsm_hysteresis_button)
+        self.open_vsm_temperature_button = QtWidgets.QPushButton("Open VSM temp graphs")
+        self.open_vsm_temperature_button.clicked.connect(
+            lambda: self._open_preview_graph("vsm_temperature")
+        )
+        self.open_vsm_temperature_button.setEnabled(False)
+        graph_row.addWidget(self.open_vsm_temperature_button)
+        self.open_dma_button = QtWidgets.QPushButton("Open DMA iso-stress graphs")
+        self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
+        self.open_dma_button.setEnabled(False)
+        graph_row.addWidget(self.open_dma_button)
         graph_row.addStretch(1)
         layout.addLayout(graph_row)
+
+        tools_row = QtWidgets.QHBoxLayout()
+        self.columns_button = QtWidgets.QPushButton("Columns...")
+        self.columns_button.clicked.connect(self._open_column_selector)
+        tools_row.addWidget(self.columns_button)
+        self.sort_button = QtWidgets.QPushButton("Sort...")
+        self.sort_button.clicked.connect(self._open_sort_dialog)
+        tools_row.addWidget(self.sort_button)
+        self.clear_sort_button = QtWidgets.QPushButton("Clear sort")
+        self.clear_sort_button.clicked.connect(self._clear_sort)
+        self.clear_sort_button.setEnabled(False)
+        tools_row.addWidget(self.clear_sort_button)
+        self.reset_order_button = QtWidgets.QPushButton("Reset order")
+        self.reset_order_button.clicked.connect(self._reset_column_order)
+        tools_row.addWidget(self.reset_order_button)
+        self.add_to_compare_button = QtWidgets.QPushButton("Add to compare")
+        self.add_to_compare_button.clicked.connect(self._add_selected_to_compare)
+        self.add_to_compare_button.setEnabled(False)
+        tools_row.addWidget(self.add_to_compare_button)
+        tools_row.addStretch(1)
+        layout.addLayout(tools_row)
 
         self.preview_model = DataFrameModel()
         self.preview_table = QtWidgets.QTableView()
@@ -9727,130 +12172,61 @@ class AssemblySection(QtWidgets.QWidget):
         preview_bar = self.preview_table.verticalScrollBar()
         if preview_bar is not None:
             preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
-        layout.addWidget(self.preview_table, 1)
-        self.preview_table.show()
-        selection_model = self.preview_table.selectionModel()
-        if selection_model is not None:
-            selection_model.selectionChanged.connect(self._update_preview_graph_buttons)
-
-        button_row = QtWidgets.QHBoxLayout()
-        button_row.addStretch(1)
-        self.export_preview_button = QtWidgets.QPushButton("Export worksheet...")
-        self.export_preview_button.clicked.connect(self._export_preview_worksheet)
-        self.export_preview_button.setEnabled(False)
-        button_row.addWidget(self.export_preview_button)
-        self.preview_button = QtWidgets.QPushButton("Preview database")
-        self.preview_button.clicked.connect(self._preview)
-        button_row.addWidget(self.preview_button)
-        self.combine_button = QtWidgets.QPushButton("Combine database")
-        self.combine_button.clicked.connect(self._combine)
-        button_row.addWidget(self.combine_button)
-        layout.addLayout(button_row)
-
-    def set_console_callback(self, callback: Callable[[pd.DataFrame], None]) -> None:
-        self._console_callback = callback
-
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(8)
-
-        form = QtWidgets.QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setSpacing(6)
-
-        self.output_dir_edit = QtWidgets.QLineEdit(str(Path.cwd()))
-        browse_button = QtWidgets.QPushButton("Browse…")
-        browse_button.clicked.connect(self._choose_output_dir)
-        dir_row = QtWidgets.QHBoxLayout()
-        dir_row.addWidget(self.output_dir_edit)
-        dir_row.addWidget(browse_button)
-        dir_container = QtWidgets.QWidget()
-        dir_container.setLayout(dir_row)
-        form.addRow("Output directory", dir_container)
-
-        self.output_name_edit = QtWidgets.QLineEdit(DEFAULT_OUTPUT_NAME)
-        form.addRow("Output name", self.output_name_edit)
-
-        layout.addLayout(form)
-
-        options_layout = QtWidgets.QHBoxLayout()
-        self.csv_checkbox = QtWidgets.QCheckBox("Export CSV")
-        self.csv_checkbox.setChecked(True)
-        options_layout.addWidget(self.csv_checkbox)
-        self.excel_checkbox = QtWidgets.QCheckBox("Export Excel")
-        options_layout.addWidget(self.excel_checkbox)
-        self.plots_checkbox = QtWidgets.QCheckBox("Create Matplotlib plots")
-        options_layout.addWidget(self.plots_checkbox)
-        self.origin_checkbox = QtWidgets.QCheckBox("Export Origin workbooks")
-        options_layout.addWidget(self.origin_checkbox)
-        options_layout.addStretch(1)
-        layout.addLayout(options_layout)
-
-        section_box = QtWidgets.QGroupBox("Include sections")
-        section_layout = QtWidgets.QHBoxLayout(section_box)
-        self.section_checkboxes: Dict[str, QtWidgets.QCheckBox] = {}
-        for key, label in (
-            ("fabrication", "Fabrication"),
-            ("annealing", "Current annealing"),
-            ("microscope", "Microscope"),
-            ("videos", "Videos"),
-            ("strain", "Strain"),
-        ):
-            checkbox = QtWidgets.QCheckBox(label)
-            checkbox.setChecked(True)
-            section_layout.addWidget(checkbox)
-            self.section_checkboxes[key] = checkbox
-        section_layout.addStretch(1)
-        layout.addWidget(section_box)
-
-        self.status_label = QtWidgets.QLabel("Ready to assemble once all sections are processed.")
-        layout.addWidget(self.status_label)
-
-        graph_row = QtWidgets.QHBoxLayout()
-        self.graph_preview_checkbox = QtWidgets.QCheckBox("Show annealing graphs in preview")
-        self.graph_preview_checkbox.setChecked(True)
-        self.graph_preview_checkbox.toggled.connect(self._update_preview_graph_visibility)
-        graph_row.addWidget(self.graph_preview_checkbox)
-        self.open_high_plot_button = QtWidgets.QPushButton("Open 1000 mA graph")
-        self.open_high_plot_button.clicked.connect(lambda: self._open_preview_graph("high"))
-        self.open_high_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_high_plot_button)
-        self.open_low_plot_button = QtWidgets.QPushButton("Open low mA graph")
-        self.open_low_plot_button.clicked.connect(lambda: self._open_preview_graph("low"))
-        self.open_low_plot_button.setEnabled(False)
-        graph_row.addWidget(self.open_low_plot_button)
-        graph_row.addStretch(1)
-        layout.addLayout(graph_row)
-
-        self.preview_model = DataFrameModel()
-        self.preview_table = QtWidgets.QTableView()
-        self.preview_table.setModel(self.preview_model)
-        self.preview_table.setAlternatingRowColors(True)
-        self.preview_table.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
-        )
-        self.preview_table.setSelectionMode(
-            QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
-        )
         header = self.preview_table.horizontalHeader()
         if header is not None:
-            header.setStretchLastSection(True)
-            header.setSectionsMovable(True)
-            header.setSectionsClickable(True)
-        self.preview_table.setVerticalScrollMode(
-            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+            try:
+                header.sectionMoved.connect(self._handle_preview_column_moved)
+            except Exception:
+                pass
+        self.graph_preview_panel = QtWidgets.QWidget()
+        graph_layout = QtWidgets.QVBoxLayout(self.graph_preview_panel)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_layout.setSpacing(6)
+        self.graph_preview_tabs = QtWidgets.QTabWidget(self.graph_preview_panel)
+        graph_layout.addWidget(self.graph_preview_tabs, 1)
+
+        annealing_tab = QtWidgets.QWidget(self.graph_preview_panel)
+        annealing_layout = QtWidgets.QVBoxLayout(annealing_tab)
+        annealing_layout.setContentsMargins(0, 0, 0, 0)
+        annealing_layout.setSpacing(6)
+        self.high_preview_display = _AnnealingPlotDisplay(
+            "Graph — 1000 mA", self.logger, annealing_tab
         )
-        self.preview_table.setHorizontalScrollMode(
-            QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
+        annealing_layout.addWidget(self.high_preview_display, 1)
+        self.low_preview_display = _AnnealingPlotDisplay(
+            "Graph — low mA", self.logger, annealing_tab
         )
-        preview_bar = self.preview_table.verticalScrollBar()
-        if preview_bar is not None:
-            preview_bar.setSingleStep(MiniDatabaseSection._SCROLL_SINGLE_STEP)
-        layout.addWidget(self.preview_table, 1)
+        annealing_layout.addWidget(self.low_preview_display, 1)
+        self.graph_preview_tabs.addTab(annealing_tab, "Annealing")
+
+        self.vsm_hysteresis_gallery = _GraphGalleryWidget(
+            "Select a row to preview VSM hysteresis graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.vsm_hysteresis_gallery, "VSM hyst")
+        self.vsm_temperature_gallery = _GraphGalleryWidget(
+            "Select a row to preview VSM temperature scans.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.vsm_temperature_gallery, "VSM temp")
+        self.dma_iso_gallery = _GraphGalleryWidget(
+            "Select a row to preview DMA iso-stress graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
+        self.graph_preview_panel.setVisible(False)
+
+        self.preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        self.preview_splitter.addWidget(self.preview_table)
+        self.preview_splitter.addWidget(self.graph_preview_panel)
+        self.preview_splitter.setStretchFactor(0, 3)
+        self.preview_splitter.setStretchFactor(1, 2)
+        layout.addWidget(self.preview_splitter, 1)
         self.preview_table.show()
         selection_model = self.preview_table.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._update_preview_graph_buttons)
+            selection_model.selectionChanged.connect(self._update_graph_preview_panel)
 
         button_row = QtWidgets.QHBoxLayout()
         button_row.addStretch(1)
@@ -9871,6 +12247,10 @@ class AssemblySection(QtWidgets.QWidget):
             self._log_callback(level, message)
         except Exception:
             self.logger.log(level, message)
+
+    def attach_compare_section(self, compare_section: "CompareSection") -> None:
+        self._compare_section = compare_section
+        self._update_preview_graph_buttons()
 
     def _choose_output_dir(self) -> None:
         start_dir = _dialog_start_directory()
@@ -9904,6 +12284,9 @@ class AssemblySection(QtWidgets.QWidget):
         tuple[
             FabricationIndex,
             List[MeasurementRecord],
+            List[VsmHysteresisRecord],
+            List[VsmTemperatureScanRecord],
+            List[DmaIsoStressRecord],
             Dict[Tuple[str, int, int], MicroscopeMeasurements],
             Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
             Dict[Tuple[str, int, int], StrainRecord],
@@ -9942,13 +12325,18 @@ class AssemblySection(QtWidgets.QWidget):
         overrides: Dict[str, Dict[str, float]] = {}
         if "microscope" in selected:
             payload = self._load_payload("microscope", "microscope_index")
-            if isinstance(payload, dict):
-                microscope_index = payload
-            elif require_payloads:
-                missing.append("microscope")
             microscope_section = self.sections.get("microscope")
             if isinstance(microscope_section, MicroscopeSection):
                 overrides = microscope_section.overrides
+                table = microscope_section.data.table
+            else:
+                table = None
+            if isinstance(payload, dict) and payload:
+                microscope_index = payload
+            elif isinstance(table, pd.DataFrame) and not table.empty:
+                microscope_index = self._build_microscope_index_from_table(table)
+            elif require_payloads:
+                missing.append("microscope")
 
         video_index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary] = {}
         if "videos" in selected:
@@ -9966,6 +12354,36 @@ class AssemblySection(QtWidgets.QWidget):
             elif require_payloads:
                 missing.append("strain")
 
+        vsm_hysteresis_records: List[VsmHysteresisRecord] = []
+        if "vsm_hysteresis" in selected:
+            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
+            if isinstance(payload, list):
+                vsm_hysteresis_records = list(payload)
+            elif require_payloads:
+                missing.append("VSM hysteresis")
+        self._cached_vsm_hysteresis_records = list(vsm_hysteresis_records)
+        self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(vsm_hysteresis_records)
+
+        vsm_temperature_records: List[VsmTemperatureScanRecord] = []
+        if "vsm_temperature_scan" in selected:
+            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
+            if isinstance(payload, list):
+                vsm_temperature_records = list(payload)
+            elif require_payloads:
+                missing.append("VSM temperature scan")
+        self._cached_vsm_temperature_records = list(vsm_temperature_records)
+        self._cached_vsm_temperature_groups = _group_graph_records_by_key(vsm_temperature_records)
+
+        dma_isostress_records: List[DmaIsoStressRecord] = []
+        if "dma_iso_stress" in selected:
+            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
+            if isinstance(payload, list):
+                dma_isostress_records = list(payload)
+            elif require_payloads:
+                missing.append("DMA iso-stress")
+        self._cached_dma_isostress_records = list(dma_isostress_records)
+        self._cached_dma_isostress_groups = _group_graph_records_by_key(dma_isostress_records)
+
         phase_points: Dict[str, Dict[str, float]] = {}
         annealing_section = self.sections.get("annealing")
         if isinstance(annealing_section, AnnealingSection):
@@ -9981,6 +12399,9 @@ class AssemblySection(QtWidgets.QWidget):
         return (
             fabrication_index,
             annealing_records,
+            vsm_hysteresis_records,
+            vsm_temperature_records,
+            dma_isostress_records,
             microscope_index,
             video_index,
             strain_records,
@@ -9988,29 +12409,225 @@ class AssemblySection(QtWidgets.QWidget):
             phase_points,
         )
 
+    @staticmethod
+    def _parse_microscope_key_from_row(row: pd.Series) -> Optional[Tuple[str, int, int]]:
+        key_value = row.get("_key")
+        if isinstance(key_value, str):
+            parts = key_value.split("|")
+            if len(parts) == 3:
+                composition = parts[0].strip()
+                try:
+                    draw = int(parts[1])
+                    piece = int(parts[2])
+                except ValueError:
+                    draw = piece = None
+                else:
+                    if composition:
+                        return (composition, draw, piece)
+        composition = str(row.get("Composition") or "").strip()
+        microwire = str(row.get("Microwire") or "").strip()
+        if not composition or not microwire:
+            return None
+        parsed = _microwire_tuple_from_label(microwire)
+        if parsed is None:
+            return None
+        try:
+            draw = int(parsed[0])
+            piece = int(parsed[1])
+        except (TypeError, ValueError):
+            return None
+        return (composition, draw, piece)
+
+    @staticmethod
+    def _parse_positive_float(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            numeric = float(value)
+        else:
+            text = str(value).strip().replace(",", ".")
+            if not text:
+                return None
+            try:
+                numeric = float(text)
+            except ValueError:
+                return None
+        if not math.isfinite(numeric) or numeric <= 0:
+            return None
+        return numeric
+
+    @staticmethod
+    def _coerce_path(value: object) -> Optional[Path]:
+        if value is None:
+            return None
+        if isinstance(value, Path):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            try:
+                return Path(text)
+            except Exception:
+                return None
+        return None
+
+    def _image_path_from_row(self, row: pd.Series, kind: str) -> Optional[Path]:
+        candidates: List[Path] = []
+        if kind == "core":
+            image_column = MICROSCOPE_IMAGE_COLUMNS[0]
+            mapped = "_core_image"
+        else:
+            image_column = MICROSCOPE_IMAGE_COLUMNS[1]
+            mapped = "_glass_image"
+        direct_path = self._coerce_path(row.get(image_column))
+        if direct_path is not None:
+            candidates.append(direct_path)
+        mapped_path = self._coerce_path(row.get(mapped))
+        if mapped_path is not None:
+            candidates.append(mapped_path)
+        images = row.get("_images")
+        if isinstance(images, (list, tuple)):
+            for entry in images:
+                path = self._coerce_path(entry)
+                if path is not None:
+                    candidates.append(path)
+                    break
+        for candidate in candidates:
+            if candidate is not None:
+                return candidate
+        return None
+
+    def _build_microscope_index_from_table(
+        self, table: pd.DataFrame
+    ) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
+        index: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+        for _, row in table.iterrows():
+            key = self._parse_microscope_key_from_row(row)
+            if key is None:
+                continue
+            measurements = index.setdefault(key, MicroscopeMeasurements())
+            d_value = self._parse_positive_float(row.get(MICROSCOPE_D_COLUMN))
+            if d_value is not None:
+                d_path = self._image_path_from_row(row, "core")
+                detection = MicroscopeDetection(
+                    value=float(d_value),
+                    image_path=d_path,
+                    source="manual",
+                )
+                detection.category = "core"
+                measurements.core.append(detection)
+            else:
+                d_path = self._image_path_from_row(row, "core")
+                if d_path is not None:
+                    measurements.add_placeholder("core", d_path)
+            D_value = self._parse_positive_float(row.get(MICROSCOPE_CAP_D_COLUMN))
+            if D_value is not None:
+                D_path = self._image_path_from_row(row, "glass")
+                detection = MicroscopeDetection(
+                    value=float(D_value),
+                    image_path=D_path,
+                    source="manual",
+                )
+                detection.category = "glass"
+                measurements.glass.append(detection)
+            else:
+                D_path = self._image_path_from_row(row, "glass")
+                if D_path is not None:
+                    measurements.add_placeholder("glass", D_path)
+        return index
+
     def _update_preview(self, frame: pd.DataFrame) -> None:
-        previous_order = self._current_preview_column_order()
-        self.preview_model.set_frame(frame)
+        previous_order = self._column_order or self._current_preview_column_order()
         if previous_order:
-            QtCore.QTimer.singleShot(0, lambda: self._apply_preview_column_order(previous_order))
+            self._column_order = list(previous_order)
+        self._raw_preview_frame = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame()
+        self._refresh_preview_frame()
+
+    def _refresh_preview_frame(self) -> None:
+        raw_frame = self._raw_preview_frame
+        if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
+            display_frame = pd.DataFrame()
+            self._preview_row_index_map = []
+        else:
+            sorted_frame, row_map = self._apply_sort_spec(raw_frame)
+            selected_columns = self._resolve_selected_columns(sorted_frame.columns)
+            display_frame = sorted_frame.loc[:, selected_columns] if selected_columns else sorted_frame.loc[:, []]
+            self._preview_row_index_map = row_map
+        self.preview_model.set_frame(display_frame)
+        if self._column_order:
+            QtCore.QTimer.singleShot(0, lambda: self._apply_preview_column_order(self._column_order))
         self.preview_table.setVisible(True)
         try:
             self.preview_table.resizeColumnsToContents()
         except Exception:
             pass
-        self._update_preview_graph_visibility()
         self._update_preview_graph_buttons()
-        if self._console_callback is not None and isinstance(frame, pd.DataFrame):
-            try:
-                self._console_callback(frame.copy())
-            except Exception:
-                self.logger.exception("Failed to publish preview dataframe to console")
-        row_count = len(frame.index) if isinstance(frame, pd.DataFrame) else 0
+        self._update_graph_preview_panel()
+        row_count = len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0
         self.status_label.setText(
             f"Preview ready - {row_count} row(s)." if row_count else "Preview is empty."
         )
         if hasattr(self, "export_preview_button"):
             self.export_preview_button.setEnabled(row_count > 0)
+        if hasattr(self, "clear_sort_button"):
+            self.clear_sort_button.setEnabled(bool(self._sort_spec))
+
+    def _resolve_selected_columns(self, columns: Sequence[str]) -> List[str]:
+        column_names = [str(column) for column in columns]
+        if self._selected_columns is None:
+            self._selected_columns = set(column_names)
+        else:
+            new_columns = [col for col in column_names if col not in self._known_columns]
+            self._selected_columns.update(new_columns)
+        self._known_columns.update(column_names)
+        self._selected_columns.update(self._mandatory_columns)
+        return [column for column in column_names if column in self._selected_columns]
+
+    def _apply_sort_spec(self, frame: pd.DataFrame) -> Tuple[pd.DataFrame, List[int]]:
+        def _index_position(index: pd.Index, value: Any, fallback: int) -> int:
+            try:
+                return int(value)
+            except Exception:
+                pass
+            try:
+                return int(index.get_loc(value))
+            except Exception:
+                return fallback
+
+        if not self._sort_spec:
+            return frame.copy(), [
+                _index_position(frame.index, idx, fallback)
+                for fallback, idx in enumerate(frame.index)
+            ]
+        sort_columns: List[str] = []
+        ascending: List[bool] = []
+        for column, is_ascending in self._sort_spec:
+            if column in frame.columns and column not in sort_columns:
+                sort_columns.append(column)
+                ascending.append(bool(is_ascending))
+        if not sort_columns:
+            return frame.copy(), [
+                _index_position(frame.index, idx, fallback)
+                for fallback, idx in enumerate(frame.index)
+            ]
+        try:
+            sorted_frame = frame.sort_values(
+                by=sort_columns,
+                ascending=ascending,
+                kind="mergesort",
+                key=lambda col: col.map(DataFrameModel._sort_value) if hasattr(col, "map") else col,
+            )
+        except Exception:
+            return frame.copy(), [
+                _index_position(frame.index, idx, fallback)
+                for fallback, idx in enumerate(frame.index)
+            ]
+        row_map = [
+            _index_position(frame.index, idx, fallback)
+            for fallback, idx in enumerate(sorted_frame.index)
+        ]
+        return sorted_frame.reset_index(drop=True), row_map
 
     def _group_annealing_records(
         self,
@@ -10033,6 +12650,16 @@ class AssemblySection(QtWidgets.QWidget):
             grouped.setdefault(key, []).append(record)
         return grouped
 
+    def _ensure_annealing_groups(self) -> Dict[str, List[MeasurementRecord]]:
+        groups = self._cached_annealing_groups
+        if not groups:
+            payload = self._load_payload("annealing", "annealing_records")
+            if isinstance(payload, list):
+                self._cached_annealing_records = list(payload)
+                self._cached_annealing_groups = self._group_annealing_records(payload)
+                groups = self._cached_annealing_groups
+        return groups
+
     def _selected_preview_row_index(self) -> Optional[int]:
         if not isinstance(self.preview_table, QtWidgets.QTableView):
             return None
@@ -10044,12 +12671,36 @@ class AssemblySection(QtWidgets.QWidget):
             return None
         return rows[0].row()
 
-    def _selected_preview_row(self) -> Optional[pd.Series]:
+    def _selected_preview_rows(self) -> List[int]:
+        if not isinstance(self.preview_table, QtWidgets.QTableView):
+            return []
+        selection = self.preview_table.selectionModel()
+        if selection is None:
+            return []
+        rows = {index.row() for index in selection.selectedRows()}
+        return sorted(rows)
+
+    def _selected_preview_row(self, *, raw: bool = False) -> Optional[pd.Series]:
+        row_index = self._selected_preview_row_index()
+        if row_index is None or row_index < 0:
+            return None
+        if raw:
+            frame = self._raw_preview_frame
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                return None
+            source_index = row_index
+            if self._preview_row_index_map and row_index < len(self._preview_row_index_map):
+                source_index = self._preview_row_index_map[row_index]
+            if source_index < 0 or source_index >= len(frame.index):
+                return None
+            try:
+                return frame.iloc[source_index]
+            except Exception:
+                return None
         frame = self.preview_model.frame()
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return None
-        row_index = self._selected_preview_row_index()
-        if row_index is None or row_index < 0 or row_index >= len(frame.index):
+        if row_index >= len(frame.index):
             return None
         try:
             return frame.iloc[row_index]
@@ -10058,79 +12709,388 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _update_preview_graph_buttons(self, *_: Any) -> None:
         row_index = self._selected_preview_row_index()
-        enabled = row_index is not None
+        row = self._selected_preview_row(raw=True)
+        key = _row_to_microwire_key(row) if row is not None else None
+        enabled = row_index is not None and key is not None
         if hasattr(self, "open_high_plot_button"):
             self.open_high_plot_button.setEnabled(enabled)
         if hasattr(self, "open_low_plot_button"):
             self.open_low_plot_button.setEnabled(enabled)
+        if hasattr(self, "open_vsm_hysteresis_button"):
+            self.open_vsm_hysteresis_button.setEnabled(
+                bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+            )
+        if hasattr(self, "open_vsm_temperature_button"):
+            self.open_vsm_temperature_button.setEnabled(
+                bool(enabled and self._ensure_vsm_temperature_groups().get(key or "", []))
+            )
+        if hasattr(self, "open_dma_button"):
+            self.open_dma_button.setEnabled(
+                bool(enabled and self._ensure_dma_isostress_groups().get(key or "", []))
+            )
+        if hasattr(self, "add_to_compare_button"):
+            self.add_to_compare_button.setEnabled(bool(row_index is not None))
 
-    def _update_preview_graph_visibility(self) -> None:
-        if not isinstance(self.preview_table, QtWidgets.QTableView):
+    def _toggle_graph_preview_panel(self, checked: bool) -> None:
+        if not hasattr(self, "graph_preview_panel"):
             return
-        frame = self.preview_model.frame()
+        self.graph_preview_panel.setVisible(bool(checked))
+        splitter = getattr(self, "preview_splitter", None)
+        if isinstance(splitter, QtWidgets.QSplitter):
+            if checked:
+                sizes = splitter.sizes()
+                if sizes and sizes[1] == 0:
+                    total = sum(sizes) or 1
+                    splitter.setSizes([int(total * 0.6), int(total * 0.4)])
+            else:
+                splitter.setSizes([1, 0])
+        self._update_graph_preview_panel()
+
+    def _update_graph_preview_panel(self, *_: Any) -> None:
+        if not getattr(self, "graph_preview_panel", None):
+            return
+        if not self.graph_preview_panel.isVisible():
+            return
+        row = self._selected_preview_row(raw=True)
+        if row is None:
+            self.high_preview_display.set_record(
+                None,
+                setpoint=None,
+                description="Select a row to preview the annealing measurement.",
+            )
+            self.low_preview_display.set_record(
+                None,
+                setpoint=None,
+                description="Select a row to preview the annealing measurement.",
+            )
+            self.vsm_hysteresis_gallery.clear("Select a row to preview VSM hysteresis graphs.")
+            self.vsm_temperature_gallery.clear("Select a row to preview VSM temperature scans.")
+            self.dma_iso_gallery.clear("Select a row to preview DMA iso-stress graphs.")
+            return
+        key = _row_to_microwire_key(row)
+        if not key:
+            message = "Select a microwire row with annealing data first."
+            self.high_preview_display.set_record(
+                None, setpoint=None, description=message
+            )
+            self.low_preview_display.set_record(None, setpoint=None, description=message)
+            self.vsm_hysteresis_gallery.clear(message)
+            self.vsm_temperature_gallery.clear(message)
+            self.dma_iso_gallery.clear(message)
+            return
+        records = self._ensure_annealing_groups().get(key, [])
+        if records:
+            high_record, low_record = _select_high_low_pair(records)
+            self.high_preview_display.set_record(
+                high_record,
+                setpoint=_extract_setpoint(high_record),
+                description="No 1000 mA measurement available for this microwire.",
+            )
+            self.low_preview_display.set_record(
+                low_record,
+                setpoint=_extract_setpoint(low_record),
+                description="No low mA measurement available for this microwire.",
+            )
+        else:
+            message = "No annealing records found for this microwire."
+            self.high_preview_display.set_record(
+                None, setpoint=None, description=message
+            )
+            self.low_preview_display.set_record(None, setpoint=None, description=message)
+
+        vsm_records = self._ensure_vsm_hysteresis_groups().get(key, [])
+        vsm_items = _vsm_hysteresis_preview_items(
+            vsm_records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        self.vsm_hysteresis_gallery.set_items(
+            vsm_items, "No VSM hysteresis graphs available for this microwire."
+        )
+
+        vsm_temp_records = self._ensure_vsm_temperature_groups().get(key, [])
+        vsm_temp_items = _vsm_temperature_preview_items(
+            vsm_temp_records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        self.vsm_temperature_gallery.set_items(
+            vsm_temp_items, "No VSM temperature scans available for this microwire."
+        )
+
+        dma_records = self._ensure_dma_isostress_groups().get(key, [])
+        dma_items = _dma_iso_stress_preview_items(
+            dma_records,
+            self.logger,
+            width_px=ANNEALING_GRAPH_WIDTH,
+            height_px=ANNEALING_GRAPH_HEIGHT,
+        )
+        self.dma_iso_gallery.set_items(
+            dma_items, "No DMA iso-stress graphs available for this microwire."
+        )
+
+    def _column_groups(self, columns: Sequence[str]) -> Dict[str, List[str]]:
+        available = [str(column) for column in columns]
+        used: Set[str] = set()
+        groups: List[Tuple[str, List[str]]] = []
+
+        def add_group(label: str, members: Sequence[str]) -> None:
+            subset = [col for col in members if col in available and col not in used]
+            if not subset:
+                return
+            groups.append((label, subset))
+            used.update(subset)
+
+        add_group("Core", ["Composition", "Microwire"])
+        add_group(
+            "Microscope",
+            [
+                MICROSCOPE_D_COLUMN,
+                MICROSCOPE_CAP_D_COLUMN,
+                "d/D",
+                *MICROSCOPE_IMAGE_COLUMNS,
+            ],
+        )
+        add_group(
+            "Current annealing",
+            [
+                "Figure — 1000 mA",
+                "Figure — low mA",
+                "Figure — 1000 mA (Origin)",
+                "Figure — low mA (Origin)",
+                "Low mA value (mA)",
+                "File 1000 mA",
+                "File low mA",
+                "As (mA)",
+                "Ms (mA)",
+            ],
+        )
+        add_group("VSM hysteresis", [VSM_HYSTERESIS_COLUMN])
+        add_group("VSM temperature scan", [VSM_TEMPERATURE_SCAN_COLUMN])
+        add_group("DMA iso-stress", [DMA_ISOSTRESS_COLUMN])
+        add_group(
+            "Current density",
+            [col for col in CURRENT_DENSITY_COLUMNS if col not in self._mandatory_columns],
+        )
+        add_group(
+            "Fabrication",
+            [
+                "Length (m)",
+                "Production datetime",
+                "Mass (g)",
+                "Resistance (Ω)",
+                "Notes",
+            ],
+        )
+        add_group(
+            "Videos",
+            [
+                "Temperature (°C)",
+                "Winding speed (m/min)",
+                "Glass feeding (mm/min)",
+                "Underpressure",
+            ],
+        )
+        add_group(
+            "Strain",
+            [
+                "Calc mode",
+                "Clamp span (mm)",
+                "m",
+                "Stress (MPa)",
+                "M length",
+                "A length",
+                "Strain",
+                "Broke",
+            ],
+        )
+        remaining = [col for col in available if col not in used]
+        if remaining:
+            groups.append(("Other", remaining))
+        return dict(groups)
+
+    def _open_column_selector(self) -> None:
+        frame = self._raw_preview_frame
         if not isinstance(frame, pd.DataFrame) or frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Select columns",
+                "Preview the database first to load the available columns.",
+            )
             return
-        show = True
-        if hasattr(self, "graph_preview_checkbox"):
-            show = self.graph_preview_checkbox.isChecked()
-        for column_name in ("Figure — 1000 mA", "Figure — low mA"):
-            if column_name not in frame.columns:
+        columns = [str(column) for column in frame.columns]
+        groups = self._column_groups(columns)
+        selected = self._selected_columns or set(columns)
+        dialog = _ColumnSelectionDialog(
+            groups,
+            selected,
+            self._mandatory_columns,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._selected_columns = dialog.selected_columns()
+            self._refresh_preview_frame()
+
+    def _open_sort_dialog(self) -> None:
+        frame = self._raw_preview_frame
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Sort preview",
+                "Preview the database first to load the sortable columns.",
+            )
+            return
+        default_column = None
+        current_index = self.preview_table.currentIndex()
+        if current_index.isValid():
+            display_frame = self.preview_model.frame()
+            if isinstance(display_frame, pd.DataFrame):
+                try:
+                    default_column = str(display_frame.columns[current_index.column()])
+                except Exception:
+                    default_column = None
+        dialog = _SortSpecDialog(
+            [str(column) for column in frame.columns],
+            self._sort_spec,
+            parent=self,
+            default_column=default_column,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._sort_spec = dialog.sort_spec()
+            self._refresh_preview_frame()
+
+    def _clear_sort(self) -> None:
+        if not self._sort_spec:
+            return
+        self._sort_spec = []
+        self._refresh_preview_frame()
+
+    def _reset_column_order(self) -> None:
+        frame = self.preview_model.frame()
+        if not isinstance(frame, pd.DataFrame):
+            return
+        self._column_order = [str(column) for column in frame.columns]
+        self._apply_preview_column_order(self._column_order)
+
+    def _add_selected_to_compare(self) -> None:
+        compare_section = self._compare_section
+        if compare_section is None:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "Compare section is not available yet.",
+            )
+            return
+        raw_frame = self._raw_preview_frame
+        if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "Preview the database first to add rows to Compare.",
+            )
+            return
+        rows = self._selected_preview_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "Select one or more rows to compare first.",
+            )
+            return
+        mapped_rows: List[int] = []
+        for row in rows:
+            if row < 0:
                 continue
-            try:
-                idx = int(frame.columns.get_loc(column_name))
-            except Exception:
-                continue
-            self.preview_table.setColumnHidden(idx, not show)
+            if self._preview_row_index_map and row < len(self._preview_row_index_map):
+                mapped_rows.append(self._preview_row_index_map[row])
+            else:
+                mapped_rows.append(row)
+        added = compare_section.add_rows_from_frame(raw_frame, mapped_rows)
+        if added:
+            self.log(f"Compare: added {added} row(s).")
+        else:
+            self.log("Compare: no new rows added.")
 
     def _open_preview_graph(self, kind: str) -> None:
-        row = self._selected_preview_row()
+        row = self._selected_preview_row(raw=True)
         if row is None:
             return
-        composition = str(row.get("Composition") or "").strip()
-        microwire = str(row.get("Microwire") or "").strip()
-        if not composition or not microwire:
+        key = _row_to_microwire_key(row)
+        if not key:
             QtWidgets.QMessageBox.information(
                 self,
                 "Microwire Data Builder",
                 "Select a microwire row with annealing data first.",
             )
             return
-        parsed = _microwire_tuple_from_label(microwire)
-        if parsed is None:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Microwire Data Builder",
-                "Unable to parse the microwire label for this row.",
-            )
+        if kind in {"high", "low"}:
+            records = self._ensure_annealing_groups().get(key, [])
+            if not records:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Microwire Data Builder",
+                    "No annealing records found for the selected microwire.",
+                )
+                return
+            high_record, low_record = _select_high_low_pair(records)
+            record = high_record if kind == "high" else low_record
+            label = "1000 mA" if kind == "high" else "low mA"
+            if record is None:
+                QtWidgets.QMessageBox.information(
+                    self,
+                    "Microwire Data Builder",
+                    f"No {label} measurement available for this microwire.",
+                )
+                return
+            self._show_annealing_record(record, label)
             return
-        draw, piece = parsed
-        key = f"{composition}|{int(draw)}|{int(piece)}"
-        groups = self._cached_annealing_groups
-        if not groups:
-            payload = self._load_payload("annealing", "annealing_records")
-            if isinstance(payload, list):
-                self._cached_annealing_records = list(payload)
-                self._cached_annealing_groups = self._group_annealing_records(payload)
-                groups = self._cached_annealing_groups
-        records = groups.get(key, [])
+
+        if kind == "vsm_hysteresis":
+            records = self._ensure_vsm_hysteresis_groups().get(key, [])
+            title = "VSM hysteresis graphs"
+            items = _vsm_hysteresis_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No VSM hysteresis graphs available."
+        elif kind == "vsm_temperature":
+            records = self._ensure_vsm_temperature_groups().get(key, [])
+            title = "VSM temperature scan graphs"
+            items = _vsm_temperature_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No VSM temperature scan graphs available."
+        else:
+            records = self._ensure_dma_isostress_groups().get(key, [])
+            title = "DMA iso-stress graphs"
+            items = _dma_iso_stress_preview_items(
+                records,
+                self.logger,
+                width_px=GRAPH_PREVIEW_WIDTH,
+                height_px=GRAPH_PREVIEW_HEIGHT,
+            )
+            empty_message = "No DMA iso-stress graphs available."
         if not records:
             QtWidgets.QMessageBox.information(
                 self,
                 "Microwire Data Builder",
-                "No annealing records found for the selected microwire.",
+                empty_message,
             )
             return
-        high_record, low_record = _select_high_low_pair(records)
-        record = high_record if kind == "high" else low_record
-        label = "1000 mA" if kind == "high" else "low mA"
-        if record is None:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Microwire Data Builder",
-                f"No {label} measurement available for this microwire.",
-            )
-            return
-        self._show_annealing_record(record, label)
+        dialog = _GraphGalleryDialog(
+            title,
+            items,
+            parent=self,
+            empty_message=empty_message,
+        )
+        dialog.exec()
 
     def _show_annealing_record(self, record: MeasurementRecord, label: str) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -10160,6 +13120,9 @@ class AssemblySection(QtWidgets.QWidget):
                 continue
             order.append(column)
         return order
+
+    def _handle_preview_column_moved(self, *_: Any) -> None:
+        self._column_order = self._current_preview_column_order()
 
     def _apply_preview_column_order(self, order: Sequence[str]) -> None:
         if not order:
@@ -10195,6 +13158,26 @@ class AssemblySection(QtWidgets.QWidget):
         if isinstance(value, (list, tuple, set)):
             return ", ".join(str(item) for item in value)
         return value
+
+    def _current_column_filter(self) -> Optional[Tuple[str, ...]]:
+        if not self._selected_columns:
+            return None
+        selected = set(self._selected_columns) | self._mandatory_columns
+        frame = self._raw_preview_frame
+        if isinstance(frame, pd.DataFrame):
+            ordered = [str(column) for column in frame.columns if str(column) in selected]
+        else:
+            ordered = sorted(selected)
+        return tuple(ordered) if ordered else None
+
+    def _current_column_order_for_export(self) -> Optional[Tuple[str, ...]]:
+        order = self._column_order or self._current_preview_column_order()
+        return tuple(order) if order else None
+
+    def _current_sort_spec(self) -> Optional[Tuple[Tuple[str, bool], ...]]:
+        if not self._sort_spec:
+            return None
+        return tuple((str(column), bool(ascending)) for column, ascending in self._sort_spec)
 
     def _export_preview_worksheet(self) -> None:
         frame = self._ordered_preview_frame()
@@ -10251,6 +13234,593 @@ class AssemblySection(QtWidgets.QWidget):
             f"Worksheet exported to:\n{path}",
         )
 
+    def _html_cell_value(self, value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+        if isinstance(value, (pd.Timestamp, datetime)):
+            return value.isoformat(sep=" ", timespec="seconds")
+        text = self._serialise_preview_value(value)
+        if text is None:
+            return ""
+        text_str = str(text)
+        return "" if text_str.lower() == "nan" else text_str
+
+    def _resolve_image_path_for_html(self, value: Any, output_dir: Path) -> Optional[Path]:
+        path = self._coerce_path(value)
+        if path is None:
+            return None
+        candidate = path if path.is_absolute() else output_dir / path
+        if candidate.exists():
+            return candidate
+        if path.exists():
+            return path
+        return None
+
+    def _image_path_to_data_uri(
+        self,
+        path: Path,
+        cache: Dict[Path, str],
+    ) -> Optional[str]:
+        cached = cache.get(path)
+        if cached is not None:
+            return cached
+        try:
+            data = path.read_bytes()
+        except Exception:
+            cache[path] = ""
+            return None
+        ext = path.suffix.lower()
+        if ext in {".jpg", ".jpeg"}:
+            mime = "image/jpeg"
+        elif ext == ".gif":
+            mime = "image/gif"
+        else:
+            mime = "image/png"
+        encoded = base64.b64encode(data).decode("ascii")
+        uri = f"data:{mime};base64,{encoded}"
+        cache[path] = uri
+        return uri
+
+    def _graph_data_uri(
+        self,
+        record: Optional[MeasurementRecord],
+        plot_dir: Path,
+        cache: Dict[str, str],
+        image_cache: Dict[Path, str],
+    ) -> str:
+        if record is None:
+            return ""
+        measurement_id = getattr(getattr(record, "metadata", object()), "measurement_id", None)
+        if isinstance(measurement_id, str) and measurement_id in cache:
+            return cache[measurement_id]
+        try:
+            plot_path = _plot_measurement_matplotlib(
+                record.dataframe,
+                record.path,
+                plot_dir,
+                DEFAULT_FIGSIZE,
+            )
+        except Exception:
+            if isinstance(measurement_id, str):
+                cache[measurement_id] = ""
+            return ""
+        uri = self._image_path_to_data_uri(plot_path, image_cache)
+        if isinstance(measurement_id, str):
+            cache[measurement_id] = uri or ""
+        return uri or ""
+
+    def _export_html(
+        self,
+        frame: pd.DataFrame,
+        output_dir: Path,
+        output_name: str,
+    ) -> Optional[Path]:
+        if frame.empty:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export HTML",
+                "There is no preview data to export.",
+            )
+            return None
+        html_path = output_dir / f"{output_name}.html"
+        groups = self._ensure_annealing_groups()
+        vsm_hyst_groups = self._ensure_vsm_hysteresis_groups()
+        vsm_temp_groups = self._ensure_vsm_temperature_groups()
+        dma_groups = self._ensure_dma_isostress_groups()
+        image_cache: Dict[Path, str] = {}
+        graph_cache: Dict[str, str] = {}
+        vsm_hyst_cache: Dict[str, str] = {}
+        vsm_temp_cache: Dict[str, str] = {}
+        dma_cache: Dict[str, str] = {}
+        rows_html: List[str] = []
+        has_graphs = False
+        has_microscope = False
+        has_vsm_hyst = False
+        has_vsm_temp = False
+        has_dma = False
+        vsm_temp_processor = _get_vsm_temp_processor(self.logger) if vsm_temp_groups else None
+
+        def _record_cache_key(record: object) -> str:
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                return str(path)
+            if isinstance(path, str) and path:
+                return path
+            label = _record_label_for_display(record)
+            return label or repr(record)
+
+        def _record_to_data_uri(
+            record: object,
+            cache: Dict[str, str],
+            builder: Callable[[object], Optional["plt.Figure"]],
+        ) -> str:
+            key = _record_cache_key(record)
+            if key in cache:
+                return cache[key]
+            try:
+                figure = builder(record)
+            except Exception:
+                self.logger.exception("Failed to render graph for HTML export")
+                cache[key] = ""
+                return ""
+            uri = _figure_to_data_uri(figure, self.logger)
+            cache[key] = uri or ""
+            return uri or ""
+
+        with TemporaryDirectory() as tmp_dir:
+            plot_dir = Path(tmp_dir)
+            for _, row in frame.iterrows():
+                composition = str(row.get("Composition") or "").strip()
+                microwire = str(row.get("Microwire") or "").strip()
+                high_uri = ""
+                low_uri = ""
+                key = None
+                if composition and microwire:
+                    parsed = _microwire_tuple_from_label(microwire)
+                    if parsed is not None:
+                        draw, piece = parsed
+                        key = f"{composition}|{int(draw)}|{int(piece)}"
+                        records = groups.get(key, [])
+                        if records:
+                            high_record, low_record = _select_high_low_pair(records)
+                            high_uri = self._graph_data_uri(
+                                high_record, plot_dir, graph_cache, image_cache
+                            )
+                            low_uri = self._graph_data_uri(
+                                low_record, plot_dir, graph_cache, image_cache
+                            )
+                if high_uri or low_uri:
+                    has_graphs = True
+                vsm_hyst_uris: List[str] = []
+                vsm_temp_uris: List[str] = []
+                dma_uris: List[str] = []
+                if key:
+                    vsm_records = vsm_hyst_groups.get(key, [])
+                    for record in vsm_records:
+                        uri = _record_to_data_uri(
+                            record,
+                            vsm_hyst_cache,
+                            lambda rec: _plot_vsm_hysteresis_figure(
+                                rec, self.logger, width_px=GRAPH_PREVIEW_WIDTH, height_px=GRAPH_PREVIEW_HEIGHT
+                            ),
+                        )
+                        if uri:
+                            vsm_hyst_uris.append(uri)
+                    if vsm_hyst_uris:
+                        has_vsm_hyst = True
+
+                    vsm_temp_records = vsm_temp_groups.get(key, [])
+                    if vsm_temp_processor is not None:
+                        for record in vsm_temp_records:
+                            uri = _record_to_data_uri(
+                                record,
+                                vsm_temp_cache,
+                                lambda rec: _plot_vsm_temperature_scan_figure(
+                                    rec,
+                                    vsm_temp_processor,
+                                    width_px=GRAPH_PREVIEW_WIDTH,
+                                    height_px=GRAPH_PREVIEW_HEIGHT,
+                                ),
+                            )
+                            if uri:
+                                vsm_temp_uris.append(uri)
+                    if vsm_temp_uris:
+                        has_vsm_temp = True
+
+                    dma_records = dma_groups.get(key, [])
+                    for record in dma_records:
+                        uri = _record_to_data_uri(
+                            record,
+                            dma_cache,
+                            lambda rec: _plot_dma_iso_stress_figure(
+                                rec, width_px=GRAPH_PREVIEW_WIDTH, height_px=GRAPH_PREVIEW_HEIGHT
+                            ),
+                        )
+                        if uri:
+                            dma_uris.append(uri)
+                    if dma_uris:
+                        has_dma = True
+                core_uri = ""
+                glass_uri = ""
+                if MICROSCOPE_IMAGE_COLUMNS[0] in frame.columns:
+                    core_path = self._resolve_image_path_for_html(
+                        row.get(MICROSCOPE_IMAGE_COLUMNS[0]), output_dir
+                    )
+                    if core_path is not None:
+                        core_uri = self._image_path_to_data_uri(core_path, image_cache) or ""
+                if MICROSCOPE_IMAGE_COLUMNS[1] in frame.columns:
+                    glass_path = self._resolve_image_path_for_html(
+                        row.get(MICROSCOPE_IMAGE_COLUMNS[1]), output_dir
+                    )
+                    if glass_path is not None:
+                        glass_uri = self._image_path_to_data_uri(glass_path, image_cache) or ""
+                if core_uri or glass_uri:
+                    has_microscope = True
+
+                cells: List[str] = []
+                for column in frame.columns:
+                    cell_text = self._html_cell_value(row.get(column))
+                    cells.append(f"<td>{html.escape(cell_text)}</td>")
+                vsm_hyst_blob = "|".join(vsm_hyst_uris)
+                vsm_temp_blob = "|".join(vsm_temp_uris)
+                dma_blob = "|".join(dma_uris)
+                attrs = [
+                    f'data-high="{html.escape(high_uri)}"',
+                    f'data-low="{html.escape(low_uri)}"',
+                    f'data-core="{html.escape(core_uri)}"',
+                    f'data-glass="{html.escape(glass_uri)}"',
+                    f'data-vsm-hyst="{html.escape(vsm_hyst_blob)}"',
+                    f'data-vsm-temp="{html.escape(vsm_temp_blob)}"',
+                    f'data-dma="{html.escape(dma_blob)}"',
+                ]
+                rows_html.append(f"<tr {' '.join(attrs)}>{''.join(cells)}</tr>")
+
+        header_cells = "".join(
+            f"<th>{html.escape(str(column))}</th>" for column in frame.columns
+        )
+        title_text = html.escape(output_name or "Microwire database")
+        preview_class = "preview-panel"
+        preview_classes = preview_class
+        microscope_section = ""
+        if has_microscope:
+            microscope_section = """
+            <div class="preview-section">
+              <div class="preview-title">Microscope images</div>
+              <div class="preview-grid">
+                <div class="preview-card">
+                  <div class="preview-label">d (core)</div>
+                  <img id="preview-core" class="preview-image" alt="Core image" />
+                  <div id="preview-core-empty" class="preview-empty">No core image</div>
+                </div>
+                <div class="preview-card">
+                  <div class="preview-label">D (glass)</div>
+                  <img id="preview-glass" class="preview-image" alt="Glass image" />
+                  <div id="preview-glass-empty" class="preview-empty">No glass image</div>
+                </div>
+              </div>
+            </div>
+            """
+        graph_section = ""
+        if has_graphs:
+            graph_section = """
+            <div class="preview-section">
+              <div class="preview-title">Annealing graphs</div>
+              <div class="preview-grid">
+                <div class="preview-card">
+                  <div class="preview-label">1000 mA</div>
+                  <img id="preview-high" class="preview-image" alt="1000 mA graph" />
+                  <div id="preview-high-empty" class="preview-empty">No 1000 mA graph</div>
+                </div>
+                <div class="preview-card">
+                  <div class="preview-label">Low mA</div>
+                  <img id="preview-low" class="preview-image" alt="Low mA graph" />
+                  <div id="preview-low-empty" class="preview-empty">No low mA graph</div>
+                </div>
+              </div>
+            </div>
+            """
+        vsm_hyst_section = ""
+        if has_vsm_hyst:
+            vsm_hyst_section = """
+            <div class="preview-section">
+              <div class="preview-title">VSM hysteresis</div>
+              <div id="preview-vsm-hyst" class="preview-stack"></div>
+              <div id="preview-vsm-hyst-empty" class="preview-empty">No VSM hysteresis graphs</div>
+            </div>
+            """
+        vsm_temp_section = ""
+        if has_vsm_temp:
+            vsm_temp_section = """
+            <div class="preview-section">
+              <div class="preview-title">VSM temperature scan</div>
+              <div id="preview-vsm-temp" class="preview-stack"></div>
+              <div id="preview-vsm-temp-empty" class="preview-empty">No VSM temperature scans</div>
+            </div>
+            """
+        dma_section = ""
+        if has_dma:
+            dma_section = """
+            <div class="preview-section">
+              <div class="preview-title">DMA iso-stress</div>
+              <div id="preview-dma" class="preview-stack"></div>
+              <div id="preview-dma-empty" class="preview-empty">No DMA iso-stress graphs</div>
+            </div>
+            """
+        if not graph_section and not microscope_section and not vsm_hyst_section and not vsm_temp_section and not dma_section:
+            preview_classes = f"{preview_class} empty"
+
+        html_text = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{title_text}</title>
+  <style>
+    :root {{
+      color-scheme: light dark;
+    }}
+    body {{
+      font-family: "Segoe UI", "Calibri", "Arial", sans-serif;
+      margin: 0;
+      background: #141414;
+      color: #f5f5f5;
+    }}
+    .toolbar {{
+      padding: 16px 24px;
+      border-bottom: 1px solid #2a2a2a;
+      background: linear-gradient(135deg, #1f1f1f, #0f0f0f);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }}
+    .title {{
+      font-size: 20px;
+      font-weight: 600;
+    }}
+    .meta {{
+      font-size: 12px;
+      color: #b0b0b0;
+    }}
+    .content {{
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 420px;
+      gap: 16px;
+      padding: 16px 24px 24px;
+    }}
+    .table-container {{
+      overflow: auto;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      background: #0f0f0f;
+    }}
+    table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    th, td {{
+      padding: 8px 10px;
+      border-bottom: 1px solid #222;
+      font-size: 12px;
+      text-align: left;
+      white-space: nowrap;
+    }}
+    th {{
+      position: sticky;
+      top: 0;
+      background: #1c1c1c;
+      cursor: pointer;
+    }}
+    tr:hover {{
+      background: rgba(255, 255, 255, 0.05);
+    }}
+    tr.active {{
+      background: rgba(0, 145, 255, 0.2);
+    }}
+    .preview-panel {{
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      padding: 12px;
+      background: #101010;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }}
+    .preview-panel.empty {{
+      color: #9b9b9b;
+    }}
+    .preview-title {{
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }}
+    .preview-grid {{
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }}
+    .preview-stack {{
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .preview-card {{
+      background: #161616;
+      border: 1px solid #242424;
+      border-radius: 6px;
+      padding: 8px;
+    }}
+    .preview-label {{
+      font-size: 12px;
+      color: #b5b5b5;
+      margin-bottom: 6px;
+    }}
+    .preview-image {{
+      width: 100%;
+      height: auto;
+      display: none;
+    }}
+    .preview-empty {{
+      font-size: 12px;
+      color: #6f6f6f;
+      display: none;
+    }}
+    @media (max-width: 1100px) {{
+      .content {{
+        grid-template-columns: 1fr;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <div class="toolbar">
+    <div class="title">{title_text}</div>
+    <div class="meta">{len(frame)} row(s)</div>
+  </div>
+    <div class="content">
+    <div class="table-container">
+      <table id="data-table">
+        <thead>
+          <tr>{header_cells}</tr>
+        </thead>
+        <tbody>
+          {''.join(rows_html)}
+        </tbody>
+      </table>
+    </div>
+    <div class="{preview_classes}">
+      {graph_section}
+      {microscope_section}
+      {vsm_hyst_section}
+      {vsm_temp_section}
+      {dma_section}
+    </div>
+  </div>
+  <script>
+    const table = document.getElementById('data-table');
+    const rows = Array.from(table.querySelectorAll('tbody tr'));
+    const preview = {{
+      high: document.getElementById('preview-high'),
+      highEmpty: document.getElementById('preview-high-empty'),
+      low: document.getElementById('preview-low'),
+      lowEmpty: document.getElementById('preview-low-empty'),
+      core: document.getElementById('preview-core'),
+      coreEmpty: document.getElementById('preview-core-empty'),
+      glass: document.getElementById('preview-glass'),
+      glassEmpty: document.getElementById('preview-glass-empty'),
+      vsmHyst: document.getElementById('preview-vsm-hyst'),
+      vsmHystEmpty: document.getElementById('preview-vsm-hyst-empty'),
+      vsmTemp: document.getElementById('preview-vsm-temp'),
+      vsmTempEmpty: document.getElementById('preview-vsm-temp-empty'),
+      dma: document.getElementById('preview-dma'),
+      dmaEmpty: document.getElementById('preview-dma-empty'),
+    }};
+
+    function setImage(imgEl, emptyEl, data) {{
+      if (!imgEl || !emptyEl) {{
+        return;
+      }}
+      if (data) {{
+        imgEl.src = data;
+        imgEl.style.display = 'block';
+        emptyEl.style.display = 'none';
+      }} else {{
+        imgEl.removeAttribute('src');
+        imgEl.style.display = 'none';
+        emptyEl.style.display = 'block';
+      }}
+    }}
+
+    function setImageList(container, emptyEl, data) {{
+      if (!container || !emptyEl) {{
+        return;
+      }}
+      const items = data ? data.split('|').filter(Boolean) : [];
+      container.innerHTML = '';
+      if (items.length) {{
+        items.forEach((uri) => {{
+          const img = document.createElement('img');
+          img.src = uri;
+          img.className = 'preview-image';
+          img.style.display = 'block';
+          img.alt = 'Graph preview';
+          container.appendChild(img);
+        }});
+        container.style.display = 'flex';
+        emptyEl.style.display = 'none';
+      }} else {{
+        container.style.display = 'none';
+        emptyEl.style.display = 'block';
+      }}
+    }}
+
+    function updatePreview(row) {{
+      if (!row) {{
+        return;
+      }}
+      setImage(preview.high, preview.highEmpty, row.dataset.high);
+      setImage(preview.low, preview.lowEmpty, row.dataset.low);
+      setImage(preview.core, preview.coreEmpty, row.dataset.core);
+      setImage(preview.glass, preview.glassEmpty, row.dataset.glass);
+      setImageList(preview.vsmHyst, preview.vsmHystEmpty, row.dataset.vsmHyst);
+      setImageList(preview.vsmTemp, preview.vsmTempEmpty, row.dataset.vsmTemp);
+      setImageList(preview.dma, preview.dmaEmpty, row.dataset.dma);
+    }}
+
+    rows.forEach((row) => {{
+      row.addEventListener('click', () => {{
+        rows.forEach((item) => item.classList.remove('active'));
+        row.classList.add('active');
+        updatePreview(row);
+      }});
+    }});
+
+    if (rows.length > 0) {{
+      rows[0].classList.add('active');
+      updatePreview(rows[0]);
+    }}
+
+    const headers = Array.from(table.querySelectorAll('th'));
+    let sortState = {{}};
+    headers.forEach((header, index) => {{
+      header.addEventListener('click', () => {{
+        const dir = sortState[index] === 'asc' ? 'desc' : 'asc';
+        sortState = {{ [index]: dir }};
+        const body = table.tBodies[0];
+        const sorted = rows.slice().sort((a, b) => {{
+          const aText = a.children[index].innerText.trim();
+          const bText = b.children[index].innerText.trim();
+          const aNum = parseFloat(aText.replace(/,/g, ''));
+          const bNum = parseFloat(bText.replace(/,/g, ''));
+          if (!Number.isNaN(aNum) && !Number.isNaN(bNum)) {{
+            return dir === 'asc' ? aNum - bNum : bNum - aNum;
+          }}
+          return dir === 'asc'
+            ? aText.localeCompare(bText)
+            : bText.localeCompare(aText);
+        }});
+        sorted.forEach((row) => body.appendChild(row));
+      }});
+    }});
+  </script>
+</body>
+</html>
+"""
+        try:
+            html_path.write_text(html_text, encoding="utf-8")
+        except Exception as exc:
+            self.logger.exception("Failed to export HTML")
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Export HTML",
+                f"Failed to export HTML:\n{exc}",
+            )
+            return None
+        self.log(f"HTML export saved to {html_path}")
+        return html_path
+
     def _combine(self) -> None:
         selected = self._selected_sections()
         inputs = self._prepare_builder_inputs(selected)
@@ -10260,6 +13830,9 @@ class AssemblySection(QtWidgets.QWidget):
         (
             fabrication_index,
             annealing_records,
+            vsm_hysteresis_records,
+            vsm_temperature_records,
+            dma_isostress_records,
             microscope_index,
             video_index,
             strain_records,
@@ -10286,6 +13859,9 @@ class AssemblySection(QtWidgets.QWidget):
             backends.append("matplotlib")
         if self.origin_checkbox.isChecked():
             backends.append("origin")
+        column_filter = self._current_column_filter()
+        column_order = self._current_column_order_for_export()
+        sort_spec = self._current_sort_spec()
 
         config = BuilderConfig(
             annealing_files=[],
@@ -10298,6 +13874,9 @@ class AssemblySection(QtWidgets.QWidget):
             export_formats=tuple(formats) if formats else ("csv",),
             plot_backends=tuple(backends),
             output_name=output_name,
+            column_filter=column_filter,
+            column_order=column_order,
+            sort_spec=sort_spec,
         )
 
         try:
@@ -10306,6 +13885,15 @@ class AssemblySection(QtWidgets.QWidget):
                 logger=self.logger,
                 fabrication_index=fabrication_index,
                 measurement_records=annealing_records,
+                vsm_hysteresis_records=(
+                    vsm_hysteresis_records if "vsm_hysteresis" in selected else []
+                ),
+                vsm_temperature_scan_records=(
+                    vsm_temperature_records if "vsm_temperature_scan" in selected else []
+                ),
+                dma_iso_stress_records=(
+                    dma_isostress_records if "dma_iso_stress" in selected else []
+                ),
                 microscope_index=microscope_index if "microscope" in selected else {},
                 video_index=video_index if "videos" in selected else {},
                 strain_records=strain_records if "strain" in selected else {},
@@ -10319,8 +13907,14 @@ class AssemblySection(QtWidgets.QWidget):
                 f"Failed to assemble database:\n{exc}",
             )
             return
-
-        exports_text = ", ".join(f"{fmt.upper()}: {path}" for fmt, path in result.exports.items())
+        exports = dict(result.exports)
+        if self.html_checkbox.isChecked():
+            html_path = self._export_html(result.dataframe, output_dir, output_name)
+            if html_path is not None:
+                exports["html"] = html_path
+        exports_text = ", ".join(
+            f"{fmt.upper()}: {path}" for fmt, path in exports.items()
+        )
         if not exports_text:
             exports_text = "No exports generated."
         QtWidgets.QMessageBox.information(
@@ -10340,6 +13934,9 @@ class AssemblySection(QtWidgets.QWidget):
         (
             fabrication_index,
             annealing_records,
+            vsm_hysteresis_records,
+            vsm_temperature_records,
+            dma_isostress_records,
             microscope_index,
             video_index,
             strain_records,
@@ -10375,6 +13972,15 @@ class AssemblySection(QtWidgets.QWidget):
                 logger=self.logger,
                 fabrication_index=fabrication_index,
                 measurement_records=annealing_records,
+                vsm_hysteresis_records=(
+                    vsm_hysteresis_records if "vsm_hysteresis" in selected else []
+                ),
+                vsm_temperature_scan_records=(
+                    vsm_temperature_records if "vsm_temperature_scan" in selected else []
+                ),
+                dma_iso_stress_records=(
+                    dma_isostress_records if "dma_iso_stress" in selected else []
+                ),
                 microscope_index=microscope_index if "microscope" in selected else {},
                 video_index=video_index if "videos" in selected else {},
                 strain_records=strain_records if "strain" in selected else {},
@@ -10423,6 +14029,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         raw_auto = self.settings.value(self._project_settings_key("auto_open_last"), False)
         self._auto_open_last: bool = bool(raw_auto)
         self._auto_open_last_action: QtGui.QAction | None = None
+        self._fullscreen_snap_pending = False
 
         central = QtWidgets.QWidget(self)
         layout = QtWidgets.QVBoxLayout(central)
@@ -10501,6 +14108,21 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self.sections["videos"] = self.video_section
         _pump_events()
 
+        self.vsm_hysteresis_section = VsmHysteresisSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.vsm_hysteresis_section, "VSM hysteresis")
+        self.sections["vsm_hysteresis"] = self.vsm_hysteresis_section
+        _pump_events()
+
+        self.vsm_temperature_section = VsmTemperatureScanSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.vsm_temperature_section, "VSM temp scan")
+        self.sections["vsm_temperature_scan"] = self.vsm_temperature_section
+        _pump_events()
+
+        self.dma_iso_stress_section = DmaIsoStressSection(self.logger, _append_log)
+        self.tab_widget.addTab(self.dma_iso_stress_section, "DMA iso-stress")
+        self.sections["dma_iso_stress"] = self.dma_iso_stress_section
+        _pump_events()
+
         self._developer_options = developer_options()
         self._ocr_debug_supported = all(
             hasattr(self._developer_options, attr)
@@ -10530,11 +14152,20 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self.sections,
             self.logger,
             _append_log,
-            console_callback=self._display_dataframe_in_console,
         )
         self.assembly_section = assembly
         self.tab_widget.addTab(assembly, "Assemble")
         _pump_events()
+
+        self.compare_section = CompareSection(
+            self.sections,
+            self.logger,
+            _append_log,
+        )
+        self.sections["compare"] = self.compare_section
+        self.tab_widget.addTab(self.compare_section, "Compare")
+        _pump_events()
+        assembly.attach_compare_section(self.compare_section)
 
         self.fabrication_section.sources_changed.connect(
             self._handle_fabrication_sources_changed
@@ -10594,14 +14225,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 | QtWidgets.QDockWidget.DockWidgetFeature.DockWidgetFloatable
             )
             dock.hide()
-
-        self.console_widget = PythonConsoleWidget(self)
-        self.console_widget.set_environment({"window": self, "pd": pd})
-        self.console_dock = QtWidgets.QDockWidget("Python Console", self)
-        self.console_dock.setObjectName("builderPythonConsoleDock")
-        self.console_dock.setWidget(self.console_widget)
-        self.addDockWidget(QtCore.Qt.DockWidgetArea.BottomDockWidgetArea, self.console_dock)
-        self.console_dock.hide()
 
         self._dock_switcher_panels: List[QtWidgets.QDockWidget | None] = []
         if self._dock_switcher_supported():
@@ -10828,9 +14451,76 @@ class BuilderWindow(QtWidgets.QMainWindow):
         super().resizeEvent(event)
         self._clamp_to_available_geometry()
 
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.WindowStateChange:
+            if self.windowState() & (
+                QtCore.Qt.WindowState.WindowMaximized | QtCore.Qt.WindowState.WindowFullScreen
+            ):
+                self._queue_fullscreen_snap()
+
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
         QtCore.QTimer.singleShot(0, self._clamp_to_available_geometry)
+
+    def _queue_fullscreen_snap(self) -> None:
+        if self._fullscreen_snap_pending:
+            return
+        self._fullscreen_snap_pending = True
+        QtCore.QTimer.singleShot(0, self._apply_fullscreen_geometry)
+
+    def _apply_fullscreen_geometry(self) -> None:
+        self._fullscreen_snap_pending = False
+        if not (self.isMaximized() or self.isFullScreen()):
+            return
+        want_fullscreen = self.isFullScreen()
+        want_maximized = self.isMaximized()
+        screen = None
+        try:
+            handle = self.windowHandle()
+            if handle is not None:
+                screen = handle.screen()
+        except Exception:
+            screen = None
+        if screen is None:
+            try:
+                screen = QtGui.QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
+            except Exception:
+                screen = None
+        if screen is None:
+            screen = QtGui.QGuiApplication.primaryScreen()
+        if screen is None:
+            return
+        rect = screen.geometry() if want_fullscreen else screen.availableGeometry()
+        geom = self.geometry()
+        frame = self.frameGeometry()
+        tolerance = 2
+        if (
+            abs(frame.left() - rect.left()) <= tolerance
+            and abs(frame.top() - rect.top()) <= tolerance
+            and abs(frame.width() - rect.width()) <= tolerance
+            and abs(frame.height() - rect.height()) <= tolerance
+        ):
+            return
+        frame_margin_w = max(0, frame.width() - geom.width())
+        frame_margin_h = max(0, frame.height() - geom.height())
+        target_w = max(self.minimumWidth(), rect.width() - frame_margin_w)
+        target_h = max(self.minimumHeight(), rect.height() - frame_margin_h)
+        try:
+            self.resize(max(1, int(target_w)), max(1, int(target_h)))
+            self.move(rect.topLeft())
+        except Exception:
+            pass
+        if want_fullscreen and not self.isFullScreen():
+            try:
+                self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowFullScreen)
+            except Exception:
+                pass
+        elif want_maximized and not self.isMaximized():
+            try:
+                self.setWindowState(self.windowState() | QtCore.Qt.WindowState.WindowMaximized)
+            except Exception:
+                pass
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._dirty:
@@ -10875,38 +14565,30 @@ class BuilderWindow(QtWidgets.QMainWindow):
         try:
             geom = self.geometry()
             frame = self.frameGeometry()
+            frame_margin_w = max(0, frame.width() - geom.width())
+            frame_margin_h = max(0, frame.height() - geom.height())
+            max_width = max(1, available.width() - frame_margin_w)
+            max_height = max(1, available.height() - frame_margin_h)
 
-            if (
-                geom.width() >= available.width() - 2
-                and geom.height() >= available.height() - 2
-            ):
-                self.setGeometry(available)
-                return
-
-            new_width = geom.width()
-            new_height = geom.height()
-            if new_width > available.width():
-                new_width = available.width()
-            if new_height > available.height():
-                new_height = available.height()
-
-            bottom_margin = max(0, frame.bottom() - geom.bottom())
-            max_height = available.bottom() - geom.y() + 1 - bottom_margin
-            if max_height < new_height:
-                new_height = max(0, int(max_height))
-
-            new_width = max(new_width, self.minimumWidth())
-            new_height = max(new_height, self.minimumHeight())
+            new_width = max(self.minimumWidth(), min(geom.width(), max_width))
+            new_height = max(self.minimumHeight(), min(geom.height(), max_height))
             if new_width != geom.width() or new_height != geom.height():
                 self.resize(new_width, new_height)
-                geom = self.geometry()
+                frame = self.frameGeometry()
 
-            max_x = available.right() - geom.width() + 1
-            max_y = available.bottom() - geom.height() + 1
-            bounded_x = min(max(geom.x(), available.left()), max_x)
-            bounded_y = min(max(geom.y(), available.top()), max_y)
-            if bounded_x != geom.x() or bounded_y != geom.y():
-                self.move(bounded_x, bounded_y)
+            if (
+                frame.width() >= available.width() - 2
+                and frame.height() >= available.height() - 2
+            ):
+                self.move(available.topLeft())
+                return
+
+            max_left = available.right() - frame.width() + 1
+            max_top = available.bottom() - frame.height() + 1
+            bounded_left = min(max(frame.left(), available.left()), max_left)
+            bounded_top = min(max(frame.top(), available.top()), max_top)
+            if bounded_left != frame.left() or bounded_top != frame.top():
+                self.move(bounded_left, bounded_top)
         finally:
             self._clamp_active = False
 
@@ -11436,24 +15118,6 @@ class BuilderWindow(QtWidgets.QMainWindow):
         except Exception:
             resolved = directory
         self.settings.setValue(self._project_settings_key("last_dir"), str(resolved))
-
-    def _display_dataframe_in_console(self, frame: pd.DataFrame) -> None:
-        if not isinstance(frame, pd.DataFrame):
-            return
-        try:
-            self.console_widget.set_environment({"database": frame})
-            rows = len(frame.index)
-            cols = len(frame.columns)
-            summary = f"database -> DataFrame with {rows} row(s) × {cols} column(s)"
-            self.console_widget.output.appendPlainText(summary)
-        except Exception:
-            self.logger.exception("Failed to stream dataframe to console")
-            return
-        self.console_dock.show()
-        try:
-            self.console_dock.raise_()
-        except Exception:
-            pass
 
 def run_app() -> None:
     main()

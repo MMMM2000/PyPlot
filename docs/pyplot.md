@@ -33,6 +33,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. |
 | VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. |
 | VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. |
+| DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level. |
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
 
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.

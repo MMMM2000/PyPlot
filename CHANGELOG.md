@@ -1,5 +1,42 @@
 # Changelog
 
+## 2026-01-02 21:03 UTC
+
+- Fixed the Assemble section startup crash caused by a missing compare-section hookup.
+
+## 2026-01-02 20:34 UTC
+
+- Added Data Builder sections for VSM hysteresis loops, VSM temperature scans, and DMA iso-stress files with per-sample previews and graph galleries.
+- Assemble preview now offers VSM/DMA graph buttons, a tabbed preview panel, and HTML exports that embed VSM/DMA previews alongside annealing/microscope assets.
+- Added a Compare section that collects selected Assemble rows for side-by-side data/graph review.
+- Added a DMA Iso-Stress PyPlot plugin for plotting TA DMA iso-stress TXT files.
+
+## 2026-01-02 15:02 UTC
+
+- Fixed the Assemble column picker crash on Qt builds that require `ItemIsAutoTristate`.
+
+## 2026-01-02 14:32 UTC
+
+- Assemble preview now supports per-section column selection, multi-column sorting, and column reordering that carries into final exports.
+- Added a self-contained HTML export with embedded annealing graphs and microscope images (when available) plus interactive row sorting/preview.
+- Assemble preview adds an optional side-by-side graph panel and drops the Python console output in favor of the Message Log.
+
+## 2026-01-02 09:45 UTC
+
+- Assemble now uses manually-entered microscope table values when OCR payloads are missing, so the database build runs with hand-entered diameters and linked images.
+
+## 2026-01-02 09:16 UTC
+
+- Microscope refresh now keeps reviewed d/D values locked, clears review highlights when values go missing, and lets Tab/Shift+Tab move between d and D cells.
+- Strain selector dropdowns expand to use available screen height and re-focus after saving a row for faster entry.
+- Data Builder queues microscope/log updates onto the UI thread, avoids empty concat warnings, and closes active editors before model resets to reduce Qt timer/editor warnings.
+- Fullscreen snapping skips redundant geometry updates to avoid Windows setGeometry warnings.
+
+## 2026-01-01 15:39 UTC
+
+- Data Builder fullscreen alignment now accounts for window frames so maximized windows sit flush without a top gap.
+- Strain entry form no longer flips to Update after adding a new row, keeping Add entry ready for the next sample.
+
 ## 2025-12-31 12:53 UTC
 
 - Data Builder fullscreen snapping now fills the available screen instead of leaving a top gap.

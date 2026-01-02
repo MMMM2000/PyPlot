@@ -1,7 +1,7 @@
 {
   "version": 1,
   "kind": "MicrowireDataBuilder",
-  "saved_at": "2026-01-01 15:17",
+  "saved_at": "2026-01-02 12:35",
   "sections": {
     "annealing": {
       "section": "annealing",
@@ -570,6 +570,16 @@
             "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_1 s1 1000mA.txt",
             "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_1 s2 100mA.txt"
           ]
+        },
+        {
+          "Composition": "Ni55Fe18Ga27",
+          "Microwire": "4/2",
+          "Graph — 1000 mA": null,
+          "Graph — low mA": null,
+          "_group_key": "Ni55Fe18Ga27|4|2",
+          "_sources": [
+            "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_2 s1 1000mA.txt"
+          ]
         }
       ],
       "index": [
@@ -623,7 +633,8 @@
         47,
         48,
         49,
-        50
+        50,
+        51
       ],
       "extra": {
         "payloads": {
@@ -853,7 +864,8 @@
         "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni54Fe19Ga27 1_1 s1 1000mA.txt": 1761307628.745,
         "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni54Fe19Ga27 1_1 s2 100mA.txt": 1761307628.723,
         "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_1 s1 1000mA.txt": 1761307628.763,
-        "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_1 s2 100mA.txt": 1761307628.838
+        "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_1 s2 100mA.txt": 1761307628.838,
+        "G:\\My Drive\\1 Projects\\Praha\\current annealing data\\Ni55Fe18Ga27 4_2 s1 1000mA.txt": 1758030075.287
       }
     },
     "fabrication": {
@@ -1910,6 +1922,28 @@
             "G:\\.shortcut-targets-by-id\\1-8FX4i_bNyyVH8wvIQz5KdrZuCTYH2xT\\databaza mikrodrotov\\Ni55Fe18Ga27\\4.Ni55Fe18Ga27 26112024 0850\\previjanie 4.Ni55Fe18Ga27 26112024 0850.xlsx",
             "G:\\.shortcut-targets-by-id\\1-8FX4i_bNyyVH8wvIQz5KdrZuCTYH2xT\\databaza mikrodrotov\\Ni55Fe18Ga27\\Ni55Fe18Ga27.xlsx"
           ]
+        },
+        {
+          "Composition": "Ni55Fe18Ga27",
+          "Draw": 4,
+          "Piece": 2,
+          "Length (m)": 0.2512,
+          "Piece date": "2024-11-26",
+          "d (µm)": null,
+          "D (µm)": null,
+          "d/D": null,
+          "Resistance (Ω)": null,
+          "Temperature (°C)": null,
+          "Mass (g)": 2.45,
+          "Winding speed (m/min)": null,
+          "Glass feeding (mm/min)": null,
+          "Underpressure": null,
+          "Notes": "po predoslom idukcne pretavena predzliatina",
+          "Production datetime": "2024-11-26 08:50:00",
+          "_source_paths": [
+            "G:\\.shortcut-targets-by-id\\1-8FX4i_bNyyVH8wvIQz5KdrZuCTYH2xT\\databaza mikrodrotov\\Ni55Fe18Ga27\\4.Ni55Fe18Ga27 26112024 0850\\previjanie 4.Ni55Fe18Ga27 26112024 0850.xlsx",
+            "G:\\.shortcut-targets-by-id\\1-8FX4i_bNyyVH8wvIQz5KdrZuCTYH2xT\\databaza mikrodrotov\\Ni55Fe18Ga27\\Ni55Fe18Ga27.xlsx"
+          ]
         }
       ],
       "index": [
@@ -1959,7 +1993,8 @@
         43,
         44,
         45,
-        46
+        46,
+        47
       ],
       "extra": {
         "payloads": {
@@ -2878,6 +2913,21 @@
             "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 core.jpg",
             "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 glass.jpg"
           ]
+        },
+        {
+          "Composition": "Ni55Fe18Ga27",
+          "Microwire": "4/2",
+          "d (µm)": 20.5,
+          "D (µm)": null,
+          "d/D": null,
+          "d (µm) image": null,
+          "D (µm) image": null,
+          "_key": "Ni55Fe18Ga27|4|2",
+          "_core_image": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_2 core.jpg",
+          "_glass_image": null,
+          "_images": [
+            "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_2 core.jpg"
+          ]
         }
       ],
       "index": [
@@ -2931,7 +2981,8 @@
         47,
         48,
         49,
-        50
+        50,
+        51
       ],
       "extra": {
         "payloads": {
@@ -3009,6 +3060,113 @@
           "Ni55Fe18Ga27|4|1": {
             "d": 15.3,
             "D": 104.9
+          },
+          "Ni46Fe23Ga23Co8|1|1": {
+            "d": 6.7,
+            "D": 34.4
+          },
+          "Ni46Fe31Ga15Si8|1|5": {
+            "d": 15.3,
+            "D": 43.8
+          },
+          "Ni47Fe24Ga23Co6|2|1": {
+            "d": 15.1,
+            "D": 44.8
+          },
+          "Ni47Fe24Ga23Co6|2|2": {
+            "d": 8.7,
+            "D": 41.9
+          },
+          "Ni47Fe30Ga17Si6|1|1": {
+            "d": 18.9,
+            "D": 53.0
+          },
+          "Ni47Fe30Ga17Si6|1|8": {
+            "d": 10.4,
+            "D": 55.1
+          },
+          "Ni48Fe25Ga23Co4|1|6": {
+            "d": 7.7,
+            "D": 44.2
+          },
+          "Ni48Fe25Ga27|1|2": {
+            "d": 16.5,
+            "D": 65.1
+          },
+          "Ni48Fe25Ga27|2|5": {
+            "d": 9.7,
+            "D": 49.1
+          },
+          "Ni49Fe25Ga26|1|2": {
+            "d": 11.1,
+            "D": 34.1
+          },
+          "Ni49Fe25Ga26|1|3": {
+            "d": 10.8,
+            "D": 35.9
+          },
+          "Ni49Fe28Ga21Si2|1|9": {
+            "d": 11.2,
+            "D": 71.2
+          },
+          "Ni50Fe25Ga25|2|1": {
+            "d": 9.3,
+            "D": 59.9
+          },
+          "Ni50Fe25Ga25|2|3": {
+            "d": 19.6,
+            "D": 54.0
+          },
+          "Ni50Fe25Ga25|3|1": {
+            "d": 12.5,
+            "D": 42.5
+          },
+          "Ni50Fe26Ga24|1|2": {
+            "d": 8.3,
+            "D": 25.6
+          },
+          "Ni50Fe26Ga24|2|2": {
+            "d": 7.5,
+            "D": 56.1
+          },
+          "Ni50Fe26Ga24|2|4": {
+            "d": 10.0,
+            "D": 73.6
+          },
+          "Ni50Fe27Ga23|10|1": {
+            "d": 12.4,
+            "D": 96.8
+          },
+          "Ni50Fe27Ga23|10|4": {
+            "d": 13.7,
+            "D": 70.8
+          },
+          "Ni50Fe27Ga23|10|5": {
+            "d": 14.2,
+            "D": 101.6
+          },
+          "Ni50Fe27Ga23|12|2": {
+            "d": 19.1,
+            "D": 58.6
+          },
+          "Ni50Fe27Ga23|2|6": {
+            "d": 9.2,
+            "D": 32.6
+          },
+          "Ni50Fe27Ga23|5|4": {
+            "d": 19.4,
+            "D": 58.6
+          },
+          "Ni50Fe27Ga23|6|2": {
+            "d": 11.3,
+            "D": 55.6
+          },
+          "Ni50Fe27Ga23|6|4": {
+            "d": 7.8,
+            "D": 66.7
+          },
+          "Ni55Fe18Ga27|4|2": {
+            "d": 20.5
           }
         },
         "ocr_cache": {
@@ -7701,6 +7859,19 @@
             "timestamp": "2025-12-31T11:08:31.533698Z",
             "D": 104.9,
             "D_reviewed": true
+          },
+          "Ni55Fe18Ga27|4|2": {
+            "sources": [
+              {
+                "path": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_2 core.jpg",
+                "key": "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_2 core.jpg",
+                "mtime": 1758806760.0,
+                "size": 815412
+              }
+            ],
+            "d": 20.5,
+            "d_reviewed": true,
+            "timestamp": "2026-01-01T16:30:31.221182Z"
           }
         }
       },
@@ -7708,22 +7879,98 @@
         "G:\\My Drive\\1 Projects\\Praha\\microscope"
       ],
       "processed": {
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni46Fe31Ga15Si8 1_10 core.jpg": 1758791808.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni46Fe31Ga15Si8 1_10 glass.jpg": 1758791946.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe27Ga21Cu2 2_4 core.jpg": 1758807468.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe27Ga21Cu2 2_4 glass.jpg": 1758807554.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Si4 1_1 core.jpg": 1758812738.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Si4 1_1 glass.jpg": 1758812800.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Sn4 2_1 core.jpg": 1758791234.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe29Ga19Sn4 2_1 glass.jpg": 1758791612.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_5 core.jpg": 1758813198.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_5 glass.jpg": 1758813258.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 11_1 core.jpg": 1758812494.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 11_1 glass.jpg": 1758812556.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe28Ga22 2_1 core.jpg": 1758801976.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe28Ga22 2_1 glass.jpg": 1758802208.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe17Ga27Co2 1_2 core.jpg": 1758811142.0,
-        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe17Ga27Co2 1_2 glass.jpg": 1758811226.0
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni46Fe23Ga23Co8 1_1 core.jpg": 1758809602.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni46Fe23Ga23Co8 1_1 glass.jpg": 1758809710.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni46Fe31Ga15Si8 1_5 core.jpg": 1758789244.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni46Fe31Ga15Si8 1_5 glass.jpg": 1758789512.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe24Ga23Co6 2_1 core.jpg": 1758808600.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe24Ga23Co6 2_1 glass.jpg": 1758887540.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe24Ga23Co6 2_2 core.jpg": 1758810092.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe24Ga23Co6 2_2 glass.jpg": 1758810170.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe30Ga17Si6 1_1 core.jpg": 1758888258.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe30Ga17Si6 1_1 glass.jpg": 1758888362.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe30Ga17Si6 1_8 core.jpg": 1758790868.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe30Ga17Si6 1_8 glass.jpg": 1758791018.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe30Ga23Si6 1_1 glass.jpg": 1758788982.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni47Fe30GaSi623 1_1 core.jpg": 1758788728.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga23Co4 1_2 core.jpg": 1758809856.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga23Co4 1_2 glass.jpg": 1758809916.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga23Co4 1_6 core.jpg": 1758808824.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga23Co4 1_6 glass.jpg": 1758808946.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 1_2 core.jpg": 1758793180.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 1_2 glass.jpg": 1758793342.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 1_2.jpg": 1758793492.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 2_3 core.jpg": 1758798120.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 2_3 glass.jpg": 1758798230.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 2_5 core.jpg": 1758887808.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni48Fe25Ga27 2_5 glass.jpg": 1758887914.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_2 core.jpg": 1758792502.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_2 glass.jpg": 1758792648.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_3 core.jpg": 1758792886.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe25Ga26 1_3 glass.jpg": 1758792970.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_9 core.jpg": 1758812970.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni49Fe28Ga21Si2 1_9 glass.jpg": 1758813032.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_1 core.jpg": 1758804396.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_1 glass.jpg": 1758804478.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_3 core.jpg": 1758804888.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 2_3 glass.jpg": 1758805012.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 3_1 core.jpg": 1758803440.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe25Ga25 3_1 glass.jpg": 1758803536.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 1_2 core.jpg": 1758801036.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 1_2 glass.jpg": 1758801154.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_2 core.jpg": 1758802746.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_2 glass.jpg": 1758802880.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_4 core.jpg": 1758804100.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe26Ga24 2_4 glass.jpg": 1758804196.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_1 core.jpg": 1758814272.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_1 glass.jpg": 1758814350.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_4 core.jpg": 1758813764.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_4 glass.jpg": 1758813842.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_5 core.jpg": 1758814486.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 10_5 glass.jpg": 1758814548.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 12_2 core.jpg": 1758812196.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 12_2 glass.jpg": 1758812334.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6 core.jpg": 1758802416.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6 glass.jpg": 1758802508.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 2_6.jpg": 1758802344.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 5_4 core.jpg": 1758813434.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 5_4 glass.jpg": 1758813516.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_2 core.jpg": 1758803932.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_2 glass.jpg": 1758803770.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_4 core.jpg": 1758805830.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_4 glass.jpg": 1758806000.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_6 core.jpg": 1758801404.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 6_6 glass.jpg": 1758801614.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 7_1 core.jpg": 1758809304.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 7_1 glass.jpg": 1758809384.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_1 core.jpg": 1758815142.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_1 glass.jpg": 1758888566.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_3 core.jpg": 1758814030.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni50Fe27Ga23 9_3 glass.jpg": 1758814100.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_1 core.jpg": 1758793904.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_1 glass.jpg": 1758793994.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_5 core.jpg": 1758798596.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe25Ga24 1_5 glass.jpg": 1758799034.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe26Ga21 1_2 core.jpg": 1758814980.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni51Fe26Ga21 1_2 glass.jpg": 1758814850.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 1_1 core.jpg": 1758811580.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 1_1 glass.jpg": 1758811664.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1 core.jpg": 1758810612.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1 glass.jpg": 1758810828.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe15Ga27Co6 2_1.jpg": 1758810946.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe21Ga27 2_1 core.jpg": 1758799624.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni52Fe21Ga27 2_1 glass.jpg": 1758799834.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni53Fe16Ga27Co4 1_2 core.jpg": 1758811358.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni53Fe16Ga27Co4 1_2 glass.jpg": 1758811436.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe19Ga27 1_1 core.jpg": 1758806346.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni54Fe19Ga27 1_1 glass.jpg": 1758806524.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 core.jpg": 1758808050.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_1 glass.jpg": 1758808194.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\Ni55Fe18Ga27 4_2 core.jpg": 1758806760.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\SampleName_000041.jpg": 1758788622.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\SampleName_000042.jpg": 1758788656.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\SampleName_000043.jpg": 1758807742.0,
+        "G:\\My Drive\\1 Projects\\Praha\\microscope\\SampleName_000044.jpg": 1758815364.0
       }
     },
     "videos": {
@@ -7760,8 +8007,8 @@
         {
           "Composition": "Ni47Fe30Ga17Si6",
           "Microwire": "1/1",
-          "Draw": 1,
-          "Piece": 1,
+          "Draw": 1.0,
+          "Piece": 1.0,
           "d (µm)": 18.9,
           "Calc mode": "linear",
           "Clamp span (mm)": null,
@@ -7771,10 +8018,682 @@
           "A length": "-",
           "Strain": "broke",
           "Broke": true
+        },
+        {
+          "Composition": "Ni46Fe31Ga15Si8",
+          "Microwire": "1/5",
+          "Draw": 1.0,
+          "Piece": 5.0,
+          "d (µm)": 15.3,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.874788,
+          "Stress (MPa)": 100.0,
+          "M length": 9.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni47Fe30Ga17Si6",
+          "Microwire": "1/8",
+          "Draw": 1.0,
+          "Piece": 8.0,
+          "d (µm)": 10.4,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 157.001,
+          "M length": 8.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni48Fe29Ga19Sn4",
+          "Microwire": "2/1",
+          "Draw": 2.0,
+          "Piece": 1.0,
+          "d (µm)": 10.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 154.025,
+          "M length": 0.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni46Fe31Ga15Si8",
+          "Microwire": "1/10",
+          "Draw": 1.0,
+          "Piece": 10.0,
+          "d (µm)": 19.9,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 3.171578,
+          "Stress (MPa)": 100.0,
+          "M length": 29.0,
+          "A length": 29.0,
+          "Strain": 0.0,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni54Fe19Ga27",
+          "Microwire": "1/1",
+          "Draw": 1.0,
+          "Piece": 1.0,
+          "d (µm)": 14.3,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.637726,
+          "Stress (MPa)": 100.0,
+          "M length": 8.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni55Fe18Ga27",
+          "Microwire": "4/2",
+          "Draw": 4.0,
+          "Piece": 2.0,
+          "d (µm)": 20.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 3.365712,
+          "Stress (MPa)": 100.0,
+          "M length": 0.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe25Ga25",
+          "Microwire": "3/1",
+          "Draw": 3.0,
+          "Piece": 1.0,
+          "d (µm)": 12.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 108.68,
+          "M length": 5.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "6/2",
+          "Draw": 6.0,
+          "Piece": 2.0,
+          "d (µm)": 11.3,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 132.988,
+          "M length": 7.0,
+          "A length": 6.0,
+          "Strain": -7.143,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe26Ga24",
+          "Microwire": "2/4",
+          "Draw": 2.0,
+          "Piece": 4.0,
+          "d (µm)": 10.0,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 169.813,
+          "M length": 13.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe25Ga25",
+          "Microwire": "2/1",
+          "Draw": 2.0,
+          "Piece": 1.0,
+          "d (µm)": 9.3,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 196.338,
+          "M length": 5.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe25Ga25",
+          "Microwire": "2/3",
+          "Draw": 2.0,
+          "Piece": 3.0,
+          "d (µm)": 19.6,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 3.076673,
+          "Stress (MPa)": 100.0,
+          "M length": 4.0,
+          "A length": 4.0,
+          "Strain": 0.0,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "6/4",
+          "Draw": 6.0,
+          "Piece": 4.0,
+          "d (µm)": 7.8,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 279.113,
+          "M length": 0.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni51Fe26Ga21",
+          "Microwire": "1/2",
+          "Draw": 1.0,
+          "Piece": 2.0,
+          "d (µm)": 11.6,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 126.198,
+          "M length": 9.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "9/1",
+          "Draw": 9.0,
+          "Piece": 1.0,
+          "d (µm)": 10.9,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 142.928,
+          "M length": 0.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "10/4",
+          "Draw": 10.0,
+          "Piece": 4.0,
+          "d (µm)": 13.7,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.503178,
+          "Stress (MPa)": 100.0,
+          "M length": 20.0,
+          "A length": 18.5,
+          "Strain": -5.556,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "9/3",
+          "Draw": 9.0,
+          "Piece": 3.0,
+          "d (µm)": 15.6,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.949029,
+          "Stress (MPa)": 100.0,
+          "M length": 23.0,
+          "A length": 22.0,
+          "Strain": -3.333,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "10/1",
+          "Draw": 10.0,
+          "Piece": 1.0,
+          "d (µm)": 12.4,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 110.44,
+          "M length": 12.0,
+          "A length": 10.5,
+          "Strain": -7.895,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "12/2",
+          "Draw": 12.0,
+          "Piece": 2.0,
+          "d (µm)": 19.1,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.921702,
+          "Stress (MPa)": 100.0,
+          "M length": 30.0,
+          "A length": 29.5,
+          "Strain": -1.351,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "11/1",
+          "Draw": 11.0,
+          "Piece": 1.0,
+          "d (µm)": 14.0,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.569731,
+          "Stress (MPa)": 100.0,
+          "M length": 15.0,
+          "A length": 12.0,
+          "Strain": -13.636,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni48Fe29Ga19Si4",
+          "Microwire": "1/1",
+          "Draw": 1.0,
+          "Piece": 1.0,
+          "d (µm)": 14.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.683857,
+          "Stress (MPa)": 100.0,
+          "M length": 11.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni49Fe28Ga21Si2",
+          "Microwire": "1/9",
+          "Draw": 1.0,
+          "Piece": 9.0,
+          "d (µm)": 11.2,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 135.373,
+          "M length": 15.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni49Fe28Ga21Si2",
+          "Microwire": "1/5",
+          "Draw": 1.0,
+          "Piece": 5.0,
+          "d (µm)": 10.3,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 160.065,
+          "M length": 3.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "5/4",
+          "Draw": 5.0,
+          "Piece": 4.0,
+          "d (µm)": 19.4,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 3.014204,
+          "Stress (MPa)": 100.0,
+          "M length": 11.0,
+          "A length": 10.0,
+          "Strain": -5.556,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni47Fe24Ga23Co6",
+          "Microwire": "2/1",
+          "Draw": 2.0,
+          "Piece": 1.0,
+          "d (µm)": 15.1,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.826094,
+          "Stress (MPa)": 100.0,
+          "M length": 16.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni47Fe24Ga23Co6",
+          "Microwire": "2/2",
+          "Draw": 2.0,
+          "Piece": 2.0,
+          "d (µm)": 8.7,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 224.353,
+          "M length": 10.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni52Fe15Ga27Co6",
+          "Microwire": "1/1",
+          "Draw": 1.0,
+          "Piece": 1.0,
+          "d (µm)": 17.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.452705,
+          "Stress (MPa)": 100.0,
+          "M length": 3.0,
+          "A length": 2.0,
+          "Strain": -10.0,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "6/6",
+          "Draw": 6.0,
+          "Piece": 6.0,
+          "d (µm)": 15.2,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.850361,
+          "Stress (MPa)": 100.0,
+          "M length": 11.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "2/6",
+          "Draw": 2.0,
+          "Piece": 6.0,
+          "d (µm)": 9.2,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 0.677868,
+          "Stress (MPa)": 100.0,
+          "M length": 0.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni48Fe27Ga21Cu2",
+          "Microwire": "2/4",
+          "Draw": 2.0,
+          "Piece": 4.0,
+          "d (µm)": 15.6,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.949029,
+          "Stress (MPa)": 100.0,
+          "M length": 9.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni55Fe18Ga27",
+          "Microwire": "4/1",
+          "Draw": 4.0,
+          "Piece": 1.0,
+          "d (µm)": 15.3,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.874788,
+          "Stress (MPa)": 100.0,
+          "M length": 14.0,
+          "A length": 13.0,
+          "Strain": -4.762,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni48Fe25Ga27",
+          "Microwire": "2/5",
+          "Draw": 2.0,
+          "Piece": 5.0,
+          "d (µm)": 9.7,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 180.479,
+          "M length": 4.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni49Fe25Ga26",
+          "Microwire": "1/2",
+          "Draw": 1.0,
+          "Piece": 2.0,
+          "d (µm)": 11.1,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 137.824,
+          "M length": 1.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni49Fe25Ga26",
+          "Microwire": "1/3",
+          "Draw": 1.0,
+          "Piece": 3.0,
+          "d (µm)": 10.8,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 145.587,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni48Fe25Ga27",
+          "Microwire": "1/2",
+          "Draw": 1.0,
+          "Piece": 2.0,
+          "d (µm)": 16.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 62.374,
+          "M length": 2.0,
+          "A length": 2.0,
+          "Strain": 0.0,
+          "Broke": false
+        },
+        {
+          "Composition": "Ni51Fe25Ga24",
+          "Microwire": "1/1",
+          "Draw": 1.0,
+          "Piece": 1.0,
+          "d (µm)": 11.2,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 135.373,
+          "M length": 1.0,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni48Fe25Ga27",
+          "Microwire": "2/3",
+          "Draw": 2.0,
+          "Piece": 3.0,
+          "d (µm)": 8.1,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 1.36,
+          "Stress (MPa)": 258.821,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe26Ga24",
+          "Microwire": "2/2",
+          "Draw": 2.0,
+          "Piece": 2.0,
+          "d (µm)": 7.5,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.36,
+          "Stress (MPa)": 523.866,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni50Fe27Ga23",
+          "Microwire": "7/1",
+          "Draw": 7.0,
+          "Piece": 1.0,
+          "d (µm)": 9.9,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.36,
+          "Stress (MPa)": 300.658,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni51Fe25Ga24",
+          "Microwire": "1/5",
+          "Draw": 1.0,
+          "Piece": 5.0,
+          "d (µm)": 7.8,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.36,
+          "Stress (MPa)": 484.344,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni52Fe15Ga27Co6",
+          "Microwire": "2/1",
+          "Draw": 2.0,
+          "Piece": 1.0,
+          "d (µm)": 5.9,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.36,
+          "Stress (MPa)": 846.523,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni53Fe16Ga27Co4",
+          "Microwire": "1/2",
+          "Draw": 1.0,
+          "Piece": 2.0,
+          "d (µm)": 9.4,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.36,
+          "Stress (MPa)": 333.493,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
+        },
+        {
+          "Composition": "Ni54Fe17Ga27Co2",
+          "Microwire": "1/2",
+          "Draw": 1.0,
+          "Piece": 2.0,
+          "d (µm)": 11.7,
+          "Calc mode": "linear",
+          "Clamp span (mm)": null,
+          "m": 2.36,
+          "Stress (MPa)": 215.264,
+          "M length": null,
+          "A length": "-",
+          "Strain": "broke",
+          "Broke": true
         }
       ],
       "index": [
-        0
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30,
+        31,
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40,
+        41,
+        42
       ],
       "extra": {
         "strain_offset": 7.0,

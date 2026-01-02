@@ -47,6 +47,13 @@ def _ensure_qapp() -> QtWidgets.QApplication:
     return app
 
 
+def test_assembly_exposes_compare_hook() -> None:
+    from microwire_data_builder.ui import AssemblySection
+
+    hook = getattr(AssemblySection, "attach_compare_section", None)
+    assert callable(hook)
+
+
 def test_paddle_candidate_kwargs_include_ascii_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from microwire_data_builder import ocr
 
@@ -731,7 +738,10 @@ def test_build_database_uses_strain_records(tmp_path: Path) -> None:
     columns = result.dataframe.columns.tolist()
     figure_idx = columns.index("Figure — 1000 mA")
     assert columns[figure_idx + 1] == "Figure — low mA"
-    assert columns[figure_idx + 2] == core.STRAIN_COLUMN
+    assert columns[figure_idx + 2] == core.VSM_HYSTERESIS_COLUMN
+    assert columns[figure_idx + 3] == core.VSM_TEMPERATURE_SCAN_COLUMN
+    assert columns[figure_idx + 4] == core.DMA_ISOSTRESS_COLUMN
+    assert columns[figure_idx + 5] == core.STRAIN_COLUMN
 
 
 def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
@@ -783,7 +793,10 @@ def test_update_existing_exports_with_strain(tmp_path: Path) -> None:
     figure_idx = columns.index("Figure — 1000 mA")
     assert columns[figure_idx - 1] == "d/D"
     assert columns[figure_idx + 1] == "Figure — low mA"
-    assert columns[figure_idx + 2] == core.STRAIN_COLUMN
+    assert columns[figure_idx + 2] == core.VSM_HYSTERESIS_COLUMN
+    assert columns[figure_idx + 3] == core.VSM_TEMPERATURE_SCAN_COLUMN
+    assert columns[figure_idx + 4] == core.DMA_ISOSTRESS_COLUMN
+    assert columns[figure_idx + 5] == core.STRAIN_COLUMN
     assert updated_excel[core.STRAIN_COLUMN].iloc[0] == "6.250%"
 
 

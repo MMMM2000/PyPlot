@@ -91,6 +91,9 @@ OUTPUT_COLUMNS = [
     "d/D",
     "Figure — 1000 mA",
     "Figure — low mA",
+    "VSM hysteresis graphs",
+    "VSM temperature scan graphs",
+    "DMA iso-stress graphs",
     "Strain",
     "As (mA)",
     "Ms (mA)",
@@ -123,6 +126,10 @@ FIGURE_COLUMNS = (
     "Figure — 1000 mA",
     "Figure — low mA",
 )
+
+VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
+VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
+DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 
 STRAIN_COLUMN = "Strain"
 
@@ -442,6 +449,9 @@ class BuilderConfig:
     matplotlib_figsize: Tuple[float, float] = DEFAULT_FIGSIZE
     include_microscope_crops: bool = True
     highlight_ocr_values: bool = True
+    column_filter: Optional[Tuple[str, ...]] = None
+    column_order: Optional[Tuple[str, ...]] = None
+    sort_spec: Optional[Tuple[Tuple[str, bool], ...]] = None
 
 
 @dataclass
@@ -496,6 +506,41 @@ class StrainRecord:
     percent: Optional[float]
     broke: bool
     source: Path
+
+
+@dataclass
+class VsmHysteresisRecord:
+    """Parsed VSM hysteresis measurement for a single file."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
+    temperature: Optional[float] = None
+    angle: Optional[float] = None
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
+class VsmTemperatureScanRecord:
+    """Parsed VSM temperature scan measurement for a single file."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
+class DmaIsoStressRecord:
+    """Parsed DMA iso-stress measurement for a single file."""
+
+    path: Path
+    sample: str
+    datasets: Dict[int, Tuple[List[float], List[float]]]
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
 
 
 class FabricationIndex:
@@ -3474,6 +3519,80 @@ def _plot_measurement_matplotlib(
     return plot_path
 
 
+def _normalise_sort_value(value: object) -> object:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(item) for item in value)
+    return value
+
+
+def _remap_highlights(
+    highlights: Mapping[str, Set[int]],
+    columns: Set[str],
+    index_map: Optional[Dict[int, int]],
+) -> Dict[str, Set[int]]:
+    remapped: Dict[str, Set[int]] = {}
+    for column, rows in highlights.items():
+        if column not in columns:
+            continue
+        if index_map:
+            updated = {index_map[row] for row in rows if row in index_map}
+        else:
+            updated = set(rows)
+        if updated:
+            remapped[column] = updated
+    return remapped
+
+
+def _apply_output_preferences(
+    dataframe: pd.DataFrame,
+    *,
+    column_filter: Optional[Sequence[str]] = None,
+    column_order: Optional[Sequence[str]] = None,
+    sort_spec: Optional[Sequence[Tuple[str, bool]]] = None,
+    highlight_map: Optional[Mapping[str, Set[int]]] = None,
+) -> Tuple[pd.DataFrame, Dict[str, Set[int]]]:
+    frame = dataframe.copy()
+    highlights = dict(highlight_map) if highlight_map else {}
+    index_map: Optional[Dict[int, int]] = None
+    if sort_spec:
+        sort_columns: List[str] = []
+        ascending: List[bool] = []
+        for entry in sort_spec:
+            if not entry:
+                continue
+            column = entry[0]
+            if not isinstance(column, str):
+                continue
+            if column not in frame.columns or column in sort_columns:
+                continue
+            sort_columns.append(column)
+            ascending.append(bool(entry[1]) if len(entry) > 1 else True)
+        if sort_columns:
+            sorted_frame = frame.sort_values(
+                by=sort_columns,
+                ascending=ascending,
+                kind="mergesort",
+                key=lambda col: col.map(_normalise_sort_value) if hasattr(col, "map") else col,
+            )
+            index_map = {
+                int(old_idx): int(new_idx)
+                for new_idx, old_idx in enumerate(sorted_frame.index)
+            }
+            frame = sorted_frame.reset_index(drop=True)
+    if column_filter:
+        filtered = [column for column in column_filter if column in frame.columns]
+        frame = frame.loc[:, filtered]
+    if column_order:
+        ordered = [column for column in column_order if column in frame.columns]
+        remaining = [column for column in frame.columns if column not in ordered]
+        frame = frame.loc[:, ordered + remaining]
+    if highlights:
+        highlights = _remap_highlights(highlights, set(frame.columns), index_map)
+    return frame, highlights
+
+
 def _update_existing_csv_with_strain(
     path: Path,
     strain_records: Dict[Tuple[str, int, int], StrainRecord],
@@ -4274,6 +4393,9 @@ def build_database(
         Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]
     ] = None,
     strain_records: Optional[Dict[Tuple[str, int, int], StrainRecord]] = None,
+    vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
+    vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
+    dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> BuildResult:
     log = _logger(logger)
@@ -4353,6 +4475,82 @@ def build_database(
         strain_records = _load_strain_records(getattr(config, "strain_files", []), log)
     else:
         strain_records = dict(strain_records)
+
+    def _normalise_record_key(value: object) -> Optional[Tuple[str, int, int]]:
+        if isinstance(value, tuple) and len(value) == 3:
+            try:
+                comp = str(value[0]).strip()
+                draw = int(value[1])
+                piece = int(value[2])
+            except (TypeError, ValueError):
+                return None
+            if comp:
+                return (comp, draw, piece)
+        if isinstance(value, str):
+            parts = value.split("|")
+            if len(parts) == 3:
+                comp = parts[0].strip()
+                try:
+                    draw = int(parts[1])
+                    piece = int(parts[2])
+                except (TypeError, ValueError):
+                    return None
+                if comp:
+                    return (comp, draw, piece)
+        return None
+
+    def _record_key(record: object) -> Optional[Tuple[str, int, int]]:
+        key = _normalise_record_key(getattr(record, "key", None))
+        if key is not None:
+            return key
+        path_value = getattr(record, "path", None)
+        if isinstance(path_value, Path):
+            key = _microscope_key(path_value)
+        elif isinstance(path_value, str):
+            try:
+                key = _microscope_key(Path(path_value))
+            except Exception:
+                key = None
+        if key is not None:
+            return key
+        sample = getattr(record, "sample", None)
+        if isinstance(sample, str) and sample.strip():
+            try:
+                return _microscope_key(Path(sample))
+            except Exception:
+                return None
+        return None
+
+    def _record_label(record: object) -> str:
+        label = getattr(record, "label", None)
+        if isinstance(label, str) and label.strip():
+            return label.strip()
+        path_value = getattr(record, "path", None)
+        if isinstance(path_value, Path):
+            return path_value.name
+        if isinstance(path_value, str):
+            return Path(path_value).name
+        sample = getattr(record, "sample", None)
+        if isinstance(sample, str) and sample.strip():
+            return sample.strip()
+        return ""
+
+    def _group_records(
+        records: Optional[Iterable[object]],
+    ) -> Dict[Tuple[str, int, int], List[object]]:
+        grouped: Dict[Tuple[str, int, int], List[object]] = {}
+        if not records:
+            return grouped
+        for record in records:
+            key = _record_key(record)
+            if key is None:
+                continue
+            grouped.setdefault(key, []).append(record)
+        return grouped
+
+    vsm_hysteresis_groups = _group_records(vsm_hysteresis_records)
+    vsm_temperature_groups = _group_records(vsm_temperature_scan_records)
+    dma_isostress_groups = _group_records(dma_iso_stress_records)
 
     phase_points_map: Dict[str, Dict[str, float]] = {}
     if phase_points:
@@ -4620,6 +4818,21 @@ def build_database(
             strain_value = _format_strain_value(strain_record)
             if strain_value is not None:
                 row[STRAIN_COLUMN] = strain_value
+        vsm_records = vsm_hysteresis_groups.get((composition, draw_x, piece_y), [])
+        if vsm_records:
+            labels = [_record_label(record) for record in vsm_records if _record_label(record)]
+            if labels:
+                row[VSM_HYSTERESIS_COLUMN] = list(dict.fromkeys(labels))
+        vsm_scan_records = vsm_temperature_groups.get((composition, draw_x, piece_y), [])
+        if vsm_scan_records:
+            labels = [_record_label(record) for record in vsm_scan_records if _record_label(record)]
+            if labels:
+                row[VSM_TEMPERATURE_SCAN_COLUMN] = list(dict.fromkeys(labels))
+        dma_records = dma_isostress_groups.get((composition, draw_x, piece_y), [])
+        if dma_records:
+            labels = [_record_label(record) for record in dma_records if _record_label(record)]
+            if labels:
+                row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
@@ -4750,6 +4963,23 @@ def build_database(
         df_out = pd.DataFrame(rows, columns=output_columns)
     else:
         df_out = pd.DataFrame(columns=output_columns)
+    column_filter = getattr(config, "column_filter", None)
+    column_order = getattr(config, "column_order", None)
+    sort_spec = getattr(config, "sort_spec", None)
+    df_out, ocr_highlights = _apply_output_preferences(
+        df_out,
+        column_filter=column_filter,
+        column_order=column_order,
+        sort_spec=sort_spec,
+        highlight_map=ocr_highlights if highlight_ocr else None,
+    )
+    if not highlight_ocr:
+        ocr_highlights = {}
+    export_columns = list(df_out.columns)
+    if microscope_image_columns:
+        microscope_image_columns = tuple(
+            column for column in microscope_image_columns if column in df_out.columns
+        )
     exports: Dict[str, Path] = {}
     if skip_exports:
         requested_formats: Tuple[str, ...] = ()
@@ -4770,7 +5000,12 @@ def build_database(
             behaviour = behaviours.get("csv", "replace")
             if behaviour == "update":
                 if csv_path.exists():
-                    _update_existing_csv_with_strain(csv_path, strain_records, output_columns, log)
+                    _update_existing_csv_with_strain(
+                        csv_path,
+                        strain_records,
+                        export_columns,
+                        log,
+                    )
                     exports["csv"] = csv_path
                     continue
                 log.warning("CSV export %s does not exist; creating a new file instead", csv_path)
@@ -4901,6 +5136,13 @@ __all__ = [
     "BuildStats",
     "OriginArtifact",
     "FabricationIndex",
+    "StrainRecord",
+    "VsmHysteresisRecord",
+    "VsmTemperatureScanRecord",
+    "DmaIsoStressRecord",
+    "VSM_HYSTERESIS_COLUMN",
+    "VSM_TEMPERATURE_SCAN_COLUMN",
+    "DMA_ISOSTRESS_COLUMN",
     "build_database",
     "build_fabrication_index",
     "LOGGER_NAME",
