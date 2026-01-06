@@ -12,6 +12,7 @@ matplotlib.use("Agg", force=True)
 
 import matplotlib.pyplot as plt
 import pandas as pd
+from matplotlib import colors as mcolors
 
 
 anneal_core = importlib.import_module("plotting.plugins.current_annealing.core")
@@ -50,9 +51,16 @@ def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:
             "R_Ohm": [100.0, 150.0, 200.0, 250.0, 260.0, 270.0],
         }
     )
-    fig, _ = anneal_core.plot_one(df, "Sample")
+    fig, _ = anneal_core.plot_one(df, "Sample", figsize=(4.0, 2.25))
     ax = fig.axes[0]
-    blue_lines = [line for line in ax.lines if line.get_color() == "b"]
+    blue_lines = []
+    for line in ax.lines:
+        try:
+            color = mcolors.to_hex(line.get_color()).lower()
+        except Exception:
+            continue
+        if color in {"#2563eb", "#0000ff"}:
+            blue_lines.append(line)
     assert blue_lines, "Expected a decreasing (blue) segment"
     first_blue = blue_lines[0]
     blue_x = list(first_blue.get_xdata())

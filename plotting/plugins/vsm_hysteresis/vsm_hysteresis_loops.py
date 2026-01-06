@@ -33,11 +33,11 @@ from plotting.pyplot.window import (
     OBJECT_TREE_STATE_ROLE,
 )
 from plotting.shared.utils import ensure_app_theme, format_annealing_title
-from plotting.shared.origin import origin_session, schedule_origin_release
+from plotting.shared.origin import origin_session
 
 HEADER_COLUMN_RE = re.compile(r"Column\s+\d+\s*:\s*(.+)")
 WHITESPACE_RE = re.compile(r"[_\s]+")
-ANGLE_RE = re.compile(r"a(-?(?:\d+(?:\.\d+)?°?)(?:-\d+)*)", re.IGNORECASE)
+ANGLE_RE = re.compile(r"(?<![A-Za-z0-9])a(-?(?:\d+(?:\.\d+)?°?)(?:-\d+)*)", re.IGNORECASE)
 TEMP_RE = re.compile(r"T(-?(?:\d+(?:\.\d+)?°?)(?:-\d+)*)", re.IGNORECASE)
 VSM_FILE_TOKEN_RE = re.compile(r"vsm-hys-data(?:$|[^0-9a-z])")
 FIELD_ANGLE_RE = re.compile(
@@ -54,6 +54,19 @@ SET_TEMPERATURE_RE = re.compile(
 )
 FOLDER_SANITIZE_RE = re.compile(r"[^0-9A-Za-z._-]+")
 SAMPLE_FRACTION_RE = re.compile(r"(?<=\b)(\d+)-(\d+)(?=\b)")
+
+ORIGIN_PLOT_COLORS = [
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+]
 
 TEMPERATURE_COLUMN_CANDIDATES = [
     "Sample Temperature [degC]",
@@ -1178,7 +1191,12 @@ def _normalise_header_token(raw: str, index: int) -> str:
     cleaned = cleaned.strip()
     return cleaned or f"Column {index}"
 
-def _normalise_metadata_value(value: float | None, *, decimals: int = 3) -> float | None:
+def _normalise_metadata_value(
+    value: float | None,
+    *,
+    decimals: int = 3,
+    snap_threshold: float = 0.45,
+) -> float | None:
     """Round metadata to a friendly value while guarding against NaNs."""
 
     if value is None:
@@ -1193,7 +1211,7 @@ def _normalise_metadata_value(value: float | None, *, decimals: int = 3) -> floa
 
     rounded = round(numeric, decimals)
     nearest_integer = round(rounded)
-    if math.isclose(rounded, nearest_integer, abs_tol=0.45):
+    if math.isclose(rounded, nearest_integer, abs_tol=snap_threshold):
         rounded = float(nearest_integer)
     else:
         rounded = round(rounded, decimals)
@@ -1201,6 +1219,14 @@ def _normalise_metadata_value(value: float | None, *, decimals: int = 3) -> floa
     if rounded == 0:
         return 0.0
     return rounded
+
+
+def _normalise_angle_value(value: float | None) -> float | None:
+    return _normalise_metadata_value(value, decimals=3, snap_threshold=0.45)
+
+
+def _normalise_temperature_value(value: float | None) -> float | None:
+    return _normalise_metadata_value(value, decimals=2, snap_threshold=0.2)
 
 def _read_vsm_file(path: Path) -> pd.DataFrame:
     columns: List[str] = []
@@ -1386,7 +1412,7 @@ def _derive_metadata_from_dataframe(df: pd.DataFrame) -> tuple[float | None, flo
         if temperature is not None:
             break
 
-    return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
+    return _normalise_angle_value(angle), _normalise_temperature_value(temperature)
 
 def _safe_float(token: str) -> float | None:
     token = token.strip()
@@ -1448,31 +1474,43 @@ def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
 @lru_cache(maxsize=256)
 def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
     angle, temperature = _metadata_from_filename(path)
-    if angle is not None and temperature is not None:
-        return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
+    explicit_angle: float | None = None
+    explicit_temperature: float | None = None
 
     try:
         handle = path.open("r", encoding="utf-8", errors="ignore")
     except OSError:
-        return angle, temperature
+        return _normalise_angle_value(angle), _normalise_temperature_value(temperature)
 
     with handle:
         for raw_line in handle:
             stripped = raw_line.strip()
             if not stripped:
                 continue
+            if explicit_angle is None:
+                match = FIELD_ANGLE_RE.search(stripped)
+                if match:
+                    candidate = _safe_float(match.group(1))
+                    if candidate is not None:
+                        explicit_angle = candidate
+                        angle = candidate
+            if explicit_temperature is None:
+                match = SET_TEMPERATURE_RE.search(stripped)
+                if match:
+                    candidate = _safe_float(match.group(1))
+                    if candidate is not None:
+                        explicit_temperature = candidate
+                        temperature = candidate
             if angle is None:
                 match = ANGLE_RE.search(stripped)
                 if not match:
-                    match = FIELD_ANGLE_RE.search(stripped) or ANGLE_OFFSET_RE.search(stripped)
+                    match = ANGLE_OFFSET_RE.search(stripped)
                 if match:
                     candidate = _safe_float(match.group(1))
                     if candidate is not None:
                         angle = candidate
             if temperature is None:
                 match = TEMP_RE.search(stripped)
-                if not match:
-                    match = SET_TEMPERATURE_RE.search(stripped)
                 if match:
                     candidate = _safe_float(match.group(1))
                     if candidate is not None:
@@ -1484,7 +1522,7 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
             if angle is not None and temperature is not None:
                 break
 
-    return _normalise_metadata_value(angle), _normalise_metadata_value(temperature)
+    return _normalise_angle_value(angle), _normalise_temperature_value(temperature)
 
 
 @lru_cache(maxsize=256)
@@ -1679,7 +1717,7 @@ class VSMPlotter(PyPlotWindow):
         self._last_axes: tuple[str, str] | None = None
         self._last_rescale_enabled = False
         self._line_visibility: Dict[float, Dict[float, bool]] = {}
-        self._worksheet_models: Dict[Path, WorksheetTableModel] = {}
+        self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
         self._plotted_series_exports: Dict[tuple[float, float], PlotSeriesExport] = {}
         self._metrics_by_temperature: Dict[float, pd.DataFrame] = {}
         self._metrics_by_angle: Dict[float, pd.DataFrame] = {}
@@ -2530,15 +2568,18 @@ class VSMPlotter(PyPlotWindow):
 
         sample_groups: Dict[str, QtWidgets.QTreeWidgetItem] = {}
         temp_groups: Dict[tuple[str, float | None], QtWidgets.QTreeWidgetItem] = {}
-        for measurement in sorted(
-            self.measurements,
-            key=lambda m: (
-                float("inf") if m.temperature is None else float(m.temperature),
-                float("inf") if m.angle is None else float(m.angle),
-                m.path.name.lower(),
+        grouped: Dict[tuple[str, float | None], List[VSMMeasurement]] = {}
+        for measurement in self.measurements:
+            sample_label = measurement.sample_name or "Unknown sample"
+            grouped.setdefault((sample_label, measurement.temperature), []).append(measurement)
+
+        for (sample_label, temperature), group in sorted(
+            grouped.items(),
+            key=lambda item: (
+                item[0][0].lower(),
+                float("inf") if item[0][1] is None else float(item[0][1]),
             ),
         ):
-            sample_label = measurement.sample_name or "Unknown sample"
             sample_parent = sample_groups.get(sample_label)
             if sample_parent is None:
                 sample_parent = QtWidgets.QTreeWidgetItem([sample_label, ""])
@@ -2553,13 +2594,13 @@ class VSMPlotter(PyPlotWindow):
                 sample_groups[sample_label] = sample_parent
                 worksheets_root.addChild(sample_parent)
 
-            temp_key = (sample_label, measurement.temperature)
+            temp_key = (sample_label, temperature)
             parent = temp_groups.get(temp_key)
             if parent is None:
                 label = (
                     "Unknown temperature"
-                    if measurement.temperature is None
-                    else f"{measurement.temperature:g} °C"
+                    if temperature is None
+                    else f"{temperature:g} °C"
                 )
                 parent = QtWidgets.QTreeWidgetItem([label, ""])
                 parent.setFlags(parent.flags() & ~QtCore.Qt.ItemFlag.ItemIsSelectable)
@@ -2571,19 +2612,19 @@ class VSMPlotter(PyPlotWindow):
                 temp_groups[temp_key] = parent
                 sample_parent.addChild(parent)
 
-            angle_label = (
-                "Unknown angle"
-                if measurement.angle is None
-                else f"{measurement.angle:g}°"
-            )
-            details = measurement.path.name
-            child = QtWidgets.QTreeWidgetItem([angle_label, details])
+            worksheet_key = self._worksheet_group_key(sample_label, temperature)
+            worksheet = self._worksheets.get(worksheet_key)
+            if worksheet is None:
+                continue
+            angle_count = sum(1 for m in group if m.angle is not None)
+            detail = f"{angle_count} angle(s)" if angle_count else ""
+            child = QtWidgets.QTreeWidgetItem(["Worksheet", detail])
             self._assign_project_payload(
                 child,
-                ("worksheet", measurement.path),
+                ("worksheet", worksheet_key),
             )
             parent.addChild(child)
-            self._worksheet_tree_items[measurement.path] = child
+            self._worksheet_tree_items[worksheet_key] = child
 
         self.project_tree.expandAll()
         self.project_tree.blockSignals(False)
@@ -2600,26 +2641,45 @@ class VSMPlotter(PyPlotWindow):
     def _populate_worksheets(self) -> None:
         self._worksheet_models.clear()
         self._worksheets.clear()
+        grouped: Dict[tuple[str, float | None], List[VSMMeasurement]] = {}
         for measurement in self.measurements:
-            worksheet = self._build_measurement_worksheet(measurement)
+            sample_label = measurement.sample_name or "Unknown sample"
+            key = self._worksheet_group_key(sample_label, measurement.temperature)
+            grouped.setdefault(key, []).append(measurement)
+
+        for key, group in sorted(
+            grouped.items(),
+            key=lambda item: (
+                item[0][0].lower(),
+                float("inf") if item[0][1] is None else float(item[0][1]),
+            ),
+        ):
+            sample_label, temperature = key
+            worksheet = self._build_group_worksheet(sample_label, temperature, group)
             self._worksheets[worksheet.key] = worksheet
             model = WorksheetTableModel(worksheet, self)
-            setattr(model, "_measurement", measurement)
-            self._worksheet_models[measurement.path] = model
-            widget = self._worksheet_tabs_open.get(measurement.path)
+            self._worksheet_models[worksheet.key] = model
+            widget = self._worksheet_tabs_open.get(worksheet.key)
             if widget is not None:
                 view = getattr(widget, "_worksheet_view", None)
                 if isinstance(view, QtWidgets.QTableView):
                     view.setModel(model)
                     self._configure_worksheet_view(view)
-        for path in list(self._worksheet_tree_items.keys()):
-            self._update_worksheet_item_state(path)
 
-    def _update_worksheet_item_state(self, path: Path) -> None:
-        item = self._worksheet_tree_items.get(path)
+        for key in list(self._worksheet_tabs_open.keys()):
+            if key not in self._worksheets:
+                widget = self._worksheet_tabs_open.get(key)
+                if widget is not None:
+                    self._close_tab(widget)
+
+        for key in list(self._worksheet_tree_items.keys()):
+            self._update_worksheet_item_state(key)
+
+    def _update_worksheet_item_state(self, key: Hashable) -> None:
+        item = self._worksheet_tree_items.get(key)
         if item is None:
             return
-        widget = self._worksheet_tabs_open.get(path)
+        widget = self._worksheet_tabs_open.get(key)
         visible = False
         if widget is not None:
             index = self.tab_widget.indexOf(widget)
@@ -2639,7 +2699,12 @@ class VSMPlotter(PyPlotWindow):
         item.setForeground(0, brush)
         item.setForeground(1, brush)
 
-    def _create_worksheet_tab(self, path: Path, model: WorksheetTableModel) -> QtWidgets.QWidget:
+    def _create_worksheet_tab(
+        self,
+        key: Hashable,
+        model: WorksheetTableModel,
+        worksheet: WorksheetData | None,
+    ) -> QtWidgets.QWidget:
         view = WorksheetTableView()
         view.setModel(model)
         view.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2654,23 +2719,14 @@ class VSMPlotter(PyPlotWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(view)
         setattr(container, "_worksheet_view", view)
-        setattr(view, "_worksheet_key", path)
+        setattr(view, "_worksheet_key", key)
 
-        tab_label = path.stem or "Worksheet"
-        measurement = getattr(model, "_measurement", None)
-        if (
-            isinstance(measurement, VSMMeasurement)
-            and measurement.temperature is not None
-            and measurement.angle is not None
-        ):
-            tab_label = f"{measurement.temperature:g}°C @ {measurement.angle:g}°"
-            if measurement.sample_name:
-                tab_label = f"{measurement.sample_name} — {tab_label}"
+        tab_label = worksheet.name if worksheet is not None else "Worksheet"
 
         index = self.tab_widget.addTab(container, tab_label)
         self.tab_widget.setCurrentIndex(index)
-        self._worksheet_tabs_open[path] = container
-        self._tab_to_worksheet_key[container] = path
+        self._worksheet_tabs_open[key] = container
+        self._tab_to_worksheet_key[container] = key
         self._set_tab_visibility(container, True)
         return container
 
@@ -2683,45 +2739,126 @@ class VSMPlotter(PyPlotWindow):
             )
         header.setDefaultSectionSize(max(22, header.defaultSectionSize()))
 
-    def _build_measurement_worksheet(self, measurement: VSMMeasurement) -> WorksheetData:
-        frame = measurement.data.copy()
-        frame.columns = [str(column) for column in frame.columns]
-        comment = self._measurement_comment(measurement)
-        formula = self._measurement_formula(measurement)
+    def _worksheet_group_key(
+        self, sample_label: str, temperature: float | None
+    ) -> tuple[str, float | None]:
+        return (sample_label, temperature)
+
+    def _worksheet_display_label(self, sample_label: str, temperature: float | None) -> str:
+        temp_label = (
+            "Unknown temperature"
+            if temperature is None
+            else f"{temperature:g} °C"
+        )
+        if sample_label:
+            return f"{sample_label} — {temp_label}"
+        return temp_label
+
+    def _worksheet_axis_columns(self, frame: pd.DataFrame) -> tuple[str | None, str | None]:
+        if frame is None or frame.empty:
+            return None, None
+        preferred_x = [
+            "Applied Field For Plot",
+            "Raw Applied Field For Plot",
+            "Applied Field [Oe]",
+            "Applied Field",
+        ]
+        preferred_y = [
+            "Signal X direction",
+            "Signal X direction [emu]",
+            "Signal parallel with sample",
+            "Signal Magnitude",
+            "Moment [emu]",
+        ]
+
+        def _pick(preferences: Sequence[str]) -> str | None:
+            for pref in preferences:
+                match = _match_column(frame, pref)
+                if match:
+                    return match
+            for column in frame.columns:
+                if pd.api.types.is_numeric_dtype(frame[column]):
+                    return str(column)
+            return None
+
+        return _pick(preferred_x), _pick(preferred_y)
+
+    def _build_group_worksheet(
+        self,
+        sample_label: str,
+        temperature: float | None,
+        measurements: Sequence[VSMMeasurement],
+    ) -> WorksheetData:
+        data: Dict[str, pd.Series] = {}
         columns: Dict[str, WorksheetColumnMeta] = {}
-        for column in frame.columns:
-            long_name, unit = _split_column_label(column)
-            columns[column] = WorksheetColumnMeta(
-                long_name=long_name or column,
-                units=unit,
+        axis_roles: List[str] = []
+        source: Path | None = None
+
+        def _unique_name(base: str) -> str:
+            if base not in data:
+                return base
+            counter = 2
+            candidate = f"{base} ({counter})"
+            while candidate in data:
+                counter += 1
+                candidate = f"{base} ({counter})"
+            return candidate
+
+        for measurement in sorted(
+            measurements,
+            key=lambda m: float("inf") if m.angle is None else float(m.angle),
+        ):
+            frame = measurement.data
+            x_column, y_column = self._worksheet_axis_columns(frame)
+            if not x_column or not y_column:
+                self._append_log(
+                    f"{measurement.path.name}: no usable axis columns for worksheet export."
+                )
+                continue
+            if source is None:
+                source = measurement.path
+
+            angle_label = (
+                f"{measurement.angle:g}°"
+                if measurement.angle is not None
+                else measurement.path.stem or "Angle"
+            )
+            x_long, x_unit = _split_column_label(x_column)
+            y_long, y_unit = _split_column_label(y_column)
+            x_name = _unique_name(f"{x_column} ({angle_label})")
+            y_name = _unique_name(f"{y_column} ({angle_label})")
+
+            x_series = pd.to_numeric(frame[x_column], errors="coerce").reset_index(drop=True)
+            y_series = pd.to_numeric(frame[y_column], errors="coerce").reset_index(drop=True)
+            data[x_name] = x_series
+            data[y_name] = y_series
+            axis_roles.extend(["X", "Y"])
+
+            comment = self._measurement_comment(measurement)
+            formula = self._measurement_formula(measurement)
+            columns[x_name] = WorksheetColumnMeta(
+                long_name=f"{x_long or x_column} ({angle_label})",
+                units=x_unit,
                 comments=comment,
                 formula=formula,
             )
-        if measurement.sample_name:
-            workbook_key: Hashable = ("sample", measurement.sample_name)
-        else:
-            workbook_key = (
-                measurement.path.parent
-                if measurement.path.parent != measurement.path
-                else measurement.path
+            columns[y_name] = WorksheetColumnMeta(
+                long_name=f"{y_long or y_column} ({angle_label})",
+                units=y_unit,
+                comments=comment,
+                formula=formula,
             )
-        name_parts: List[str] = []
-        if measurement.temperature is not None:
-            name_parts.append(f"{measurement.temperature:g}°C")
-        if measurement.angle is not None:
-            name_parts.append(f"{measurement.angle:g}°")
-        if not name_parts:
-            name_parts.append(measurement.path.stem or "Worksheet")
-        sheet_name = " @ ".join(name_parts)
-        if measurement.sample_name:
-            sheet_name = f"{measurement.sample_name} — {sheet_name}"
+
+        frame = pd.DataFrame(data)
+        worksheet_key = self._worksheet_group_key(sample_label, temperature)
         return WorksheetData(
-            key=measurement.path,
-            name=sheet_name,
+            key=worksheet_key,
+            name=self._worksheet_display_label(sample_label, temperature),
             dataframe=frame,
             columns=columns,
-            source=measurement.path,
-            workbook_key=workbook_key,
+            source=source,
+            workbook_key=worksheet_key,
+            axis_roles="".join(axis_roles),
         )
 
     def _measurement_comment(self, measurement: VSMMeasurement) -> str:
@@ -2783,25 +2920,22 @@ class VSMPlotter(PyPlotWindow):
         self._last_source_dir = resolved
         self.settings.setValue("last_source_dir", str(resolved))
 
-    def _open_worksheet_tab(self, path: Path) -> None:
-        model = self._worksheet_models.get(path)
+    def _open_worksheet_tab(self, key: Hashable) -> None:
+        model = self._worksheet_models.get(key)
+        worksheet = self._worksheets.get(key)
         if model is None:
-            worksheet = self._worksheets.get(path)
             if worksheet is None:
                 return
             model = WorksheetTableModel(worksheet, self)
-            measurement = next((m for m in self.measurements if m.path == path), None)
-            if measurement is not None:
-                setattr(model, "_measurement", measurement)
-            self._worksheet_models[path] = model
-        widget = self._worksheet_tabs_open.get(path)
+            self._worksheet_models[key] = model
+        widget = self._worksheet_tabs_open.get(key)
         if widget is None:
-            widget = self._create_worksheet_tab(path, model)
+            widget = self._create_worksheet_tab(key, model, worksheet)
         index = self.tab_widget.indexOf(widget)
         if index >= 0:
             self._set_tab_visibility(widget, True)
             self.tab_widget.setCurrentIndex(index)
-        self._update_worksheet_item_state(path)
+        self._update_worksheet_item_state(key)
         self._update_tab_buttons()
 
     def _show_tab(self, tab: QtWidgets.QWidget) -> None:
@@ -2874,9 +3008,9 @@ class VSMPlotter(PyPlotWindow):
         if tab in self._tab_descriptors:
             self._update_graph_tree_for_tab(tab)
         else:
-            path = self._tab_to_worksheet_key.get(tab)
-            if path is not None:
-                self._update_worksheet_item_state(path)
+            key = self._tab_to_worksheet_key.get(tab)
+            if key is not None:
+                self._update_worksheet_item_state(key)
 
     def _find_alternate_tab_index(self, current_index: int) -> int | None:
         count = self.tab_widget.count()
@@ -2904,9 +3038,9 @@ class VSMPlotter(PyPlotWindow):
             self.export_button.setEnabled(False)
             self.open_origin_button.setEnabled(False)
         self.export_button.setEnabled(False)
-        path = self._tab_to_worksheet_key.get(tab)
-        if path is not None:
-            self._update_worksheet_item_state(path)
+        key = self._tab_to_worksheet_key.get(tab)
+        if key is not None:
+            self._update_worksheet_item_state(key)
 
     def _focus_tree_on_tab(self, tab: QtWidgets.QWidget | None) -> None:
         self.project_tree.blockSignals(True)
@@ -2917,9 +3051,9 @@ class VSMPlotter(PyPlotWindow):
             if descriptor is not None:
                 target_item = self._graph_tree_items.get(tab)
             else:
-                path = self._tab_to_worksheet_key.get(tab)
-                if path is not None:
-                    target_item = self._worksheet_tree_items.get(path)
+                key = self._tab_to_worksheet_key.get(tab)
+                if key is not None:
+                    target_item = self._worksheet_tree_items.get(key)
         if target_item is not None:
             self.project_tree.setCurrentItem(target_item)
             self.project_tree.scrollToItem(target_item)
@@ -3001,12 +3135,10 @@ class VSMPlotter(PyPlotWindow):
             model.removeRows(row, 1)
         label = None
         worksheet_key = getattr(table, "_worksheet_key", None)
-        if isinstance(worksheet_key, Path):
-            label = worksheet_key.name
-        if label is None:
-            measurement = getattr(model, "_measurement", None)
-            if isinstance(measurement, VSMMeasurement):
-                label = measurement.path.name
+        if worksheet_key is not None:
+            worksheet = self._worksheets.get(worksheet_key)
+            if worksheet is not None:
+                label = worksheet.name
         if label is None:
             label = "worksheet"
         self._append_log(f"Deleted {len(rows)} row(s) from {label}.")
@@ -3099,10 +3231,10 @@ class VSMPlotter(PyPlotWindow):
                             self.project_tree.takeTopLevelItem(index)
             for key in [key for key in self._object_items.keys() if key[0] is tab]:
                 self._object_items.pop(key, None)
-            path = self._tab_to_worksheet_key.pop(tab, None)
-            if path is not None:
-                self._worksheet_tabs_open.pop(path, None)
-                self._update_worksheet_item_state(path)
+            key = self._tab_to_worksheet_key.pop(tab, None)
+            if key is not None:
+                self._worksheet_tabs_open.pop(key, None)
+                self._update_worksheet_item_state(key)
             self._hidden_tabs.discard(tab)
         tabs.clear()
         self._update_save_graph_enabled()
@@ -3341,11 +3473,13 @@ class VSMPlotter(PyPlotWindow):
     def _populate_axis_combos(self, labels: List[str]) -> None:
         numeric_labels = [label for label in labels if label]
         preferred_x = [
-            "Applied Field",
             "Applied Field For Plot",
+            "Raw Applied Field For Plot",
             "Applied Field [Oe]",
+            "Applied Field",
         ]
         preferred_y = [
+            "Signal X direction",
             "Signal X direction [emu]",
             "Signal parallel with sample",
             "Signal Magnitude",
@@ -3353,17 +3487,34 @@ class VSMPlotter(PyPlotWindow):
         ]
 
         stored_x, stored_y = self._stored_axes
+        if stored_x and stored_y:
+            stored_x_lower = stored_x.lower()
+            stored_y_lower = stored_y.lower()
+            if any(pref.lower() in stored_x_lower for pref in preferred_y) and any(
+                pref.lower() in stored_y_lower for pref in preferred_x
+            ):
+                stored_x = None
+                stored_y = None
 
         def _choose(
             preferences: Iterable[str],
             combo: QtWidgets.QComboBox,
             stored: str | None,
+            *,
+            avoid_raw: bool = False,
         ) -> None:
-            if stored and stored in numeric_labels:
-                combo.setCurrentText(stored)
+            stored_text = stored if stored in numeric_labels else None
+            if stored_text and avoid_raw and "raw applied field" in stored_text.lower():
+                stored_text = None
+            if stored_text:
+                combo.setCurrentText(stored_text)
                 return
             for pref in preferences:
                 matches = [label for label in numeric_labels if pref.lower() in label.lower()]
+                if avoid_raw:
+                    non_raw = [label for label in matches if "raw" not in label.lower()]
+                    if non_raw:
+                        matches = non_raw
                 if matches:
                     combo.setCurrentText(matches[0])
                     return
@@ -3375,7 +3526,7 @@ class VSMPlotter(PyPlotWindow):
             combo.clear()
             combo.addItems(numeric_labels)
             combo.blockSignals(False)
-        _choose(preferred_x, self.x_axis_combo, stored_x)
+        _choose(preferred_x, self.x_axis_combo, stored_x, avoid_raw=True)
         _choose(preferred_y, self.y_axis_combo, stored_y)
         self._store_axis_selection()
 
@@ -5644,8 +5795,7 @@ class VSMPlotter(PyPlotWindow):
         rescale_enabled: bool,
     ) -> None:
         try:
-            with origin_session() as op:
-                schedule_origin_release()
+            with origin_session(keep_open=True) as op:
                 exported = 0
                 for temperature, entries in sorted(prepared_groups.items()):
                     valid = []
@@ -5680,12 +5830,18 @@ class VSMPlotter(PyPlotWindow):
         except Exception as exc:
             self._append_log(f"Unexpected Origin error: {exc}")
 
-    def _origin_book_name(self, temperature: float) -> str:
-        label = f"VSM_{temperature:g}C"
+    def _origin_book_name(self, temperature: float, sample_label: str | None = None) -> str:
+        if sample_label:
+            label = f"{sample_label} {temperature:g}C"
+        else:
+            label = f"VSM_{temperature:g}C"
         return "".join(ch if ch.isalnum() else "_" for ch in label)[:30]
 
-    def _origin_graph_short_name(self, temperature: float) -> str:
-        label = f"T{temperature:g}C"
+    def _origin_graph_short_name(self, temperature: float, sample_label: str | None = None) -> str:
+        if sample_label:
+            label = f"{sample_label} {temperature:g}C"
+        else:
+            label = f"T{temperature:g}C"
         return "".join(ch if ch.isalnum() else "_" for ch in label)[:13]
 
     def _build_origin_group(
@@ -5696,7 +5852,15 @@ class VSMPlotter(PyPlotWindow):
         x_axis: str,
         y_axis: str,
     ) -> None:
-        book = origin_any.new_book('w', lname=self._origin_book_name(temperature))
+        sample_label: str | None = None
+        for measurement, _subset in entries:
+            candidate = measurement.sample_name or measurement.path.stem
+            if candidate:
+                sample_label = str(candidate)
+                break
+        book = origin_any.new_book(
+            'w', lname=self._origin_book_name(temperature, sample_label)
+        )
         book.activate()
 
         graph = origin_any.new_graph(template='line')
@@ -5705,56 +5869,114 @@ class VSMPlotter(PyPlotWindow):
             return
 
         try:
-            graph.lname = f"{temperature:g} °C"
+            graph_title = (
+                f"{sample_label} — {temperature:g} °C"
+                if sample_label
+                else f"{temperature:g} °C"
+            )
+            graph.lname = graph_title
         except Exception:
             pass
         try:
-            graph.name = self._origin_graph_short_name(temperature)
+            graph.name = self._origin_graph_short_name(temperature, sample_label)
         except Exception:
             pass
 
-        for index, (measurement, subset) in enumerate(entries):
-            if index < len(book):
-                sheet = book[index]
-            else:
-                sheet = book.add_sheet()
-            sheet.name = f"a{measurement.angle:g}"
-            sheet.from_df(subset)
+        sheet = book[0] if len(book) else book.add_sheet()
+        sheet.name = "Data"
+        column_names: List[str] = []
+        axis_roles: List[str] = []
+        data: Dict[str, pd.Series] = {}
+        plot_pairs: List[tuple[str, str, str, int]] = []
+        column_labels: Dict[str, str] = {}
+        column_units: Dict[str, str] = {}
+        column_comments: Dict[str, str] = {}
+        plot_idx = 1
+
+        def _split_label_unit(label: str) -> tuple[str, str]:
+            text = str(label)
+            match = re.search(r"\[(.+?)\]\s*$", text)
+            if match:
+                return text[: match.start()].strip(), match.group(1).strip()
+            match = re.search(r"\((.+?)\)\s*$", text)
+            if match:
+                return text[: match.start()].strip(), match.group(1).strip()
+            return text.strip(), ""
+
+        x_label, x_unit = _split_label_unit(x_axis)
+        y_label, y_unit = _split_label_unit(y_axis)
+        if not x_unit and "Oe" in x_axis:
+            x_unit = "Oe"
+        if not y_unit and "emu" in y_axis.lower():
+            y_unit = "emu"
+
+        for measurement, subset in entries:
+            angle_label = (
+                f"{measurement.angle:g}°"
+                if measurement.angle is not None
+                else measurement.path.stem
+            )
+            x_name = f"X{plot_idx}"
+            y_name = f"Y{plot_idx}"
+            data[x_name] = pd.to_numeric(subset[x_axis], errors="coerce").reset_index(drop=True)
+            data[y_name] = pd.to_numeric(subset[y_axis], errors="coerce").reset_index(drop=True)
+            column_names.extend([x_name, y_name])
+            axis_roles.extend(["X", "Y"])
+            column_labels[x_name] = x_label or x_axis
+            column_units[x_name] = x_unit
+            column_comments[x_name] = angle_label
+            column_labels[y_name] = y_label or y_axis
+            column_units[y_name] = y_unit
+            column_comments[y_name] = angle_label
+            plot_pairs.append((x_name, y_name, angle_label, plot_idx - 1))
+            plot_idx += 1
+
+        frame = pd.DataFrame(data)
+        sheet.from_df(frame)
+        try:
+            sheet.header_rows("LUC")
+        except Exception:
+            pass
+        try:
+            sheet.cols_axis("".join(axis_roles))
+        except Exception:
+            pass
+
+        col_index = {name: idx for idx, name in enumerate(column_names)}
+        for name, index in col_index.items():
             try:
-                sheet.cols_axis('XY')
+                sheet.set_label(index, column_labels.get(name, name), "L")
             except Exception:
                 pass
-            for col, label in enumerate((x_axis, y_axis)):
+            unit = column_units.get(name)
+            if unit:
                 try:
-                    sheet.set_label(col, label)
+                    sheet.set_label(index, unit, "U")
                 except Exception:
                     pass
-            comment = f"Angle {measurement.angle:g}°"
-            safe_comment = self._escape_origin_text(comment)
-            try:
-                sheet.activate()
-            except Exception:
-                pass
-            try:
-                sheet.set_comment(1, comment)  # type: ignore[attr-defined]
-            except Exception:
-                pass
-            for command in (
-                f'wks.comment$="{safe_comment}";',
-                f'wks.col2.comment$="{safe_comment}";',
-            ):
+            comment = column_comments.get(name)
+            if comment:
                 try:
-                    origin_any.lt_exec(command)
+                    sheet.set_label(index, comment, "C")
                 except Exception:
                     pass
-            try:
-                setattr(sheet, "comment", comment)
-            except Exception:
-                pass
-            plot_obj = layer.add_plot(sheet, coly=1, colx=0, type='y')
+
+        for x_name, y_name, angle_label, color_index in plot_pairs:
+            x_idx = col_index.get(x_name)
+            y_idx = col_index.get(y_name)
+            if x_idx is None or y_idx is None:
+                continue
+            plot_obj = layer.add_plot(sheet, coly=y_idx, colx=x_idx, type='y')
             if plot_obj is not None:
+                color = ORIGIN_PLOT_COLORS[color_index % len(ORIGIN_PLOT_COLORS)]
                 try:
-                    plot_obj.legend = f"Angle {measurement.angle:g}°"
+                    plot_obj.color = color
+                    plot_obj.line_width = 1.5
+                    plot_obj.symbol_shape = 2
+                    plot_obj.symbol_size = 4
+                    plot_obj.symbol_edge_color = color
+                    plot_obj.symbol_fill_color = color
+                    plot_obj.legend = f"{angle_label}"
                 except Exception:
                     pass
 
@@ -5765,13 +5987,13 @@ class VSMPlotter(PyPlotWindow):
 
         safe_x = self._escape_origin_text(x_axis)
         safe_y = self._escape_origin_text(y_axis)
-        safe_title = self._escape_origin_text(
-            f"{y_axis} vs {x_axis} at {temperature:g} °C"
-        )
+        if sample_label:
+            title_text = f"{sample_label} — {temperature:g} °C"
+        else:
+            title_text = f"{y_axis} vs {x_axis} at {temperature:g} °C"
+        safe_title = self._escape_origin_text(title_text)
 
         for command in (
-            'page.antialias=1;',
-            'layer -aa 1;',
             f'lab -xb "{safe_x}";',
             f'lab -yl "{safe_y}";',
             f'title -s "{safe_title}";',

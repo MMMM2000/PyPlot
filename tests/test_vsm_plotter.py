@@ -165,7 +165,24 @@ New Section: Section 0:
     module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
 
     assert module._parse_angle(path) == -15.5
-    assert module._parse_temperature(path) == -30.0
+    assert module._parse_temperature(path) == pytest.approx(-29.6, abs=0.05)
+
+
+def test_parse_angle_ignores_composition_tokens(tmp_path: Path) -> None:
+    path = tmp_path / "Ni50Fe27Ga23 5-4 no glass T025-00.VSM-Hys-Data"
+    content = """Action 0:      Set Field Angle to 15.0 [deg]
+Action 1:      Set Sample Temperature to 25.0 [degC]
+@@Data
+New Section: Section 0:
+1 2 3
+@@END Data
+"""
+    path.write_text(content)
+
+    module._metadata_from_file.cache_clear()  # type: ignore[attr-defined]
+
+    assert module._parse_angle(path) == 15.0
+    assert module._parse_temperature(path) == 25.0
 
 
 def test_metadata_rounds_action_block_values(tmp_path: Path) -> None:
@@ -713,10 +730,10 @@ def test_build_origin_group_sets_names_and_legends() -> None:
 
     book = fake_origin.books[0]
     sheet = book[0]
-    assert sheet.name == "a10"
-    assert sheet.data.equals(subset)
-    assert sheet.labels == {0: "H", 1: "M"}
-    assert sheet.comment == "Angle 10°"
+    assert sheet.name == "Data"
+    expected = pd.DataFrame({"H (10°)": [-10.0, 10.0], "M (10°)": [-1.0, 1.0]})
+    assert sheet.data.equals(expected)
+    assert sheet.labels == {0: "H (10°)", 1: "M (10°)"}
     assert sheet.column_comments == {1: "Angle 10°"}
 
     graph = fake_origin.graphs[0]
@@ -725,7 +742,7 @@ def test_build_origin_group_sets_names_and_legends() -> None:
 
     layer = graph[0]
     assert layer.plots, "Expected a plot to be added to the Origin layer"
-    assert layer.plots[0].legend == "Angle 10°"
+    assert layer.plots[0].legend == "10°"
     assert any("wks.col2.comment$=\"Angle 10°\";" in cmd for cmd in fake_origin.commands)
 
 

@@ -18,6 +18,9 @@
 - Re-run smoke scripts such as `launcher.py` when practical, or note when they were not run.
 - Keep running tests and iterating until each feature is fully functional; create new tests or extend existing ones whenever coverage is missing.
 
+## Diagnostics
+- When investigating crashes or errors, check `logs/message_log.txt` (and other files under `logs/`) first and summarize any relevant stack traces or warnings.
+
 ## Task Tracking
 - Keep `TODO.md` up to date based on conversations; add new tasks yourself and ask the user before moving items to "Done."
 

@@ -14,7 +14,11 @@ from plotting.plugins.pdf_plotter.dialog import PdfPlotterWindow, parse_pdf_to_r
 
 
 def test_plot_creates_top_level_window():
-    app = QtWidgets.QApplication([])
+    app = QtWidgets.QApplication.instance()
+    created = False
+    if app is None:
+        app = QtWidgets.QApplication([])
+        created = True
     win = PdfPlotterWindow()
     try:
         rows = parse_pdf_to_rows('sample_data/3D prud c.3 2mm iba data.pdf')
@@ -26,7 +30,8 @@ def test_plot_creates_top_level_window():
     finally:
         # Ensure windows and application are cleaned up
         win.close()
-        app.quit()
+        if created:
+            app.quit()
 
 def test_parse_handles_six_column_format():
     rows = parse_pdf_to_rows('sample_data/pdf_data/189_2_c2 1000hz.pdf')

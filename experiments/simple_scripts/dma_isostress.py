@@ -47,6 +47,10 @@ except Exception as e:  # don't crash import; we'll validate on Plot
     _origin_import_error = e
 else:
     _origin_import_error = None
+try:
+    from plotting.shared.origin import origin_session
+except Exception:
+    origin_session = None  # type: ignore
 
 
 NUMERIC = re.compile(r"^[\s\t]*[+\-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+\-]?\d+)?")
@@ -392,77 +396,77 @@ class App(tk.Tk):
 
         self.progress.pack_forget()
 
-        try:
-            import originpro as op
-        except Exception as e:
+        if op is None or origin_session is None:
             messagebox.showerror(
                 "originpro not available",
                 (
-                    f"Could not import originpro: {e}\n\n"
+                    f"Could not import originpro: {_origin_import_error}\n\n"
                     "Please install/configure Origin's Python package and try again."
                 ),
             )
             return
 
-        try:
-            op.set_show(True)
-        except Exception:
-            pass
-
         file_paths = [Path(self.files_list.get(i)) for i in range(self.files_list.size())]
         plotted_count = 0
         skipped_files: List[str] = []
 
-        for fp in file_paths:
-            try:
-                stress_datasets = parse_dma_txt(fp)
-                if not stress_datasets:
-                    skipped_files.append(f"{fp.name} (no IsoStress data found)")
-                    continue
-
-                # Create a new workbook and graph for each file
-                book = op.new_book('w')
-                book.lname = fp.stem
-                wks = book[0]
-                wks.name = 'Data'
-
-                graph = op.new_graph()
-                graph.title = fp.stem
-                layer = graph[0]
-
-                colx = 0
-                for stress_val, (T, E) in sorted(stress_datasets.items()):
-                    if not T:
+        with origin_session(keep_open=True) as origin:
+            for fp in file_paths:
+                try:
+                    stress_datasets = parse_dma_txt(fp)
+                    if not stress_datasets:
+                        skipped_files.append(f"{fp.name} (no IsoStress data found)")
                         continue
-                    
-                    label = f"{stress_val} MPa"
-                    
-                    wks.from_list(colx, T)
-                    col_t = wks.obj.Columns(colx)
-                    col_t.LongName = "Temperature"
-                    col_t.Units = "°C"
-                    col_t.Type = 3 # X
 
-                    wks.from_list(colx + 1, E)
-                    col_e = wks.obj.Columns(colx + 1)
-                    col_e.LongName = "Strain"
-                    col_e.Units = "%"
-                    col_e.Comment = label
-                    col_e.Type = 4 # Y
-                    
-                    layer.add_plot(wks, coly=colx + 1, colx=colx)
-                    colx += 2
-                
-                layer.rescale()
-                layer.axis(0).title = "Temperature (°C)"  # 0 = bottom axis
-                layer.axis(1).title = "Strain (%)"        # 1 = left axis
-                layer.add_legend()
-                plotted_count += 1
+                    # Create a new workbook and graph for each file
+                    book = origin.new_book('w')
+                    book.lname = fp.stem
+                    wks = book[0]
+                    wks.name = 'Data'
 
-            except Exception as ex:
-                import traceback
-                tb_str = traceback.format_exc()
-                skipped_files.append(f"{fp.name} (error: {ex})\n{tb_str}")
+                    graph = origin.new_graph()
+                    graph.title = fp.stem
+                    layer = graph[0]
+
+                    colx = 0
+                    for stress_val, (T, E) in sorted(stress_datasets.items()):
+                        if not T:
+                            continue
+
+                        label = f"{stress_val} MPa"
+
+                        wks.from_list(colx, T)
+                        col_t = wks.obj.Columns(colx)
+                        col_t.LongName = "Temperature"
+                        col_t.Units = "°C"
+                        col_t.Comment = label
+                        col_t.Type = 3  # X
+
+                        wks.from_list(colx + 1, E)
+                        col_e = wks.obj.Columns(colx + 1)
+                        col_e.LongName = "Strain"
+                        col_e.Units = "%"
+                        col_e.Comment = label
+                        col_e.Type = 4  # Y
+
+                        layer.add_plot(wks, coly=colx + 1, colx=colx)
+                        colx += 2
+
+                    try:
+                        wks.header_rows("LUC")
+                    except Exception:
+                        pass
+
+                    layer.rescale()
+                    layer.axis(0).title = "Temperature (°C)"  # 0 = bottom axis
+                    layer.axis(1).title = "Strain (%)"        # 1 = left axis
+                    layer.add_legend()
+                    plotted_count += 1
+
+                except Exception as ex:
+                    import traceback
+                    tb_str = traceback.format_exc()
+                    skipped_files.append(f"{fp.name} (error: {ex})\n{tb_str}")
 
         # Report
         if skipped_files:

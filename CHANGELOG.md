@@ -1,5 +1,113 @@
 # Changelog
 
+## 2026-01-06 19:25 UTC
+
+- Microwire Data Builder now writes unhandled exception traces to `logs/crash_log.txt` to help diagnose pre-log crashes.
+
+## 2026-01-06 19:03 UTC
+
+- Assemble Preview now runs in a background worker so the busy indicator animates and the UI stays responsive during preview builds.
+
+## 2026-01-06 18:22 UTC
+
+- Assemble Preview now shows a busy progress dialog while building the preview dataset.
+- Current Annealing Origin exports now populate units/comments rows for worksheet columns.
+- DMA iso-stress Origin exports avoid invalid antialias LabTalk calls and include units/comments header rows.
+- VSM hysteresis Origin exports now include sample labels in workbook/graph names when available.
+
+## 2026-01-06 17:46 UTC
+
+- Added `docs/database_builder.md` and `docs/origin_output.md` to capture expected Data Builder and Origin export behavior in one place.
+- PyPlot now respects the Message Log capture toggle and appends its log output to `logs/message_log.txt` alongside the Data Builder.
+- Assemble preview restores VSM/DMA group loading helpers to prevent Preview Database crashes.
+
+## 2026-01-06 17:19 UTC
+
+- Assemble now merges current density + strain detail fields into the combined dataset and exposes all section columns (including graphs) in the column picker, while missing sections log warnings instead of blocking preview/export.
+- HTML-only exports no longer force CSV output and can proceed without processing Videos.
+- Origin exports for VSM hysteresis/temp scan/DMA now show units/comments rows, and VSM temp scan/DMA detach Origin sessions so the app can close independently.
+
+## 2026-01-06 14:30 UTC
+
+- Assemble now ensures all output columns are available for selection (including VSM/DMA/graph references) and restores VSM/DMA preview loading for Assemble/HTML export.
+- VSM hysteresis Origin export now uses short worksheet column names, assigns distinct series colors, and writes angle comments into the comments row; removed invalid antialias LabTalk calls.
+
+## 2026-01-06 13:05 UTC
+
+- Assemble now uses a single Export dialog button (review settings, then export), and the column picker drives which sections are included.
+- Graph columns returned to assembled outputs (Matplotlib/Origin + VSM/DMA references) and can be shown inline in Assemble when selected, with graphs hidden by default.
+- Message log alerts now highlight the Message Log dock switcher tab on unread errors.
+- Compare now accepts multi-row selections even if the table selection model only reports selected indexes.
+
+## 2026-01-06 11:49 UTC
+
+- Assemble now uses a compact Export settings dialog, remembers preview columns/order/sort in `.pydpj`, and adds a column reorder dialog.
+- Assemble outputs now include transition temperature columns (As/Af/Ms/Mf) and omit graph reference columns from the assembled table.
+- Microwire column sorting now treats draw/piece values numerically for consistent ordering.
+- VSM hysteresis Origin exports keep Origin open, and DMA iso-stress now supports Open in Origin exports.
+
+## 2026-01-06 10:01 UTC
+
+- Developer menu now includes a Message Log capture toggle that appends builder log output to `logs/message_log.txt` in the repo.
+- Transition temps no longer jumps back to the first graph after picking values, and Assemble column selection now allows per-column deselection.
+
+## 2026-01-06 09:19 UTC
+
+- Added a Transition temps tab that lists VSM temperature scan samples and lets you double-click graphs to capture As/Af/Ms/Mf values (with export).
+- Current annealing, VSM temperature scan, and DMA iso-stress sections now include Open in PyPlot/Origin controls; DMA previews also expose these actions.
+- DMA iso-stress plots now include sample variants (e.g., s1/s3) in graph titles.
+
+## 2026-01-05 14:00 UTC
+
+- VSM temperature scan and DMA iso-stress sections now preview multiple graphs per sample row (side-by-side thumbnails) so subfolder/file variants stay together.
+
+## 2026-01-05 11:48 UTC
+
+- VSM hysteresis worksheets now bundle all angles for a temperature into one worksheet with XY column pairs (one workbook per graph) in both PyPlot and Origin exports.
+
+## 2026-01-05 10:01 UTC
+
+- VSM hysteresis now prefers explicit header angle/temperature metadata and uses tighter temperature snapping to avoid spurious 25.6->26°C labels.
+- VSM hysteresis axes ignore swapped stored selections so Applied Field vs Signal X stays the default, and Origin opens are deferred slightly to let plots finish.
+- Suppressed noisy Windows Qt `QWindowsWindow::setGeometry` warnings during startup.
+
+## 2026-01-05 08:35 UTC
+
+- VSM hysteresis angle parsing no longer misreads composition tokens (e.g., “Ga23”), and PyPlot now defaults to applied-field-for-plot + Signal X direction axes to avoid vertical-line plots.
+- VSM table rows now store sample IDs in a hidden column so the visible Sample column stays gone after refresh.
+- PyPlot stops auto-maximizing on Windows to avoid geometry warnings on startup.
+
+## 2026-01-03 19:10 UTC
+
+- VSM hysteresis plots now force the Y axis to Signal X direction and prioritize applied-field-for-plot columns for sweep mode.
+- Builder geometry clamping now avoids redundant fullscreen snap adjustments on Windows to reduce Qt geometry warnings.
+
+## 2026-01-03 18:55 UTC
+
+- VSM hysteresis Open in PyPlot/Origin now loads data and plots automatically; sample variants (e.g., “NG CA”, “no glass”) persist in graph titles.
+- VSM hysteresis axes now fall back from stored PyPlot settings when they would yield a near-flat field axis (sweep-mode fix), and sweep folders are parsed as samples.
+- VSM graph tables hide the Sample column consistently after refresh.
+
+## 2026-01-03 13:25 UTC
+
+- VSM hysteresis previews now keep full-size plots per group instead of shrinking them, and the layout warnings from tight layout are suppressed.
+- Maximized geometry snapping on Windows no longer emits Qt geometry warnings.
+
+## 2026-01-03 11:09 UTC
+
+- VSM hysteresis previews now render multiple graphs side-by-side per microwire and align axis selection with saved PyPlot settings.
+- VSM tables hide the redundant Sample column, and the hysteresis section adds row-level Open in PyPlot/Origin shortcuts.
+
+## 2026-01-03 10:31 UTC
+
+- VSM Data Builder now groups hysteresis angles into shared graphs, merges sample sub-variants into a single row, and adds per-graph Open in PyPlot/Origin buttons.
+- VSM temperature scans now carry variant labels so subfolder suffixes remain visible in previews and exports.
+
+## 2026-01-02 22:40 UTC
+
+- PyPlot now keeps the Plot action disabled until required data is loaded for plug-ins that need imported data.
+- Updating existing Data Builder CSV/Excel exports now adds VSM/DMA graph columns alongside Strain and avoids column insertion index errors.
+
 ## 2026-01-02 21:03 UTC
 
 - Fixed the Assemble section startup crash caused by a missing compare-section hookup.

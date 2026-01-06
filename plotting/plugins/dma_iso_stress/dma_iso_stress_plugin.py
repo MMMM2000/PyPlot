@@ -8,6 +8,7 @@ from PyQt6 import QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
+from plotting.shared.origin import origin_session
 
 try:
     from experiments.simple_scripts.dma_isostress import parse_dma_txt
@@ -174,7 +175,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         if hasattr(self.host, "export_button"):
             self.host.export_button.setEnabled(False)
         if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(False)
+            self.host.open_origin_button.setEnabled(has_data)
         if hasattr(self.host, "export_origin_button"):
             self.host.export_origin_button.setEnabled(False)
         if hasattr(self.host, "save_graph_button"):
@@ -189,6 +190,131 @@ class DmaIsoStressPlugin(PyPlotPlugin):
             else:
                 self._summary_label.clear()
         self.host._update_project_actions()
+
+    def open_origin(self) -> None:  # type: ignore[override]
+        if not self._dataset:
+            self.load_data()
+        if not self._dataset:
+            return
+        try:
+            with origin_session(keep_open=True) as op:
+                exported = 0
+                sort_stress = bool(
+                    self._sort_checkbox.isChecked() if self._sort_checkbox is not None else True
+                )
+                for entry in self._dataset:
+                    if not entry.datasets:
+                        continue
+                    try:
+                        book = op.new_book("w")
+                    except Exception:
+                        continue
+                    try:
+                        book.lname = entry.sample
+                    except Exception:
+                        pass
+                    sheet = book[0] if len(book) else book.add_sheet()
+                    sheet.name = "Data"
+                    graph = op.new_graph(template="line")
+                    layer = graph[0] if graph else None
+                    if layer is None:
+                        continue
+                    try:
+                        graph.lname = entry.sample
+                    except Exception:
+                        pass
+                    try:
+                        graph.name = self._origin_graph_name(entry.sample)
+                    except Exception:
+                        pass
+
+                    col_index = 0
+                    stresses = list(entry.datasets.keys())
+                    if sort_stress:
+                        stresses.sort()
+                    for stress in stresses:
+                        temps, strains = entry.datasets[stress]
+                        if not temps:
+                            continue
+                        label = f"{stress} MPa"
+                        try:
+                            sheet.from_list(col_index, temps)
+                            col_t = sheet.obj.Columns(col_index)
+                            col_t.LongName = "Temperature"
+                            col_t.Units = "°C"
+                            col_t.Comment = label
+                            col_t.Type = 3  # X
+                        except Exception:
+                            pass
+                        try:
+                            sheet.from_list(col_index + 1, strains)
+                            col_e = sheet.obj.Columns(col_index + 1)
+                            col_e.LongName = "Strain"
+                            col_e.Units = "%"
+                            col_e.Comment = label
+                            col_e.Type = 4  # Y
+                        except Exception:
+                            pass
+                        try:
+                            layer.add_plot(sheet, coly=col_index + 1, colx=col_index, type="y")
+                        except Exception:
+                            pass
+                        col_index += 2
+
+                    try:
+                        sheet.header_rows("LUC")
+                    except Exception:
+                        pass
+                    try:
+                        layer.rescale()
+                    except Exception:
+                        pass
+                    try:
+                        layer.set_int("antialias", 1)
+                        layer.set_int("use_speed_mode", 0)
+                        layer.set_int("speedmode", 0)
+                    except Exception:
+                        pass
+                    try:
+                        layer.axis(0).title = "Temperature (°C)"
+                        layer.axis(1).title = "Strain (%)"
+                    except Exception:
+                        try:
+                            op.lt_exec('lab -xb "Temperature (°C)";')
+                            op.lt_exec('lab -yl "Strain (%)";')
+                        except Exception:
+                            pass
+                    try:
+                        layer.add_legend()
+                    except Exception:
+                        try:
+                            op.lt_exec('legend;')
+                        except Exception:
+                            pass
+                    exported += 1
+                if exported:
+                    self._log(f"Sent {exported} DMA iso-stress graph(s) to Origin.")
+                else:
+                    self._log("No DMA iso-stress graphs were exported to Origin.", level="error")
+        except (ModuleNotFoundError, ImportError) as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Origin export failed:\n{exc}",
+            )
+            self._log(f"Origin export failed: {exc}", level="error")
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Origin export failed:\n{exc}",
+            )
+            self._log(f"Origin export failed: {exc}", level="error")
+
+    @staticmethod
+    def _origin_graph_name(label: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() else "_" for ch in label).strip("_")
+        return (cleaned or "DMA_IsoStress")[:18]
 
     def _clear_tabs(self) -> None:
         if not self._plot_tabs:

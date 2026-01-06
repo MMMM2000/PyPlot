@@ -83,20 +83,52 @@ MICRO_SIGN = "µ"
 MICROSCOPE_RESIZE_TARGET = 2200
 FOCUS_ROI_LIMIT = 3
 
+CURRENT_DENSITY_EXTRA_COLUMNS = [
+    "As1 (mA)",
+    "Af1 (mA)",
+    "Ms1 (mA)",
+    "Mf1 (mA)",
+    "As2 (mA)",
+    "Af2 (mA)",
+    "Ms2 (mA)",
+    "Mf2 (mA)",
+    "As current density (A/mm^2)",
+    "Ms current density (A/mm^2)",
+    "As2-As1 (mA)",
+    "Af2-Af1 (mA)",
+    "Ms2-Ms1 (mA)",
+    "Mf2-Mf1 (mA)",
+    "Mf1-Af1 (mA)",
+    "Mf2-Af2 (mA)",
+    "Setpoints (mA)",
+    "Sources",
+]
+
+STRAIN_EXTRA_COLUMNS = [
+    "Calc mode",
+    "Clamp span (mm)",
+    "m",
+    "Stress (MPa)",
+    "M length",
+    "A length",
+    "Broke",
+]
+
 OUTPUT_COLUMNS = [
     "Composition",
     "Microwire",
     "d (µm)",
     "D (µm)",
     "d/D",
-    "Figure — 1000 mA",
-    "Figure — low mA",
-    "VSM hysteresis graphs",
-    "VSM temperature scan graphs",
-    "DMA iso-stress graphs",
     "Strain",
+    *STRAIN_EXTRA_COLUMNS,
     "As (mA)",
     "Ms (mA)",
+    *CURRENT_DENSITY_EXTRA_COLUMNS,
+    "As (°C)",
+    "Af (°C)",
+    "Ms (°C)",
+    "Mf (°C)",
     "Length (m)",
     "Production datetime",
     "Mass (g)",
@@ -106,11 +138,16 @@ OUTPUT_COLUMNS = [
     "Glass feeding (mm/min)",
     "Underpressure",
     "Notes",
-    "Figure — 1000 mA (Origin)",
-    "Figure — low mA (Origin)",
     "Low mA value (mA)",
     "File 1000 mA",
     "File low mA",
+    "Figure — 1000 mA",
+    "Figure — low mA",
+    "Figure — 1000 mA (Origin)",
+    "Figure — low mA (Origin)",
+    "VSM hysteresis graphs",
+    "VSM temperature scan graphs",
+    "DMA iso-stress graphs",
 ]
 
 DIAMETER_COLUMN = OUTPUT_COLUMNS[2]
@@ -131,6 +168,17 @@ VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
 
+TRANSITION_TEMP_AS_COLUMN = "As (°C)"
+TRANSITION_TEMP_AF_COLUMN = "Af (°C)"
+TRANSITION_TEMP_MS_COLUMN = "Ms (°C)"
+TRANSITION_TEMP_MF_COLUMN = "Mf (°C)"
+TRANSITION_TEMP_COLUMNS = (
+    TRANSITION_TEMP_AS_COLUMN,
+    TRANSITION_TEMP_AF_COLUMN,
+    TRANSITION_TEMP_MS_COLUMN,
+    TRANSITION_TEMP_MF_COLUMN,
+)
+
 STRAIN_COLUMN = "Strain"
 
 ORIGIN_FIGURE_COLUMNS = tuple(
@@ -140,6 +188,7 @@ ORIGIN_FIGURE_COLUMNS = tuple(
 )
 
 MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
+MICROWIRE_SORT_RE = re.compile(r"^\s*(\d+)\s*[/\-]\s*(\d+)\s*$")
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
@@ -3522,6 +3571,16 @@ def _plot_measurement_matplotlib(
 def _normalise_sort_value(value: object) -> object:
     if isinstance(value, Path):
         return str(value)
+    if isinstance(value, str):
+        match = MICROWIRE_SORT_RE.match(value)
+        if match:
+            try:
+                draw = int(match.group(1))
+                piece = int(match.group(2))
+            except (TypeError, ValueError):
+                draw = piece = None
+            else:
+                return f"{draw:05d}/{piece:05d}"
     if isinstance(value, (list, tuple, set)):
         return ", ".join(str(item) for item in value)
     return value
@@ -3606,10 +3665,17 @@ def _update_existing_csv_with_strain(
         return
     if df.empty:
         return
+    for column_name in (
+        VSM_HYSTERESIS_COLUMN,
+        VSM_TEMPERATURE_SCAN_COLUMN,
+        DMA_ISOSTRESS_COLUMN,
+    ):
+        if column_name in output_columns and column_name not in df.columns:
+            df[column_name] = None
     if STRAIN_COLUMN not in df.columns:
         insert_index = len(df.columns)
         if STRAIN_COLUMN in output_columns:
-            insert_index = list(output_columns).index(STRAIN_COLUMN)
+            insert_index = min(len(df.columns), list(output_columns).index(STRAIN_COLUMN))
         df.insert(insert_index, STRAIN_COLUMN, None)
     if {"Composition", "Microwire"}.issubset(df.columns) and strain_records:
         for idx, row in df.iterrows():
@@ -3658,6 +3724,8 @@ def _update_existing_excel_with_strain(
     strain_target = len(headers) + 1 if d_over_d_index is None else d_over_d_index + 1
     if d_over_d_index is not None:
         for column_name in FIGURE_COLUMNS:
+            if column_name not in OUTPUT_COLUMNS:
+                continue
             headers = _headers()
             if column_name not in headers:
                 continue
@@ -3672,20 +3740,29 @@ def _update_existing_excel_with_strain(
                 )
             strain_target += 1
 
-    headers = _headers()
-    if STRAIN_COLUMN in headers:
-        current_index = headers.index(STRAIN_COLUMN) + 1
-        if current_index != strain_target:
-            offset = strain_target - current_index
-            col_letter = get_column_letter(current_index)
-            ws.move_range(
-                f"{col_letter}1:{col_letter}{ws.max_row}",
-                rows=0,
-                cols=offset,
-            )
-    else:
-        ws.insert_cols(strain_target)
-        ws.cell(row=1, column=strain_target).value = STRAIN_COLUMN
+    for column_name in (
+        VSM_HYSTERESIS_COLUMN,
+        VSM_TEMPERATURE_SCAN_COLUMN,
+        DMA_ISOSTRESS_COLUMN,
+        STRAIN_COLUMN,
+    ):
+        if column_name not in OUTPUT_COLUMNS:
+            continue
+        headers = _headers()
+        if column_name in headers:
+            current_index = headers.index(column_name) + 1
+            if current_index != strain_target:
+                offset = strain_target - current_index
+                col_letter = get_column_letter(current_index)
+                ws.move_range(
+                    f"{col_letter}1:{col_letter}{ws.max_row}",
+                    rows=0,
+                    cols=offset,
+                )
+        else:
+            ws.insert_cols(strain_target)
+            ws.cell(row=1, column=strain_target).value = column_name
+        strain_target += 1
 
     headers = _headers()
     try:
@@ -4393,10 +4470,13 @@ def build_database(
         Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]
     ] = None,
     strain_records: Optional[Dict[Tuple[str, int, int], StrainRecord]] = None,
+    strain_entries: Optional[Dict[str, Dict[str, object]]] = None,
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
     dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
+    transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
+    current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
 ) -> BuildResult:
     log = _logger(logger)
     output_dir = config.output_dir
@@ -4562,6 +4642,54 @@ def build_database(
                 phase_points_map[key] = cleaned
     phase_points_map = dict(phase_points_map)
 
+    transition_temps_map: Dict[str, Dict[str, float]] = {}
+    if transition_temps:
+        for key, payload in transition_temps.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            cleaned = {label: float(value) for label, value in payload.items() if isinstance(value, (int, float))}
+            if cleaned:
+                transition_temps_map[key] = cleaned
+    transition_temps_map = dict(transition_temps_map)
+
+    current_density_map: Dict[str, Dict[str, object]] = {}
+    if current_density_entries:
+        for key, payload in current_density_entries.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            entry: Dict[str, object] = {}
+            for column in CURRENT_DENSITY_EXTRA_COLUMNS:
+                if column in payload:
+                    entry[column] = payload.get(column)
+            if "Notes" in payload:
+                entry["Notes"] = payload.get("Notes")
+            if entry:
+                current_density_map[key] = entry
+    current_density_map = dict(current_density_map)
+
+    strain_entry_map: Dict[str, Dict[str, object]] = {}
+    if strain_entries:
+        for key, payload in strain_entries.items():
+            if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            entry: Dict[str, object] = {}
+            for column in list(STRAIN_EXTRA_COLUMNS) + [STRAIN_COLUMN]:
+                if column in payload:
+                    entry[column] = payload.get(column)
+            if entry:
+                strain_entry_map[key] = entry
+    elif strain_records:
+        for (composition, draw_x, piece_y), record in strain_records.items():
+            entry: Dict[str, object] = {}
+            if record.m_length is not None:
+                entry["M length"] = record.m_length
+            if record.a_length is not None:
+                entry["A length"] = record.a_length
+            entry["Broke"] = bool(record.broke)
+            if entry:
+                strain_entry_map[f"{composition}|{draw_x}|{piece_y}"] = entry
+    strain_entry_map = dict(strain_entry_map)
+
     analysis_total_local = analysis_total
     if analysis_total_local is None:
         analysis_total_local = len(microscope_sources) + len(video_sources)
@@ -4714,6 +4842,43 @@ def build_database(
                 ms_value = phase_entry.get("Ms")
             if ms_value is not None:
                 row["Ms (mA)"] = ms_value
+        transition_entry = transition_temps_map.get(
+            f"{composition}|{draw_x}|{piece_y}", {}
+        )
+        if transition_entry:
+            if transition_entry.get("As") is not None:
+                row[TRANSITION_TEMP_AS_COLUMN] = transition_entry.get("As")
+            if transition_entry.get("Af") is not None:
+                row[TRANSITION_TEMP_AF_COLUMN] = transition_entry.get("Af")
+            if transition_entry.get("Ms") is not None:
+                row[TRANSITION_TEMP_MS_COLUMN] = transition_entry.get("Ms")
+            if transition_entry.get("Mf") is not None:
+                row[TRANSITION_TEMP_MF_COLUMN] = transition_entry.get("Mf")
+        current_density_entry = current_density_map.get(
+            f"{composition}|{draw_x}|{piece_y}", {}
+        )
+        if current_density_entry:
+            for column in CURRENT_DENSITY_EXTRA_COLUMNS:
+                if column not in output_columns:
+                    continue
+                value = current_density_entry.get(column)
+                if value is None or value == "":
+                    continue
+                if column in {"Setpoints (mA)", "Sources"} and isinstance(
+                    value, (list, tuple, set)
+                ):
+                    value = ", ".join(str(item) for item in value)
+                row[column] = value
+            if row.get("As (mA)") in (None, "", float("nan")):
+                as1_value = current_density_entry.get("As1 (mA)")
+                if isinstance(as1_value, (int, float)) and math.isfinite(float(as1_value)):
+                    row["As (mA)"] = float(as1_value)
+            if row.get("Ms (mA)") in (None, "", float("nan")):
+                ms1_value = current_density_entry.get("Ms1 (mA)")
+                if isinstance(ms1_value, (int, float)) and math.isfinite(float(ms1_value)):
+                    row["Ms (mA)"] = float(ms1_value)
+            if (not row.get("Notes")) and current_density_entry.get("Notes"):
+                row["Notes"] = current_density_entry.get("Notes")
         row_highlights: Set[str] = set()
         d_detection: Optional[MicroscopeDetection] = None
         D_detection: Optional[MicroscopeDetection] = None
@@ -4818,6 +4983,17 @@ def build_database(
             strain_value = _format_strain_value(strain_record)
             if strain_value is not None:
                 row[STRAIN_COLUMN] = strain_value
+        strain_entry = strain_entry_map.get(f"{composition}|{draw_x}|{piece_y}", {})
+        if strain_entry:
+            for column in STRAIN_EXTRA_COLUMNS:
+                if column not in output_columns:
+                    continue
+                value = strain_entry.get(column)
+                if value is None or value == "":
+                    continue
+                row[column] = value
+            if not row.get(STRAIN_COLUMN) and strain_entry.get(STRAIN_COLUMN):
+                row[STRAIN_COLUMN] = strain_entry.get(STRAIN_COLUMN)
         vsm_records = vsm_hysteresis_groups.get((composition, draw_x, piece_y), [])
         if vsm_records:
             labels = [_record_label(record) for record in vsm_records if _record_label(record)]
@@ -4987,7 +5163,7 @@ def build_database(
         requested_formats = (
             tuple(dict.fromkeys(config.export_formats))
             if config.export_formats
-            else ("csv",)
+            else ()
         )
     behaviours = {
         (key.lower() if isinstance(key, str) else ""): str(value).lower()

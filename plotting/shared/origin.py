@@ -23,8 +23,8 @@ def _ensure_origin_sdk_on_path() -> None:
 
 
 @contextmanager
-def origin_session() -> Iterator[Any]:
-    """Return an Origin session that is closed on exit."""
+def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
+    """Return an Origin session; optionally leave Origin open on exit."""
 
     _ensure_origin_sdk_on_path()
     import originpro as op  # lazy import
@@ -35,10 +35,20 @@ def origin_session() -> Iterator[Any]:
     try:
         yield cast(Any, op)
     finally:
-        try:
-            cast(Any, op).exit()
-        except Exception:
-            pass
+        if keep_open:
+            try:
+                cast(Any, op).detach()
+            except Exception:
+                pass
+            try:
+                schedule_origin_release()
+            except Exception:
+                pass
+        else:
+            try:
+                cast(Any, op).exit()
+            except Exception:
+                pass
 
 
 _ORIGIN_RELEASED = False

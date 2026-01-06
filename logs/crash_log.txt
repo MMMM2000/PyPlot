@@ -1,0 +1,9 @@
+2026-01-06 19:35:54 [EXCEPTION] AttributeError: 'CurrentDensitySection' object has no attribute 'current_density_snapshot'
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 16627, in _preview
+    inputs = self._prepare_builder_inputs(selected, require_payloads=False)
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 14757, in _prepare_builder_inputs
+    current_density_entries = current_section.current_density_snapshot()
+                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'CurrentDensitySection' object has no attribute 'current_density_snapshot'
+

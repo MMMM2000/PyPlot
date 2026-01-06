@@ -29,6 +29,10 @@ try:
     import originpro as op  # type: ignore
 except Exception:  # pragma: no cover - optional dependency
     op = None
+try:
+    from plotting.shared.origin import origin_session
+except Exception:  # pragma: no cover - optional dependency
+    origin_session = None  # type: ignore
 
 try:
     from experiments.simple_scripts._shared import SimpleScriptApp, SimpleScriptProcessor
@@ -895,14 +899,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
 
     # ------------------------------------------------------------------ Origin plotting
     def plot_origin(self, dataset: list[VSMEntry]) -> None:
-        if op is None:  # pragma: no cover - requires Origin
+        if op is None or origin_session is None:  # pragma: no cover - requires Origin
             raise RuntimeError(
                 "originpro is not available. Install OriginLab's Python package on this machine."
             )
-        try:
-            op.set_show(True)
-        except Exception:
-            pass
         plotted = 0
 
         def _style_origin_layer(layer: Any, title: str) -> None:
@@ -934,76 +934,82 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                 except Exception:
                     pass
 
-        for entry in dataset:
-            series = self._build_series(entry.dataframe.copy())
-            if not series:
-                continue
-            prepared = self._prepare_series(series)
-            if not prepared:
-                continue
-            include_raw_derivative = bool(self.show_derivative)
-            book = op.new_book("w")
-            book.lname = f"{entry.sample} (TScan)"
-            data_sheet = cast(Any, book[0])
-            data_sheet.name = "Data"
-            col_index = 0
-            column_pairs: list[tuple[float, int, str, str]] = []
-            designations: list[str] = []
-            for item in prepared:
-                frame = item.frame
-                temps = frame["temperature"].astype(float).tolist()
-                signals = frame["signal"].astype(float).tolist()
-                data_sheet.from_list(
-                    col_index,
-                    temps,
-                    lname="Temperature",
-                    units="°C",
-                    comments=item.section_label,
-                    axis="X",
-                )
-                col_x = cast(Any, data_sheet.obj.Columns(col_index))
+        with origin_session(keep_open=True) as origin:
+            for entry in dataset:
+                series = self._build_series(entry.dataframe.copy())
+                if not series:
+                    continue
+                prepared = self._prepare_series(series)
+                if not prepared:
+                    continue
+                include_raw_derivative = bool(self.show_derivative)
+                book = origin.new_book("w")
+                book.lname = f"{entry.sample} (TScan)"
+                data_sheet = cast(Any, book[0])
+                data_sheet.name = "Data"
+                col_index = 0
+                column_pairs: list[tuple[float, int, str, str]] = []
+                designations: list[str] = []
+                for item in prepared:
+                    frame = item.frame
+                    temps = frame["temperature"].astype(float).tolist()
+                    signals = frame["signal"].astype(float).tolist()
+                    data_sheet.from_list(
+                        col_index,
+                        temps,
+                        lname="Temperature",
+                        units="°C",
+                        comments=item.section_label,
+                        axis="X",
+                    )
+                    col_x = cast(Any, data_sheet.obj.Columns(col_index))
+                    try:
+                        col_x.LongName = "Temperature"
+                        col_x.Units = "°C"
+                        col_x.Comment = item.section_label
+                        col_x.Type = 3
+                    except Exception:
+                        pass
+                    designations.append("X")
+                    data_sheet.from_list(
+                        col_index + 1,
+                        signals,
+                        lname="Signal X",
+                        units="emu",
+                        comments=item.legend,
+                        axis="Y",
+                    )
+                    col_y = cast(Any, data_sheet.obj.Columns(col_index + 1))
+                    try:
+                        col_y.LongName = "Signal X"
+                        col_y.Units = "emu"
+                        col_y.Comment = item.legend
+                        col_y.Type = 4
+                    except Exception:
+                        pass
+                    designations.append("Y")
+                    column_pairs.append((item.series.field, col_index, item.legend, item.color))
+                    col_index += 2
+                if designations:
+                    try:
+                        data_sheet.cols_axis("".join(designations))
+                    except Exception:
+                        pass
                 try:
-                    col_x.LongName = "Temperature"
-                    col_x.Units = "°C"
-                    col_x.Type = 3
-                except Exception:
-                    pass
-                designations.append("X")
-                data_sheet.from_list(
-                    col_index + 1,
-                    signals,
-                    lname="Signal X",
-                    units="emu",
-                    comments=item.legend,
-                    axis="Y",
-                )
-                col_y = cast(Any, data_sheet.obj.Columns(col_index + 1))
-                try:
-                    col_y.LongName = "Signal X"
-                    col_y.Units = "emu"
-                    col_y.Type = 4
-                except Exception:
-                    pass
-                designations.append("Y")
-                column_pairs.append((item.series.field, col_index, item.legend, item.color))
-                col_index += 2
-            if designations:
-                try:
-                    data_sheet.cols_axis("".join(designations))
+                    data_sheet.header_rows("LUC")
                 except Exception:
                     pass
 
-            graphs: list[Any] = []
-            graph = op.new_graph(template="doubley")
-            graphs.append(graph)
-            try:
-                graph_title = f"{entry.sample} - VSM Temperature Scan"
-                graph.set_str("title", graph_title)
-                graph.name = f"{entry.sample} - TScan"
-                graph.lname = f"{entry.sample} - TScan"
-            except Exception:
-                graph_title = f"{entry.sample} - VSM Temperature Scan"
-                pass
+                graphs: list[Any] = []
+                graph = origin.new_graph(template="doubley")
+                graphs.append(graph)
+                try:
+                    graph_title = f"{entry.sample} - VSM Temperature Scan"
+                    graph.set_str("title", graph_title)
+                    graph.name = f"{entry.sample} - TScan"
+                    graph.lname = f"{entry.sample} - TScan"
+                except Exception:
+                    graph_title = f"{entry.sample} - VSM Temperature Scan"
             unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
             layer_map: Dict[float, Any] = {}
             existing_layers = len(graph)
@@ -1066,6 +1072,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     try:
                         col_x.LongName = "Temperature"
                         col_x.Units = "°C"
+                        col_x.Comment = item.section_label
                         col_x.Type = 3
                     except Exception:
                         pass
@@ -1082,6 +1089,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     try:
                         col_y.LongName = "Signal X (smoothed)"
                         col_y.Units = "emu"
+                        col_y.Comment = item.legend
                         col_y.Type = 4
                     except Exception:
                         pass
@@ -1093,7 +1101,11 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         smooth_sheet.cols_axis("".join(s_designations))
                     except Exception:
                         pass
-                smooth_graph = op.new_graph(template="doubley")
+                try:
+                    smooth_sheet.header_rows("LUC")
+                except Exception:
+                    pass
+                smooth_graph = origin.new_graph(template="doubley")
                 graphs.append(smooth_graph)
                 try:
                     smooth_title = f"{entry.sample} - Smoothed Signal X"
@@ -1165,6 +1177,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     try:
                         col_x.LongName = "Temperature"
                         col_x.Units = "°C"
+                        col_x.Comment = item.section_label
                         col_x.Type = 3
                     except Exception:
                         pass
@@ -1181,6 +1194,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                     try:
                         col_y.LongName = "dSignal/dT"
                         col_y.Units = "emu/°C"
+                        col_y.Comment = item.legend
                         col_y.Type = 4
                     except Exception:
                         pass
@@ -1192,7 +1206,11 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         deriv_sheet.cols_axis("".join(d_designations))
                     except Exception:
                         pass
-                deriv_graph = op.new_graph()
+                try:
+                    deriv_sheet.header_rows("LUC")
+                except Exception:
+                    pass
+                deriv_graph = origin.new_graph()
                 graphs.append(deriv_graph)
                 try:
                     deriv_title = f"{entry.sample} - d(Signal X)/dT"
@@ -1254,6 +1272,7 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         try:
                             col_x.LongName = "Temperature"
                             col_x.Units = "°C"
+                            col_x.Comment = item.section_label
                             col_x.Type = 3
                         except Exception:
                             pass
@@ -1270,18 +1289,23 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
                         try:
                             col_y.LongName = "dSignal/dT (smoothed)"
                             col_y.Units = "emu/°C"
+                            col_y.Comment = item.legend
                             col_y.Type = 4
                         except Exception:
                             pass
                         sm_designations.append("Y")
                         col += 2
                         derivative_sm_pairs.append((item.series.field, col - 2, item.legend, item.color))
-                    if sm_designations:
+                        if sm_designations:
+                            try:
+                                deriv_sm_sheet.cols_axis("".join(sm_designations))
+                            except Exception:
+                                pass
                         try:
-                            deriv_sm_sheet.cols_axis("".join(sm_designations))
+                            deriv_sm_sheet.header_rows("LUC")
                         except Exception:
                             pass
-                    deriv_sm_graph = op.new_graph()
+                    deriv_sm_graph = origin.new_graph()
                     graphs.append(deriv_sm_graph)
                     try:
                         deriv_sm_title = f"{entry.sample} - Smoothed d(Signal X)/dT"
@@ -1323,13 +1347,13 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
 
             try:
                 book.activate()
-                op.lt_exec("doc -tf;")
+                origin.lt_exec("doc -tf;")
             except Exception:
                 pass
             for g in graphs:
                 try:
                     g.activate()
-                    op.lt_exec("doc -tf;")
+                    origin.lt_exec("doc -tf;")
                 except Exception:
                     pass
             plotted += 1

@@ -915,6 +915,7 @@ class _DeveloperOptions(QtCore.QObject):
 
     keep_files_changed = QtCore.pyqtSignal(bool)
     experiments_visibility_changed = QtCore.pyqtSignal(bool)
+    message_log_capture_changed = QtCore.pyqtSignal(bool)
 
     def __init__(self) -> None:
         super().__init__()
@@ -923,8 +924,12 @@ class _DeveloperOptions(QtCore.QObject):
         self._show_experiments = self._read_bool(
             "developer_show_experiments", default=False
         )
+        self._capture_message_log = self._read_bool(
+            "developer_capture_message_log", default=False
+        )
         self._keep_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
         self._experiment_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
+        self._capture_log_actions: list[weakref.ReferenceType[QtGui.QAction]] = []
 
     # ------------------------------------------------------------------ helpers
     def _read_bool(self, key: str, *, default: bool) -> bool:
@@ -957,6 +962,9 @@ class _DeveloperOptions(QtCore.QObject):
     def show_experiments(self) -> bool:
         return self._show_experiments
 
+    def capture_message_log(self) -> bool:
+        return self._capture_message_log
+
     def set_keep_files(self, enabled: bool) -> None:
         enabled = bool(enabled)
         if enabled == self._keep_files:
@@ -974,6 +982,15 @@ class _DeveloperOptions(QtCore.QObject):
         self._settings.setValue("developer_show_experiments", enabled)
         self._sync(self._experiment_actions, enabled)
         self.experiments_visibility_changed.emit(enabled)
+
+    def set_capture_message_log(self, enabled: bool) -> None:
+        enabled = bool(enabled)
+        if enabled == self._capture_message_log:
+            return
+        self._capture_message_log = enabled
+        self._settings.setValue("developer_capture_message_log", enabled)
+        self._sync(self._capture_log_actions, enabled)
+        self.message_log_capture_changed.emit(enabled)
 
     def create_menu(self, parent: QtWidgets.QWidget) -> QtWidgets.QMenu:
         menu = QtWidgets.QMenu("&Developer", parent)
@@ -994,6 +1011,14 @@ class _DeveloperOptions(QtCore.QObject):
             exp_action.toggled.connect(self.set_show_experiments)
             self._experiment_actions.append(weakref.ref(exp_action))
 
+        capture_action = menu.addAction("Capture &Message Log to File")
+        if capture_action is not None:
+            capture_action.setObjectName("mw_capture_message_log")
+            capture_action.setCheckable(True)
+            capture_action.setChecked(self._capture_message_log)
+            capture_action.toggled.connect(self.set_capture_message_log)
+            self._capture_log_actions.append(weakref.ref(capture_action))
+
         return menu
 
 
@@ -1012,4 +1037,10 @@ def developer_options() -> _DeveloperOptions:
 def ensure_app_theme(app: QtWidgets.QApplication) -> None:
     """Apply the stored theme preference to ``app``."""
 
+    try:
+        from . import theme as _theme
+
+        _theme._install_qt_message_filter()  # type: ignore[attr-defined]
+    except Exception:
+        pass
     theme_manager().apply(app)

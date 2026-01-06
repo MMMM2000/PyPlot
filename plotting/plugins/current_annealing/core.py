@@ -425,8 +425,16 @@ def _prepare_origin_workspace(
     except Exception:
         pass
     try:
-        worksheet.set_label(0, "Current (mA)")
-        worksheet.set_label(1, "Resistance (Ω)")
+        worksheet.header_rows("LUC")
+    except Exception:
+        pass
+    try:
+        worksheet.set_label(0, "Current", "L")
+        worksheet.set_label(0, "mA", "U")
+        worksheet.set_label(0, legend_label, "C")
+        worksheet.set_label(1, "Resistance", "L")
+        worksheet.set_label(1, "Ω", "U")
+        worksheet.set_label(1, legend_label, "C")
     except Exception:
         pass
 

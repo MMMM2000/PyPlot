@@ -100,12 +100,13 @@ class PyPlotWorkbench(PyPlotWindow):
         self._last_graph_dir: Path | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
-        try:
-            self.setWindowState(
-                self.windowState() | QtCore.Qt.WindowState.WindowMaximized
-            )
-        except Exception:
-            pass
+        if not sys.platform.startswith("win"):
+            try:
+                self.setWindowState(
+                    self.windowState() | QtCore.Qt.WindowState.WindowMaximized
+                )
+            except Exception:
+                pass
         self.tab_widget.currentChanged.connect(lambda _: self._update_action_states())
 
         stored_sources = self.settings.value("sources", "")
@@ -527,7 +528,7 @@ class PyPlotWorkbench(PyPlotWindow):
             return True
         requires = bool(getattr(plugin, "requires_imported_data", False))
         if requires:
-            return bool(self._selected_paths())
+            return False
         return bool(self._selected_paths())
 
     def _import_paths(self, paths: Iterable[Path]) -> None:

@@ -2037,6 +2037,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._reorder_columns_action: QtGui.QAction | None = None
 
         self._log_has_unread_errors = False
+        self._log_capture_enabled = False
+        self._log_capture_faulted = False
+        self._log_capture_path: Path | None = None
         self._history = _HistoryManager()
         self._retabify_pending = False
         self._import_storage_key = self._project_settings_key("import_sources")
@@ -2109,7 +2112,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._ensure_settings_menu()
         self._update_project_title()
         self._update_project_actions()
-        developer_options().keep_files_changed.connect(self._handle_keep_files_changed)
+        dev_opts = developer_options()
+        dev_opts.keep_files_changed.connect(self._handle_keep_files_changed)
+        if hasattr(dev_opts, "message_log_capture_changed"):
+            try:
+                dev_opts.message_log_capture_changed.connect(self._handle_log_capture_changed)
+            except Exception:
+                pass
+            try:
+                self._handle_log_capture_changed(bool(dev_opts.capture_message_log()))
+            except Exception:
+                pass
         QtCore.QTimer.singleShot(0, self._restore_persisted_imports)
         self._apply_toolbar_style_hint()
         self._update_history_actions()
@@ -6121,6 +6134,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 pass
 
+        if getattr(self, "_log_capture_enabled", False):
+            self._append_log_to_file(level, message)
+
         dock = getattr(self, "log_dock", None)
         view_visible = isinstance(view, QtWidgets.QPlainTextEdit) and view.isVisible()
         dock_visible = isinstance(dock, QtWidgets.QDockWidget) and dock.isVisible()
@@ -6158,6 +6174,52 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return
         self._log_has_unread_errors = False
         self._set_log_alert(False)
+
+    def _handle_log_capture_changed(self, enabled: bool) -> None:
+        self._log_capture_enabled = bool(enabled)
+        if self._log_capture_enabled:
+            self._log_capture_path = self._resolve_log_capture_path()
+            self._log_capture_faulted = False
+            try:
+                self._append_log(f"Message log capture enabled: {self._log_capture_path}")
+            except Exception:
+                pass
+        else:
+            try:
+                self._append_log("Message log capture disabled.")
+            except Exception:
+                pass
+
+    def _resolve_log_capture_path(self) -> Path:
+        try:
+            repo_root = Path(__file__).resolve().parents[2]
+        except Exception:
+            repo_root = Path.cwd()
+        return repo_root / "logs" / "message_log.txt"
+
+    def _append_log_to_file(self, level: str, message: str) -> None:
+        if not self._log_capture_enabled or self._log_capture_faulted:
+            return
+        if self._log_capture_path is None:
+            self._log_capture_path = self._resolve_log_capture_path()
+        path = self._log_capture_path
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            level_name = "ERROR" if level == "error" else "INFO"
+            timestamp = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{timestamp} [{level_name}] {message}\n")
+        except Exception as exc:
+            self._log_capture_faulted = True
+            self._log_capture_enabled = False
+            try:
+                view = getattr(self, "log_view", None)
+                if isinstance(view, QtWidgets.QPlainTextEdit):
+                    view.appendPlainText(
+                        f"WARNING: Failed to write message log capture file: {exc}"
+                    )
+            except Exception:
+                pass
 
     def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:
         if self._data_tree_root is None:

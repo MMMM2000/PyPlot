@@ -31,9 +31,9 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Stress Sensitivity      | `plotting.plugins.stress_sensitivity`                 | Combines stress sweeps and overlays key metrics. |
 | Stress Dependence       | `plotting.plugins.stress_dependence`                  | Converts TXT exports into worksheets + line graphs. |
 | Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. |
-| VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. |
+| VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. Workbooks group each temperature graph into a single worksheet with XY column pairs per angle. |
 | VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. |
-| DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level. |
+| DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level; Origin export is available from the toolbar. |
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
 
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.
@@ -42,7 +42,7 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
 
 1. Use the **Import data…** button (or the Data menu) to select files/folders.
 2. Supported formats: CSV/TSV/TXT/XLS/XLSX/XLSM/JSON/VSM `.vsm-hys-data`. Plug-ins can add their own loaders (see `PyPlotPlugin.load_data` implementations).
-3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Otherwise clicking Plot is responsible for loading the selected files and rebuilding the per-graph workbooks.
+3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Plug-ins that declare `requires_imported_data` keep Plot disabled until Load Data (or auto-load) populates their data.
 4. All worksheets live under `Imported Data` → `<folder>` → `<workbook>` so every plug-in can reuse them (export to Origin, duplicate, edit columns, etc.).
 
 ## Logs
