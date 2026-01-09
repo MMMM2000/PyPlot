@@ -1,5 +1,44 @@
 # Changelog
 
+## 2026-01-08 17:24 UTC
+
+- Added an FMR PyPlot plugin plus a Data Builder FMR section with Field vs X/Y plots and Origin export support.
+- VSM Folder Export now keeps the original @@Columns header structure when writing formatted TXT files.
+
+## 2026-01-08 11:43 UTC
+
+- Assemble export now runs in a background worker with a modal progress indicator and refreshes the preview after completion.
+- Fixed HTML export invocation for Assemble (no more `bool`-call crash) and preserved export messaging.
+- Current density snapshots now refresh before Assemble builds to keep As/Af/Ms/Mf columns in sync.
+- DMA previews now fall back to microwire key grouping and legacy Sample/sample columns are cleaned up on load.
+
+## 2026-01-08 12:03 UTC
+
+- VSM Folder Export experiment now shows its dialog when launched from the launcher.
+
+## 2026-01-08 12:21 UTC
+
+- Current Annealing auto-loads on import so Plot is enabled after data import, and the directional Origin export now writes both directions into a single worksheet with units/comments populated.
+
+## 2026-01-08 15:33 UTC
+
+- VSM Folder Export now preserves the input folder structure and file names, only swapping the extension to `.txt`.
+
+## 2026-01-08 09:27 UTC
+
+- Compare now defaults to a “samples as columns” matrix view with selectable field rows and inline graph previews for side-by-side comparisons.
+- Current density snapshots now feed Assemble previews/exports so As/Af/Ms/Mf columns appear reliably.
+- VSM/DMA sections strip legacy Sample columns on project load, and DMA uses hidden sample keys by default.
+
+## 2026-01-08 10:13 UTC
+
+- Added `experiments/vsm_folder_export.py` to batch-convert VSM hysteresis and temperature scan files into plain TXT tables grouped by sample folder.
+
+## 2026-01-08 08:08 UTC
+
+- Assemble preview now loads VSM/DMA groups without errors, current density data is included again, and Add to compare shows feedback.
+- VSM temperature scan/DMA sections now hide the temporary Sample columns immediately when opening a project (no manual refresh required).
+
 ## 2026-01-06 19:25 UTC
 
 - Microwire Data Builder now writes unhandled exception traces to `logs/crash_log.txt` to help diagnose pre-log crashes.
@@ -1225,6 +1264,12 @@
   no text, and surfaced the captured strings in debug logs.
 - Added regression coverage that stubs pytesseract to ensure the fallback keeps
   recording both core and glass diameters in the database worksheet.
+
+## 2026-01-08 18:20 UTC
+
+- Enabled the Current Annealing plot button to allow plotting and data import without a preselected file list.
+- Updated FMR plotting labels to match the Field/X axes convention and carry units when available.
+- Improved VSM folder export visibility and default recursion in the GUI so nested folders are preserved.
 
 ## 2025-10-19
 

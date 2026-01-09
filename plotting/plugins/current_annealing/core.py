@@ -571,6 +571,16 @@ def _plot_origin_experimental(
 ) -> None:
     if graph is None or layer is None:
         return
+    if worksheet is None:
+        _plot_origin_simple(
+            workbook,
+            worksheet,
+            graph,
+            layer,
+            legend_label,
+            display_label or legend_label,
+        )
+        return
     _, segments = _direction_profile(currents)
     if not segments:
         _plot_origin_simple(
@@ -608,24 +618,41 @@ def _plot_origin_experimental(
 
     legend_entries: List[Tuple[int, str]] = []
 
-    def _add_direction_plot(data_x: List[float], data_y: List[float], label: str, color: str) -> None:
+    def _set_column_meta(col_index: int, label: str, is_x: bool) -> None:
+        try:
+            col = worksheet.obj.Columns(col_index)
+        except Exception:
+            col = None
+        if col is not None:
+            try:
+                col.LongName = "Current" if is_x else "Resistance"
+                col.Units = "mA" if is_x else "Ω"
+                col.Comment = label
+                col.Type = 3 if is_x else 4
+            except Exception:
+                pass
+        else:
+            try:
+                worksheet.set_label(col_index, "Current" if is_x else "Resistance", "L")
+                worksheet.set_label(col_index, "mA" if is_x else "Ω", "U")
+                worksheet.set_label(col_index, label, "C")
+            except Exception:
+                pass
+
+    def _write_series(col_index: int, data_x: List[float], data_y: List[float], label: str) -> bool:
         if not data_x:
-            return
-        sheet_obj: Any | None
+            return False
         try:
-            sheet_obj = origin_any.new_sheet('w', lname=label.lower().replace(' ', '_'))
+            worksheet.from_list(col_index, data_x)
+            worksheet.from_list(col_index + 1, data_y)
         except Exception:
-            sheet_obj = None
-        if sheet_obj is None:
-            return
-        sheet = cast(Any, sheet_obj)
-        try:
-            sheet.from_list(0, data_x)
-            sheet.from_list(1, data_y)
-            sheet.cols_axis('XY')
-        except Exception:
-            return
-        plot_obj = layer.add_plot(sheet, coly=1, colx=0, type='y')
+            return False
+        _set_column_meta(col_index, label, True)
+        _set_column_meta(col_index + 1, label, False)
+        return True
+
+    def _add_direction_plot(col_index: int, label: str, color: str) -> None:
+        plot_obj = layer.add_plot(worksheet, coly=col_index + 1, colx=col_index, type='y')
         if plot_obj is None:
             return
         plot_any = cast(Any, plot_obj)
@@ -657,8 +684,28 @@ def _plot_origin_experimental(
             dataset_index = len(legend_entries) + 1
         legend_entries.append((dataset_index, label))
 
-    _add_direction_plot(inc_x, inc_y, "Increasing current", '#d32f2f')
-    _add_direction_plot(dec_x, dec_y, "Decreasing current", '#1976d2')
+    try:
+        worksheet.header_rows("LUC")
+    except Exception:
+        pass
+
+    col_index = 0
+    if _write_series(col_index, inc_x, inc_y, "Increasing current"):
+        _add_direction_plot(col_index, "Increasing current", '#d32f2f')
+        col_index += 2
+    if _write_series(col_index, dec_x, dec_y, "Decreasing current"):
+        _add_direction_plot(col_index, "Decreasing current", '#1976d2')
+
+    if not legend_entries:
+        _plot_origin_simple(
+            workbook,
+            worksheet,
+            graph,
+            layer,
+            legend_label,
+            display_label or legend_label,
+        )
+        return
 
     legend = _legend_label(layer)
     if legend is not None and legend_entries:

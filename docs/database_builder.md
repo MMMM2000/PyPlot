@@ -13,6 +13,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - VSM temperature scan: multiple graphs per sample row (sub-versions in the same row).
 - Transition temps: pick As/Af/Ms/Mf from VSM temperature graphs without switching away from the active graph.
 - DMA iso-stress: multiple graphs per sample row (sub-versions in the same row).
+- FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
 - Compare: subset of rows for side-by-side comparison.
@@ -54,7 +55,8 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Compare
 
 - Holds the selected rows from Assemble.
-- Displays the same columns and graph previews as Assemble (subject to column selection).
+- Default view is a samples-as-columns matrix: columns are `Composition Microwire`, rows are selected fields, and graph rows render inline previews for side-by-side comparison.
+- Users can switch back to the row-based view and choose which fields to show + their order.
 
 ## Export Targets
 
@@ -68,4 +70,3 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Message Log captures warnings/errors for builder actions.
 - Developer menu includes "Capture Message Log to File" to write to `logs/message_log.txt`.
 - Unread errors should highlight the Message Log dock/button.
-

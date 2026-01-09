@@ -27,6 +27,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
     """Embed current annealing plotting inside PyPlot."""
 
     requires_imported_data = True
+    auto_load_on_import = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -128,10 +129,12 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         if not data_by_file:
             self._data_by_file = {}
             self._loaded_files = []
+            self._data = None
             self.update_ui()
             return
         self._data_by_file = data_by_file
         self._loaded_files = list(data_by_file.keys())
+        self._data = data_by_file
         if paths:
             self.host._plugin_last_directories[self.name] = paths[0].parent
         self._log(f"Loaded {len(data_by_file)} current annealing file(s).")
@@ -242,7 +245,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
-        ready_to_plot = has_data or self._host_has_data_selection()
+        ready_to_plot = True
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(ready_to_plot)
         if hasattr(self.host, "save_graph_button"):

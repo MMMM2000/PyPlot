@@ -2753,3 +2753,683 @@ Traceback (most recent call last):
     current_density_entries = current_section.current_density_snapshot()
                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AttributeError: 'CurrentDensitySection' object has no attribute 'current_density_snapshot'
+2026-01-08 07:44:58 [WARNING] Skipping videos because no data were found.
+2026-01-08 07:44:58 [WARNING] WARNING: Current density snapshot method is missing; skipping current density values.
+2026-01-08 07:44:58 [WARNING] Skipping current density because no data were found.
+2026-01-08 07:44:58 [INFO] Preview build started.
+2026-01-08 07:44:58 [WARNING] WARNING: No low-current measurement found for Ni47Fe30Ga17Si6 1/8
+2026-01-08 07:44:58 [WARNING] WARNING: No low-current measurement found for Ni48Fe25Ga23Co4 1/6
+2026-01-08 07:45:02 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 1/2
+2026-01-08 07:45:02 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 2/2
+2026-01-08 07:45:03 [WARNING] WARNING: No low-current measurement found for Ni52Fe21Ga27 2/1
+2026-01-08 07:45:03 [WARNING] WARNING: No low-current measurement found for Ni55Fe18Ga27 4/2
+2026-01-08 07:45:04 [INFO] Preview updated.
+2026-01-08 07:49:01 [ERROR] ERROR: Failed to update assemble preview buttons
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 15320, in _update_preview_graph_buttons
+    bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'. Did you mean: '_cached_vsm_hysteresis_groups'?
+2026-01-08 07:49:01 [ERROR] Failed to update assemble preview buttons: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'
+2026-01-08 07:49:08 [ERROR] ERROR: Failed to update assemble preview buttons
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 15320, in _update_preview_graph_buttons
+    bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'. Did you mean: '_cached_vsm_hysteresis_groups'?
+2026-01-08 07:49:08 [ERROR] Failed to update assemble preview buttons: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'
+2026-01-08 07:49:09 [ERROR] ERROR: Failed to update assemble preview buttons
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 15320, in _update_preview_graph_buttons
+    bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'. Did you mean: '_cached_vsm_hysteresis_groups'?
+2026-01-08 07:49:09 [ERROR] Failed to update assemble preview buttons: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'
+2026-01-08 07:49:12 [ERROR] ERROR: Failed to update assemble preview buttons
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 15320, in _update_preview_graph_buttons
+    bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'. Did you mean: '_cached_vsm_hysteresis_groups'?
+2026-01-08 07:49:12 [ERROR] Failed to update assemble preview buttons: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'
+2026-01-08 07:49:13 [ERROR] ERROR: Failed to update assemble preview buttons
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 15320, in _update_preview_graph_buttons
+    bool(enabled and self._ensure_vsm_hysteresis_groups().get(key or "", []))
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'. Did you mean: '_cached_vsm_hysteresis_groups'?
+2026-01-08 07:49:13 [ERROR] Failed to update assemble preview buttons: 'AssemblySection' object has no attribute '_ensure_vsm_hysteresis_groups'
+2026-01-08 08:18:11 [WARNING] Skipping videos because no data were found.
+2026-01-08 08:18:11 [WARNING] WARNING: Current density snapshot method is missing; skipping current density values.
+2026-01-08 08:18:11 [WARNING] Skipping current density because no data were found.
+2026-01-08 08:18:11 [INFO] Preview build started.
+2026-01-08 08:18:11 [WARNING] WARNING: No low-current measurement found for Ni47Fe30Ga17Si6 1/8
+2026-01-08 08:18:11 [WARNING] WARNING: No low-current measurement found for Ni48Fe25Ga23Co4 1/6
+2026-01-08 08:18:15 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 1/2
+2026-01-08 08:18:15 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 2/2
+2026-01-08 08:18:16 [WARNING] WARNING: No low-current measurement found for Ni52Fe21Ga27 2/1
+2026-01-08 08:18:16 [WARNING] WARNING: No low-current measurement found for Ni55Fe18Ga27 4/2
+2026-01-08 08:18:17 [INFO] Preview updated.
+2026-01-08 08:20:15 [INFO] Compare: added 3 row(s).
+2026-01-08 09:44:40 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-08 09:44:43 [INFO] Loaded 4 dataset(s).
+2026-01-08 09:44:43 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 4.
+2026-01-08 09:44:43 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:43 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:43 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:43 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:43 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-08 09:44:43 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-08 09:44:43 [INFO] Removed 6252 duplicate temperature point(s) for 50 Oe section 1.
+2026-01-08 09:44:43 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 3.
+2026-01-08 09:44:43 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:43 [INFO] Loaded 4 VSM temperature file(s).
+2026-01-08 09:44:45 [INFO] Loaded 4 dataset(s).
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 4.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-08 09:44:45 [INFO] Removed 6252 duplicate temperature point(s) for 50 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 3.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Loaded 4 VSM temperature file(s).
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 4.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-08 09:44:45 [INFO] Removed 6252 duplicate temperature point(s) for 50 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 3.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 4.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-08 09:44:45 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-08 09:44:45 [INFO] Removed 6252 duplicate temperature point(s) for 50 Oe section 1.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 3.
+2026-01-08 09:44:45 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:46 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 4.
+2026-01-08 09:44:46 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:46 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:46 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:46 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:46 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-08 09:44:46 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-08 09:44:46 [INFO] Removed 6252 duplicate temperature point(s) for 50 Oe section 1.
+2026-01-08 09:44:46 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 3.
+2026-01-08 09:44:46 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:57 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 4.
+2026-01-08 09:44:57 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:57 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:59 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:44:59 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 2.
+2026-01-08 09:44:59 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-08 09:44:59 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-08 09:45:01 [INFO] Removed 6252 duplicate temperature point(s) for 50 Oe section 1.
+2026-01-08 09:45:02 [INFO] Removed 2 duplicate temperature point(s) for 50 Oe section 3.
+2026-01-08 09:45:02 [INFO] Removed 2 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-08 09:45:04 [INFO] Sent Ni50Fe27Ga23 5-4 no glass to Origin.
+2026-01-08 09:45:05 [INFO] Sent VSM temperature scan data to Origin.
+2026-01-08 10:08:30 [ERROR] ERROR: Unhandled exception: 
+2026-01-08 10:09:12 [INFO] DMA iso-stress: processed 2 file(s).
+2026-01-08 10:09:54 [WARNING] Skipping videos because no data were found.
+2026-01-08 10:09:54 [INFO] Preview build started.
+2026-01-08 10:09:54 [WARNING] WARNING: No low-current measurement found for Ni47Fe30Ga17Si6 1/8
+2026-01-08 10:09:54 [WARNING] WARNING: No low-current measurement found for Ni48Fe25Ga23Co4 1/6
+2026-01-08 10:09:58 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 1/2
+2026-01-08 10:09:58 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 2/2
+2026-01-08 10:09:59 [WARNING] WARNING: No low-current measurement found for Ni52Fe21Ga27 2/1
+2026-01-08 10:09:59 [WARNING] WARNING: No low-current measurement found for Ni55Fe18Ga27 4/2
+2026-01-08 10:10:00 [INFO] Preview updated.
+2026-01-08 10:10:20 [WARNING] Skipping videos because no data were found.
+2026-01-08 10:10:20 [WARNING] WARNING: No low-current measurement found for Ni47Fe30Ga17Si6 1/8
+2026-01-08 10:10:20 [WARNING] WARNING: No low-current measurement found for Ni48Fe25Ga23Co4 1/6
+2026-01-08 10:10:23 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 1/2
+2026-01-08 10:10:23 [WARNING] WARNING: No low-current measurement found for Ni50Fe26Ga24 2/2
+2026-01-08 10:10:25 [WARNING] WARNING: No low-current measurement found for Ni52Fe21Ga27 2/1
+2026-01-08 10:10:25 [WARNING] WARNING: No low-current measurement found for Ni55Fe18Ga27 4/2
+2026-01-08 10:10:25 [ERROR] ERROR: Unhandled exception: 'bool' object is not callable
+2026-01-08 12:04:55 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-08 16:55:07 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-01.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-02.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-03.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-04.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-05.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-06.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-07.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-08.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-09.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-10.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-11.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-12.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-13.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-14.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-15.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-16.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:51 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121609-Hys-a000-T120-17.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a000-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a010-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a020-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a030-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a040-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a050-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a060-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a070-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a080-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a090-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a100-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a110-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a120-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a130-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a140-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a150-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a160-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a170-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121614-Hys-a180-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:03:54 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 10-5 NG CA\202503121615-Hys-a025-T120-00.VSM-Hys-Data
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-00.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-01.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-02.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-03.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-04.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-05.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-06.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-07.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-08.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-09.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-10.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-11.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-12.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-13.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-14.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-15.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-16.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-17.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-18.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-19.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-20.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-21.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-22.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-23.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-24.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-25.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-26.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-27.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-28.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-29.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-30.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-31.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-32.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-33.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-34.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-35.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:03 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-36.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:04 [ERROR] ERROR: Failed to parse G:\My Drive\1 Projects\Praha\VSM hysteresis loops\Ni50Fe27Ga23 5-4 no glass\202504120846-Hys-37.VSM-HYS-DATA
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 10921, in process
+    frame = _read_vsm_file(Path(path))
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1328, in _read_vsm_file
+    raise ValueError("No data rows detected in VSM file")
+ValueError: No data rows detected in VSM file
+2026-01-08 17:04:10 [INFO] VSM hysteresis loops: processed 209 file(s).
+2026-01-08 17:05:26 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt

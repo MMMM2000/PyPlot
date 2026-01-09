@@ -7,3 +7,19 @@ Traceback (most recent call last):
                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AttributeError: 'CurrentDensitySection' object has no attribute 'current_density_snapshot'
 
+2026-01-08 10:08:30 [EXCEPTION] KeyboardInterrupt: 
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\launcher.py", line 587, in eventFilter
+    def eventFilter(self, obj: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
+    
+KeyboardInterrupt
+
+2026-01-08 10:10:25 [EXCEPTION] TypeError: 'bool' object is not callable
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 15076, in _open_export_dialog
+    self._combine()
+    ~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17188, in _combine
+    html_path = self._export_html(result.dataframe, output_dir, output_name)
+TypeError: 'bool' object is not callable
+

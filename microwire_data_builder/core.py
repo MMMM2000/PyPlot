@@ -148,6 +148,7 @@ OUTPUT_COLUMNS = [
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
+    "FMR graphs",
 ]
 
 DIAMETER_COLUMN = OUTPUT_COLUMNS[2]
@@ -167,6 +168,7 @@ FIGURE_COLUMNS = (
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
 VSM_TEMPERATURE_SCAN_COLUMN = "VSM temperature scan graphs"
 DMA_ISOSTRESS_COLUMN = "DMA iso-stress graphs"
+FMR_COLUMN = "FMR graphs"
 
 TRANSITION_TEMP_AS_COLUMN = "As (°C)"
 TRANSITION_TEMP_AF_COLUMN = "Af (°C)"
@@ -588,6 +590,17 @@ class DmaIsoStressRecord:
     path: Path
     sample: str
     datasets: Dict[int, Tuple[List[float], List[float]]]
+    key: Optional[Tuple[str, int, int]] = None
+    label: Optional[str] = None
+
+
+@dataclass
+class FmrRecord:
+    """Parsed FMR measurement for a single file."""
+
+    path: Path
+    sample: str
+    data: pd.DataFrame
     key: Optional[Tuple[str, int, int]] = None
     label: Optional[str] = None
 
@@ -3669,6 +3682,7 @@ def _update_existing_csv_with_strain(
         VSM_HYSTERESIS_COLUMN,
         VSM_TEMPERATURE_SCAN_COLUMN,
         DMA_ISOSTRESS_COLUMN,
+        FMR_COLUMN,
     ):
         if column_name in output_columns and column_name not in df.columns:
             df[column_name] = None
@@ -3744,6 +3758,7 @@ def _update_existing_excel_with_strain(
         VSM_HYSTERESIS_COLUMN,
         VSM_TEMPERATURE_SCAN_COLUMN,
         DMA_ISOSTRESS_COLUMN,
+        FMR_COLUMN,
         STRAIN_COLUMN,
     ):
         if column_name not in OUTPUT_COLUMNS:
@@ -4474,6 +4489,7 @@ def build_database(
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
     dma_iso_stress_records: Optional[Iterable[DmaIsoStressRecord]] = None,
+    fmr_records: Optional[Iterable[FmrRecord]] = None,
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
     transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
     current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
@@ -4631,6 +4647,7 @@ def build_database(
     vsm_hysteresis_groups = _group_records(vsm_hysteresis_records)
     vsm_temperature_groups = _group_records(vsm_temperature_scan_records)
     dma_isostress_groups = _group_records(dma_iso_stress_records)
+    fmr_groups = _group_records(fmr_records)
 
     phase_points_map: Dict[str, Dict[str, float]] = {}
     if phase_points:
@@ -5009,6 +5026,11 @@ def build_database(
             labels = [_record_label(record) for record in dma_records if _record_label(record)]
             if labels:
                 row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
+        fmr_entries = fmr_groups.get((composition, draw_x, piece_y), [])
+        if fmr_entries:
+            labels = [_record_label(record) for record in fmr_entries if _record_label(record)]
+            if labels:
+                row[FMR_COLUMN] = list(dict.fromkeys(labels))
         ratio_display = _parse_numeric(row["d/D"])
         if ratio_display is not None:
             row["d/D"] = round(ratio_display, 3)
@@ -5316,9 +5338,11 @@ __all__ = [
     "VsmHysteresisRecord",
     "VsmTemperatureScanRecord",
     "DmaIsoStressRecord",
+    "FmrRecord",
     "VSM_HYSTERESIS_COLUMN",
     "VSM_TEMPERATURE_SCAN_COLUMN",
     "DMA_ISOSTRESS_COLUMN",
+    "FMR_COLUMN",
     "build_database",
     "build_fabrication_index",
     "LOGGER_NAME",

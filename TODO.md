@@ -16,9 +16,12 @@
 
 ## In Progress
 - Add Data Builder sections for VSM hysteresis loops, VSM temperature scan, and DMA iso-stress (reuse PyPlot plotting scripts; handle multiple graphs per microwire).
+- Add FMR PyPlot plugin + Data Builder section and validate sample CSV plotting/Origin export.
 - Add a Compare section to filter/select microwires and compare their data/graphs side-by-side.
+- Compare: add default samples-as-columns view with selectable field rows and inline graph previews.
 - Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).
 - VSM Data Builder: validate sweep/no-glass angle parsing + temperature labeling against PyPlot, confirm Open-in-PyPlot axes defaults, verify VSM temp scan + DMA multi-graph previews, and confirm Origin export stability.
+- Current Annealing: enable Plot after data import and fix directional Origin exports.
 - Assemble: validate merged Export dialog flow, column-driven section selection, .pydpj persistence for preview columns/order/sort, and confirm row-selection crashes are resolved.
 - Confirm Assemble preview no longer crashes (VSM/DMA group helpers + log review).
 - DMA iso-stress: verify new Origin export behavior from PyPlot/Data Builder.
