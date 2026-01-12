@@ -3673,7 +3673,7 @@ def _select_other_measurements(
     high_record: Optional[MeasurementRecord],
     low_record: Optional[MeasurementRecord],
 ) -> List[MeasurementRecord]:
-    excluded = {high_record, low_record}
+    excluded_ids = {id(high_record), id(low_record)}
 
     def key(record: MeasurementRecord) -> Tuple[int, str]:
         setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
@@ -3684,7 +3684,7 @@ def _select_other_measurements(
         file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
         return (setpoint_value, str(file_name).lower())
 
-    remaining = [record for record in records if record not in excluded]
+    remaining = [record for record in records if id(record) not in excluded_ids]
     return sorted(remaining, key=key)
 
 

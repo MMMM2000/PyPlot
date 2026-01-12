@@ -1081,11 +1081,17 @@ def _calculate_metrics(subset: pd.DataFrame, x_axis: str, y_axis: str) -> Metric
     if subset.empty:
         return MetricResult(None, None, None)
     numeric = subset[[x_axis, y_axis]].apply(pd.to_numeric, errors="coerce")
-    ordered = numeric.dropna()
+    x_series = numeric[x_axis]
+    y_series = numeric[y_axis]
+    if isinstance(x_series, pd.DataFrame):
+        x_series = x_series.iloc[:, 0]
+    if isinstance(y_series, pd.DataFrame):
+        y_series = y_series.iloc[:, 0]
+    ordered = pd.concat([x_series, y_series], axis=1).dropna()
     if ordered.empty:
         return MetricResult(None, None, None)
-    x_values = ordered[x_axis].to_numpy(dtype=float)
-    y_values = ordered[y_axis].to_numpy(dtype=float)
+    x_values = ordered.iloc[:, 0].to_numpy(dtype=float)
+    y_values = ordered.iloc[:, 1].to_numpy(dtype=float)
     coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
     coercivity, coercivity_pair, coercivity_raw = _symmetrise_crossings(coercivity_candidates)
     remanence_candidates = _collect_crossings_y_at_x(x_values, y_values, target=0.0)
@@ -1581,7 +1587,10 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
             if angle is not None and temperature is not None:
                 break
 
-    temperature = _prefer_filename_temperature(filename_temperature, temperature)
+    if explicit_temperature is not None:
+        temperature = explicit_temperature
+    else:
+        temperature = _prefer_filename_temperature(filename_temperature, temperature)
     return _normalise_angle_value(angle), _normalise_temperature_value(temperature)
 
 

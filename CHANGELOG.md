@@ -1,8 +1,22 @@
 # Changelog
 
-## 2026-01-12 07:42 UTC
+## 2026-01-12 10:42 UTC
+
+- Fixed VSM hysteresis metrics calculation for duplicate axis columns so PyPlot graphing no longer crashes.
+- Normalized axis label matching in the Data Builder VSM previews to avoid picking time columns when field columns exist.
+
+- VSM hysteresis temperature parsing now favors explicit header temperatures over filename tokens to avoid mislabeled graphs.
+- Downsampled VSM/DMA/FMR previews to speed up initial section rendering.
+- VSM hysteresis axis selection now prefers field columns that cross zero when available to avoid mis-plotted sweeps.
+
+## 2026-01-12 09:28 UTC
 
 - Assemble now keeps zero-valued strain entries instead of dropping them as empty.
+- Current annealing now initializes preview settings early to avoid launcher crashes.
+- Fixed current annealing graph grouping to avoid unhashable MeasurementRecord errors.
+- Fixed another unhashable MeasurementRecord path in annealing graph selection.
+- Restored VSM/DMA/FMR previews by falling back to microwire keys when sample columns are hidden.
+- Refreshed section column hiding now resets stale hidden indices so graph columns stay visible after refresh.
 
 ## 2026-01-08 17:24 UTC
 

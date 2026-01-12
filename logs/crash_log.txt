@@ -23,3 +23,355 @@ Traceback (most recent call last):
     html_path = self._export_html(result.dataframe, output_dir, output_name)
 TypeError: 'bool' object is not callable
 
+2026-01-12 10:32:00 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:17 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:17 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:17 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:18 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:23 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:23 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:23 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:24 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:24 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:24 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:24 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:24 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:24 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:25 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+
+2026-01-12 10:32:25 [EXCEPTION] TypeError: only length-1 arrays can be converted to Python scalars
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3697, in _generate_plots
+    metrics = _calculate_metrics(
+        export_subset[[x_axis, y_axis]], x_axis, y_axis
+    )
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 1089, in _calculate_metrics
+    coercivity_candidates = _collect_crossings_x_at_y(x_values, y_values, target=0.0)
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in _collect_crossings_x_at_y
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+       ~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 896, in <genexpr>
+    if any(math.isnan(v) for v in (x0, x1, y0, y1)):
+           ~~~~~~~~~~^^^
+TypeError: only length-1 arrays can be converted to Python scalars
+

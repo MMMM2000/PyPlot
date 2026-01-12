@@ -24,6 +24,7 @@
 - HTML export: add compare mode alongside the preview panel.
 - Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).
 - VSM Data Builder: validate sweep/no-glass angle parsing + temperature labeling against PyPlot, confirm Open-in-PyPlot axes defaults, verify VSM temp scan + DMA multi-graph previews, and confirm Origin export stability.
+- Optimize VSM/DMA/FMR preview rendering performance (downsample plot points for faster section load).
 - Current Annealing: enable Plot after data import and fix directional Origin exports.
 - Assemble: validate merged Export dialog flow, column-driven section selection, .pydpj persistence for preview columns/order/sort, and confirm row-selection crashes are resolved.
 - Confirm Assemble preview no longer crashes (VSM/DMA group helpers + log review).

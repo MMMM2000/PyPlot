@@ -156,6 +156,7 @@ ANNEALING_TICK_FONT_SIZE = 6
 ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other mA"
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
+MAX_PLOT_POINTS = 2000
 ANNEALING_AS_COLUMN = "As1 (mA)"
 ANNEALING_AF1_COLUMN = "Af1 (mA)"
 ANNEALING_MS_COLUMN = "Ms1 (mA)"
@@ -3064,12 +3065,62 @@ def _axis_column_range(
     return best_range
 
 
+def _axis_column_bounds(
+    records: Sequence[object],
+    column: str,
+) -> Optional[Tuple[float, float]]:
+    minimum: Optional[float] = None
+    maximum: Optional[float] = None
+    for entry in records:
+        frame = getattr(entry, "data", None)
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            continue
+        if column not in frame.columns:
+            continue
+        series = pd.to_numeric(frame[column], errors="coerce").dropna()
+        if series.empty:
+            continue
+        try:
+            current_min = float(series.min())
+            current_max = float(series.max())
+        except Exception:
+            continue
+        if minimum is None or current_min < minimum:
+            minimum = current_min
+        if maximum is None or current_max > maximum:
+            maximum = current_max
+    if minimum is None or maximum is None:
+        return None
+    return minimum, maximum
+
+
+def _downsample_series(series: pd.Series, max_points: int = 2000) -> pd.Series:
+    if max_points <= 0:
+        return series
+    length = len(series)
+    if length <= max_points:
+        return series
+    stride = max(int(math.ceil(length / max_points)), 1)
+    return series.iloc[::stride]
+
+
+def _downsample_values(values: Sequence[float], max_points: int = 2000) -> Sequence[float]:
+    if max_points <= 0:
+        return values
+    length = len(values)
+    if length <= max_points:
+        return values
+    stride = max(int(math.ceil(length / max_points)), 1)
+    return values[::stride]
+
+
 def _match_axis_setting(columns: Sequence[str], stored: Optional[str]) -> Optional[str]:
     if not stored:
         return None
     stored_text = str(stored).strip()
     if not stored_text:
         return None
+    stored_norm = _normalize_axis_label(stored_text)
     for column in columns:
         if column == stored_text:
             return column
@@ -3077,7 +3128,14 @@ def _match_axis_setting(columns: Sequence[str], stored: Optional[str]) -> Option
     for column in columns:
         if column.lower() == stored_lower:
             return column
+    for column in columns:
+        if _normalize_axis_label(column) == stored_norm:
+            return column
     return None
+
+
+def _normalize_axis_label(label: str) -> str:
+    return re.sub(r"\s+", " ", label.strip().lower())
 
 
 def _choose_axis_column(
@@ -3091,10 +3149,11 @@ def _choose_axis_column(
         return None
     stored_match = _match_axis_setting(columns, stored)
     candidates: List[str] = []
+    normalized_columns = [(column, _normalize_axis_label(column)) for column in columns]
     for pref in preferences:
-        pref_lower = pref.lower()
-        for column in columns:
-            if pref_lower in column.lower() and column not in candidates:
+        pref_norm = _normalize_axis_label(pref)
+        for column, normalized in normalized_columns:
+            if pref_norm in normalized and column not in candidates:
                 candidates.append(column)
     if not candidates:
         candidates = list(columns)
@@ -3387,18 +3446,41 @@ def _plot_vsm_hysteresis_figure(
             break
     if frame is None or not columns:
         return None
+    x_preferences = [
+        "Applied Field For Plot",
+        "Raw Applied Field For Plot",
+        "Applied Field",
+        "Raw Applied Field",
+        "Applied Field [Oe]",
+        "Field",
+    ]
     x_column = _choose_axis_column(
         columns,
-        [
-            "Applied Field For Plot",
-            "Raw Applied Field For Plot",
-            "Applied Field",
-            "Raw Applied Field",
-            "Applied Field [Oe]",
-            "Field",
-        ],
+        x_preferences,
         records=records,
     )
+    if x_column:
+        bounds = _axis_column_bounds(records, x_column)
+        if bounds is not None and (bounds[0] > 0 or bounds[1] < 0):
+            candidates: List[str] = []
+            normalized_columns = [(column, _normalize_axis_label(column)) for column in columns]
+            for pref in x_preferences:
+                pref_norm = _normalize_axis_label(pref)
+                for column, normalized in normalized_columns:
+                    if pref_norm in normalized and column not in candidates:
+                        candidates.append(column)
+            if not candidates:
+                candidates = list(columns)
+            zero_candidates: List[Tuple[float, str]] = []
+            for candidate in candidates:
+                candidate_bounds = _axis_column_bounds(records, candidate)
+                if candidate_bounds is None:
+                    continue
+                if candidate_bounds[0] <= 0 <= candidate_bounds[1]:
+                    zero_candidates.append((candidate_bounds[1] - candidate_bounds[0], candidate))
+            if zero_candidates:
+                zero_candidates.sort(reverse=True)
+                x_column = zero_candidates[0][1]
     y_column = _choose_axis_column(
         columns,
         [
@@ -3420,8 +3502,13 @@ def _plot_vsm_hysteresis_figure(
         subset = entry_frame[[x_column, y_column]].apply(pd.to_numeric, errors="coerce").dropna()
         if subset.empty:
             continue
+        x_series = subset[x_column]
+        y_series = subset[y_column]
+        if len(subset) > MAX_PLOT_POINTS:
+            x_series = _downsample_series(x_series, MAX_PLOT_POINTS)
+            y_series = y_series.loc[x_series.index]
         angle_value = _coerce_finite_float(getattr(entry, "angle", None))
-        valid_records.append((subset[x_column], subset[y_column], angle_value))
+        valid_records.append((x_series, y_series, angle_value))
     if not valid_records:
         return None
     figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
@@ -3490,6 +3577,9 @@ def _plot_vsm_temperature_scan_figure(
         frame = entry_series.frame
         temps = frame["temperature"]
         signal = frame["signal"]
+        if len(temps) > MAX_PLOT_POINTS:
+            temps = _downsample_series(temps, MAX_PLOT_POINTS)
+            signal = signal.loc[temps.index]
         color_key = (entry_series.field, entry_series.direction, entry_series.segment_index)
         color = color_map.get(color_key, plt.rcParams["axes.prop_cycle"].by_key()["color"][idx % 10])
         label = f"{entry_series.field:.0f} Oe{processor._direction_label(entry_series.direction, entry_series.segment_index)}"
@@ -3535,6 +3625,8 @@ def _plot_dma_iso_stress_figure(
     ax = figure.add_subplot(111)
     for stress in sorted(datasets):
         temps, strains = datasets[stress]
+        temps = list(_downsample_values(temps, MAX_PLOT_POINTS))
+        strains = list(_downsample_values(strains, MAX_PLOT_POINTS))
         ax.plot(temps, strains, linewidth=1.4, label=f"{stress} MPa")
     title = record.sample or Path(record.path).stem
     variant = getattr(record, "variant", None)
@@ -3566,6 +3658,9 @@ def _plot_fmr_figure(
     subset = frame[[field_col, x_col, y_col]].apply(pd.to_numeric, errors="coerce").dropna(how="any")
     if subset.empty:
         return None
+    if len(subset) > MAX_PLOT_POINTS:
+        field_series = _downsample_series(subset[field_col], MAX_PLOT_POINTS)
+        subset = subset.loc[field_series.index]
     figsize = (max(width_px / 96.0, 1.0), max(height_px / 96.0, 1.0))
     figure = plt.Figure(figsize=figsize)
     ax = figure.add_subplot(111)
@@ -3721,7 +3816,7 @@ def _select_other_measurements(
     high_record: Optional[MeasurementRecord],
     low_record: Optional[MeasurementRecord],
 ) -> List[MeasurementRecord]:
-    excluded = {high_record, low_record}
+    excluded_ids = {id(high_record), id(low_record)}
 
     def _sort_key(record: MeasurementRecord) -> Tuple[int, str]:
         setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
@@ -3732,7 +3827,7 @@ def _select_other_measurements(
         file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
         return (setpoint_value, str(file_name).lower())
 
-    remaining = [record for record in records if record not in excluded]
+    remaining = [record for record in records if id(record) not in excluded_ids]
     return sorted(remaining, key=_sort_key)
 
 
@@ -5087,7 +5182,7 @@ def _row_sample_value(row: pd.Series) -> Optional[str]:
         value = row.get(key)
         if isinstance(value, str) and value.strip():
             return value.strip()
-    return None
+    return _row_to_microwire_key(row)
 
 
 def _group_graph_records_by_key(records: Sequence[object]) -> Dict[str, List[object]]:
@@ -5531,10 +5626,8 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         normalized_targets = {str(name).strip().lower() for name in names}
         for index, column in enumerate(columns):
             normalized = str(column).strip().lower()
-            if normalized not in normalized_targets:
-                continue
             try:
-                self.table_view.setColumnHidden(index, True)
+                self.table_view.setColumnHidden(index, normalized in normalized_targets)
             except Exception:
                 continue
 
@@ -6712,13 +6805,13 @@ class AnnealingSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._table_splitter: QtWidgets.QSplitter | None = None
+        self._preview_other_count = 1
+        self._preview_spacing = 6
         super().__init__(logger, log_callback, parent)
         self._hidden_paths: Set[str] = set()
         self._all_records: List[MeasurementRecord] = []
         self._pixmap_cache: Dict[Tuple[object, ...], Optional[QtGui.QPixmap]] = {}
         self._phase_points: Dict[str, Dict[str, float]] = {}
-        self._preview_other_count = 1
-        self._preview_spacing = 6
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
             cleaned: Dict[str, Dict[str, float]] = {}
@@ -7217,7 +7310,7 @@ class AnnealingSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        count = max(int(self._preview_other_count), 1)
+        count = max(int(getattr(self, "_preview_other_count", 1)), 1)
         return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _update_preview_icon_size(self) -> None:
@@ -11557,7 +11650,12 @@ class VsmHysteresisSection(MiniDatabaseSection):
             sample = _row_sample_value(series)
             if not sample:
                 continue
-            records.extend(self._record_groups.get(sample, []))
+            matched = self._record_groups.get(sample, [])
+            if not matched:
+                row_key = _row_to_microwire_key(series)
+                if row_key:
+                    matched = self._record_groups_by_key.get(row_key, [])
+            records.extend(matched)
         return records
 
     def _open_selected_graphs(self) -> None:
@@ -11673,6 +11771,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
     ) -> None:
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._record_groups_by_key: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._hidden_paths: Set[str] = set()
         self._all_records: List[VsmTemperatureScanRecord] = []
         self._preview_group_count = 1
@@ -11869,6 +11968,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 if isinstance(sample, str) and sample.strip():
                     grouped.setdefault(sample, []).append(record)
         self._record_groups = grouped
+        self._record_groups_by_key = _group_graph_records_by_key(visible_records)
         max_groups = 1
         for records in grouped.values():
             if len(records) > max_groups:
@@ -11923,6 +12023,10 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(sample, [])
+        if not records:
+            row_key = _row_to_microwire_key(row)
+            if row_key:
+                records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             items = _vsm_temperature_preview_items(
@@ -11994,7 +12098,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             sample = _row_sample_value(series)
             if not sample:
                 continue
-            records.extend(self._record_groups.get(sample, []))
+            matched = self._record_groups.get(sample, [])
+            if not matched:
+                row_key = _row_to_microwire_key(series)
+                if row_key:
+                    matched = self._record_groups_by_key.get(row_key, [])
+            records.extend(matched)
         return records
 
     def _open_selected_in_pyplot(self) -> None:
@@ -12327,6 +12436,10 @@ class DmaIsoStressSection(MiniDatabaseSection):
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(sample, [])
+        if not records:
+            row_key = _row_to_microwire_key(row)
+            if row_key:
+                records = self._record_groups_by_key.get(row_key, [])
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             items = _dma_iso_stress_preview_items(
@@ -12398,7 +12511,12 @@ class DmaIsoStressSection(MiniDatabaseSection):
             sample = _row_sample_value(series)
             if not sample:
                 continue
-            records.extend(self._record_groups.get(sample, []))
+            matched = self._record_groups.get(sample, [])
+            if not matched:
+                row_key = _row_to_microwire_key(series)
+                if row_key:
+                    matched = self._record_groups_by_key.get(row_key, [])
+            records.extend(matched)
         return records
 
     def _open_selected_in_pyplot(self) -> None:
@@ -12767,7 +12885,12 @@ class FmrSection(MiniDatabaseSection):
             sample = _row_sample_value(series)
             if not sample:
                 continue
-            records.extend(self._record_groups.get(sample, []))
+            matched = self._record_groups.get(sample, [])
+            if not matched:
+                row_key = _row_to_microwire_key(series)
+                if row_key:
+                    matched = self._record_groups_by_key.get(row_key, [])
+            records.extend(matched)
         return records
 
     def _open_selected_graphs(self) -> None:
