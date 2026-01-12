@@ -143,8 +143,10 @@ OUTPUT_COLUMNS = [
     "File low mA",
     "Figure — 1000 mA",
     "Figure — low mA",
+    "Figure — other mA",
     "Figure — 1000 mA (Origin)",
     "Figure — low mA (Origin)",
+    "Figure — other mA (Origin)",
     "VSM hysteresis graphs",
     "VSM temperature scan graphs",
     "DMA iso-stress graphs",
@@ -163,6 +165,7 @@ MICROSCOPE_IMAGE_COLUMNS = (
 FIGURE_COLUMNS = (
     "Figure — 1000 mA",
     "Figure — low mA",
+    "Figure — other mA",
 )
 
 VSM_HYSTERESIS_COLUMN = "VSM hysteresis graphs"
@@ -189,8 +192,13 @@ ORIGIN_FIGURE_COLUMNS = tuple(
     if column.startswith("Figure") and "(Origin)" in column
 )
 
-MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*/\s*(\d+)")
-MICROWIRE_SORT_RE = re.compile(r"^\s*(\d+)\s*[/\-]\s*(\d+)\s*$")
+MICROWIRE_LABEL_RE = re.compile(r"(\d+)\s*[/\-]\s*(\d+)")
+MICROWIRE_SORT_RE = re.compile(
+    r"^\s*(\d+)\s*[/\-]\s*(\d+)\s*([A-Za-z][A-Za-z0-9]*)?\s*$"
+)
+MICROWIRE_TOKEN_RE = re.compile(
+    r"(\d+)\s*[/\-_]\s*(\d+)([A-Za-z][A-Za-z0-9]*)?"
+)
 
 _INVALID_FILENAME_CHARS = set('<>:"/\\|?*')
 
@@ -1351,6 +1359,88 @@ def _microwire_tuple_from_label(label: str) -> Optional[Tuple[int, int]]:
         return None
 
 
+def _microwire_parts_from_label(
+    label: str,
+) -> Optional[Tuple[int, int, Optional[str]]]:
+    if not label:
+        return None
+    cleaned = _clean_str(label)
+    if not cleaned:
+        return None
+    match = MICROWIRE_SORT_RE.match(cleaned)
+    if not match:
+        match = MICROWIRE_TOKEN_RE.search(cleaned)
+    if not match:
+        return None
+    try:
+        draw = int(match.group(1))
+        piece = int(match.group(2))
+    except (TypeError, ValueError):
+        return None
+    suffix = match.group(3)
+    suffix = suffix.strip() if isinstance(suffix, str) else ""
+    return draw, piece, suffix or None
+
+
+def _split_microwire_key(
+    value: object,
+) -> Optional[Tuple[str, int, int, Optional[str]]]:
+    if isinstance(value, tuple):
+        if len(value) == 3:
+            try:
+                composition = str(value[0]).strip()
+                draw = int(value[1])
+                piece = int(value[2])
+            except (TypeError, ValueError):
+                return None
+            if composition:
+                return composition, draw, piece, None
+        if len(value) == 4:
+            try:
+                composition = str(value[0]).strip()
+                draw = int(value[1])
+                piece = int(value[2])
+            except (TypeError, ValueError):
+                return None
+            suffix = value[3]
+            suffix_text = str(suffix).strip() if suffix is not None else ""
+            if composition:
+                return composition, draw, piece, suffix_text or None
+    if isinstance(value, str):
+        return _microwire_key_from_string(value)
+    return None
+
+
+def _microwire_key_to_str(
+    key: Tuple[str, int, int, Optional[str]],
+) -> str:
+    composition, draw, piece, suffix = key
+    base = f"{composition}|{draw}|{piece}"
+    if suffix:
+        return f"{base}|{suffix}"
+    return base
+
+
+def _microwire_key_from_string(
+    value: str,
+) -> Optional[Tuple[str, int, int, Optional[str]]]:
+    if not value:
+        return None
+    parts = [part.strip() for part in value.split("|")]
+    if len(parts) not in {3, 4}:
+        return None
+    composition = parts[0]
+    if not composition:
+        return None
+    try:
+        draw = int(parts[1])
+        piece = int(parts[2])
+    except (TypeError, ValueError):
+        return None
+    suffix = parts[3] if len(parts) == 4 else ""
+    return composition, draw, piece, suffix or None
+
+
 def _format_strain_value(record: StrainRecord) -> Optional[str]:
     if record.broke:
         return "broke"
@@ -1586,21 +1676,41 @@ def _extract_composition_token(text: str) -> Optional[str]:
     return tokens[0]
 
 
-def _microscope_key(path: Path) -> Optional[Tuple[str, int, int]]:
-    def _match(text: str) -> Optional[Tuple[str, int, int]]:
+def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]:
+    def _suffix_from_text(text: str, start_idx: int) -> Optional[str]:
+        if start_idx >= len(text):
+            return None
+        suffix_chars: List[str] = []
+        started = False
+        for ch in text[start_idx:]:
+            if ch.isalnum():
+                if not started:
+                    if not ch.isalpha():
+                        break
+                    started = True
+                suffix_chars.append(ch)
+                continue
+            break
+        suffix = "".join(suffix_chars).strip()
+        return suffix or None
+
+    def _match(text: str) -> Optional[Tuple[str, int, int, Optional[str]]]:
         if not text:
             return None
         composition = _extract_composition_token(text)
         if not composition or not any(ch.isdigit() for ch in composition):
             return None
 
-        def _to_pair(match: re.Match[str]) -> Optional[Tuple[str, int, int]]:
+        def _to_pair(
+            match: re.Match[str], source_text: str
+        ) -> Optional[Tuple[str, int, int, Optional[str]]]:
             try:
                 draw_x = int(match.group(1))
                 piece_y = int(match.group(2))
             except (TypeError, ValueError):
                 return None
-            return composition, draw_x, piece_y
+            suffix = _suffix_from_text(source_text, match.end())
+            return composition, draw_x, piece_y, suffix
 
         for pattern in MICROSCOPE_PAIR_PATTERNS:
             normalised = text
@@ -1612,12 +1722,12 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int]]:
                     following = normalised[match.end(): match.end() + 1]
                     if following and following in "-/":
                         continue
-                pair = _to_pair(match)
+                pair = _to_pair(match, normalised)
                 if pair is not None:
                     return pair
 
         for match in MICROSCOPE_WHITESPACE_PAIR.finditer(text):
-            pair = _to_pair(match)
+            pair = _to_pair(match, text)
             if pair is not None:
                 return pair
 
@@ -1629,7 +1739,7 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int]]:
             match = XY_PATTERN.search(normalised)
             if not match:
                 continue
-            pair = _to_pair(match)
+            pair = _to_pair(match, normalised)
             if pair is not None:
                 return pair
         return None
@@ -1715,8 +1825,11 @@ def _auto_discover_microscope_paths(
         key = _microscope_key(path)
         if key is None:
             continue
-        composition, draw_x, piece_y = key
-        fragment = f"{draw_x}_{piece_y}"
+        parts = _split_microwire_key(key)
+        if parts is None:
+            continue
+        composition, draw_x, piece_y, suffix = parts
+        fragment = f"{draw_x}_{piece_y}{suffix or ''}"
         try:
             resolved = path.resolve()
             parents = list(resolved.parents)
@@ -2646,13 +2759,13 @@ class MicroscopeGroupingResult(tuple):
 
     def __new__(
         cls,
-        index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
+        index: Dict[Tuple[str, int, int, Optional[str]], MicroscopeMeasurements],
         cache: Dict[str, MicroscopeCacheEntry],
     ) -> "MicroscopeGroupingResult":
         return super().__new__(cls, (index, cache))
 
     @property
-    def index(self) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
+    def index(self) -> Dict[Tuple[str, int, int, Optional[str]], MicroscopeMeasurements]:
         return super().__getitem__(0)
 
     @property
@@ -2689,10 +2802,13 @@ def _group_microscope_measurements(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     debug_callback: Optional[Callable[[Path, MicroscopeOCRResult], None]] = None,
     update_callback: Optional[
-        Callable[[Tuple[str, int, int], MicroscopeMeasurements], None]
+        Callable[[Tuple[str, int, int, Optional[str]], MicroscopeMeasurements], None]
     ] = None,
     cache: Optional[Mapping[str, Any]] = None,
-) -> Tuple[Dict[Tuple[str, int, int], MicroscopeMeasurements], Dict[str, MicroscopeCacheEntry]]:
+) -> Tuple[
+    Dict[Tuple[str, int, int, Optional[str]], MicroscopeMeasurements],
+    Dict[str, MicroscopeCacheEntry],
+]:
     """Group microscope captures into microwire measurements while caching OCR output."""
 
     log = _logger(logger)
@@ -2731,7 +2847,7 @@ def _group_microscope_measurements(
 
     total = len(combined)
     processed = 0
-    grouped: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+    grouped: Dict[Tuple[str, int, int, Optional[str]], MicroscopeMeasurements] = {}
     updated_cache: Dict[str, MicroscopeCacheEntry] = {}
     for raw_path in combined:
         path = raw_path.expanduser()
@@ -2972,7 +3088,11 @@ def _collect_video_metrics(
             continue
         key = _microscope_key(path)
         if key is not None:
-            composition, draw_x, piece_y = key
+            parts = _split_microwire_key(key)
+            if parts is None:
+                _notify()
+                continue
+            composition, draw_x, piece_y, _ = parts
         else:
             draw_key = _draw_key(path)
             if draw_key is None:
@@ -3405,8 +3525,8 @@ def _compose_notes(*records: Dict[str, object]) -> Optional[str]:
 def _load_strain_records(
     paths: Sequence[Path],
     log: logging.Logger,
-) -> Dict[Tuple[str, int, int], StrainRecord]:
-    records: Dict[Tuple[str, int, int], StrainRecord] = {}
+) -> Dict[Tuple[str, int, int, Optional[str]], StrainRecord]:
+    records: Dict[Tuple[str, int, int, Optional[str]], StrainRecord] = {}
     if not paths:
         return records
     seen: set[Path] = set()
@@ -3455,10 +3575,10 @@ def _load_strain_records(
             microwire_label = _clean_str(values[micro_idx])
             if not microwire_label:
                 continue
-            draw_piece = _microwire_tuple_from_label(microwire_label)
-            if not draw_piece:
+            draw_parts = _microwire_parts_from_label(microwire_label)
+            if not draw_parts:
                 continue
-            draw, piece = draw_piece
+            draw, piece, suffix = draw_parts
             m_length = (
                 _parse_strain_float(values[column_map["m_length"]])
                 if "m_length" in column_map
@@ -3502,13 +3622,20 @@ def _load_strain_records(
                 broke=broke,
                 source=path,
             )
-            records[(composition, draw, piece)] = record
+            records[(composition, draw, piece, suffix)] = record
     return records
 
 
-def _microwire_label(draw_x: Optional[int], piece_y: Optional[int]) -> str:
+def _microwire_label(
+    draw_x: Optional[int],
+    piece_y: Optional[int],
+    suffix: Optional[str] = None,
+) -> str:
     if draw_x is None or piece_y is None:
         return ""
+    suffix_text = str(suffix).strip() if suffix is not None else ""
+    if suffix_text:
+        return f"{draw_x}/{piece_y}{suffix_text}"
     return f"{draw_x}/{piece_y}"
 
 
@@ -3539,6 +3666,26 @@ def _select_low_measurement(records: List[MeasurementRecord]) -> Optional[Measur
         return (setpoint, variant_penalty, record.metadata.file_name.lower())
 
     return min(candidates, key=key)
+
+
+def _select_other_measurements(
+    records: Sequence[MeasurementRecord],
+    high_record: Optional[MeasurementRecord],
+    low_record: Optional[MeasurementRecord],
+) -> List[MeasurementRecord]:
+    excluded = {high_record, low_record}
+
+    def key(record: MeasurementRecord) -> Tuple[int, str]:
+        setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
+        try:
+            setpoint_value = int(setpoint) if setpoint is not None else -1
+        except (TypeError, ValueError):
+            setpoint_value = -1
+        file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
+        return (setpoint_value, str(file_name).lower())
+
+    remaining = [record for record in records if record not in excluded]
+    return sorted(remaining, key=key)
 
 
 def _plot_measurement_matplotlib(
@@ -3593,7 +3740,9 @@ def _normalise_sort_value(value: object) -> object:
             except (TypeError, ValueError):
                 draw = piece = None
             else:
-                return f"{draw:05d}/{piece:05d}"
+                suffix = match.group(3) or ""
+                suffix = suffix.strip().lower()
+                return f"{draw:05d}/{piece:05d}{suffix}"
     if isinstance(value, (list, tuple, set)):
         return ", ".join(str(item) for item in value)
     return value
@@ -3667,7 +3816,7 @@ def _apply_output_preferences(
 
 def _update_existing_csv_with_strain(
     path: Path,
-    strain_records: Dict[Tuple[str, int, int], StrainRecord],
+    strain_records: Dict[Tuple[str, int, int, Optional[str]], StrainRecord],
     output_columns: Sequence[str],
     log: logging.Logger,
 ) -> None:
@@ -3695,10 +3844,12 @@ def _update_existing_csv_with_strain(
         for idx, row in df.iterrows():
             composition = _clean_str(row.get("Composition"))
             microwire_label = _clean_str(row.get("Microwire"))
-            key = _microwire_tuple_from_label(microwire_label)
-            if not composition or not key:
+            key_parts = _microwire_parts_from_label(microwire_label)
+            if not composition or not key_parts:
                 continue
-            record = strain_records.get((composition, key[0], key[1]))
+            record = strain_records.get(
+                (composition, key_parts[0], key_parts[1], key_parts[2])
+            )
             if record is None:
                 continue
             df.at[idx, STRAIN_COLUMN] = _format_strain_value(record)
@@ -3712,7 +3863,7 @@ def _update_existing_csv_with_strain(
 
 def _update_existing_excel_with_strain(
     path: Path,
-    strain_records: Dict[Tuple[str, int, int], StrainRecord],
+    strain_records: Dict[Tuple[str, int, int, Optional[str]], StrainRecord],
     log: logging.Logger,
 ) -> None:
     try:
@@ -3796,10 +3947,12 @@ def _update_existing_excel_with_strain(
     for row_idx in range(2, ws.max_row + 1):
         composition = _clean_str(ws.cell(row=row_idx, column=composition_index).value)
         microwire_label = _clean_str(ws.cell(row=row_idx, column=microwire_index).value)
-        key = _microwire_tuple_from_label(microwire_label)
-        if not composition or not key:
+        key_parts = _microwire_parts_from_label(microwire_label)
+        if not composition or not key_parts:
             continue
-        record = strain_records.get((composition, key[0], key[1]))
+        record = strain_records.get(
+            (composition, key_parts[0], key_parts[1], key_parts[2])
+        )
         if record is None:
             continue
         ws.cell(row=row_idx, column=strain_index).value = _format_strain_value(record)
@@ -4479,12 +4632,12 @@ def build_database(
     fabrication_index: FabricationIndex | None = None,
     measurement_records: Optional[Iterable[MeasurementRecord]] = None,
     microscope_index: Optional[
-        Dict[Tuple[str, int, int], MicroscopeMeasurements]
+        Dict[Tuple[str, int, int, Optional[str]], MicroscopeMeasurements]
     ] = None,
     video_index: Optional[
         Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]
     ] = None,
-    strain_records: Optional[Dict[Tuple[str, int, int], StrainRecord]] = None,
+    strain_records: Optional[Dict[Tuple[str, int, int, Optional[str]], StrainRecord]] = None,
     strain_entries: Optional[Dict[str, Dict[str, object]]] = None,
     vsm_hysteresis_records: Optional[Iterable[VsmHysteresisRecord]] = None,
     vsm_temperature_scan_records: Optional[Iterable[VsmTemperatureScanRecord]] = None,
@@ -4536,7 +4689,7 @@ def build_database(
         config.fabrication_files, log
     )
     stats = BuildStats()
-    grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+    grouped: Dict[Tuple[str, int, int, Optional[str]], List[MeasurementRecord]] = {}
     plot_records: List[str] = []
     plot_cache: Dict[str, Path] = {}
     plot_name_to_path: Dict[str, Path] = {}
@@ -4572,30 +4725,14 @@ def build_database(
     else:
         strain_records = dict(strain_records)
 
-    def _normalise_record_key(value: object) -> Optional[Tuple[str, int, int]]:
-        if isinstance(value, tuple) and len(value) == 3:
-            try:
-                comp = str(value[0]).strip()
-                draw = int(value[1])
-                piece = int(value[2])
-            except (TypeError, ValueError):
-                return None
-            if comp:
-                return (comp, draw, piece)
-        if isinstance(value, str):
-            parts = value.split("|")
-            if len(parts) == 3:
-                comp = parts[0].strip()
-                try:
-                    draw = int(parts[1])
-                    piece = int(parts[2])
-                except (TypeError, ValueError):
-                    return None
-                if comp:
-                    return (comp, draw, piece)
-        return None
+    def _normalise_record_key(
+        value: object,
+    ) -> Optional[Tuple[str, int, int, Optional[str]]]:
+        return _split_microwire_key(value)
 
-    def _record_key(record: object) -> Optional[Tuple[str, int, int]]:
+    def _record_key(
+        record: object,
+    ) -> Optional[Tuple[str, int, int, Optional[str]]]:
         key = _normalise_record_key(getattr(record, "key", None))
         if key is not None:
             return key
@@ -4633,8 +4770,8 @@ def build_database(
 
     def _group_records(
         records: Optional[Iterable[object]],
-    ) -> Dict[Tuple[str, int, int], List[object]]:
-        grouped: Dict[Tuple[str, int, int], List[object]] = {}
+    ) -> Dict[Tuple[str, int, int, Optional[str]], List[object]]:
+        grouped: Dict[Tuple[str, int, int, Optional[str]], List[object]] = {}
         if not records:
             return grouped
         for record in records:
@@ -4654,9 +4791,16 @@ def build_database(
         for key, payload in phase_points.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
-            cleaned = {label: float(value) for label, value in payload.items() if isinstance(value, (int, float))}
+            key_parts = _microwire_key_from_string(key)
+            if key_parts is None:
+                continue
+            cleaned = {
+                label: float(value)
+                for label, value in payload.items()
+                if isinstance(value, (int, float))
+            }
             if cleaned:
-                phase_points_map[key] = cleaned
+                phase_points_map[_microwire_key_to_str(key_parts)] = cleaned
     phase_points_map = dict(phase_points_map)
 
     transition_temps_map: Dict[str, Dict[str, float]] = {}
@@ -4664,15 +4808,25 @@ def build_database(
         for key, payload in transition_temps.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
-            cleaned = {label: float(value) for label, value in payload.items() if isinstance(value, (int, float))}
+            key_parts = _microwire_key_from_string(key)
+            if key_parts is None:
+                continue
+            cleaned = {
+                label: float(value)
+                for label, value in payload.items()
+                if isinstance(value, (int, float))
+            }
             if cleaned:
-                transition_temps_map[key] = cleaned
+                transition_temps_map[_microwire_key_to_str(key_parts)] = cleaned
     transition_temps_map = dict(transition_temps_map)
 
     current_density_map: Dict[str, Dict[str, object]] = {}
     if current_density_entries:
         for key, payload in current_density_entries.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
+                continue
+            key_parts = _microwire_key_from_string(key)
+            if key_parts is None:
                 continue
             entry: Dict[str, object] = {}
             for column in CURRENT_DENSITY_EXTRA_COLUMNS:
@@ -4681,7 +4835,7 @@ def build_database(
             if "Notes" in payload:
                 entry["Notes"] = payload.get("Notes")
             if entry:
-                current_density_map[key] = entry
+                current_density_map[_microwire_key_to_str(key_parts)] = entry
     current_density_map = dict(current_density_map)
 
     strain_entry_map: Dict[str, Dict[str, object]] = {}
@@ -4689,14 +4843,21 @@ def build_database(
         for key, payload in strain_entries.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
+            key_parts = _microwire_key_from_string(key)
+            if key_parts is None:
+                continue
             entry: Dict[str, object] = {}
             for column in list(STRAIN_EXTRA_COLUMNS) + [STRAIN_COLUMN]:
                 if column in payload:
                     entry[column] = payload.get(column)
             if entry:
-                strain_entry_map[key] = entry
+                strain_entry_map[_microwire_key_to_str(key_parts)] = entry
     elif strain_records:
-        for (composition, draw_x, piece_y), record in strain_records.items():
+        for key, record in strain_records.items():
+            parts = _split_microwire_key(key)
+            if parts is None:
+                continue
+            composition, draw_x, piece_y, suffix = parts
             entry: Dict[str, object] = {}
             if record.m_length is not None:
                 entry["M length"] = record.m_length
@@ -4704,7 +4865,7 @@ def build_database(
                 entry["A length"] = record.a_length
             entry["Broke"] = bool(record.broke)
             if entry:
-                strain_entry_map[f"{composition}|{draw_x}|{piece_y}"] = entry
+                strain_entry_map[_microwire_key_to_str((composition, draw_x, piece_y, suffix))] = entry
     strain_entry_map = dict(strain_entry_map)
 
     analysis_total_local = analysis_total
@@ -4807,16 +4968,18 @@ def build_database(
                         path,
                         mean_error * 100,
                     )
-            if metadata.draw_x is None or metadata.piece_y is None:
-                log.warning(
-                    "Skipping %s because the microwire draw/piece identifiers could not be parsed",
-                    path,
-                )
-                stats.skipped += 1
-                if progress_callback:
-                    progress_callback(idx, total)
-                continue
-            key = (metadata.composition_token, metadata.draw_x, metadata.piece_y)
+            key = _microscope_key(path)
+            if key is None:
+                if metadata.draw_x is None or metadata.piece_y is None:
+                    log.warning(
+                        "Skipping %s because the microwire draw/piece identifiers could not be parsed",
+                        path,
+                    )
+                    stats.skipped += 1
+                    if progress_callback:
+                        progress_callback(idx, total)
+                    continue
+                key = (metadata.composition_token, metadata.draw_x, metadata.piece_y, None)
             record = MeasurementRecord(
                 path=path,
                 metadata=metadata,
@@ -4829,12 +4992,22 @@ def build_database(
             if progress_callback:
                 progress_callback(idx, total)
     rows: List[Dict[str, object]] = []
-    for (composition, draw_x, piece_y), records in sorted(grouped.items()):
+
+    def _group_sort_key(
+        item: Tuple[Tuple[str, int, int, Optional[str]], List[MeasurementRecord]]
+    ) -> Tuple[str, int, int, str]:
+        key, _records = item
+        composition, draw_x, piece_y, suffix = key
+        return (composition.lower(), draw_x, piece_y, (suffix or "").lower())
+
+    for key, records in sorted(grouped.items(), key=_group_sort_key):
+        composition, draw_x, piece_y, suffix = key
         draw_info = fabrication_index.get_draw(composition, draw_x)
         piece_info = fabrication_index.get_piece(composition, draw_x, piece_y)
         row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
-        row["Microwire"] = _microwire_label(draw_x, piece_y)
+        row["Microwire"] = _microwire_label(draw_x, piece_y, suffix)
+        key_str = _microwire_key_to_str(key)
         row["d (µm)"] = None
         row["D (µm)"] = None
         row[ratio_column] = None
@@ -4847,7 +5020,7 @@ def build_database(
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
         row["Notes"] = _compose_notes(draw_info, piece_info)
-        phase_entry = phase_points_map.get(f"{composition}|{draw_x}|{piece_y}", {})
+        phase_entry = phase_points_map.get(key_str, {})
         if phase_entry:
             as_value = phase_entry.get("As1")
             if as_value is None:
@@ -4859,9 +5032,31 @@ def build_database(
                 ms_value = phase_entry.get("Ms")
             if ms_value is not None:
                 row["Ms (mA)"] = ms_value
-        transition_entry = transition_temps_map.get(
-            f"{composition}|{draw_x}|{piece_y}", {}
-        )
+            phase_column_map = {
+                "As1": "As1 (mA)",
+                "Af1": "Af1 (mA)",
+                "Ms1": "Ms1 (mA)",
+                "Mf1": "Mf1 (mA)",
+                "As2": "As2 (mA)",
+                "Af2": "Af2 (mA)",
+                "Ms2": "Ms2 (mA)",
+                "Mf2": "Mf2 (mA)",
+            }
+            for label, column in phase_column_map.items():
+                if column not in output_columns:
+                    continue
+                current_value = row.get(column)
+                if current_value is not None and not _is_nan(current_value):
+                    continue
+                value = phase_entry.get(label)
+                if value is None and label == "As1":
+                    value = phase_entry.get("As")
+                if value is None and label == "Ms1":
+                    value = phase_entry.get("Ms")
+                if value is None:
+                    continue
+                row[column] = value
+        transition_entry = transition_temps_map.get(key_str, {})
         if transition_entry:
             if transition_entry.get("As") is not None:
                 row[TRANSITION_TEMP_AS_COLUMN] = transition_entry.get("As")
@@ -4871,9 +5066,7 @@ def build_database(
                 row[TRANSITION_TEMP_MS_COLUMN] = transition_entry.get("Ms")
             if transition_entry.get("Mf") is not None:
                 row[TRANSITION_TEMP_MF_COLUMN] = transition_entry.get("Mf")
-        current_density_entry = current_density_map.get(
-            f"{composition}|{draw_x}|{piece_y}", {}
-        )
+        current_density_entry = current_density_map.get(key_str, {})
         if current_density_entry:
             for column in CURRENT_DENSITY_EXTRA_COLUMNS:
                 if column not in output_columns:
@@ -4902,7 +5095,13 @@ def build_database(
         d_numeric = _parse_numeric(row["d (µm)"])
         D_numeric = _parse_numeric(row["D (µm)"])
         ratio_numeric = _parse_numeric(row[ratio_column])
-        microscope_data = microscope_index.get((composition, draw_x, piece_y))
+        microscope_data = None
+        if microscope_index:
+            microscope_data = microscope_index.get(key)
+            if microscope_data is None:
+                microscope_data = microscope_index.get((composition, draw_x, piece_y, None))
+            if microscope_data is None:
+                microscope_data = microscope_index.get((composition, draw_x, piece_y))
         if microscope_data:
             if d_numeric is None:
                 d_detection = microscope_data.best_core_detection()
@@ -4942,9 +5141,10 @@ def build_database(
             if MICROSCOPE_IMAGE_COLUMNS[1] in row:
                 row[MICROSCOPE_IMAGE_COLUMNS[1]] = row.get(MICROSCOPE_IMAGE_COLUMNS[1])
             if d_detection and d_detection.image_path is not None:
+                suffix_text = f"{suffix}" if suffix else ""
                 crop_path = d_detection.ensure_crop(
                     microscope_crop_dir,
-                    f"{composition}_{draw_x}_{piece_y}_d",
+                    f"{composition}_{draw_x}_{piece_y}{suffix_text}_d",
                 )
                 if crop_path is not None:
                     try:
@@ -4955,9 +5155,10 @@ def build_database(
                     row[MICROSCOPE_IMAGE_COLUMNS[0]] = rel_text
                     microscope_crop_map[rel_text] = crop_path
             if D_detection and D_detection.image_path is not None:
+                suffix_text = f"{suffix}" if suffix else ""
                 crop_path = D_detection.ensure_crop(
                     microscope_crop_dir,
-                    f"{composition}_{draw_x}_{piece_y}_D",
+                    f"{composition}_{draw_x}_{piece_y}{suffix_text}_D",
                 )
                 if crop_path is not None:
                     try:
@@ -4967,7 +5168,9 @@ def build_database(
                         rel_text = str(crop_path)
                     row[MICROSCOPE_IMAGE_COLUMNS[1]] = rel_text
                     microscope_crop_map[rel_text] = crop_path
-        video_data = video_index.get((composition, draw_x, piece_y))
+        video_data = video_index.get(key) if video_index else None
+        if video_data is None:
+            video_data = video_index.get((composition, draw_x, piece_y))
         if video_data is None:
             video_data = video_index.get((composition, draw_x, None))
         if video_data:
@@ -4995,12 +5198,16 @@ def build_database(
                 if glass is not None:
                     row["Glass feeding (mm/min)"] = glass
                     row_highlights.add("Glass feeding (mm/min)")
-        strain_record = strain_records.get((composition, draw_x, piece_y))
+        strain_record = (
+            strain_records.get(key)
+            or strain_records.get((composition, draw_x, piece_y, None))
+            or strain_records.get((composition, draw_x, piece_y))
+        )
         if strain_record:
             strain_value = _format_strain_value(strain_record)
             if strain_value is not None:
                 row[STRAIN_COLUMN] = strain_value
-        strain_entry = strain_entry_map.get(f"{composition}|{draw_x}|{piece_y}", {})
+        strain_entry = strain_entry_map.get(key_str, {})
         if strain_entry:
             for column in STRAIN_EXTRA_COLUMNS:
                 if column not in output_columns:
@@ -5009,24 +5216,42 @@ def build_database(
                 if value is None or value == "":
                     continue
                 row[column] = value
-            if not row.get(STRAIN_COLUMN) and strain_entry.get(STRAIN_COLUMN):
-                row[STRAIN_COLUMN] = strain_entry.get(STRAIN_COLUMN)
-        vsm_records = vsm_hysteresis_groups.get((composition, draw_x, piece_y), [])
+            if STRAIN_COLUMN in strain_entry:
+                strain_value = strain_entry.get(STRAIN_COLUMN)
+                if row.get(STRAIN_COLUMN) in (None, "") and strain_value not in (None, ""):
+                    row[STRAIN_COLUMN] = strain_value
+        vsm_records = vsm_hysteresis_groups.get(key, [])
+        if not vsm_records:
+            vsm_records = vsm_hysteresis_groups.get((composition, draw_x, piece_y, None), [])
+        if not vsm_records:
+            vsm_records = vsm_hysteresis_groups.get((composition, draw_x, piece_y), [])
         if vsm_records:
             labels = [_record_label(record) for record in vsm_records if _record_label(record)]
             if labels:
                 row[VSM_HYSTERESIS_COLUMN] = list(dict.fromkeys(labels))
-        vsm_scan_records = vsm_temperature_groups.get((composition, draw_x, piece_y), [])
+        vsm_scan_records = vsm_temperature_groups.get(key, [])
+        if not vsm_scan_records:
+            vsm_scan_records = vsm_temperature_groups.get((composition, draw_x, piece_y, None), [])
+        if not vsm_scan_records:
+            vsm_scan_records = vsm_temperature_groups.get((composition, draw_x, piece_y), [])
         if vsm_scan_records:
             labels = [_record_label(record) for record in vsm_scan_records if _record_label(record)]
             if labels:
                 row[VSM_TEMPERATURE_SCAN_COLUMN] = list(dict.fromkeys(labels))
-        dma_records = dma_isostress_groups.get((composition, draw_x, piece_y), [])
+        dma_records = dma_isostress_groups.get(key, [])
+        if not dma_records:
+            dma_records = dma_isostress_groups.get((composition, draw_x, piece_y, None), [])
+        if not dma_records:
+            dma_records = dma_isostress_groups.get((composition, draw_x, piece_y), [])
         if dma_records:
             labels = [_record_label(record) for record in dma_records if _record_label(record)]
             if labels:
                 row[DMA_ISOSTRESS_COLUMN] = list(dict.fromkeys(labels))
-        fmr_entries = fmr_groups.get((composition, draw_x, piece_y), [])
+        fmr_entries = fmr_groups.get(key, [])
+        if not fmr_entries:
+            fmr_entries = fmr_groups.get((composition, draw_x, piece_y, None), [])
+        if not fmr_entries:
+            fmr_entries = fmr_groups.get((composition, draw_x, piece_y), [])
         if fmr_entries:
             labels = [_record_label(record) for record in fmr_entries if _record_label(record)]
             if labels:
@@ -5046,6 +5271,7 @@ def build_database(
             setpoints = {r.metadata.setpoint_mA for r in records if r.metadata.setpoint_mA is not None}
             if high_sp is not None and low_sp == high_sp and len(setpoints) <= 1:
                 low_record = None
+        other_records = _select_other_measurements(records, high_record, low_record)
         if high_record:
             row["File 1000 mA"] = high_record.metadata.file_name
         else:
@@ -5099,6 +5325,30 @@ def build_database(
                     plot_name_to_path.setdefault(figure_name, cached)
                     if figure_name not in plot_records:
                         plot_records.append(figure_name)
+            if other_records:
+                other_figures: List[str] = []
+                for record in other_records:
+                    cached = plot_cache.get(record.metadata.measurement_id)
+                    if cached is None:
+                        try:
+                            cached = _plot_measurement_matplotlib(
+                                record.dataframe,
+                                record.path,
+                                plot_dir,
+                                figure_size,
+                            )
+                            plot_cache[record.metadata.measurement_id] = cached
+                        except Exception:
+                            log.exception("Failed to generate plot for %s", record.path)
+                            cached = None
+                    if cached is not None:
+                        figure_name = Path(cached).name
+                        other_figures.append(figure_name)
+                        plot_name_to_path.setdefault(figure_name, cached)
+                        if figure_name not in plot_records:
+                            plot_records.append(figure_name)
+                if other_figures:
+                    row["Figure — other mA"] = other_figures
         if origin_enabled:
             if high_record:
                 cached_origin = origin_cache.get(high_record.metadata.measurement_id)
@@ -5150,6 +5400,35 @@ def build_database(
                             origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
                 if cached_origin is not None:
                     row["Figure — low mA (Origin)"] = cached_origin.descriptor
+            if origin_enabled and other_records:
+                other_descriptors: List[str] = []
+                for record in other_records:
+                    cached_origin = origin_cache.get(record.metadata.measurement_id)
+                    if cached_origin is None:
+                        try:
+                            cached_origin = _plot_measurement_origin(
+                                record.dataframe,
+                                record.path,
+                                origin_dir,
+                                log,
+                            )
+                        except RuntimeError as exc:
+                            if origin_disabled_reason is None:
+                                origin_disabled_reason = str(exc) or exc.__class__.__name__
+                                log.warning("Origin plotting disabled: %s", origin_disabled_reason)
+                            origin_enabled = False
+                            cached_origin = None
+                        except Exception:
+                            log.exception("Failed to generate Origin plot for %s", record.path)
+                            cached_origin = None
+                        else:
+                            if cached_origin is not None:
+                                origin_cache[record.metadata.measurement_id] = cached_origin
+                                origin_artifacts.setdefault(cached_origin.descriptor, cached_origin)
+                    if cached_origin is not None:
+                        other_descriptors.append(cached_origin.descriptor)
+                if other_descriptors:
+                    row["Figure — other mA (Origin)"] = other_descriptors
         row_index = len(rows)
         rows.append(row)
         if row_highlights:

@@ -1259,6 +1259,28 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
         expected_columns = None
         in_data = False
 
+    def _split_vsm_tokens(raw_line: str) -> List[str]:
+        line = raw_line.strip()
+        if not line:
+            return []
+        if "," in line and " " not in line and "\t" not in line:
+            parts = [part.strip() for part in line.split(",")]
+        elif ";" in line and " " not in line and "\t" not in line:
+            parts = [part.strip() for part in line.split(";")]
+        elif "\t" in line and " " not in line:
+            parts = [part.strip() for part in line.split("\t")]
+        else:
+            parts = line.split()
+        tokens: List[str] = []
+        for part in parts:
+            if not part:
+                continue
+            cleaned = part.strip()
+            if "," in cleaned and "." not in cleaned:
+                cleaned = cleaned.replace(",", ".")
+            tokens.append(cleaned)
+        return tokens
+
     with path.open("r", encoding="utf-8", errors="ignore") as handle:
         for line in handle:
             stripped = line.strip()
@@ -1300,7 +1322,7 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
             if stripped.startswith("@"):
                 continue
 
-            tokens = stripped.split()
+            tokens = _split_vsm_tokens(stripped)
             if not tokens:
                 continue
             current_tokens.extend(tokens)
@@ -1320,12 +1342,34 @@ def _read_vsm_file(path: Path) -> pd.DataFrame:
     if in_data:
         _finish_section()
 
+    data_rows: List[List[str]] = []
     for section in reversed(sections):
         if section:
             data_rows = section
             break
-    else:
-        raise ValueError("No data rows detected in VSM file")
+    if not data_rows:
+        expected_fallback: Optional[int] = (
+            len(columns) if columns else (len(inline_header) if inline_header else None)
+        )
+        length_buckets: Dict[int, List[List[str]]] = {}
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("@"):
+                    continue
+                tokens = _split_vsm_tokens(stripped)
+                if not tokens:
+                    continue
+                if not all(_looks_numeric(token) for token in tokens):
+                    continue
+                length_buckets.setdefault(len(tokens), []).append(tokens)
+        if expected_fallback is not None and expected_fallback in length_buckets:
+            data_rows = length_buckets[expected_fallback]
+        elif length_buckets:
+            best_len = max(length_buckets.keys(), key=lambda key: len(length_buckets[key]))
+            data_rows = length_buckets[best_len]
+        if not data_rows:
+            raise ValueError("No data rows detected in VSM file")
 
     numeric_rows: List[List[str]] = []
     for row in data_rows:
@@ -1367,6 +1411,8 @@ def _looks_numeric(token: str) -> bool:
     token = token.strip()
     if not token:
         return False
+    if "," in token and "." not in token:
+        token = token.replace(",", ".")
     try:
         float(token)
     except ValueError:
@@ -1471,9 +1517,22 @@ def _metadata_from_filename(path: Path) -> tuple[float | None, float | None]:
     temperature = _safe_float(temp_match.group(1)) if temp_match else None
     return angle, temperature
 
+
+def _prefer_filename_temperature(
+    filename_value: float | None,
+    header_value: float | None,
+) -> float | None:
+    if filename_value is None:
+        return header_value
+    if not math.isfinite(filename_value):
+        return header_value
+    return filename_value
+
 @lru_cache(maxsize=256)
 def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
     angle, temperature = _metadata_from_filename(path)
+    filename_angle = angle
+    filename_temperature = temperature
     explicit_angle: float | None = None
     explicit_temperature: float | None = None
 
@@ -1522,6 +1581,7 @@ def _metadata_from_file(path: Path) -> tuple[float | None, float | None]:
             if angle is not None and temperature is not None:
                 break
 
+    temperature = _prefer_filename_temperature(filename_temperature, temperature)
     return _normalise_angle_value(angle), _normalise_temperature_value(temperature)
 
 

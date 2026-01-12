@@ -85,7 +85,11 @@ from .core import (
     _group_microscope_measurements,
     _collect_video_metrics,
     _microwire_label,
+    _microwire_parts_from_label,
     _microwire_tuple_from_label,
+    _microwire_key_to_str,
+    _microwire_key_from_string,
+    _split_microwire_key,
     MICROWIRE_SORT_RE,
     _parse_strain_float,
     _plot_measurement_matplotlib,
@@ -149,6 +153,7 @@ ANNEALING_GRAPH_HEIGHT = 200
 ANNEALING_TITLE_FONT_SIZE = 8
 ANNEALING_AXIS_FONT_SIZE = 6
 ANNEALING_TICK_FONT_SIZE = 6
+ANNEALING_OTHER_GRAPH_COLUMN = "Graph — other mA"
 GRAPH_PREVIEW_WIDTH = 720
 GRAPH_PREVIEW_HEIGHT = 420
 ANNEALING_AS_COLUMN = "As1 (mA)"
@@ -585,7 +590,7 @@ def collect_support_files(
                     if not is_microscope_candidate(candidate):
                         continue
                     key = _microscope_key(candidate)
-                    if key == (composition, draw, piece):
+                    if key is not None and key[:3] == (composition, draw, piece):
                         _append_unique(auto_micro, seen_micro, candidate)
             if include_videos:
                 video_dirs: list[Path] = []
@@ -615,7 +620,7 @@ def collect_support_files(
                             continue
                     for candidate in dict.fromkeys(video_candidates):
                         key = _microscope_key(candidate)
-                        if key == (composition, draw, piece):
+                        if key is not None and key[:3] == (composition, draw, piece):
                             _append_unique(videos, seen_video, candidate)
                             continue
                         draw_key = _draw_key(candidate)
@@ -2509,7 +2514,9 @@ class DataFrameModel(QtCore.QAbstractTableModel):
                 except (TypeError, ValueError):
                     pass
                 else:
-                    return f"{draw:05d}/{piece:05d}"
+                    suffix = match.group(3) or ""
+                    suffix_text = suffix.strip().lower()
+                    return f"{draw:05d}/{piece:05d}{suffix_text}"
         if isinstance(value, (list, tuple, set)):
             return ", ".join(str(item) for item in value)
         return value
@@ -3248,18 +3255,93 @@ def _group_vsm_hysteresis_plot_groups(
     records: Sequence[VsmHysteresisRecord],
 ) -> List[_VsmHysteresisPlotGroup]:
     grouped: Dict[Tuple[Optional[str], Optional[float]], List[VsmHysteresisRecord]] = {}
+    temp_tolerance = 1.0
+    merge_tolerance = 2.0
+    by_variant: Dict[Optional[str], List[Tuple[float, VsmHysteresisRecord]]] = {}
+
+    def _bucket_angle_count(items: Sequence[VsmHysteresisRecord]) -> int:
+        angles: Set[float] = set()
+        for entry in items:
+            angle = _coerce_finite_float(getattr(entry, "angle", None))
+            if angle is not None:
+                angles.add(round(angle, 3))
+        return len(angles) if angles else 1
+
     for record in records:
         variant = getattr(record, "variant", None)
         if isinstance(variant, str):
             variant = variant.strip() or None
         temp = _coerce_finite_float(getattr(record, "temperature", None))
-        grouped.setdefault((variant, temp), []).append(record)
+        if temp is None:
+            setattr(record, "_group_temperature", None)
+            grouped.setdefault((variant, None), []).append(record)
+            continue
+        by_variant.setdefault(variant, []).append((temp, record))
 
-    def _group_sort_key(entry: Tuple[Tuple[Optional[str], Optional[float]], List[VsmHysteresisRecord]]) -> Tuple[int, str, int, float]:
+    for variant, entries in by_variant.items():
+        entries.sort(key=lambda item: item[0])
+        buckets: List[Tuple[float, List[VsmHysteresisRecord]]] = []
+        for temp, record in entries:
+            if not buckets:
+                buckets.append((temp, [record]))
+                setattr(record, "_group_temperature", temp)
+                continue
+            last_temp, bucket_records = buckets[-1]
+            if abs(temp - last_temp) <= temp_tolerance:
+                bucket_records.append(record)
+                setattr(record, "_group_temperature", last_temp)
+            else:
+                buckets.append((temp, [record]))
+                setattr(record, "_group_temperature", temp)
+        if buckets:
+            merged: List[Tuple[float, List[VsmHysteresisRecord]]] = []
+            for idx, (bucket_temp, bucket_records) in enumerate(buckets):
+                angle_count = _bucket_angle_count(bucket_records)
+                merged_into_previous = False
+                if merged:
+                    prev_temp, prev_records = merged[-1]
+                    prev_count = _bucket_angle_count(prev_records)
+                    if (
+                        angle_count <= 1
+                        and prev_count >= angle_count
+                        and abs(bucket_temp - prev_temp) <= merge_tolerance
+                    ):
+                        prev_records.extend(bucket_records)
+                        for record in bucket_records:
+                            setattr(record, "_group_temperature", prev_temp)
+                        merged_into_previous = True
+                if merged_into_previous:
+                    continue
+                next_bucket = buckets[idx + 1] if idx + 1 < len(buckets) else None
+                if next_bucket:
+                    next_temp, next_records = next_bucket
+                    next_count = _bucket_angle_count(next_records)
+                    if (
+                        angle_count <= 1
+                        and next_count >= angle_count
+                        and abs(bucket_temp - next_temp) <= merge_tolerance
+                    ):
+                        next_records.extend(bucket_records)
+                        for record in bucket_records:
+                            setattr(record, "_group_temperature", next_temp)
+                        continue
+                merged.append((bucket_temp, bucket_records))
+            buckets = merged
+        for bucket_temp, bucket_records in buckets:
+            grouped.setdefault((variant, bucket_temp), []).extend(bucket_records)
+
+    def _group_sort_key(
+        entry: Tuple[Tuple[Optional[str], Optional[float]], List[VsmHysteresisRecord]]
+    ) -> Tuple[int, str, int, float]:
         (variant, temp), _records = entry
         variant_key = variant or ""
         temp_value = temp if temp is not None else float("inf")
-        return (0 if variant is None else 1, variant_key.lower(), 0 if temp is not None else 1, temp_value)
+        return (
+            0 if variant is None else 1,
+            variant_key.lower(),
+            0 if temp is not None else 1,
+            temp_value,
+        )
 
     groups: List[_VsmHysteresisPlotGroup] = []
     for (variant, temp), grouped_records in sorted(grouped.items(), key=_group_sort_key):
@@ -3351,7 +3433,10 @@ def _plot_vsm_hysteresis_figure(
     base_record = records[0]
     title = base_record.sample or Path(base_record.path).stem
     details: list[str] = []
-    temperature = _coerce_finite_float(getattr(base_record, "temperature", None))
+    group_temp = getattr(base_record, "_group_temperature", None)
+    temperature = _coerce_finite_float(group_temp)
+    if temperature is None:
+        temperature = _coerce_finite_float(getattr(base_record, "temperature", None))
     if temperature is not None:
         details.append(f"T{temperature:g}C")
     variant = getattr(base_record, "variant", None)
@@ -3511,10 +3596,11 @@ def _annealing_records_to_frame(
         "Microwire",
         "Graph — 1000 mA",
         "Graph — low mA",
+        ANNEALING_OTHER_GRAPH_COLUMN,
         "_group_key",
         "_sources",
     ]
-    grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+    grouped: Dict[MicrowireKey, List[MeasurementRecord]] = {}
     for record in records:
         metadata = getattr(record, "metadata", None)
         if metadata is None:
@@ -3524,17 +3610,31 @@ def _annealing_records_to_frame(
         piece = getattr(metadata, "piece_y", None)
         if composition is None or draw is None or piece is None:
             continue
+        suffix = None
+        path = getattr(record, "path", None)
+        if isinstance(path, Path):
+            parsed_key = _microscope_key(path)
+            if parsed_key is not None:
+                _, _, _, suffix = parsed_key
         try:
-            key = (str(composition), int(draw), int(piece))
+            key = (str(composition), int(draw), int(piece), suffix)
         except (TypeError, ValueError):
             continue
         grouped.setdefault(key, []).append(record)
 
     rows: List[Dict[str, Any]] = []
-    for (composition, draw, piece), group in sorted(grouped.items()):
+    for (composition, draw, piece, suffix), group in sorted(
+        grouped.items(),
+        key=lambda item: (
+            str(item[0][0]).lower(),
+            int(item[0][1]),
+            int(item[0][2]),
+            (str(item[0][3]).lower() if item[0][3] is not None else ""),
+        ),
+    ):
         high_record, low_record = _select_high_low_pair(group)
         try:
-            microwire = _microwire_label(draw, piece)
+            microwire = _microwire_label(draw, piece, suffix)
         except Exception:
             microwire = f"{draw}/{piece}"
 
@@ -3547,7 +3647,7 @@ def _annealing_records_to_frame(
             except Exception:
                 return None
 
-        group_key = f"{composition}|{draw}|{piece}"
+        group_key = _microwire_key_to_str((composition, draw, piece, suffix))
         source_paths: List[str] = []
         for entry in (high_record, low_record):
             path = getattr(entry, "path", None)
@@ -3561,6 +3661,7 @@ def _annealing_records_to_frame(
                 "Microwire": microwire,
                 "Graph — 1000 mA": None,
                 "Graph — low mA": None,
+                ANNEALING_OTHER_GRAPH_COLUMN: None,
                 "_group_key": group_key,
                 "_sources": source_paths,
             }
@@ -3613,6 +3714,26 @@ def _select_high_low_pair(
         if len(setpoints) <= 1:
             low_record = None
     return high_record, low_record
+
+
+def _select_other_measurements(
+    records: Sequence[MeasurementRecord],
+    high_record: Optional[MeasurementRecord],
+    low_record: Optional[MeasurementRecord],
+) -> List[MeasurementRecord]:
+    excluded = {high_record, low_record}
+
+    def _sort_key(record: MeasurementRecord) -> Tuple[int, str]:
+        setpoint = getattr(getattr(record, "metadata", object()), "setpoint_mA", None)
+        try:
+            setpoint_value = int(setpoint) if setpoint is not None else -1
+        except (TypeError, ValueError):
+            setpoint_value = -1
+        file_name = getattr(getattr(record, "metadata", object()), "file_name", "")
+        return (setpoint_value, str(file_name).lower())
+
+    remaining = [record for record in records if record not in excluded]
+    return sorted(remaining, key=_sort_key)
 
 
 class _AnnealingPlotDisplay(QtWidgets.QWidget):
@@ -4350,7 +4471,7 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
 
     def update_selection(
         self,
-        key: Optional[Tuple[str, int, int]],
+        key: Optional[MicrowireKey],
         high: Optional[MeasurementRecord],
         low: Optional[MeasurementRecord],
     ) -> None:
@@ -4360,9 +4481,9 @@ class AnnealingPlotPanel(QtWidgets.QWidget):
             self._low_display.clear("Select a row to view the low-current measurement.")
             return
 
-        composition, draw, piece = key
+        composition, draw, piece, suffix = key
         try:
-            microwire = _microwire_label(draw, piece)
+            microwire = _microwire_label(draw, piece, suffix)
         except Exception:
             microwire = f"{draw}/{piece}"
         self.header_label.setText(f"{composition} — {microwire}")
@@ -4624,7 +4745,7 @@ class _PendingScanWorker(QtCore.QObject):
 
 
 def _microscope_index_to_frame(
-    index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
+    index: Dict[MicrowireKey, MicroscopeMeasurements],
     overrides: Dict[str, Dict[str, float]],
 ) -> pd.DataFrame:
     columns = MICROSCOPE_TABLE_COLUMNS.copy()
@@ -4640,8 +4761,16 @@ def _microscope_index_to_frame(
         return None
 
     rows: List[Dict[str, Any]] = []
-    for (composition, draw, piece), measurements in sorted(index.items()):
-        key = f"{composition}|{draw}|{piece}"
+    for (composition, draw, piece, suffix), measurements in sorted(
+        index.items(),
+        key=lambda item: (
+            str(item[0][0]).lower(),
+            int(item[0][1]),
+            int(item[0][2]),
+            (str(item[0][3]).lower() if item[0][3] is not None else ""),
+        ),
+    ):
+        key = _microwire_key_to_str((composition, draw, piece, suffix))
         override = overrides.get(key, {})
         d_value = override.get("d")
         if d_value is None:
@@ -4672,7 +4801,7 @@ def _microscope_index_to_frame(
         rows.append(
             {
                 "Composition": composition,
-                "Microwire": _microwire_label(draw, piece),
+                "Microwire": _microwire_label(draw, piece, suffix),
                 MICROSCOPE_D_COLUMN: d_value,
                 MICROSCOPE_CAP_D_COLUMN: D_value,
                 "d/D": ratio,
@@ -4721,7 +4850,7 @@ def _video_index_to_frame(
     return pd.DataFrame(rows, columns=columns)
 
 
-def _strain_records_to_frame(records: Dict[Tuple[str, int, int], StrainRecord]) -> pd.DataFrame:
+def _strain_records_to_frame(records: Dict[MicrowireKey, StrainRecord]) -> pd.DataFrame:
     columns = [
         "Composition",
         "Draw",
@@ -4731,13 +4860,13 @@ def _strain_records_to_frame(records: Dict[Tuple[str, int, int], StrainRecord]) 
         "Broke",
     ]
     rows: List[Dict[str, Any]] = []
-    for (composition, draw, piece), record in sorted(records.items()):
+    for (composition, draw, piece, suffix), record in sorted(records.items()):
         rows.append(
             {
                 "Composition": composition,
                 "Draw": draw,
                 "Piece": piece,
-                "Microwire": record.microwire_label,
+                "Microwire": record.microwire_label or _microwire_label(draw, piece, suffix),
                 "Strain (%)": record.percent,
                 "Broke": bool(record.broke),
             }
@@ -4748,18 +4877,24 @@ def _strain_records_to_frame(records: Dict[Tuple[str, int, int], StrainRecord]) 
 
 
 def _apply_microscope_overrides(
-    index: Dict[Tuple[str, int, int], MicroscopeMeasurements],
+    index: Dict[MicrowireKey, MicroscopeMeasurements],
     overrides: Dict[str, Dict[str, float]],
-) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
-    result: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+    result: Dict[MicrowireKey, MicroscopeMeasurements] = {}
     for key, measurements in index.items():
         clone = MicroscopeMeasurements(
             core=list(measurements.core),
             glass=list(measurements.glass),
             other=list(measurements.other),
         )
-        token = f"{key[0]}|{key[1]}|{key[2]}"
+        token = _microwire_key_to_text(key) or ""
         override = overrides.get(token, {})
+        if not override:
+            parts = _split_microwire_key(key)
+            if parts is not None:
+                composition, draw, piece, _suffix = parts
+                base_token = _microwire_key_to_str((composition, draw, piece, None))
+                override = overrides.get(base_token, {})
         d_value = override.get("d")
         if isinstance(d_value, (int, float)) and d_value > 0:
             detection = MicroscopeDetection(
@@ -4801,8 +4936,30 @@ def _sample_from_path(path: Path, sources: Sequence[str]) -> str:
 
 
 _SAMPLE_VARIANT_RE = re.compile(
-    r"^\s*(?P<comp>[A-Za-z][A-Za-z0-9]*)\s+(?P<draw>\d{1,3})\s*[-_/]\s*(?P<piece>\d{1,3})(?P<rest>.*)$"
+    r"^\s*(?P<comp>[A-Za-z][A-Za-z0-9]*)\s+(?P<draw>\d{1,3})\s*[-_/]\s*(?P<piece>\d{1,3})(?P<suffix>[A-Za-z][A-Za-z0-9]*)?(?P<rest_sep>[\s\-_/.]+(?P<rest>.+))?$"
 )
+
+
+MicrowireKey = Tuple[str, int, int, Optional[str]]
+
+
+def _microwire_key_to_text(value: object) -> Optional[str]:
+    parts = _split_microwire_key(value)
+    if parts is None:
+        return None
+    return _microwire_key_to_str(parts)
+
+
+def _microwire_parts_from_label_safe(
+    label: str,
+) -> Optional[Tuple[int, int, Optional[str]]]:
+    parts = _microwire_parts_from_label(label)
+    if parts is not None:
+        return parts
+    fallback = _microwire_tuple_from_label(label)
+    if fallback is not None:
+        return fallback[0], fallback[1], None
+    return None
 
 
 def _split_sample_variant(sample: str) -> Tuple[str, Optional[str]]:
@@ -4815,14 +4972,16 @@ def _split_sample_variant(sample: str) -> Tuple[str, Optional[str]]:
     comp = match.group("comp").strip()
     draw = match.group("draw").strip()
     piece = match.group("piece").strip()
-    base = f"{comp} {draw}-{piece}"
+    suffix = match.group("suffix") or ""
+    suffix = suffix.strip()
+    base = f"{comp} {draw}-{piece}{suffix}"
     rest = (match.group("rest") or "").strip()
     if rest:
         rest = rest.strip(" -_/")
     return base, rest or None
 
 
-def _microwire_key_from_path(path: Path, sample: str) -> Optional[Tuple[str, int, int]]:
+def _microwire_key_from_path(path: Path, sample: str) -> Optional[MicrowireKey]:
     key = _microscope_key(path)
     if key is None and sample:
         try:
@@ -4833,15 +4992,16 @@ def _microwire_key_from_path(path: Path, sample: str) -> Optional[Tuple[str, int
 
 
 def _microwire_info_from_key(
-    key: Optional[Tuple[str, int, int]],
+    key: Optional[MicrowireKey],
 ) -> Tuple[Optional[str], Optional[str]]:
-    if key is None:
+    parts = _split_microwire_key(key) if key is not None else None
+    if parts is None:
         return None, None
-    composition, draw, piece = key
+    composition, draw, piece, suffix = parts
     if not composition:
         return None, None
     try:
-        microwire = _microwire_label(int(draw), int(piece))
+        microwire = _microwire_label(int(draw), int(piece), suffix)
     except Exception:
         microwire = f"{draw}/{piece}"
     return str(composition), microwire
@@ -4860,13 +5020,50 @@ def _record_label_for_display(record: object) -> str:
     return str(sample).strip() if sample else ""
 
 
-def _record_key_for_group(record: object) -> Optional[Tuple[str, int, int]]:
+def _record_path_key(record: object) -> Optional[str]:
+    path = getattr(record, "path", None)
+    if isinstance(path, Path):
+        return str(path)
+    if isinstance(path, str) and path:
+        return path
+    return None
+
+
+def _visibility_items_from_records(records: Sequence[object]) -> List[Tuple[str, str]]:
+    items: List[Tuple[str, str]] = []
+    seen: Set[str] = set()
+    for record in records:
+        path = _record_path_key(record)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        label = _record_label_for_display(record)
+        sample = getattr(record, "sample", None)
+        if isinstance(sample, str) and sample.strip():
+            if label and label != sample:
+                label = f"{sample} — {label}"
+            else:
+                label = sample
+        if not label:
+            label = Path(path).name
+        items.append((label, path))
+    return items
+
+
+def _hidden_paths_from_section(section: object) -> Set[str]:
+    extra = getattr(getattr(section, "data", None), "extra", None)
+    if isinstance(extra, Mapping):
+        hidden = extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            return {str(path) for path in hidden if path}
+    return set()
+
+
+def _record_key_for_group(record: object) -> Optional[MicrowireKey]:
     key = getattr(record, "key", None)
-    if isinstance(key, tuple) and len(key) == 3:
-        try:
-            return (str(key[0]), int(key[1]), int(key[2]))
-        except (TypeError, ValueError):
-            return None
+    key_parts = _split_microwire_key(key)
+    if key_parts is not None:
+        return key_parts
     return None
 
 
@@ -4875,12 +5072,12 @@ def _row_to_microwire_key(row: pd.Series) -> Optional[str]:
     microwire = str(row.get("Microwire") or "").strip()
     if not composition or not microwire:
         return None
-    parsed = _microwire_tuple_from_label(microwire)
+    parsed = _microwire_parts_from_label_safe(microwire)
     if parsed is None:
         return None
-    draw, piece = parsed
+    draw, piece, suffix = parsed
     try:
-        return f"{composition}|{int(draw)}|{int(piece)}"
+        return _microwire_key_to_str((composition, int(draw), int(piece), suffix))
     except (TypeError, ValueError):
         return None
 
@@ -4906,9 +5103,8 @@ def _group_graph_records_by_key(records: Sequence[object]) -> Dict[str, List[obj
                     key = None
         if key is None:
             continue
-        try:
-            group_key = f"{str(key[0])}|{int(key[1])}|{int(key[2])}"
-        except (TypeError, ValueError):
+        group_key = _microwire_key_to_text(key)
+        if not group_key:
             continue
         grouped.setdefault(group_key, []).append(record)
     return grouped
@@ -4948,7 +5144,7 @@ def _graph_records_to_frame(
         grouped.setdefault(sample, []).append(record)
     rows: List[Dict[str, Any]] = []
     for sample, group in sorted(grouped.items()):
-        key: Optional[Tuple[str, int, int]] = None
+        key: Optional[MicrowireKey] = None
         for record in group:
             key = _record_key_for_group(record)
             if key is not None:
@@ -4965,7 +5161,7 @@ def _graph_records_to_frame(
                 sources.append(str(path))
             elif isinstance(path, str):
                 sources.append(path)
-        group_key = f"{key[0]}|{key[1]}|{key[2]}" if key is not None else ""
+        group_key = _microwire_key_to_text(key) if key is not None else ""
         rows.append(
             {
                 sample_column: sample if sample_column else None,
@@ -4983,17 +5179,17 @@ def _drop_visible_sample_column(section: "MiniDatabaseSection") -> None:
     frame = section.model.frame() if hasattr(section, "model") else None
     if not isinstance(frame, pd.DataFrame):
         return
-    sample_column = None
-    for name in ("Sample", "sample"):
-        if name in frame.columns:
-            sample_column = name
-            break
-    if sample_column is None:
+    sample_columns: List[str] = []
+    for column in frame.columns:
+        normalized = str(column).strip().lower()
+        if normalized in {"sample", "_sample"}:
+            sample_columns.append(str(column))
+    if not sample_columns:
         return
     cleaned = frame.copy()
-    if "_sample" not in cleaned.columns:
-        cleaned["_sample"] = cleaned[sample_column]
-    cleaned = cleaned.drop(columns=[sample_column])
+    if "_sample" not in cleaned.columns and sample_columns:
+        cleaned["_sample"] = cleaned[sample_columns[0]]
+    cleaned = cleaned.drop(columns=sample_columns)
     try:
         section.data.table = cleaned
     except Exception:
@@ -5332,10 +5528,11 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if frame is None:
             return
         columns = list(frame.columns)
-        for name in names:
-            if name not in columns:
+        normalized_targets = {str(name).strip().lower() for name in names}
+        for index, column in enumerate(columns):
+            normalized = str(column).strip().lower()
+            if normalized not in normalized_targets:
                 continue
-            index = columns.index(name)
             try:
                 self.table_view.setColumnHidden(index, True)
             except Exception:
@@ -6238,24 +6435,19 @@ class FabricationSection(MiniDatabaseSection):
                 for value in frame["_group_key"]:
                     if value in (None, "", "None"):
                         continue
-                    parts = str(value).split("|")
-                    if len(parts) != 3:
+                    key_parts = _microwire_key_from_string(str(value))
+                    if key_parts is None:
                         continue
-                    comp = parts[0].strip()
-                    try:
-                        draw_val = int(parts[1])
-                        piece_val = int(parts[2])
-                    except ValueError:
-                        continue
+                    comp, draw_val, piece_val, _suffix = key_parts
                     present.add((comp, draw_val, piece_val))
             else:
                 for _, row in frame.iterrows():
                     comp = str(row.get("Composition", "")).strip()
                     microwire = str(row.get("Microwire", "")).strip()
-                    draw_piece = _microwire_tuple_from_label(microwire)
-                    if draw_piece is None:
+                    parsed = _microwire_parts_from_label_safe(microwire)
+                    if parsed is None:
                         continue
-                    draw_val, piece_val = draw_piece
+                    draw_val, piece_val, _suffix = parsed
                     present.add((comp, int(draw_val), int(piece_val)))
         missing = [
             f"{composition} {draw}/{piece}"
@@ -6521,8 +6713,12 @@ class AnnealingSection(MiniDatabaseSection):
     ) -> None:
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
-        self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
+        self._hidden_paths: Set[str] = set()
+        self._all_records: List[MeasurementRecord] = []
+        self._pixmap_cache: Dict[Tuple[object, ...], Optional[QtGui.QPixmap]] = {}
         self._phase_points: Dict[str, Dict[str, float]] = {}
+        self._preview_other_count = 1
+        self._preview_spacing = 6
         stored_phase_points = self.data.extra.get("phase_points")
         if isinstance(stored_phase_points, dict):
             cleaned: Dict[str, Dict[str, float]] = {}
@@ -6533,6 +6729,7 @@ class AnnealingSection(MiniDatabaseSection):
                 if entry:
                     cleaned[key] = entry
             self._phase_points = cleaned
+        self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self._sanitize_graph_columns()
@@ -6548,6 +6745,10 @@ class AnnealingSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected annealing files to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.visibility_button = QtWidgets.QPushButton("Visibility...")
+        self.visibility_button.setToolTip("Show or hide specific annealing graphs.")
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        self.controls_layout.addWidget(self.visibility_button)
         self._update_export_enabled()
         self._refresh_record_groups()
         self._hide_columns(["_group_key", "_sources"])
@@ -6570,7 +6771,7 @@ class AnnealingSection(MiniDatabaseSection):
         )
         table.setSortingEnabled(True)
         table.setIconSize(
-            QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
+            QtCore.QSize(self._preview_icon_width(), ANNEALING_GRAPH_HEIGHT)
         )
         header = table.verticalHeader()
         if header is not None:
@@ -6662,6 +6863,51 @@ class AnnealingSection(MiniDatabaseSection):
         has_rows = isinstance(self.data.table, pd.DataFrame) and not self.data.table.empty
         if hasattr(self, "export_button"):
             self.export_button.setEnabled(has_rows)
+
+    def _load_hidden_paths(self) -> None:
+        hidden = self.data.extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            self._hidden_paths = {str(path) for path in hidden if path}
+        else:
+            self._hidden_paths = set()
+
+    def _store_hidden_paths(self) -> None:
+        self.data.extra["hidden_paths"] = sorted(self._hidden_paths)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist annealing visibility settings")
+
+    def _visible_records(
+        self, records: Sequence[MeasurementRecord]
+    ) -> List[MeasurementRecord]:
+        if not self._hidden_paths:
+            return list(records)
+        return [
+            record
+            for record in records
+            if _record_path_key(record) not in self._hidden_paths
+        ]
+
+    def _open_visibility_dialog(self) -> None:
+        items = _visibility_items_from_records(self._all_records)
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No annealing graphs are available yet.",
+            )
+            return
+        dialog = _GraphVisibilityDialog(
+            "Annealing graph visibility",
+            items,
+            self._hidden_paths,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._hidden_paths = dialog.hidden_paths()
+            self._store_hidden_paths()
+            self._refresh_record_groups()
 
     def _clean_phase_points_payload(self, payload: Dict[str, Any]) -> Dict[str, float]:
         entry: Dict[str, float] = {}
@@ -6867,8 +7113,11 @@ class AnnealingSection(MiniDatabaseSection):
             payload = self.store.load_payload("annealing_records")
         except Exception:
             payload = None
-        if isinstance(payload, list):
-            for record in payload:
+        all_records = list(payload) if isinstance(payload, list) else []
+        self._all_records = list(all_records)
+        visible_records = self._visible_records(all_records)
+        if visible_records:
+            for record in visible_records:
                 metadata = getattr(record, "metadata", None)
                 if metadata is None:
                     continue
@@ -6877,20 +7126,34 @@ class AnnealingSection(MiniDatabaseSection):
                 piece = getattr(metadata, "piece_y", None)
                 if composition is None or draw is None or piece is None:
                     continue
+                suffix = None
+                path_value = getattr(record, "path", None)
+                if isinstance(path_value, Path):
+                    parsed_key = _microscope_key(path_value)
+                    if parsed_key is not None:
+                        _, _, _, suffix = parsed_key
                 try:
-                    key = f"{composition}|{int(draw)}|{int(piece)}"
+                    key = _microwire_key_to_str((composition, int(draw), int(piece), suffix))
                 except (TypeError, ValueError):
                     continue
                 grouped.setdefault(key, []).append(record)
         self._record_groups = grouped
+        max_other = 1
+        for records in grouped.values():
+            high_record, low_record = _select_high_low_pair(records)
+            other_records = _select_other_measurements(records, high_record, low_record)
+            if other_records:
+                max_other = max(max_other, len(other_records))
+        self._preview_other_count = max_other
         self._invalidate_previews()
+        self._update_preview_icon_size()
 
     def _sanitize_graph_columns(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             return
         changed = False
-        for column in ("Graph — 1000 mA", "Graph — low mA"):
+        for column in ("Graph — 1000 mA", "Graph — low mA", ANNEALING_OTHER_GRAPH_COLUMN):
             if column not in frame.columns:
                 continue
             series = frame[column]
@@ -6919,6 +7182,7 @@ class AnnealingSection(MiniDatabaseSection):
             "Microwire",
             "Graph — 1000 mA",
             "Graph — low mA",
+            ANNEALING_OTHER_GRAPH_COLUMN,
             "_group_key",
             "_sources",
         ]
@@ -6952,25 +7216,76 @@ class AnnealingSection(MiniDatabaseSection):
             except Exception:
                 pass
 
+    def _preview_icon_width(self) -> int:
+        count = max(int(self._preview_other_count), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
+
+    def _update_preview_icon_size(self) -> None:
+        table = self.table_view
+        if not isinstance(table, QtWidgets.QTableView):
+            return
+        width = self._preview_icon_width()
+        try:
+            table.setIconSize(
+                QtCore.QSize(max(width, ANNEALING_GRAPH_WIDTH), ANNEALING_GRAPH_HEIGHT)
+            )
+        except Exception:
+            pass
+        header = table.verticalHeader()
+        if header is not None:
+            try:
+                header.setDefaultSectionSize(ANNEALING_GRAPH_HEIGHT + 24)
+            except Exception:
+                pass
+        self._auto_fit_columns()
+
     def _preview_decoration(
         self,
         row: pd.Series,
         column: str,
     ) -> Optional[QtGui.QPixmap]:
-        if column not in {"Graph — 1000 mA", "Graph — low mA"}:
+        if column not in {"Graph — 1000 mA", "Graph — low mA", ANNEALING_OTHER_GRAPH_COLUMN}:
             return None
         key = row.get("_group_key")
         if not isinstance(key, str) or not key:
             return None
-        cache_key = (key, column)
+        cache_key: Tuple[object, ...] = (key, column)
         if cache_key in self._pixmap_cache:
             return self._pixmap_cache[cache_key]
         records = self._record_groups.get(key)
         pixmap: Optional[QtGui.QPixmap] = None
         if records:
             high_record, low_record = _select_high_low_pair(records)
-            target = high_record if column == "Graph — 1000 mA" else low_record
-            pixmap = _render_measurement_pixmap(target, self.logger)
+            if column == "Graph — 1000 mA":
+                target = high_record
+                pixmap = _render_measurement_pixmap(target, self.logger)
+            elif column == "Graph — low mA":
+                target = low_record
+                pixmap = _render_measurement_pixmap(target, self.logger)
+            else:
+                other_records = _select_other_measurements(records, high_record, low_record)
+                if other_records:
+                    signature = tuple(
+                        str(getattr(record, "path", "")) for record in other_records
+                    )
+                    cache_key = (key, column, signature)
+                    cached = self._pixmap_cache.get(cache_key)
+                    if cached is not None:
+                        return cached
+                    pixmaps: List[QtGui.QPixmap] = []
+                    for record in other_records:
+                        preview = _render_measurement_pixmap(record, self.logger)
+                        if preview is not None:
+                            pixmaps.append(preview)
+                    pixmap = _combine_pixmaps_side_by_side(
+                        pixmaps,
+                        width_px=self._preview_icon_width(),
+                        height_px=ANNEALING_GRAPH_HEIGHT,
+                        spacing=self._preview_spacing,
+                        scale_to_fit=False,
+                    )
+                    self._pixmap_cache[cache_key] = pixmap
+                    return pixmap
         if pixmap is None:
             path_value = row.get(column)
             if isinstance(path_value, str) and path_value:
@@ -7038,7 +7353,7 @@ class AnnealingSection(MiniDatabaseSection):
             )
             return
 
-        grouped: Dict[Tuple[str, int, int], List[MeasurementRecord]] = {}
+        grouped: Dict[MicrowireKey, List[MeasurementRecord]] = {}
         for record in records:
             metadata = getattr(record, "metadata", None)
             if metadata is None:
@@ -7048,7 +7363,13 @@ class AnnealingSection(MiniDatabaseSection):
             composition = getattr(metadata, "composition_token", None)
             if composition is None or draw_x is None or piece_y is None:
                 continue
-            grouped.setdefault((str(composition), int(draw_x), int(piece_y)), []).append(record)
+            suffix = None
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                parsed_key = _microscope_key(path)
+                if parsed_key is not None:
+                    _, _, _, suffix = parsed_key
+            grouped.setdefault((str(composition), int(draw_x), int(piece_y), suffix), []).append(record)
 
         if not grouped:
             QtWidgets.QMessageBox.warning(
@@ -7080,10 +7401,18 @@ class AnnealingSection(MiniDatabaseSection):
 
                     plot_dir = Path(tmpdir)
                     row_idx = 1
-                    for (composition, draw_x, piece_y), recs in sorted(grouped.items()):
+                    for (composition, draw_x, piece_y, suffix), recs in sorted(
+                        grouped.items(),
+                        key=lambda item: (
+                            str(item[0][0]).lower(),
+                            int(item[0][1]),
+                            int(item[0][2]),
+                            (str(item[0][3]).lower() if item[0][3] is not None else ""),
+                        ),
+                    ):
                         high_record, low_record = _select_high_low_pair(recs)
 
-                        microwire_label = _microwire_label(draw_x, piece_y)
+                        microwire_label = _microwire_label(draw_x, piece_y, suffix)
                         low_setpoint = (
                             low_record.metadata.setpoint_mA if low_record else None
                         )
@@ -7242,7 +7571,7 @@ class MicroscopeSection(MiniDatabaseSection):
         self._selected_key: str | None = None
         self._ocr_debug_enabled = False
         self._pixmap_cache: Dict[Tuple[str, str], Optional[QtGui.QPixmap]] = {}
-        self._expected_keys_current: Set[Tuple[str, int, int]] = set()
+        self._expected_keys_current: Set[MicrowireKey] = set()
         self._prepopulated_keys: Set[str] = set()
         self._table_splitter: QtWidgets.QSplitter | None = None
         self._force_ocr_next = False
@@ -7569,8 +7898,8 @@ class MicroscopeSection(MiniDatabaseSection):
             preview_target = max(preview_target, 360)
             splitter.setSizes([table_target, preview_target])
 
-    def _expected_microwire_keys(self) -> Set[Tuple[str, int, int]]:
-        keys: Set[Tuple[str, int, int]] = set()
+    def _expected_microwire_keys(self) -> Set[MicrowireKey]:
+        keys: Set[MicrowireKey] = set()
         try:
             annealing_records = MiniDatabaseStore("annealing").load_payload(
                 "annealing_records"
@@ -7588,43 +7917,44 @@ class MicroscopeSection(MiniDatabaseSection):
             piece = getattr(metadata, "piece_y", None)
             if not composition or draw is None or piece is None:
                 continue
+            suffix = None
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                parsed_key = _microscope_key(path)
+                if parsed_key is not None:
+                    _, _, _, suffix = parsed_key
             try:
-                keys.add((str(composition), int(draw), int(piece)))
+                keys.add((str(composition), int(draw), int(piece), suffix))
             except (TypeError, ValueError):
                 continue
         keys.update(self._extra_expected_keys())
         return keys
 
-    def _extra_expected_keys(self) -> Set[Tuple[str, int, int]]:
-        extra: Set[Tuple[str, int, int]] = set()
+    def _extra_expected_keys(self) -> Set[MicrowireKey]:
+        extra: Set[MicrowireKey] = set()
         tokens = set(self._overrides.keys()) | set(self._validated.keys())
         for token in tokens:
             if not token:
                 continue
-            parts = str(token).split("|")
-            if len(parts) != 3:
-                continue
-            composition = parts[0].strip()
-            try:
-                draw = int(parts[1])
-                piece = int(parts[2])
-            except ValueError:
-                continue
-            if composition:
-                extra.add((composition, draw, piece))
+            parts = _microwire_key_from_string(str(token))
+            if parts is not None:
+                extra.add(parts)
         return extra
 
     def _protected_key_tokens(self) -> Set[str]:
         return {str(key) for key in self._overrides.keys()} | {str(key) for key in self._validated.keys()}
 
-    def _prepare_initial_table(self, expected_keys: Set[Tuple[str, int, int]]) -> None:
+    def _prepare_initial_table(self, expected_keys: Set[MicrowireKey]) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             frame = pd.DataFrame(columns=MICROSCOPE_TABLE_COLUMNS)
         else:
             frame = frame.copy()
         if expected_keys:
-            allowed = {f"{composition}|{draw}|{piece}" for composition, draw, piece in expected_keys}
+            allowed = {
+                _microwire_key_to_str((composition, draw, piece, suffix))
+                for composition, draw, piece, suffix in expected_keys
+            }
             allowed.update(self._protected_key_tokens())
             if "_key" in frame.columns:
                 try:
@@ -7637,11 +7967,13 @@ class MicroscopeSection(MiniDatabaseSection):
                 for idx, row in frame.iterrows():
                     composition = str(row.get("Composition", "")).strip()
                     microwire_label = str(row.get("Microwire", "")).strip()
-                    wire_tuple = _microwire_tuple_from_label(microwire_label)
+                    wire_tuple = _microwire_parts_from_label_safe(microwire_label)
                     if wire_tuple is None:
                         continue
-                    draw, piece = wire_tuple
-                    key_str = f"{composition}|{int(draw)}|{int(piece)}"
+                    draw, piece, suffix = wire_tuple
+                    key_str = _microwire_key_to_str(
+                        (composition, int(draw), int(piece), suffix)
+                    )
                     if key_str in allowed:
                         filtered_rows.append(idx)
                 if filtered_rows:
@@ -7651,14 +7983,22 @@ class MicroscopeSection(MiniDatabaseSection):
                 frame[column] = pd.Series([None] * len(frame))
         existing_keys = set(str(key) for key in frame.get("_key", []))
         new_rows: List[Dict[str, object]] = []
-        for composition, draw, piece in sorted(expected_keys):
-            key_str = f"{composition}|{draw}|{piece}"
+        for composition, draw, piece, suffix in sorted(
+            expected_keys,
+            key=lambda key: (
+                str(key[0]).lower(),
+                int(key[1]),
+                int(key[2]),
+                (str(key[3]).lower() if key[3] is not None else ""),
+            ),
+        ):
+            key_str = _microwire_key_to_str((composition, draw, piece, suffix))
             if key_str in existing_keys:
                 continue
             new_rows.append(
                 {
                     "Composition": composition,
-                    "Microwire": _microwire_label(draw, piece),
+                    "Microwire": _microwire_label(draw, piece, suffix),
                     MICROSCOPE_D_COLUMN: None,
                     MICROSCOPE_CAP_D_COLUMN: None,
                     "d/D": None,
@@ -7711,11 +8051,11 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _record_to_row(
         self,
-        key: Tuple[str, int, int],
+        key: MicrowireKey,
         measurement: MicroscopeMeasurements,
     ) -> Dict[str, object]:
-        composition, draw, piece = key
-        key_str = f"{composition}|{draw}|{piece}"
+        composition, draw, piece, suffix = key
+        key_str = _microwire_key_to_str((composition, draw, piece, suffix))
         override = self._overrides.get(key_str, {})
 
         d_value = override.get("d")
@@ -7782,7 +8122,7 @@ class MicroscopeSection(MiniDatabaseSection):
 
         return {
             "Composition": composition,
-            "Microwire": _microwire_label(draw, piece),
+            "Microwire": _microwire_label(draw, piece, suffix),
             MICROSCOPE_D_COLUMN: d_value,
             MICROSCOPE_CAP_D_COLUMN: D_value,
             "d/D": ratio,
@@ -8861,7 +9201,10 @@ class MicroscopeSection(MiniDatabaseSection):
     def _prepopulate_image_refs(self, candidates: Iterable[Path]) -> None:
         expected = self._expected_keys_current or self._expected_microwire_keys()
         allowed = (
-            {f"{composition}|{draw}|{piece}" for composition, draw, piece in expected}
+            {
+                _microwire_key_to_str((composition, draw, piece, suffix))
+                for composition, draw, piece, suffix in expected
+            }
             if expected
             else None
         )
@@ -8870,8 +9213,8 @@ class MicroscopeSection(MiniDatabaseSection):
             key_tuple = _microscope_key(path)
             if key_tuple is None:
                 continue
-            composition, draw, piece = key_tuple
-            key = f"{composition}|{draw}|{piece}"
+            composition, draw, piece, suffix = key_tuple
+            key = _microwire_key_to_str((composition, draw, piece, suffix))
             if allowed is not None and key not in allowed:
                 continue
             entry = grouped.setdefault(
@@ -8879,7 +9222,7 @@ class MicroscopeSection(MiniDatabaseSection):
                 {
                     "_key": key,
                     "Composition": composition,
-                    "Microwire": _microwire_label(draw, piece),
+                    "Microwire": _microwire_label(draw, piece, suffix),
                     "_images": [],
                 },
             )
@@ -8951,7 +9294,7 @@ class MicroscopeSection(MiniDatabaseSection):
         debug_cb = self._ocr_debug_callback if self._ocr_debug_enabled else None
         expected_keys = self._expected_keys_current or self._expected_microwire_keys()
 
-        def _emit_partial(key: Tuple[str, int, int], measurement: MicroscopeMeasurements) -> None:
+        def _emit_partial(key: MicrowireKey, measurement: MicroscopeMeasurements) -> None:
             try:
                 row = self._record_to_row(key, measurement)
             except Exception:
@@ -8967,10 +9310,11 @@ class MicroscopeSection(MiniDatabaseSection):
             key_tuple = _microscope_key(path_obj)
             if key_tuple is None:
                 continue
-            comp, draw, piece = key_tuple
-            if expected_keys and (comp, draw, piece) not in expected_keys:
-                continue
-            key = f"{comp}|{draw}|{piece}"
+            comp, draw, piece, suffix = key_tuple
+            if expected_keys and (comp, draw, piece, suffix) not in expected_keys:
+                if (comp, draw, piece, None) not in expected_keys:
+                    continue
+            key = _microwire_key_to_str((comp, draw, piece, suffix))
             validated_entry = self._validated.get(key)
             if not isinstance(validated_entry, dict):
                 continue
@@ -9022,8 +9366,8 @@ class MicroscopeSection(MiniDatabaseSection):
             key: value
             for key, value in self._overrides.items()
             if any(
-                key == f"{comp}|{draw}|{piece}"
-                for comp, draw, piece in index.keys()
+                key == _microwire_key_to_str((comp, draw, piece, suffix))
+                for comp, draw, piece, suffix in index.keys()
             )
         }
         self._overrides = filtered_overrides
@@ -9110,7 +9454,7 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
 
     def update_selection(
         self,
-        key: Optional[Tuple[str, int, int]],
+        key: Optional[MicrowireKey],
         high: Optional[MeasurementRecord],
         low: Optional[MeasurementRecord],
     ) -> None:
@@ -9119,9 +9463,9 @@ class _CurrentDensityPreviewPanel(QtWidgets.QWidget):
             self._high_display.clear("Select a row to view the 1000 mA measurement.")
             self._low_display.clear("Select a row to view the low-current measurement.")
             return
-        composition, draw, piece = key
+        composition, draw, piece, suffix = key
         try:
-            microwire = _microwire_label(draw, piece)
+            microwire = _microwire_label(draw, piece, suffix)
         except Exception:
             microwire = f"{draw}/{piece}"
         self.header_label.setText(f"{composition} — {microwire}")
@@ -9318,7 +9662,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     None,
                 )
                 if key_tuple:
-                    key_text = f"{key_tuple[0]}|{key_tuple[1]}|{key_tuple[2]}"
+                    key_text = _microwire_key_to_str(key_tuple)
             if not key_text:
                 continue
             entry: Dict[str, Any] = {}
@@ -9347,7 +9691,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             except Exception:
                 continue
 
-    def _current_selection_key(self) -> Optional[Tuple[str, int, int]]:
+    def _current_selection_key(self) -> Optional[MicrowireKey]:
         table = self.table_view
         if not isinstance(table, QtWidgets.QTableView):
             return None
@@ -9368,7 +9712,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
         key_value = frame.iloc[row_index].get("_group_key")
         return self._parse_group_key(key_value)
 
-    def _restore_selection(self, key: Optional[Tuple[str, int, int]]) -> None:
+    def _restore_selection(self, key: Optional[MicrowireKey]) -> None:
         if key is None:
             return
         table = self.table_view
@@ -9377,7 +9721,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
             return
         if not isinstance(frame, pd.DataFrame) or "_group_key" not in frame.columns:
             return
-        target = f"{key[0]}|{key[1]}|{key[2]}"
+        target = _microwire_key_to_str(key)
         try:
             matches = frame.index[frame["_group_key"] == target].tolist()
         except Exception:
@@ -9551,50 +9895,56 @@ class CurrentDensitySection(QtWidgets.QWidget):
 
     def _fetch_records_for_key(
         self,
-        key: Tuple[str, int, int],
+        key: MicrowireKey,
     ) -> Tuple[Optional[MeasurementRecord], Optional[MeasurementRecord]]:
-        composition, draw, piece = key
-        key_str = f"{composition}|{draw}|{piece}"
+        key_str = _microwire_key_to_str(key)
         groups = getattr(self._annealing_section, "_record_groups", {})
         if not isinstance(groups, dict):
             return None, None
         records = groups.get(key_str, [])
         if not records:
+            parts = _split_microwire_key(key)
+            if parts is not None:
+                composition, draw, piece, _suffix = parts
+                base_key = _microwire_key_to_str((composition, draw, piece, None))
+                records = groups.get(base_key, [])
+        if not records:
             return None, None
         return _select_high_low_pair(records)
 
     @staticmethod
-    def _parse_group_key(value: object) -> Optional[Tuple[str, int, int]]:
+    def _parse_group_key(value: object) -> Optional[MicrowireKey]:
         if value is None:
             return None
         text = str(value).strip()
         if not text:
             return None
-        parts = text.split("|")
-        if len(parts) != 3:
-            return None
-        composition = parts[0].strip()
-        try:
-            draw = int(parts[1])
-            piece = int(parts[2])
-        except ValueError:
-            return None
-        return (composition, draw, piece)
+        return _microwire_key_from_string(text)
 
     def _calculate_frame(self) -> pd.DataFrame:
         diameter_map = self._collect_microscope_data()
         setpoint_map = self._collect_setpoint_data()
         phase_map = self._collect_phase_points()
-        keys = sorted(set(setpoint_map.keys()) | set(phase_map.keys()))
+        keys = sorted(
+            set(setpoint_map.keys()) | set(phase_map.keys()),
+            key=lambda item: (
+                str(item[0]).lower(),
+                int(item[1]),
+                int(item[2]),
+                (str(item[3]).lower() if item[3] is not None else ""),
+            ),
+        )
         rows: List[Dict[str, Any]] = []
         all_sources: Set[str] = set()
         if not keys:
             columns = CURRENT_DENSITY_COLUMNS + ["_group_key"]
             return pd.DataFrame(columns=columns)
-        for composition, draw, piece in keys:
-            micro_info = diameter_map.get((composition, draw, piece), {})
-            setpoint_info = setpoint_map.get((composition, draw, piece), {})
-            phase_info = phase_map.get((composition, draw, piece), {})
+        for composition, draw, piece, suffix in keys:
+            key = (composition, draw, piece, suffix)
+            base_key = (composition, draw, piece, None)
+            micro_info = diameter_map.get(key) or diameter_map.get(base_key, {})
+            setpoint_info = setpoint_map.get(key) or setpoint_map.get(base_key, {})
+            phase_info = phase_map.get(key) or phase_map.get(base_key, {})
             diameter_um = micro_info.get("diameter")
             area_mm2 = self._diameter_to_area(diameter_um)
             setpoints = setpoint_info.get("setpoints", [])
@@ -9605,7 +9955,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 notes.append("Missing diameter")
             composition_label = micro_info.get("composition") or setpoint_info.get("composition") or composition
             try:
-                microwire_label = micro_info.get("label") or _microwire_label(draw, piece)
+                microwire_label = micro_info.get("label") or _microwire_label(draw, piece, suffix)
             except Exception:
                 microwire_label = micro_info.get("label") or f"{draw}/{piece}"
             as1_value = phase_info.get("As1")
@@ -9658,7 +10008,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     "Setpoints (mA)": self._format_setpoints(setpoints),
                     "Sources": self._summarise_sources(sources),
                     "Notes": "; ".join(notes) if notes else "",
-                    "_group_key": f"{composition}|{draw}|{piece}",
+                    "_group_key": _microwire_key_to_str(key),
                 }
             )
         self._last_sources = sorted(all_sources)
@@ -9669,8 +10019,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
         desired_order = [column for column in CURRENT_DENSITY_COLUMNS + ["_group_key"] if column in frame.columns]
         return frame.loc[:, desired_order]
 
-    def _collect_microscope_data(self) -> Dict[Tuple[str, int, int], Dict[str, Any]]:
-        result: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+    def _collect_microscope_data(self) -> Dict[MicrowireKey, Dict[str, Any]]:
+        result: Dict[MicrowireKey, Dict[str, Any]] = {}
         table = getattr(getattr(self._microscope_section, "data", None), "table", None)
         if not isinstance(table, pd.DataFrame) or table.empty:
             return result
@@ -9678,13 +10028,13 @@ class CurrentDensitySection(QtWidgets.QWidget):
             key = self._extract_key(row.get("Composition"), row.get("Microwire"), row.get("_key"))
             if key is None:
                 continue
-            composition, draw, piece = key
+            composition, draw, piece, suffix = key
             diameter = self._to_positive_float(row.get(MICROSCOPE_D_COLUMN))
             composition_label = self._normalise_text(row.get("Composition")) or composition
             label = self._normalise_text(row.get("Microwire"))
             if not label:
                 try:
-                    label = _microwire_label(draw, piece)
+                    label = _microwire_label(draw, piece, suffix)
                 except Exception:
                     label = f"{draw}/{piece}"
             result[key] = {
@@ -9694,8 +10044,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
             }
         return result
 
-    def _collect_setpoint_data(self) -> Dict[Tuple[str, int, int], Dict[str, Any]]:
-        result: Dict[Tuple[str, int, int], Dict[str, Any]] = {}
+    def _collect_setpoint_data(self) -> Dict[MicrowireKey, Dict[str, Any]]:
+        result: Dict[MicrowireKey, Dict[str, Any]] = {}
         groups = getattr(self._annealing_section, "_record_groups", {})
         if not isinstance(groups, dict) or not groups:
             return result
@@ -9715,8 +10065,19 @@ class CurrentDensitySection(QtWidgets.QWidget):
                     or setpoint is None
                 ):
                     continue
+                suffix = None
+                path = getattr(record, "path", None)
+                if isinstance(path, Path):
+                    parsed_key = _microscope_key(path)
+                    if parsed_key is not None:
+                        _, _, _, suffix = parsed_key
                 try:
-                    key = (str(composition), int(draw), int(piece))
+                    key = (
+                        str(composition),
+                        int(draw),
+                        int(piece),
+                        str(suffix).strip() or None,
+                    )
                     setpoint_value = float(setpoint)
                 except (TypeError, ValueError):
                     continue
@@ -9742,8 +10103,8 @@ class CurrentDensitySection(QtWidgets.QWidget):
             entry["sources"] = sorted(entry["sources"])
         return result
 
-    def _collect_phase_points(self) -> Dict[Tuple[str, int, int], Dict[str, float]]:
-        result: Dict[Tuple[str, int, int], Dict[str, float]] = {}
+    def _collect_phase_points(self) -> Dict[MicrowireKey, Dict[str, float]]:
+        result: Dict[MicrowireKey, Dict[str, float]] = {}
         snapshot_provider = getattr(self._annealing_section, "phase_points_snapshot", None)
         if callable(snapshot_provider):
             raw = snapshot_provider()
@@ -9754,15 +10115,10 @@ class CurrentDensitySection(QtWidgets.QWidget):
         for key, payload in raw.items():
             if not isinstance(key, str) or not isinstance(payload, dict):
                 continue
-            parts = key.split("|")
-            if len(parts) != 3:
+            parts = _microwire_key_from_string(key)
+            if parts is None:
                 continue
-            composition = parts[0].strip()
-            try:
-                draw = int(parts[1])
-                piece = int(parts[2])
-            except ValueError:
-                continue
+            composition, draw, piece, suffix = parts
             cleaned: Dict[str, float] = {}
             for label in PHASE_POINT_LABELS:
                 try:
@@ -9786,7 +10142,7 @@ class CurrentDensitySection(QtWidgets.QWidget):
                 if isinstance(numeric, (int, float)) and math.isfinite(float(numeric)):
                     cleaned["Ms1"] = float(numeric)
             if cleaned:
-                result[(composition, draw, piece)] = cleaned
+                result[(composition, draw, piece, suffix)] = cleaned
         return result
 
     @staticmethod
@@ -9809,27 +10165,21 @@ class CurrentDensitySection(QtWidgets.QWidget):
         composition: object,
         microwire: object,
         stored_key: object,
-    ) -> Optional[Tuple[str, int, int]]:
+    ) -> Optional[MicrowireKey]:
         comp_text = self._normalise_text(composition)
         if isinstance(stored_key, str):
-            parts = stored_key.split("|")
-            if len(parts) == 3:
-                base_comp = parts[0].strip()
-                try:
-                    draw = int(parts[1])
-                    piece = int(parts[2])
-                except ValueError:
-                    pass
-                else:
-                    comp_value = comp_text or base_comp
-                    if comp_value:
-                        return (comp_value, draw, piece)
+            parts = _microwire_key_from_string(stored_key)
+            if parts is not None:
+                base_comp, draw, piece, suffix = parts
+                comp_value = comp_text or base_comp
+                if comp_value:
+                    return (comp_value, draw, piece, suffix)
         label_text = self._normalise_text(microwire)
         if label_text and comp_text:
-            draw_piece = _microwire_tuple_from_label(label_text)
+            draw_piece = _microwire_parts_from_label_safe(label_text)
             if draw_piece is not None:
-                draw, piece = draw_piece
-                return (comp_text, int(draw), int(piece))
+                draw, piece, suffix = draw_piece
+                return (comp_text, int(draw), int(piece), suffix)
         return None
 
     @staticmethod
@@ -10415,7 +10765,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         except Exception:
             payload = None
         if isinstance(payload, list):
-            grouped = _group_graph_records_by_key(payload)
+            hidden = _hidden_paths_from_section(self._vsm_temperature_section)
+            visible_records = [
+                record
+                for record in payload
+                if _record_path_key(record) not in hidden
+            ]
+            grouped = _group_graph_records_by_key(visible_records)
             for records in grouped.values():
                 records.sort(key=_record_label_for_display)
         self._record_groups = grouped
@@ -10668,22 +11024,13 @@ class TransitionTempsSection(QtWidgets.QWidget):
         self._update_preview()
 
     @staticmethod
-    def _parse_group_key(value: object) -> Optional[Tuple[str, int, int]]:
+    def _parse_group_key(value: object) -> Optional[MicrowireKey]:
         if value is None:
             return None
         text = str(value).strip()
         if not text:
             return None
-        parts = text.split("|")
-        if len(parts) != 3:
-            return None
-        composition = parts[0].strip()
-        try:
-            draw = int(parts[1])
-            piece = int(parts[2])
-        except ValueError:
-            return None
-        return (composition, draw, piece)
+        return _microwire_key_from_string(text)
 
     def _prune_transition_points(self, valid_keys: Iterable[str]) -> bool:
         valid_set = {str(value) for value in valid_keys if value}
@@ -10884,10 +11231,13 @@ class VsmHysteresisSection(MiniDatabaseSection):
     ) -> None:
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._record_groups: Dict[str, List[VsmHysteresisRecord]] = {}
+        self._hidden_paths: Set[str] = set()
+        self._all_records: List[VsmHysteresisRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
@@ -10901,6 +11251,10 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected VSM files to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.visibility_button = QtWidgets.QPushButton("Visibility...")
+        self.visibility_button.setToolTip("Show or hide specific VSM hysteresis graphs.")
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        self.controls_layout.addWidget(self.visibility_button)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -10923,6 +11277,15 @@ class VsmHysteresisSection(MiniDatabaseSection):
             self._check_cancelled()
             try:
                 frame = _read_vsm_file(Path(path))
+            except ValueError as exc:
+                if "No data rows detected" in str(exc):
+                    message = f"Skipped {Path(path).name}: no data rows detected."
+                    self.logger.warning(message)
+                    self.log(message, level=logging.WARNING)
+                    frame = pd.DataFrame()
+                else:
+                    self.logger.exception("Failed to parse %s", path)
+                    frame = pd.DataFrame()
             except Exception:
                 self.logger.exception("Failed to parse %s", path)
                 frame = pd.DataFrame()
@@ -10980,8 +11343,54 @@ class VsmHysteresisSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
+    def _load_hidden_paths(self) -> None:
+        hidden = self.data.extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            self._hidden_paths = {str(path) for path in hidden if path}
+        else:
+            self._hidden_paths = set()
+
+    def _store_hidden_paths(self) -> None:
+        self.data.extra["hidden_paths"] = sorted(self._hidden_paths)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist VSM hysteresis visibility settings")
+
+    def _visible_records(
+        self, records: Sequence[VsmHysteresisRecord]
+    ) -> List[VsmHysteresisRecord]:
+        if not self._hidden_paths:
+            return list(records)
+        return [
+            record
+            for record in records
+            if _record_path_key(record) not in self._hidden_paths
+        ]
+
+    def _open_visibility_dialog(self) -> None:
+        items = _visibility_items_from_records(self._all_records)
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No VSM hysteresis graphs are available yet.",
+            )
+            return
+        dialog = _GraphVisibilityDialog(
+            "VSM hysteresis visibility",
+            items,
+            self._hidden_paths,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._hidden_paths = dialog.hidden_paths()
+            self._store_hidden_paths()
+            self._refresh_record_groups()
+
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
@@ -10997,8 +11406,11 @@ class VsmHysteresisSection(MiniDatabaseSection):
             payload = self.store.load_payload("vsm_hysteresis_records")
         except Exception:
             payload = None
-        if isinstance(payload, list):
-            for record in payload:
+        all_records = list(payload) if isinstance(payload, list) else []
+        self._all_records = list(all_records)
+        visible_records = self._visible_records(all_records)
+        if visible_records:
+            for record in visible_records:
                 sample = getattr(record, "sample", None)
                 if isinstance(sample, str) and sample.strip():
                     existing_variant = getattr(record, "variant", None)
@@ -11029,12 +11441,26 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 if isinstance(sample, str) and sample.strip():
                     grouped.setdefault(sample, []).append(record)
         self._record_groups = grouped
-        self._record_groups_by_key = _group_graph_records_by_key(list(payload)) if isinstance(payload, list) else {}
+        self._record_groups_by_key = _group_graph_records_by_key(visible_records)
         max_groups = 1
         for records in grouped.values():
-            group_count = len(_group_vsm_hysteresis_plot_groups(records))
+            groups = _group_vsm_hysteresis_plot_groups(records)
+            group_count = len(groups)
             if group_count > max_groups:
                 max_groups = group_count
+            for record in records:
+                record_temp = getattr(record, "_group_temperature", None)
+                label = _format_vsm_hysteresis_group_label(
+                    _coerce_finite_float(record_temp)
+                    if record_temp is not None
+                    else _coerce_finite_float(getattr(record, "temperature", None)),
+                    getattr(record, "variant", None),
+                )
+                if label:
+                    try:
+                        record.label = label
+                    except Exception:
+                        pass
         self._preview_group_count = max_groups
         self._update_preview_icon_size()
         self._pixmap_cache.clear()
@@ -11045,11 +11471,11 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(self._preview_group_count), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_HEIGHT * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_HEIGHT
 
     def _update_preview_icon_size(self) -> None:
         table = self.table_view
@@ -11109,7 +11535,7 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 if preview is not None:
                     pixmaps.append(preview)
             icon_width = self._preview_icon_width()
-            pixmap = _combine_pixmaps_vertical(
+            pixmap = _combine_pixmaps_side_by_side(
                 pixmaps,
                 width_px=icon_width,
                 height_px=self._preview_icon_height(),
@@ -11247,10 +11673,13 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
     ) -> None:
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._record_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
+        self._hidden_paths: Set[str] = set()
+        self._all_records: List[VsmTemperatureScanRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
@@ -11264,6 +11693,10 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected VSM files to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.visibility_button = QtWidgets.QPushButton("Visibility...")
+        self.visibility_button.setToolTip("Show or hide specific VSM temperature scan graphs.")
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        self.controls_layout.addWidget(self.visibility_button)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -11337,8 +11770,56 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
+    def _load_hidden_paths(self) -> None:
+        hidden = self.data.extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            self._hidden_paths = {str(path) for path in hidden if path}
+        else:
+            self._hidden_paths = set()
+
+    def _store_hidden_paths(self) -> None:
+        self.data.extra["hidden_paths"] = sorted(self._hidden_paths)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception(
+                "Failed to persist VSM temperature scan visibility settings"
+            )
+
+    def _visible_records(
+        self, records: Sequence[VsmTemperatureScanRecord]
+    ) -> List[VsmTemperatureScanRecord]:
+        if not self._hidden_paths:
+            return list(records)
+        return [
+            record
+            for record in records
+            if _record_path_key(record) not in self._hidden_paths
+        ]
+
+    def _open_visibility_dialog(self) -> None:
+        items = _visibility_items_from_records(self._all_records)
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No VSM temperature scan graphs are available yet.",
+            )
+            return
+        dialog = _GraphVisibilityDialog(
+            "VSM temperature scan visibility",
+            items,
+            self._hidden_paths,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._hidden_paths = dialog.hidden_paths()
+            self._store_hidden_paths()
+            self._refresh_record_groups()
+
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
@@ -11354,8 +11835,11 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             payload = self.store.load_payload("vsm_temperature_scan_records")
         except Exception:
             payload = None
-        if isinstance(payload, list):
-            for record in payload:
+        all_records = list(payload) if isinstance(payload, list) else []
+        self._all_records = list(all_records)
+        visible_records = self._visible_records(all_records)
+        if visible_records:
+            for record in visible_records:
                 sample = getattr(record, "sample", None)
                 if isinstance(sample, str) and sample.strip():
                     existing_variant = getattr(record, "variant", None)
@@ -11399,11 +11883,11 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(self._preview_group_count), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_HEIGHT * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_HEIGHT
 
     def _update_preview_icon_size(self) -> None:
         table = self.table_view
@@ -11449,7 +11933,7 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_vertical(
+                pixmap = _combine_pixmaps_side_by_side(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
@@ -11593,10 +12077,13 @@ class DmaIsoStressSection(MiniDatabaseSection):
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._record_groups: Dict[str, List[DmaIsoStressRecord]] = {}
         self._record_groups_by_key: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._hidden_paths: Set[str] = set()
+        self._all_records: List[DmaIsoStressRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
@@ -11610,6 +12097,10 @@ class DmaIsoStressSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected DMA files to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.visibility_button = QtWidgets.QPushButton("Visibility...")
+        self.visibility_button.setToolTip("Show or hide specific DMA iso-stress graphs.")
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        self.controls_layout.addWidget(self.visibility_button)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -11684,8 +12175,54 @@ class DmaIsoStressSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
+    def _load_hidden_paths(self) -> None:
+        hidden = self.data.extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            self._hidden_paths = {str(path) for path in hidden if path}
+        else:
+            self._hidden_paths = set()
+
+    def _store_hidden_paths(self) -> None:
+        self.data.extra["hidden_paths"] = sorted(self._hidden_paths)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist DMA iso-stress visibility settings")
+
+    def _visible_records(
+        self, records: Sequence[DmaIsoStressRecord]
+    ) -> List[DmaIsoStressRecord]:
+        if not self._hidden_paths:
+            return list(records)
+        return [
+            record
+            for record in records
+            if _record_path_key(record) not in self._hidden_paths
+        ]
+
+    def _open_visibility_dialog(self) -> None:
+        items = _visibility_items_from_records(self._all_records)
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No DMA iso-stress graphs are available yet.",
+            )
+            return
+        dialog = _GraphVisibilityDialog(
+            "DMA iso-stress visibility",
+            items,
+            self._hidden_paths,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._hidden_paths = dialog.hidden_paths()
+            self._store_hidden_paths()
+            self._refresh_record_groups()
+
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
@@ -11701,8 +12238,11 @@ class DmaIsoStressSection(MiniDatabaseSection):
             payload = self.store.load_payload("dma_iso_stress_records")
         except Exception:
             payload = None
-        if isinstance(payload, list):
-            for record in payload:
+        all_records = list(payload) if isinstance(payload, list) else []
+        self._all_records = list(all_records)
+        visible_records = self._visible_records(all_records)
+        if visible_records:
+            for record in visible_records:
                 sample = getattr(record, "sample", None)
                 if isinstance(sample, str) and sample.strip():
                     existing_variant = getattr(record, "variant", None)
@@ -11732,6 +12272,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
                 if isinstance(sample, str) and sample.strip():
                     grouped.setdefault(sample, []).append(record)
         self._record_groups = grouped
+        self._record_groups_by_key = _group_graph_records_by_key(visible_records)
         max_groups = 1
         for records in grouped.values():
             if len(records) > max_groups:
@@ -11746,11 +12287,11 @@ class DmaIsoStressSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(self._preview_group_count), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_HEIGHT * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_HEIGHT
 
     def _update_preview_icon_size(self) -> None:
         table = self.table_view
@@ -11796,7 +12337,7 @@ class DmaIsoStressSection(MiniDatabaseSection):
             )
             pixmaps = [item.pixmap for item in items if item.pixmap is not None]
             if pixmaps:
-                pixmap = _combine_pixmaps_vertical(
+                pixmap = _combine_pixmaps_side_by_side(
                     pixmaps,
                     width_px=self._preview_icon_width(),
                     height_px=self._preview_icon_height(),
@@ -11940,10 +12481,13 @@ class FmrSection(MiniDatabaseSection):
         self._pixmap_cache: Dict[str, Optional[QtGui.QPixmap]] = {}
         self._record_groups: Dict[str, List[FmrRecord]] = {}
         self._record_groups_by_key: Dict[str, List[FmrRecord]] = {}
+        self._hidden_paths: Set[str] = set()
+        self._all_records: List[FmrRecord] = []
         self._preview_group_count = 1
         self._preview_spacing = 6
         self._table_splitter: QtWidgets.QSplitter | None = None
         super().__init__(logger, log_callback, parent)
+        self._load_hidden_paths()
         if isinstance(self.model, DataFrameModel):
             self.model.set_decoration_provider(self._preview_decoration)
         self.open_graphs_button = QtWidgets.QPushButton("Open graphs")
@@ -11957,6 +12501,10 @@ class FmrSection(MiniDatabaseSection):
         self.open_origin_button.setToolTip("Send the selected FMR files to Origin via PyPlot.")
         self.open_origin_button.clicked.connect(self._open_selected_in_origin)
         self.controls_layout.addWidget(self.open_origin_button)
+        self.visibility_button = QtWidgets.QPushButton("Visibility...")
+        self.visibility_button.setToolTip("Show or hide specific FMR graphs.")
+        self.visibility_button.clicked.connect(self._open_visibility_dialog)
+        self.controls_layout.addWidget(self.visibility_button)
         header = self.table_view.verticalHeader() if self.table_view is not None else None
         if header is not None:
             default_height = ANNEALING_GRAPH_HEIGHT + 24
@@ -12034,8 +12582,52 @@ class FmrSection(MiniDatabaseSection):
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
 
+    def _load_hidden_paths(self) -> None:
+        hidden = self.data.extra.get("hidden_paths")
+        if isinstance(hidden, (list, tuple, set)):
+            self._hidden_paths = {str(path) for path in hidden if path}
+        else:
+            self._hidden_paths = set()
+
+    def _store_hidden_paths(self) -> None:
+        self.data.extra["hidden_paths"] = sorted(self._hidden_paths)
+        try:
+            self.store.save(self.data)
+        except Exception:
+            self.logger.exception("Failed to persist FMR visibility settings")
+
+    def _visible_records(self, records: Sequence[FmrRecord]) -> List[FmrRecord]:
+        if not self._hidden_paths:
+            return list(records)
+        return [
+            record
+            for record in records
+            if _record_path_key(record) not in self._hidden_paths
+        ]
+
+    def _open_visibility_dialog(self) -> None:
+        items = _visibility_items_from_records(self._all_records)
+        if not items:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "No FMR graphs are available yet.",
+            )
+            return
+        dialog = _GraphVisibilityDialog(
+            "FMR visibility",
+            items,
+            self._hidden_paths,
+            parent=self,
+        )
+        if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
+            self._hidden_paths = dialog.hidden_paths()
+            self._store_hidden_paths()
+            self._refresh_record_groups()
+
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
+        self._load_hidden_paths()
         _drop_visible_sample_column(self)
         self._refresh_record_groups()
         self._hide_columns(["Sample", "_sample", "_group_key", "_sources"])
@@ -12051,8 +12643,11 @@ class FmrSection(MiniDatabaseSection):
             payload = self.store.load_payload("fmr_records")
         except Exception:
             payload = None
-        if isinstance(payload, list):
-            for record in payload:
+        all_records = list(payload) if isinstance(payload, list) else []
+        self._all_records = list(all_records)
+        visible_records = self._visible_records(all_records)
+        if visible_records:
+            for record in visible_records:
                 sample = getattr(record, "sample", None)
                 if isinstance(sample, str) and sample.strip():
                     existing_variant = getattr(record, "variant", None)
@@ -12073,7 +12668,7 @@ class FmrSection(MiniDatabaseSection):
                 if isinstance(sample, str) and sample.strip():
                     grouped.setdefault(sample, []).append(record)
         self._record_groups = grouped
-        self._record_groups_by_key = _group_graph_records_by_key(list(payload)) if isinstance(payload, list) else {}
+        self._record_groups_by_key = _group_graph_records_by_key(visible_records)
         max_groups = 1
         for records in grouped.values():
             group_count = len(records)
@@ -12089,11 +12684,11 @@ class FmrSection(MiniDatabaseSection):
                 pass
 
     def _preview_icon_width(self) -> int:
-        return ANNEALING_GRAPH_WIDTH
+        count = max(int(self._preview_group_count), 1)
+        return ANNEALING_GRAPH_WIDTH * count + self._preview_spacing * (count - 1)
 
     def _preview_icon_height(self) -> int:
-        count = max(int(self._preview_group_count), 1)
-        return ANNEALING_GRAPH_HEIGHT * count + self._preview_spacing * (count - 1)
+        return ANNEALING_GRAPH_HEIGHT
 
     def _update_preview_icon_size(self) -> None:
         table = self.table_view
@@ -12150,7 +12745,7 @@ class FmrSection(MiniDatabaseSection):
                 )
                 if preview is not None:
                     pixmaps.append(preview)
-            pixmap = _combine_pixmaps_vertical(
+            pixmap = _combine_pixmaps_side_by_side(
                 pixmaps,
                 width_px=self._preview_icon_width(),
                 height_px=self._preview_icon_height(),
@@ -12315,12 +12910,12 @@ class StrainSection(MiniDatabaseSection):
         log_callback: Callable[[int, str], None],
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
-        self._wire_choices: Dict[str, Dict[str, tuple[int, int]]] = {}
-        self._d_lookup: Dict[tuple[str, int, int], float] = {}
+        self._wire_choices: Dict[str, Dict[str, tuple[int, int, Optional[str]]]] = {}
+        self._d_lookup: Dict[MicrowireKey, float] = {}
         self._suspend_auto_fill = False
         self._editing_index: Optional[int] = None
-        self._editing_key: Optional[tuple[str, int, int]] = None
-        self._selected_wire_key: Optional[tuple[str, int, int]] = None
+        self._editing_key: Optional[MicrowireKey] = None
+        self._selected_wire_key: Optional[MicrowireKey] = None
         self._mass_override_active = False
         self._suppress_table_selection = False
         self._strain_offsets: Dict[str, float] = {
@@ -12605,23 +13200,28 @@ class StrainSection(MiniDatabaseSection):
     def _microwire_changed(self) -> None:
         comp = self.composition_combo.currentText().strip()
         data = self.microwire_combo.currentData()
-        key: Optional[tuple[int, int]] = None
+        key: Optional[tuple[int, int, Optional[str]]] = None
         if isinstance(data, tuple):
-            key = (int(data[0]), int(data[1]))
+            suffix = None
+            if len(data) >= 3 and data[2]:
+                suffix = str(data[2]).strip() or None
+            key = (int(data[0]), int(data[1]), suffix)
         else:
-            parsed = _microwire_tuple_from_label(self.microwire_combo.currentText())
+            parsed = _microwire_parts_from_label_safe(self.microwire_combo.currentText())
             if parsed:
-                key = (int(parsed[0]), int(parsed[1]))
+                key = (int(parsed[0]), int(parsed[1]), parsed[2])
         if key is None:
             self._selected_wire_key = None
             if not self._suspend_auto_fill:
                 self.d_edit.clear()
                 self._refresh_mass_or_stress()
             return
-        self._selected_wire_key = (comp, key[0], key[1])
+        self._selected_wire_key = (comp, key[0], key[1], key[2])
         if self._suspend_auto_fill:
             return
         d_value = self._d_lookup.get(self._selected_wire_key)
+        if d_value is None:
+            d_value = self._d_lookup.get((comp, key[0], key[1], None))
         if d_value is not None:
             self.d_edit.setText(f"{d_value:.4f}")
         self._refresh_mass_or_stress()
@@ -12729,16 +13329,20 @@ class StrainSection(MiniDatabaseSection):
         microwire = str(row.get(self.COLUMN_MICROWIRE) or "").strip()
         draw = row.get(self.COLUMN_DRAW)
         piece = row.get(self.COLUMN_PIECE)
-        key: Optional[tuple[str, int, int]] = None
+        key: Optional[MicrowireKey] = None
+        suffix: Optional[str] = None
+        parsed_label: Optional[Tuple[int, int, Optional[str]]] = None
+        if microwire:
+            parsed_label = _microwire_parts_from_label_safe(microwire)
+            if parsed_label is not None:
+                suffix = parsed_label[2]
         if pd.notna(draw) and pd.notna(piece):
             try:
-                key = (composition, int(float(draw)), int(float(piece)))
+                key = (composition, int(float(draw)), int(float(piece)), suffix)
             except (TypeError, ValueError):
                 key = None
-        if key is None and microwire:
-            parsed = _microwire_tuple_from_label(microwire)
-            if parsed:
-                key = (composition, int(parsed[0]), int(parsed[1]))
+        if key is None and parsed_label is not None:
+            key = (composition, int(parsed_label[0]), int(parsed_label[1]), suffix)
         self._editing_index = row_index
         self._editing_key = key
 
@@ -12751,7 +13355,7 @@ class StrainSection(MiniDatabaseSection):
             if idx >= 0:
                 self.microwire_combo.setCurrentIndex(idx)
             elif key is not None:
-                self.microwire_combo.insertItem(0, microwire, (key[1], key[2]))
+                self.microwire_combo.insertItem(0, microwire, (key[1], key[2], key[3]))
                 self.microwire_combo.setCurrentIndex(0)
         d_value = _parse_strain_float(row.get(self.COLUMN_D))
         d_block = QtCore.QSignalBlocker(self.d_edit)
@@ -12831,15 +13435,18 @@ class StrainSection(MiniDatabaseSection):
             return
         label = self.microwire_combo.currentText().strip()
         data = self.microwire_combo.currentData()
-        key: Optional[tuple[str, int, int]] = None
+        key: Optional[MicrowireKey] = None
         if isinstance(data, tuple):
-            key = (composition, int(data[0]), int(data[1]))
+            suffix = None
+            if len(data) >= 3 and data[2]:
+                suffix = str(data[2]).strip() or None
+            key = (composition, int(data[0]), int(data[1]), suffix)
         elif self._selected_wire_key and self._selected_wire_key[0] == composition:
             key = self._selected_wire_key
         else:
-            parsed = _microwire_tuple_from_label(label)
+            parsed = _microwire_parts_from_label_safe(label)
             if parsed:
-                key = (composition, int(parsed[0]), int(parsed[1]))
+                key = (composition, int(parsed[0]), int(parsed[1]), parsed[2])
         if key is None:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -13040,7 +13647,10 @@ class StrainSection(MiniDatabaseSection):
         if self._editing_key in used:
             used.discard(self._editing_key)
         for composition, wires in self._wire_choices.items():
-            if any((composition, draw, piece) not in used for draw, piece in wires.values()):
+            if any(
+                (composition, draw, piece, suffix) not in used
+                for draw, piece, suffix in wires.values()
+            ):
                 available.append(composition)
         available.sort(key=lambda value: value.lower())
         was_blocked = self.composition_combo.blockSignals(True)
@@ -13068,17 +13678,24 @@ class StrainSection(MiniDatabaseSection):
             used.discard(self._editing_key)
         options = []
         for label, key in self._wire_choices.get(composition, {}).items():
-            if (composition, key[0], key[1]) in used:
+            if (composition, key[0], key[1], key[2]) in used:
                 continue
             options.append((label, key))
-        options.sort(key=lambda item: (item[1][0], item[1][1], item[0]))
+        options.sort(
+            key=lambda item: (
+                item[1][0],
+                item[1][1],
+                str(item[1][2] or ""),
+                item[0],
+            )
+        )
         for label, key in options:
             self.microwire_combo.addItem(label, key)
         if self._editing_key and self._editing_key[0] == composition:
-            draw, piece = self._editing_key[1:]
-            label = _microwire_label(draw, piece)
+            draw, piece, suffix = self._editing_key[1:]
+            label = _microwire_label(draw, piece, suffix)
             if label and self.microwire_combo.findText(label) == -1:
-                self.microwire_combo.insertItem(0, label, (draw, piece))
+                self.microwire_combo.insertItem(0, label, (draw, piece, suffix))
         if current_label:
             idx = self.microwire_combo.findText(current_label)
             if idx >= 0:
@@ -13145,13 +13762,13 @@ class StrainSection(MiniDatabaseSection):
         count = 0
         used = self._used_wire_keys()
         for composition, wires in self._wire_choices.items():
-            for draw, piece in wires.values():
-                if (composition, draw, piece) not in used:
+            for draw, piece, suffix in wires.values():
+                if (composition, draw, piece, suffix) not in used:
                     count += 1
         return count
 
-    def _used_wire_keys(self) -> set[tuple[str, int, int]]:
-        keys: set[tuple[str, int, int]] = set()
+    def _used_wire_keys(self) -> set[MicrowireKey]:
+        keys: set[MicrowireKey] = set()
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             return keys
@@ -13161,20 +13778,23 @@ class StrainSection(MiniDatabaseSection):
                 continue
             draw = row.get(self.COLUMN_DRAW)
             piece = row.get(self.COLUMN_PIECE)
+            suffix: Optional[str] = None
+            parsed = _microwire_parts_from_label_safe(str(row.get(self.COLUMN_MICROWIRE) or ""))
+            if parsed:
+                suffix = parsed[2]
             if pd.notna(draw) and pd.notna(piece):
                 try:
                     draw_int = int(float(draw))
                     piece_int = int(float(piece))
                 except (TypeError, ValueError):
                     continue
-                keys.add((composition, draw_int, piece_int))
+                keys.add((composition, draw_int, piece_int, suffix))
                 continue
-            parsed = _microwire_tuple_from_label(str(row.get(self.COLUMN_MICROWIRE) or ""))
             if parsed:
-                keys.add((composition, int(parsed[0]), int(parsed[1])))
+                keys.add((composition, int(parsed[0]), int(parsed[1]), parsed[2]))
         return keys
 
-    def _select_key(self, key: tuple[str, int, int]) -> None:
+    def _select_key(self, key: MicrowireKey) -> None:
         if not isinstance(self.table_view, QtWidgets.QTableView):
             return
         index = self._find_row_by_key(key)
@@ -13191,27 +13811,35 @@ class StrainSection(MiniDatabaseSection):
         )
         self.table_view.scrollTo(model_index, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter)
 
-    def _find_row_by_key(self, key: tuple[str, int, int]) -> Optional[int]:
+    def _find_row_by_key(self, key: MicrowireKey) -> Optional[int]:
         if not isinstance(self.data.table, pd.DataFrame) or self.data.table.empty:
             return None
-        composition, draw, piece = key
+        composition, draw, piece, suffix = key
         for index, row in self.data.table.iterrows():
             row_comp = str(row.get(self.COLUMN_COMPOSITION) or "").strip()
             if row_comp != composition:
                 continue
             row_draw = row.get(self.COLUMN_DRAW)
             row_piece = row.get(self.COLUMN_PIECE)
+            parsed = _microwire_parts_from_label_safe(str(row.get(self.COLUMN_MICROWIRE) or ""))
+            parsed_suffix = parsed[2] if parsed else None
             try:
                 row_draw_int = int(float(row_draw))
                 row_piece_int = int(float(row_piece))
             except (TypeError, ValueError):
+                if parsed is None:
+                    continue
+                row_draw_int = int(parsed[0])
+                row_piece_int = int(parsed[1])
+            if row_draw_int != draw or row_piece_int != piece:
                 continue
-            if row_draw_int == draw and row_piece_int == piece:
-                return index
+            if (parsed_suffix or None) != (suffix or None):
+                continue
+            return index
         return None
 
     def _load_reference_data(self) -> None:
-        wire_choices: Dict[str, Dict[str, tuple[int, int]]] = {}
+        wire_choices: Dict[str, Dict[str, tuple[int, int, Optional[str]]]] = {}
         try:
             annealing_store = MiniDatabaseStore("annealing")
             records = annealing_store.load_payload("annealing_records")
@@ -13227,17 +13855,20 @@ class StrainSection(MiniDatabaseSection):
                 piece = getattr(metadata, "piece_y", None)
                 if not composition or draw is None or piece is None:
                     continue
-                label = _microwire_label(int(draw), int(piece))
+                label = _microwire_label(int(draw), int(piece), None)
                 bucket = wire_choices.setdefault(composition, {})
-                bucket[label] = (int(draw), int(piece))
+                bucket[label] = (int(draw), int(piece), None)
         self._wire_choices = {
             composition: dict(
-                sorted(bucket.items(), key=lambda item: (item[1][0], item[1][1], item[0]))
+                sorted(
+                    bucket.items(),
+                    key=lambda item: (item[1][0], item[1][1], str(item[1][2] or ""), item[0]),
+                )
             )
             for composition, bucket in wire_choices.items()
         }
 
-        d_lookup: Dict[tuple[str, int, int], float] = {}
+        d_lookup: Dict[MicrowireKey, float] = {}
         try:
             microscope_data = MiniDatabaseStore("microscope").load()
             frame = microscope_data.table if isinstance(microscope_data.table, pd.DataFrame) else pd.DataFrame()
@@ -13248,18 +13879,12 @@ class StrainSection(MiniDatabaseSection):
                 composition = str(row.get("Composition") or "").strip()
                 draw_int: Optional[int] = None
                 piece_int: Optional[int] = None
+                suffix: Optional[str] = None
                 key_text = row.get("_key")
                 if isinstance(key_text, str) and "|" in key_text:
-                    parts = key_text.split("|")
-                    if len(parts) == 3:
-                        if not composition:
-                            composition = parts[0].strip()
-                        try:
-                            draw_int = int(parts[1])
-                            piece_int = int(parts[2])
-                        except (TypeError, ValueError):
-                            draw_int = None
-                            piece_int = None
+                    parts = _microwire_key_from_string(key_text)
+                    if parts is not None:
+                        composition, draw_int, piece_int, suffix = parts
                 if draw_int is None or piece_int is None:
                     draw = row.get("Draw")
                     piece = row.get("Piece")
@@ -13271,15 +13896,15 @@ class StrainSection(MiniDatabaseSection):
                             draw_int = None
                             piece_int = None
                 if (draw_int is None or piece_int is None) and row.get("Microwire"):
-                    parsed = _microwire_tuple_from_label(str(row.get("Microwire") or ""))
+                    parsed = _microwire_parts_from_label_safe(str(row.get("Microwire") or ""))
                     if parsed:
-                        draw_int, piece_int = int(parsed[0]), int(parsed[1])
+                        draw_int, piece_int, suffix = int(parsed[0]), int(parsed[1]), parsed[2]
                 if not composition or draw_int is None or piece_int is None:
                     continue
                 d_value = _parse_strain_float(row.get(MICROSCOPE_D_COLUMN))
                 if d_value is None:
                     continue
-                d_lookup[(composition, draw_int, piece_int)] = d_value
+                d_lookup[(composition, draw_int, piece_int, suffix)] = d_value
         self._d_lookup = d_lookup
 
     def _ensure_table_structure(self) -> None:
@@ -13315,7 +13940,7 @@ class StrainSection(MiniDatabaseSection):
             draw = row.get(self.COLUMN_DRAW)
             piece = row.get(self.COLUMN_PIECE)
             if microwire and (pd.isna(draw) or pd.isna(piece)):
-                parsed = _microwire_tuple_from_label(microwire)
+                parsed = _microwire_parts_from_label_safe(microwire)
                 if parsed:
                     frame.at[index, self.COLUMN_DRAW] = int(parsed[0])
                     frame.at[index, self.COLUMN_PIECE] = int(parsed[1])
@@ -13406,8 +14031,8 @@ class StrainSection(MiniDatabaseSection):
         except Exception:
             pass
 
-    def _build_records_from_table(self) -> Dict[tuple[str, int, int], StrainRecord]:
-        records: Dict[tuple[str, int, int], StrainRecord] = {}
+    def _build_records_from_table(self) -> Dict[MicrowireKey, StrainRecord]:
+        records: Dict[MicrowireKey, StrainRecord] = {}
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else pd.DataFrame()
         if frame.empty:
             return records
@@ -13419,6 +14044,10 @@ class StrainSection(MiniDatabaseSection):
             piece = row.get(self.COLUMN_PIECE)
             draw_int: Optional[int] = None
             piece_int: Optional[int] = None
+            suffix: Optional[str] = None
+            parsed = _microwire_parts_from_label_safe(str(row.get(self.COLUMN_MICROWIRE) or ""))
+            if parsed is not None:
+                suffix = parsed[2]
             if pd.notna(draw) and pd.notna(piece):
                 try:
                     draw_int = int(float(draw))
@@ -13427,13 +14056,12 @@ class StrainSection(MiniDatabaseSection):
                     draw_int = None
                     piece_int = None
             if draw_int is None or piece_int is None:
-                parsed = _microwire_tuple_from_label(str(row.get(self.COLUMN_MICROWIRE) or ""))
                 if parsed:
                     draw_int = int(parsed[0])
                     piece_int = int(parsed[1])
             if draw_int is None or piece_int is None:
                 continue
-            label = _microwire_label(draw_int, piece_int)
+            label = _microwire_label(draw_int, piece_int, suffix)
             m_length = _parse_strain_float(row.get(self.COLUMN_M_LENGTH))
             a_value = row.get(self.COLUMN_A_LENGTH)
             broke = bool(row.get(self.COLUMN_BROKE))
@@ -13449,7 +14077,7 @@ class StrainSection(MiniDatabaseSection):
             percent = _parse_strain_float(strain_value)
             if percent is None and m_length not in (None, 0) and a_length is not None:
                 percent = self._compute_strain_percent(m_length, a_length)
-        records[(composition, draw_int, piece_int)] = StrainRecord(
+        records[(composition, draw_int, piece_int, suffix)] = StrainRecord(
             composition=composition,
             draw=draw_int,
             piece=piece_int,
@@ -13462,7 +14090,7 @@ class StrainSection(MiniDatabaseSection):
         )
         return records
 
-    def records_snapshot(self) -> Dict[tuple[str, int, int], StrainRecord]:
+    def records_snapshot(self) -> Dict[MicrowireKey, StrainRecord]:
         return self._build_records_from_table()
 
     def entries_snapshot(self) -> Dict[str, Dict[str, Any]]:
@@ -13478,6 +14106,10 @@ class StrainSection(MiniDatabaseSection):
             piece = row.get(self.COLUMN_PIECE)
             draw_int: Optional[int] = None
             piece_int: Optional[int] = None
+            suffix: Optional[str] = None
+            parsed = _microwire_parts_from_label_safe(str(row.get(self.COLUMN_MICROWIRE) or ""))
+            if parsed:
+                suffix = parsed[2]
             if pd.notna(draw) and pd.notna(piece):
                 try:
                     draw_int = int(float(draw))
@@ -13486,13 +14118,12 @@ class StrainSection(MiniDatabaseSection):
                     draw_int = None
                     piece_int = None
             if draw_int is None or piece_int is None:
-                parsed = _microwire_tuple_from_label(str(row.get(self.COLUMN_MICROWIRE) or ""))
                 if parsed:
                     draw_int = int(parsed[0])
                     piece_int = int(parsed[1])
             if draw_int is None or piece_int is None:
                 continue
-            key = f"{composition}|{draw_int}|{piece_int}"
+            key = _microwire_key_to_str((composition, draw_int, piece_int, suffix))
             entry = {str(col): row.get(col) for col in frame.columns}
             snapshot[key] = entry
         return snapshot
@@ -13672,7 +14303,7 @@ class _ColumnSelectionDialog(QtWidgets.QDialog):
         super().__init__(parent)
         self.setWindowTitle("Select columns")
         self._mandatory = set(mandatory)
-        self._column_items: Dict[str, QtWidgets.QTreeWidgetItem] = {}
+        self._column_items: Dict[str, List[QtWidgets.QTreeWidgetItem]] = {}
         self._updating = False
 
         layout = QtWidgets.QVBoxLayout(self)
@@ -13708,7 +14339,7 @@ class _ColumnSelectionDialog(QtWidgets.QDialog):
                 )
                 item.setCheckState(0, state)
                 group_item.addChild(item)
-                self._column_items[column] = item
+                self._column_items.setdefault(column, []).append(item)
             self._sync_group_state(group_item)
 
         self.tree.expandAll()
@@ -13734,8 +14365,8 @@ class _ColumnSelectionDialog(QtWidgets.QDialog):
 
     def selected_columns(self) -> Set[str]:
         selected: Set[str] = set(self._mandatory)
-        for column, item in self._column_items.items():
-            if item.checkState(0) == QtCore.Qt.CheckState.Checked:
+        for column, items in self._column_items.items():
+            if any(item.checkState(0) == QtCore.Qt.CheckState.Checked for item in items):
                 selected.add(column)
         return selected
 
@@ -13747,11 +14378,12 @@ class _ColumnSelectionDialog(QtWidgets.QDialog):
 
     def _set_all(self, state: QtCore.Qt.CheckState) -> None:
         self._updating = True
-        for column, item in self._column_items.items():
-            if column in self._mandatory:
-                item.setCheckState(0, QtCore.Qt.CheckState.Checked)
-            else:
-                item.setCheckState(0, state)
+        for column, items in self._column_items.items():
+            for item in items:
+                if column in self._mandatory:
+                    item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+                else:
+                    item.setCheckState(0, state)
         for index in range(self.tree.topLevelItemCount()):
             group_item = self.tree.topLevelItem(index)
             if group_item is not None:
@@ -13776,12 +14408,37 @@ class _ColumnSelectionDialog(QtWidgets.QDialog):
                     child.setCheckState(0, QtCore.Qt.CheckState.Checked)
                 else:
                     child.setCheckState(0, state)
+                if column_name is not None:
+                    for peer in self._column_items.get(column_name, []):
+                        if peer is child:
+                            continue
+                        peer.setCheckState(0, child.checkState(0))
+                        parent = peer.parent()
+                        if parent is not None:
+                            self._sync_group_state(parent)
             self._sync_group_state(item)
             self._updating = False
             return
         if column in self._mandatory and item.checkState(0) != QtCore.Qt.CheckState.Checked:
             self._updating = True
-            item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+            for peer in self._column_items.get(column, [item]):
+                peer.setCheckState(0, QtCore.Qt.CheckState.Checked)
+                parent = peer.parent()
+                if parent is not None:
+                    self._sync_group_state(parent)
+            self._updating = False
+            return
+        state = item.checkState(0)
+        peers = self._column_items.get(column, [])
+        if len(peers) > 1:
+            self._updating = True
+            for peer in peers:
+                if peer is item:
+                    continue
+                peer.setCheckState(0, state)
+                parent = peer.parent()
+                if parent is not None:
+                    self._sync_group_state(parent)
             self._updating = False
         parent = item.parent()
         if parent is not None:
@@ -13808,6 +14465,77 @@ class _ColumnSelectionDialog(QtWidgets.QDialog):
         else:
             state = QtCore.Qt.CheckState.PartiallyChecked
         group_item.setCheckState(0, state)
+
+
+class _GraphVisibilityDialog(QtWidgets.QDialog):
+    def __init__(
+        self,
+        title: str,
+        items: Sequence[Tuple[str, str]],
+        hidden_paths: Set[str],
+        parent: QtWidgets.QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self._hidden_paths = set(hidden_paths)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        intro = QtWidgets.QLabel("Toggle which graphs should be visible.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.list = QtWidgets.QListWidget()
+        layout.addWidget(self.list, 1)
+
+        for label, path in items:
+            item = QtWidgets.QListWidgetItem(label)
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
+            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+            state = (
+                QtCore.Qt.CheckState.Unchecked
+                if path in self._hidden_paths
+                else QtCore.Qt.CheckState.Checked
+            )
+            item.setCheckState(state)
+            self.list.addItem(item)
+
+        button_row = QtWidgets.QHBoxLayout()
+        show_all = QtWidgets.QPushButton("Show all")
+        show_all.clicked.connect(lambda: self._set_all(QtCore.Qt.CheckState.Checked))
+        button_row.addWidget(show_all)
+        hide_all = QtWidgets.QPushButton("Hide all")
+        hide_all.clicked.connect(lambda: self._set_all(QtCore.Qt.CheckState.Unchecked))
+        button_row.addWidget(hide_all)
+        button_row.addStretch(1)
+        layout.addLayout(button_row)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def hidden_paths(self) -> Set[str]:
+        hidden: Set[str] = set()
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            if item is None:
+                continue
+            path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+            if not isinstance(path, str):
+                continue
+            if item.checkState() != QtCore.Qt.CheckState.Checked:
+                hidden.add(path)
+        return hidden
+
+    def _set_all(self, state: QtCore.Qt.CheckState) -> None:
+        for idx in range(self.list.count()):
+            item = self.list.item(idx)
+            if item is None:
+                continue
+            item.setCheckState(state)
 
 
 class _ColumnOrderDialog(QtWidgets.QDialog):
@@ -14555,14 +15283,63 @@ class CompareSection(MiniDatabaseSection):
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
         default_height = self.matrix_view.verticalHeader().defaultSectionSize()
-        graph_height = ANNEALING_GRAPH_HEIGHT + 24
+        spacing = 6
+        padding = 32
+        max_graph_count = 1
         for row_idx in range(len(frame.index)):
             field = str(frame.iloc[row_idx].get("Field") or "")
-            target = graph_height if field in self._matrix_graph_rows else default_height
+            if field in self._matrix_graph_rows:
+                row_max = 1
+                for column in frame.columns:
+                    if str(column) == "Field":
+                        continue
+                    key = self._matrix_column_keys.get(str(column))
+                    if not key:
+                        continue
+                    count = self._matrix_graph_stack_count(field, key)
+                    if count > row_max:
+                        row_max = count
+                max_graph_count = max(max_graph_count, row_max)
+                target = ANNEALING_GRAPH_HEIGHT * row_max + spacing * (row_max - 1) + padding
+            else:
+                target = default_height
             try:
                 self.matrix_view.setRowHeight(row_idx, target)
             except Exception:
                 continue
+        try:
+            self.matrix_view.setIconSize(
+                QtCore.QSize(
+                    ANNEALING_GRAPH_WIDTH,
+                    ANNEALING_GRAPH_HEIGHT * max_graph_count + spacing * (max_graph_count - 1),
+                )
+            )
+        except Exception:
+            pass
+
+    def _matrix_graph_stack_count(self, field: str, key: str) -> int:
+        if field in FIGURE_COLUMNS:
+            if field == ANNEALING_OTHER_GRAPH_COLUMN:
+                records = self._ensure_annealing_groups().get(key, [])
+                if not records:
+                    return 1
+                high_record, low_record = _select_high_low_pair(records)
+                other_records = _select_other_measurements(records, high_record, low_record)
+                return max(len(other_records), 1)
+            return 1
+        if field == VSM_HYSTERESIS_COLUMN:
+            records = self._ensure_vsm_hysteresis_groups().get(key, [])
+            return len(_group_vsm_hysteresis_plot_groups(records))
+        if field == VSM_TEMPERATURE_SCAN_COLUMN:
+            records = self._ensure_vsm_temperature_groups().get(key, [])
+            return len(records)
+        if field == DMA_ISOSTRESS_COLUMN:
+            records = self._ensure_dma_isostress_groups().get(key, [])
+            return len(records)
+        if field == FMR_COLUMN:
+            records = self._ensure_fmr_groups().get(key, [])
+            return len(records)
+        return 1
 
     def _update_matrix_column_widths(self) -> None:
         if not isinstance(getattr(self, "matrix_view", None), QtWidgets.QTableView):
@@ -14625,19 +15402,23 @@ class CompareSection(MiniDatabaseSection):
         if cached is not None:
             return cached
         pixmaps = [item.pixmap for item in items if item.pixmap is not None]
+        count = max(len(pixmaps), 1)
+        spacing = 6
         if stack_vertical:
             combined = _combine_pixmaps_vertical(
                 pixmaps,
                 width_px=ANNEALING_GRAPH_WIDTH,
-                height_px=ANNEALING_GRAPH_HEIGHT,
-                scale_to_fit=True,
+                height_px=ANNEALING_GRAPH_HEIGHT * count + spacing * (count - 1),
+                spacing=spacing,
+                scale_to_fit=False,
             )
         else:
             combined = _combine_pixmaps_side_by_side(
                 pixmaps,
-                width_px=ANNEALING_GRAPH_WIDTH,
+                width_px=ANNEALING_GRAPH_WIDTH * count + spacing * (count - 1),
                 height_px=ANNEALING_GRAPH_HEIGHT,
-                scale_to_fit=True,
+                spacing=spacing,
+                scale_to_fit=False,
             )
         if combined is not None:
             self._matrix_pixmap_cache[cache_key] = combined
@@ -14660,28 +15441,63 @@ class CompareSection(MiniDatabaseSection):
                 if not records:
                     return None
                 high_record, low_record = _select_high_low_pair(records)
-                target = high_record if field == FIGURE_COLUMNS[0] else low_record
-                if target is None:
+                if field == FIGURE_COLUMNS[0]:
+                    target = high_record
+                elif field == FIGURE_COLUMNS[1]:
+                    target = low_record
+                else:
+                    target = None
+                if target is not None:
+                    measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
+                    cache_key = (
+                        "annealing",
+                        field,
+                        measurement_id or str(getattr(target, "path", "")),
+                    )
+                    cached = self._matrix_pixmap_cache.get(cache_key)
+                    if cached is not None:
+                        return cached
+                    pixmap = _render_measurement_pixmap(
+                        target,
+                        self.logger,
+                        width_px=ANNEALING_GRAPH_WIDTH,
+                        height_px=ANNEALING_GRAPH_HEIGHT,
+                    )
+                    if pixmap is None:
+                        return None
+                    self._matrix_pixmap_cache[cache_key] = pixmap
+                    return pixmap
+                other_records = _select_other_measurements(records, high_record, low_record)
+                if not other_records:
                     return None
-                measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
-                cache_key = (
-                    "annealing",
-                    field,
-                    measurement_id or str(getattr(target, "path", "")),
+                signature = tuple(
+                    str(getattr(record, "path", "")) for record in other_records
                 )
+                cache_key = ("annealing_other", key, signature)
                 cached = self._matrix_pixmap_cache.get(cache_key)
                 if cached is not None:
                     return cached
-                pixmap = _render_measurement_pixmap(
-                    target,
-                    self.logger,
+                pixmaps: List[QtGui.QPixmap] = []
+                for record in other_records:
+                    preview = _render_measurement_pixmap(
+                        record,
+                        self.logger,
+                        width_px=ANNEALING_GRAPH_WIDTH,
+                        height_px=ANNEALING_GRAPH_HEIGHT,
+                    )
+                    if preview is not None:
+                        pixmaps.append(preview)
+                combined = _combine_pixmaps_vertical(
+                    pixmaps,
                     width_px=ANNEALING_GRAPH_WIDTH,
-                    height_px=ANNEALING_GRAPH_HEIGHT,
+                    height_px=ANNEALING_GRAPH_HEIGHT * max(len(pixmaps), 1)
+                    + 6 * (max(len(pixmaps), 1) - 1),
+                    spacing=6,
+                    scale_to_fit=False,
                 )
-                if pixmap is None:
-                    return None
-                self._matrix_pixmap_cache[cache_key] = pixmap
-                return pixmap
+                if combined is not None:
+                    self._matrix_pixmap_cache[cache_key] = combined
+                return combined
             if field == VSM_HYSTERESIS_COLUMN:
                 records = self._ensure_vsm_hysteresis_groups().get(key, [])
                 if not records:
@@ -15135,18 +15951,33 @@ class CompareSection(MiniDatabaseSection):
         if not groups:
             payload = self._load_payload("annealing", "annealing_records")
             if isinstance(payload, list):
-                self._cached_annealing_records = list(payload)
-                self._cached_annealing_groups = self._group_annealing_records(payload)
+                records = self._filter_hidden_records(payload, "annealing")
+                self._cached_annealing_records = list(records)
+                self._cached_annealing_groups = self._group_annealing_records(records)
                 groups = self._cached_annealing_groups
         return groups
 
+    def _filter_hidden_records(
+        self, records: Sequence[object], section_key: str
+    ) -> List[object]:
+        hidden = _hidden_paths_from_section(self.sections.get(section_key))
+        if not hidden:
+            return list(records)
+        filtered: List[object] = []
+        for record in records:
+            path_key = _record_path_key(record)
+            if path_key and path_key in hidden:
+                continue
+            filtered.append(record)
+        return filtered
+
     def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
         groups = self._cached_vsm_hysteresis_groups
         if not groups:
             payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_hysteresis_records = records
+                records = self._filter_hidden_records(payload, "vsm_hysteresis")
+                self._cached_vsm_hysteresis_records = list(records)
                 self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
                 groups = self._cached_vsm_hysteresis_groups
         return groups
@@ -15154,13 +15985,10 @@ class CompareSection(MiniDatabaseSection):
     def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
         groups = self._cached_vsm_temperature_groups
         if not groups:
-            payload = self._load_payload(
-                "vsm_temperature_scan",
-                "vsm_temperature_scan_records",
-            )
+            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_temperature_records = records
+                records = self._filter_hidden_records(payload, "vsm_temperature_scan")
+                self._cached_vsm_temperature_records = list(records)
                 self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
                 groups = self._cached_vsm_temperature_groups
         return groups
@@ -15170,8 +15998,8 @@ class CompareSection(MiniDatabaseSection):
         if not groups:
             payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_dma_isostress_records = records
+                records = self._filter_hidden_records(payload, "dma_iso_stress")
+                self._cached_dma_isostress_records = list(records)
                 self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
                 groups = self._cached_dma_isostress_groups
         return groups
@@ -15181,120 +16009,10 @@ class CompareSection(MiniDatabaseSection):
         if not groups:
             payload = self._load_payload("fmr", "fmr_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_fmr_records = records
+                records = self._filter_hidden_records(payload, "fmr")
+                self._cached_fmr_records = list(records)
                 self._cached_fmr_groups = _group_graph_records_by_key(records)
                 groups = self._cached_fmr_groups
-        return groups
-
-    def _ensure_fmr_groups(self) -> Dict[str, List[FmrRecord]]:
-        groups = self._cached_fmr_groups
-        if not groups:
-            payload = self._load_payload("fmr", "fmr_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_fmr_records = records
-                self._cached_fmr_groups = _group_graph_records_by_key(records)
-                groups = self._cached_fmr_groups
-        return groups
-
-    def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
-        groups = self._cached_vsm_hysteresis_groups
-        if not groups:
-            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_hysteresis_records = records
-                self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_hysteresis_groups
-        return groups
-
-    def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
-        groups = self._cached_vsm_temperature_groups
-        if not groups:
-            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_temperature_records = records
-                self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_temperature_groups
-        return groups
-
-    def _ensure_dma_isostress_groups(self) -> Dict[str, List[DmaIsoStressRecord]]:
-        groups = self._cached_dma_isostress_groups
-        if not groups:
-            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_dma_isostress_records = records
-                self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
-                groups = self._cached_dma_isostress_groups
-        return groups
-
-    def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
-        groups = self._cached_vsm_hysteresis_groups
-        if not groups:
-            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_hysteresis_records = records
-                self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_hysteresis_groups
-        return groups
-
-    def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
-        groups = self._cached_vsm_temperature_groups
-        if not groups:
-            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_temperature_records = records
-                self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_temperature_groups
-        return groups
-
-    def _ensure_dma_isostress_groups(self) -> Dict[str, List[DmaIsoStressRecord]]:
-        groups = self._cached_dma_isostress_groups
-        if not groups:
-            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_dma_isostress_records = records
-                self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
-                groups = self._cached_dma_isostress_groups
-        return groups
-
-    def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
-        groups = self._cached_vsm_hysteresis_groups
-        if not groups:
-            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_hysteresis_records = records
-                self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_hysteresis_groups
-        return groups
-
-    def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
-        groups = self._cached_vsm_temperature_groups
-        if not groups:
-            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_temperature_records = records
-                self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_temperature_groups
-        return groups
-
-    def _ensure_dma_isostress_groups(self) -> Dict[str, List[DmaIsoStressRecord]]:
-        groups = self._cached_dma_isostress_groups
-        if not groups:
-            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_dma_isostress_records = records
-                self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
-                groups = self._cached_dma_isostress_groups
         return groups
 
     def _group_annealing_records(
@@ -15311,45 +16029,18 @@ class CompareSection(MiniDatabaseSection):
             piece = getattr(metadata, "piece_y", None)
             if composition is None or draw is None or piece is None:
                 continue
+            suffix = None
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                parsed_key = _microscope_key(path)
+                if parsed_key is not None:
+                    _, _, _, suffix = parsed_key
             try:
-                key = f"{composition}|{int(draw)}|{int(piece)}"
+                key = _microwire_key_to_str((str(composition), int(draw), int(piece), suffix))
             except (TypeError, ValueError):
                 continue
             grouped.setdefault(key, []).append(record)
         return grouped
-
-    def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
-        groups = self._cached_vsm_hysteresis_groups
-        if not groups:
-            payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_hysteresis_records = records
-                self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_hysteresis_groups
-        return groups
-
-    def _ensure_vsm_temperature_groups(self) -> Dict[str, List[VsmTemperatureScanRecord]]:
-        groups = self._cached_vsm_temperature_groups
-        if not groups:
-            payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_temperature_records = records
-                self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
-                groups = self._cached_vsm_temperature_groups
-        return groups
-
-    def _ensure_dma_isostress_groups(self) -> Dict[str, List[DmaIsoStressRecord]]:
-        groups = self._cached_dma_isostress_groups
-        if not groups:
-            payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
-            if isinstance(payload, list):
-                records = list(payload)
-                self._cached_dma_isostress_records = records
-                self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
-                groups = self._cached_dma_isostress_groups
-        return groups
 
     def _remove_selected(self) -> None:
         rows = self._selected_rows()
@@ -15401,6 +16092,8 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_vsm_temperature_groups: Dict[str, List[VsmTemperatureScanRecord]] = {}
         self._cached_dma_isostress_records: List[DmaIsoStressRecord] = []
         self._cached_dma_isostress_groups: Dict[str, List[DmaIsoStressRecord]] = {}
+        self._cached_fmr_records: List[FmrRecord] = []
+        self._cached_fmr_groups: Dict[str, List[FmrRecord]] = {}
         self._compare_section: Optional["CompareSection"] = None
         self._raw_preview_frame: Optional[pd.DataFrame] = None
         self._preview_row_index_map: List[int] = []
@@ -15828,9 +16521,9 @@ class AssemblySection(QtWidgets.QWidget):
             List[VsmTemperatureScanRecord],
             List[DmaIsoStressRecord],
             List[FmrRecord],
-            Dict[Tuple[str, int, int], MicroscopeMeasurements],
+            Dict[MicrowireKey, MicroscopeMeasurements],
             Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
-            Dict[Tuple[str, int, int], StrainRecord],
+            Dict[MicrowireKey, StrainRecord],
             Dict[str, Dict[str, Any]],
             Dict[str, Dict[str, Any]],
             Dict[str, Dict[str, float]],
@@ -15865,13 +16558,15 @@ class AssemblySection(QtWidgets.QWidget):
         annealing_records_payload = self._load_payload("annealing", "annealing_records")
         annealing_records: List[MeasurementRecord] = []
         if isinstance(annealing_records_payload, list):
-            annealing_records = list(annealing_records_payload)
+            annealing_records = list(
+                self._filter_hidden_records(annealing_records_payload, "annealing")
+            )
         if not annealing_records:
             _mark_missing("annealing")
         self._cached_annealing_records = list(annealing_records)
         self._cached_annealing_groups = self._group_annealing_records(annealing_records)
 
-        microscope_index: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+        microscope_index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
         overrides: Dict[str, Dict[str, float]] = {}
         if "microscope" in selected:
             payload = self._load_payload("microscope", "microscope_index")
@@ -15894,9 +16589,12 @@ class AssemblySection(QtWidgets.QWidget):
             if isinstance(payload, dict):
                 video_index = payload
             else:
-                _mark_missing("videos")
+                if require_payloads:
+                    self.log("Skipping videos because no data were found.", level=logging.WARNING)
+                else:
+                    _mark_missing("videos")
 
-        strain_records: Dict[Tuple[str, int, int], StrainRecord] = {}
+        strain_records: Dict[MicrowireKey, StrainRecord] = {}
         if "strain" in selected:
             payload = self._load_payload("strain", "strain_records")
             if isinstance(payload, dict):
@@ -15918,7 +16616,9 @@ class AssemblySection(QtWidgets.QWidget):
         if "vsm_hysteresis" in selected:
             payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
             if isinstance(payload, list):
-                vsm_hysteresis_records = list(payload)
+                vsm_hysteresis_records = list(
+                    self._filter_hidden_records(payload, "vsm_hysteresis")
+                )
             else:
                 _mark_missing("VSM hysteresis")
         self._cached_vsm_hysteresis_records = list(vsm_hysteresis_records)
@@ -15928,7 +16628,9 @@ class AssemblySection(QtWidgets.QWidget):
         if "vsm_temperature_scan" in selected:
             payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
             if isinstance(payload, list):
-                vsm_temperature_records = list(payload)
+                vsm_temperature_records = list(
+                    self._filter_hidden_records(payload, "vsm_temperature_scan")
+                )
             else:
                 _mark_missing("VSM temperature scan")
         self._cached_vsm_temperature_records = list(vsm_temperature_records)
@@ -15938,7 +16640,9 @@ class AssemblySection(QtWidgets.QWidget):
         if "dma_iso_stress" in selected:
             payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
             if isinstance(payload, list):
-                dma_isostress_records = list(payload)
+                dma_isostress_records = list(
+                    self._filter_hidden_records(payload, "dma_iso_stress")
+                )
             else:
                 _mark_missing("DMA iso-stress")
         self._cached_dma_isostress_records = list(dma_isostress_records)
@@ -15948,7 +16652,7 @@ class AssemblySection(QtWidgets.QWidget):
         if "fmr" in selected:
             payload = self._load_payload("fmr", "fmr_records")
             if isinstance(payload, list):
-                fmr_records = list(payload)
+                fmr_records = list(self._filter_hidden_records(payload, "fmr"))
             else:
                 _mark_missing("FMR")
         self._cached_fmr_records = list(fmr_records)
@@ -16020,33 +16724,26 @@ class AssemblySection(QtWidgets.QWidget):
         )
 
     @staticmethod
-    def _parse_microscope_key_from_row(row: pd.Series) -> Optional[Tuple[str, int, int]]:
+    def _parse_microscope_key_from_row(row: pd.Series) -> Optional[MicrowireKey]:
         key_value = row.get("_key")
         if isinstance(key_value, str):
-            parts = key_value.split("|")
-            if len(parts) == 3:
-                composition = parts[0].strip()
-                try:
-                    draw = int(parts[1])
-                    piece = int(parts[2])
-                except ValueError:
-                    draw = piece = None
-                else:
-                    if composition:
-                        return (composition, draw, piece)
+            parsed = _microwire_key_from_string(key_value)
+            if parsed is not None:
+                return parsed
         composition = str(row.get("Composition") or "").strip()
         microwire = str(row.get("Microwire") or "").strip()
         if not composition or not microwire:
             return None
-        parsed = _microwire_tuple_from_label(microwire)
+        parsed = _microwire_parts_from_label_safe(microwire)
         if parsed is None:
             return None
         try:
             draw = int(parsed[0])
             piece = int(parsed[1])
+            suffix = parsed[2]
         except (TypeError, ValueError):
             return None
-        return (composition, draw, piece)
+        return (composition, draw, piece, suffix)
 
     @staticmethod
     def _parse_positive_float(value: object) -> Optional[float]:
@@ -16110,8 +16807,8 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _build_microscope_index_from_table(
         self, table: pd.DataFrame
-    ) -> Dict[Tuple[str, int, int], MicroscopeMeasurements]:
-        index: Dict[Tuple[str, int, int], MicroscopeMeasurements] = {}
+    ) -> Dict[MicrowireKey, MicroscopeMeasurements]:
+        index: Dict[MicrowireKey, MicroscopeMeasurements] = {}
         for _, row in table.iterrows():
             key = self._parse_microscope_key_from_row(row)
             if key is None:
@@ -16226,8 +16923,11 @@ class AssemblySection(QtWidgets.QWidget):
         )
         try:
             if show_graphs:
+                max_count = self._preview_graph_max_count(display_columns)
+                spacing = 6
+                icon_width = ANNEALING_GRAPH_WIDTH * max_count + spacing * (max_count - 1)
                 self.preview_table.setIconSize(
-                    QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
+                    QtCore.QSize(max(icon_width, ANNEALING_GRAPH_WIDTH), ANNEALING_GRAPH_HEIGHT)
                 )
                 header = self.preview_table.verticalHeader()
                 if header is not None:
@@ -16258,6 +16958,30 @@ class AssemblySection(QtWidgets.QWidget):
             self.export_preview_button.setEnabled(row_count > 0)
         if hasattr(self, "clear_sort_button"):
             self.clear_sort_button.setEnabled(bool(self._sort_spec))
+
+    def _preview_graph_max_count(self, columns: Sequence[str]) -> int:
+        max_count = 1
+        column_set = {str(column) for column in columns}
+        if ANNEALING_OTHER_GRAPH_COLUMN in column_set:
+            for records in self._ensure_annealing_groups().values():
+                if not records:
+                    continue
+                high_record, low_record = _select_high_low_pair(records)
+                other_records = _select_other_measurements(records, high_record, low_record)
+                max_count = max(max_count, len(other_records))
+        if VSM_HYSTERESIS_COLUMN in column_set:
+            for records in self._ensure_vsm_hysteresis_groups().values():
+                max_count = max(max_count, len(_group_vsm_hysteresis_plot_groups(records)))
+        if VSM_TEMPERATURE_SCAN_COLUMN in column_set:
+            for records in self._ensure_vsm_temperature_groups().values():
+                max_count = max(max_count, len(records))
+        if DMA_ISOSTRESS_COLUMN in column_set:
+            for records in self._ensure_dma_isostress_groups().values():
+                max_count = max(max_count, len(records))
+        if FMR_COLUMN in column_set:
+            for records in self._ensure_fmr_groups().values():
+                max_count = max(max_count, len(records))
+        return max(max_count, 1)
 
     def _resolve_selected_columns(self, columns: Sequence[str]) -> List[str]:
         column_names = [str(column) for column in columns]
@@ -16352,19 +17076,23 @@ class AssemblySection(QtWidgets.QWidget):
         if cached is not None:
             return cached
         pixmaps = [item.pixmap for item in items if item.pixmap is not None]
+        count = max(len(pixmaps), 1)
+        spacing = 6
         if stack_vertical:
             combined = _combine_pixmaps_vertical(
                 pixmaps,
                 width_px=ANNEALING_GRAPH_WIDTH,
-                height_px=ANNEALING_GRAPH_HEIGHT,
-                scale_to_fit=True,
+                height_px=ANNEALING_GRAPH_HEIGHT * count + spacing * (count - 1),
+                spacing=spacing,
+                scale_to_fit=False,
             )
         else:
             combined = _combine_pixmaps_side_by_side(
                 pixmaps,
-                width_px=ANNEALING_GRAPH_WIDTH,
+                width_px=ANNEALING_GRAPH_WIDTH * count + spacing * (count - 1),
                 height_px=ANNEALING_GRAPH_HEIGHT,
-                scale_to_fit=True,
+                spacing=spacing,
+                scale_to_fit=False,
             )
         if combined is not None:
             self._graph_pixmap_cache[cache_key] = combined
@@ -16384,28 +17112,63 @@ class AssemblySection(QtWidgets.QWidget):
                 if not records:
                     return None
                 high_record, low_record = _select_high_low_pair(records)
-                target = high_record if column_label == FIGURE_COLUMNS[0] else low_record
-                if target is None:
+                if column_label == FIGURE_COLUMNS[0]:
+                    target = high_record
+                elif column_label == FIGURE_COLUMNS[1]:
+                    target = low_record
+                else:
+                    target = None
+                if target is not None:
+                    measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
+                    cache_key = (
+                        "annealing",
+                        column_label,
+                        measurement_id or str(getattr(target, "path", "")),
+                    )
+                    cached = self._graph_pixmap_cache.get(cache_key)
+                    if cached is not None:
+                        return cached
+                    pixmap = _render_measurement_pixmap(
+                        target,
+                        self.logger,
+                        width_px=ANNEALING_GRAPH_WIDTH,
+                        height_px=ANNEALING_GRAPH_HEIGHT,
+                    )
+                    if pixmap is None:
+                        return None
+                    self._graph_pixmap_cache[cache_key] = pixmap
+                    return pixmap
+                other_records = _select_other_measurements(records, high_record, low_record)
+                if not other_records:
                     return None
-                measurement_id = getattr(getattr(target, "metadata", None), "measurement_id", None)
-                cache_key = (
-                    "annealing",
-                    column_label,
-                    measurement_id or str(getattr(target, "path", "")),
+                signature = tuple(
+                    str(getattr(record, "path", "")) for record in other_records
                 )
+                cache_key = ("annealing_other", key, signature)
                 cached = self._graph_pixmap_cache.get(cache_key)
                 if cached is not None:
                     return cached
-                pixmap = _render_measurement_pixmap(
-                    target,
-                    self.logger,
-                    width_px=ANNEALING_GRAPH_WIDTH,
+                pixmap_stack: List[QtGui.QPixmap] = []
+                for record in other_records:
+                    preview = _render_measurement_pixmap(
+                        record,
+                        self.logger,
+                        width_px=ANNEALING_GRAPH_WIDTH,
+                        height_px=ANNEALING_GRAPH_HEIGHT,
+                    )
+                    if preview is not None:
+                        pixmap_stack.append(preview)
+                combined = _combine_pixmaps_side_by_side(
+                    pixmap_stack,
+                    width_px=ANNEALING_GRAPH_WIDTH * max(len(pixmap_stack), 1)
+                    + 6 * (max(len(pixmap_stack), 1) - 1),
                     height_px=ANNEALING_GRAPH_HEIGHT,
+                    spacing=6,
+                    scale_to_fit=False,
                 )
-                if pixmap is None:
-                    return None
-                self._graph_pixmap_cache[cache_key] = pixmap
-                return pixmap
+                if combined is not None:
+                    self._graph_pixmap_cache[cache_key] = combined
+                return combined
             if column_label == VSM_HYSTERESIS_COLUMN:
                 records = self._ensure_vsm_hysteresis_groups().get(key, [])
                 if not records:
@@ -16418,7 +17181,7 @@ class AssemblySection(QtWidgets.QWidget):
                     width_px=ANNEALING_GRAPH_WIDTH,
                     height_px=ANNEALING_GRAPH_HEIGHT,
                 )
-                return self._combined_graph_pixmap(cache_key, items, stack_vertical=True)
+                return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
             if column_label == VSM_TEMPERATURE_SCAN_COLUMN:
                 records = self._ensure_vsm_temperature_groups().get(key, [])
                 if not records:
@@ -16431,7 +17194,7 @@ class AssemblySection(QtWidgets.QWidget):
                     width_px=ANNEALING_GRAPH_WIDTH,
                     height_px=ANNEALING_GRAPH_HEIGHT,
                 )
-                return self._combined_graph_pixmap(cache_key, items, stack_vertical=True)
+                return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
             if column_label == DMA_ISOSTRESS_COLUMN:
                 records = self._ensure_dma_isostress_groups().get(key, [])
                 if not records:
@@ -16444,7 +17207,7 @@ class AssemblySection(QtWidgets.QWidget):
                     width_px=ANNEALING_GRAPH_WIDTH,
                     height_px=ANNEALING_GRAPH_HEIGHT,
                 )
-                return self._combined_graph_pixmap(cache_key, items, stack_vertical=True)
+                return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
             if column_label == FMR_COLUMN:
                 records = self._ensure_fmr_groups().get(key, [])
                 if not records:
@@ -16457,7 +17220,7 @@ class AssemblySection(QtWidgets.QWidget):
                     width_px=ANNEALING_GRAPH_WIDTH,
                     height_px=ANNEALING_GRAPH_HEIGHT,
                 )
-                return self._combined_graph_pixmap(cache_key, items, stack_vertical=True)
+                return self._combined_graph_pixmap(cache_key, items, stack_vertical=False)
         except Exception:
             self.logger.exception("Failed to render assemble graph preview")
         return None
@@ -16476,8 +17239,14 @@ class AssemblySection(QtWidgets.QWidget):
             piece = getattr(metadata, "piece_y", None)
             if composition is None or draw is None or piece is None:
                 continue
+            suffix = None
+            path = getattr(record, "path", None)
+            if isinstance(path, Path):
+                parsed_key = _microscope_key(path)
+                if parsed_key is not None:
+                    _, _, _, suffix = parsed_key
             try:
-                key = f"{composition}|{int(draw)}|{int(piece)}"
+                key = _microwire_key_to_str((str(composition), int(draw), int(piece), suffix))
             except (TypeError, ValueError):
                 continue
             grouped.setdefault(key, []).append(record)
@@ -16488,18 +17257,33 @@ class AssemblySection(QtWidgets.QWidget):
         if not groups:
             payload = self._load_payload("annealing", "annealing_records")
             if isinstance(payload, list):
-                self._cached_annealing_records = list(payload)
-                self._cached_annealing_groups = self._group_annealing_records(payload)
+                records = self._filter_hidden_records(payload, "annealing")
+                self._cached_annealing_records = list(records)
+                self._cached_annealing_groups = self._group_annealing_records(records)
                 groups = self._cached_annealing_groups
         return groups
+
+    def _filter_hidden_records(
+        self, records: Sequence[object], section_key: str
+    ) -> List[object]:
+        hidden = _hidden_paths_from_section(self.sections.get(section_key))
+        if not hidden:
+            return list(records)
+        filtered: List[object] = []
+        for record in records:
+            path_key = _record_path_key(record)
+            if path_key and path_key in hidden:
+                continue
+            filtered.append(record)
+        return filtered
 
     def _ensure_vsm_hysteresis_groups(self) -> Dict[str, List[VsmHysteresisRecord]]:
         groups = self._cached_vsm_hysteresis_groups
         if not groups:
             payload = self._load_payload("vsm_hysteresis", "vsm_hysteresis_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_hysteresis_records = records
+                records = self._filter_hidden_records(payload, "vsm_hysteresis")
+                self._cached_vsm_hysteresis_records = list(records)
                 self._cached_vsm_hysteresis_groups = _group_graph_records_by_key(records)
                 groups = self._cached_vsm_hysteresis_groups
         return groups
@@ -16509,8 +17293,8 @@ class AssemblySection(QtWidgets.QWidget):
         if not groups:
             payload = self._load_payload("vsm_temperature_scan", "vsm_temperature_scan_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_vsm_temperature_records = records
+                records = self._filter_hidden_records(payload, "vsm_temperature_scan")
+                self._cached_vsm_temperature_records = list(records)
                 self._cached_vsm_temperature_groups = _group_graph_records_by_key(records)
                 groups = self._cached_vsm_temperature_groups
         return groups
@@ -16520,10 +17304,21 @@ class AssemblySection(QtWidgets.QWidget):
         if not groups:
             payload = self._load_payload("dma_iso_stress", "dma_iso_stress_records")
             if isinstance(payload, list):
-                records = list(payload)
-                self._cached_dma_isostress_records = records
+                records = self._filter_hidden_records(payload, "dma_iso_stress")
+                self._cached_dma_isostress_records = list(records)
                 self._cached_dma_isostress_groups = _group_graph_records_by_key(records)
                 groups = self._cached_dma_isostress_groups
+        return groups
+
+    def _ensure_fmr_groups(self) -> Dict[str, List[FmrRecord]]:
+        groups = self._cached_fmr_groups
+        if not groups:
+            payload = self._load_payload("fmr", "fmr_records")
+            if isinstance(payload, list):
+                records = self._filter_hidden_records(payload, "fmr")
+                self._cached_fmr_records = list(records)
+                self._cached_fmr_groups = _group_graph_records_by_key(records)
+                groups = self._cached_fmr_groups
         return groups
 
     def _selected_preview_row_index(self) -> Optional[int]:
@@ -16835,15 +17630,16 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _column_groups(self, columns: Sequence[str]) -> Dict[str, List[str]]:
         available = [str(column) for column in columns]
-        used: Set[str] = set()
+        available_set = {str(column) for column in columns}
+        included: Set[str] = set()
         groups: List[Tuple[str, List[str]]] = []
 
         def add_group(label: str, members: Sequence[str]) -> None:
-            subset = [col for col in members if col in available and col not in used]
+            subset = [col for col in members if col in available_set]
             if not subset:
                 return
             groups.append((label, subset))
-            used.update(subset)
+            included.update(subset)
 
         section_map = self._section_column_map(columns)
         add_group("Core", ["Composition", "Microwire"])
@@ -16858,7 +17654,7 @@ class AssemblySection(QtWidgets.QWidget):
         add_group("Fabrication", section_map.get("fabrication", []))
         add_group("Videos", section_map.get("videos", []))
         add_group("Strain", section_map.get("strain", []))
-        remaining = [col for col in available if col not in used]
+        remaining = [col for col in available if col not in included]
         if remaining:
             groups.append(("Other", remaining))
         return dict(groups)
@@ -17324,17 +18120,20 @@ class AssemblySection(QtWidgets.QWidget):
         vsm_hyst_groups = self._ensure_vsm_hysteresis_groups()
         vsm_temp_groups = self._ensure_vsm_temperature_groups()
         dma_groups = self._ensure_dma_isostress_groups()
+        fmr_groups = self._ensure_fmr_groups()
         image_cache: Dict[Path, str] = {}
         graph_cache: Dict[str, str] = {}
         vsm_hyst_cache: Dict[str, str] = {}
         vsm_temp_cache: Dict[str, str] = {}
         dma_cache: Dict[str, str] = {}
+        fmr_cache: Dict[str, str] = {}
         rows_html: List[str] = []
         has_graphs = False
         has_microscope = False
         has_vsm_hyst = False
         has_vsm_temp = False
         has_dma = False
+        has_fmr = False
         vsm_temp_processor = _get_vsm_temp_processor(self.logger) if vsm_temp_groups else None
 
         def _record_cache_key(record: object) -> str:
@@ -17380,10 +18179,10 @@ class AssemblySection(QtWidgets.QWidget):
                 low_uri = ""
                 key = None
                 if composition and microwire:
-                    parsed = _microwire_tuple_from_label(microwire)
+                    parsed = _microwire_parts_from_label_safe(microwire)
                     if parsed is not None:
-                        draw, piece = parsed
-                        key = f"{composition}|{int(draw)}|{int(piece)}"
+                        draw, piece, suffix = parsed
+                        key = _microwire_key_to_str((composition, int(draw), int(piece), suffix))
                         records = groups.get(key, [])
                         if records:
                             high_record, low_record = _select_high_low_pair(records)
@@ -17393,11 +18192,27 @@ class AssemblySection(QtWidgets.QWidget):
                             low_uri = self._graph_data_uri(
                                 low_record, plot_dir, graph_cache, image_cache
                             )
-                if high_uri or low_uri:
+                            other_records = _select_other_measurements(
+                                records, high_record, low_record
+                            )
+                            other_uris = [
+                                self._graph_data_uri(
+                                    record, plot_dir, graph_cache, image_cache
+                                )
+                                for record in other_records
+                            ]
+                        else:
+                            other_uris = []
+                    else:
+                        other_uris = []
+                else:
+                    other_uris = []
+                if high_uri or low_uri or any(other_uris):
                     has_graphs = True
                 vsm_hyst_uris: List[str] = []
                 vsm_temp_uris: List[str] = []
                 dma_uris: List[str] = []
+                fmr_uris: List[str] = []
                 if key:
                     vsm_records = vsm_hyst_groups.get(key, [])
                     vsm_groups = _group_vsm_hysteresis_plot_groups(vsm_records)
@@ -17448,6 +18263,22 @@ class AssemblySection(QtWidgets.QWidget):
                             dma_uris.append(uri)
                     if dma_uris:
                         has_dma = True
+                    fmr_records = fmr_groups.get(key, [])
+                    for record in fmr_records:
+                        uri = _record_to_data_uri(
+                            record,
+                            fmr_cache,
+                            lambda rec: _plot_fmr_figure(
+                                rec,
+                                self.logger,
+                                width_px=GRAPH_PREVIEW_WIDTH,
+                                height_px=GRAPH_PREVIEW_HEIGHT,
+                            ),
+                        )
+                        if uri:
+                            fmr_uris.append(uri)
+                    if fmr_uris:
+                        has_fmr = True
                 core_uri = ""
                 glass_uri = ""
                 if MICROSCOPE_IMAGE_COLUMNS[0] in frame.columns:
@@ -17472,14 +18303,18 @@ class AssemblySection(QtWidgets.QWidget):
                 vsm_hyst_blob = "|".join(vsm_hyst_uris)
                 vsm_temp_blob = "|".join(vsm_temp_uris)
                 dma_blob = "|".join(dma_uris)
+                other_blob = "|".join(uri for uri in other_uris if uri)
+                fmr_blob = "|".join(fmr_uris)
                 attrs = [
                     f'data-high="{html.escape(high_uri)}"',
                     f'data-low="{html.escape(low_uri)}"',
+                    f'data-other="{html.escape(other_blob)}"',
                     f'data-core="{html.escape(core_uri)}"',
                     f'data-glass="{html.escape(glass_uri)}"',
                     f'data-vsm-hyst="{html.escape(vsm_hyst_blob)}"',
                     f'data-vsm-temp="{html.escape(vsm_temp_blob)}"',
                     f'data-dma="{html.escape(dma_blob)}"',
+                    f'data-fmr="{html.escape(fmr_blob)}"',
                 ]
                 rows_html.append(f"<tr {' '.join(attrs)}>{''.join(cells)}</tr>")
 
@@ -17524,6 +18359,11 @@ class AssemblySection(QtWidgets.QWidget):
                   <img id="preview-low" class="preview-image" alt="Low mA graph" />
                   <div id="preview-low-empty" class="preview-empty">No low mA graph</div>
                 </div>
+                <div class="preview-card">
+                  <div class="preview-label">Other mA</div>
+                  <div id="preview-other" class="preview-stack"></div>
+                  <div id="preview-other-empty" class="preview-empty">No other mA graphs</div>
+                </div>
               </div>
             </div>
             """
@@ -17554,7 +18394,23 @@ class AssemblySection(QtWidgets.QWidget):
               <div id="preview-dma-empty" class="preview-empty">No DMA iso-stress graphs</div>
             </div>
             """
-        if not graph_section and not microscope_section and not vsm_hyst_section and not vsm_temp_section and not dma_section:
+        fmr_section = ""
+        if has_fmr:
+            fmr_section = """
+            <div class="preview-section">
+              <div class="preview-title">FMR</div>
+              <div id="preview-fmr" class="preview-stack"></div>
+              <div id="preview-fmr-empty" class="preview-empty">No FMR graphs</div>
+            </div>
+            """
+        if (
+            not graph_section
+            and not microscope_section
+            and not vsm_hyst_section
+            and not vsm_temp_section
+            and not dma_section
+            and not fmr_section
+        ):
             preview_classes = f"{preview_class} empty"
 
         html_text = f"""<!doctype html>
@@ -17582,6 +18438,23 @@ class AssemblySection(QtWidgets.QWidget):
       align-items: center;
       gap: 12px;
     }}
+    .toolbar-actions {{
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }}
+    .toolbar button {{
+      background: #222;
+      color: #f5f5f5;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }}
+    .toolbar button:hover {{
+      border-color: #4a4a4a;
+    }}
     .title {{
       font-size: 20px;
       font-weight: 600;
@@ -17595,6 +18468,51 @@ class AssemblySection(QtWidgets.QWidget):
       grid-template-columns: minmax(0, 1fr) 420px;
       gap: 16px;
       padding: 16px 24px 24px;
+    }}
+    .compare-panel {{
+      margin: 0 24px 24px;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      background: #101010;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }}
+    .compare-panel.hidden {{
+      display: none;
+    }}
+    .compare-header {{
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }}
+    .compare-title {{
+      font-size: 14px;
+      font-weight: 600;
+    }}
+    .compare-help {{
+      font-size: 12px;
+      color: #9b9b9b;
+    }}
+    .compare-table-container {{
+      overflow: auto;
+      border: 1px solid #2a2a2a;
+      border-radius: 8px;
+      background: #0f0f0f;
+    }}
+    .compare-table {{
+      width: 100%;
+      border-collapse: collapse;
+    }}
+    .compare-table th,
+    .compare-table td {{
+      padding: 8px 10px;
+      border-bottom: 1px solid #222;
+      font-size: 12px;
+      text-align: left;
+      vertical-align: top;
+      white-space: nowrap;
     }}
     .table-container {{
       overflow: auto;
@@ -17624,6 +18542,9 @@ class AssemblySection(QtWidgets.QWidget):
     }}
     tr.active {{
       background: rgba(0, 145, 255, 0.2);
+    }}
+    tr.compare {{
+      background: rgba(0, 145, 255, 0.35);
     }}
     .preview-panel {{
       border: 1px solid #2a2a2a;
@@ -17682,8 +18603,14 @@ class AssemblySection(QtWidgets.QWidget):
 </head>
 <body>
   <div class="toolbar">
-    <div class="title">{title_text}</div>
-    <div class="meta">{len(frame)} row(s)</div>
+    <div>
+      <div class="title">{title_text}</div>
+      <div class="meta">{len(frame)} row(s)</div>
+    </div>
+    <div class="toolbar-actions">
+      <button id="compare-clear" type="button">Clear compare</button>
+      <div id="compare-count" class="meta">0 selected</div>
+    </div>
   </div>
     <div class="content">
     <div class="table-container">
@@ -17702,7 +18629,15 @@ class AssemblySection(QtWidgets.QWidget):
       {vsm_hyst_section}
       {vsm_temp_section}
       {dma_section}
+      {fmr_section}
     </div>
+  </div>
+  <div id="compare-panel" class="compare-panel hidden">
+    <div class="compare-header">
+      <div class="compare-title">Compare</div>
+      <div class="compare-help">Ctrl/Cmd + click rows to compare</div>
+    </div>
+    <div class="compare-table-container" id="compare-table"></div>
   </div>
   <script>
     const table = document.getElementById('data-table');
@@ -17712,6 +18647,8 @@ class AssemblySection(QtWidgets.QWidget):
       highEmpty: document.getElementById('preview-high-empty'),
       low: document.getElementById('preview-low'),
       lowEmpty: document.getElementById('preview-low-empty'),
+      other: document.getElementById('preview-other'),
+      otherEmpty: document.getElementById('preview-other-empty'),
       core: document.getElementById('preview-core'),
       coreEmpty: document.getElementById('preview-core-empty'),
       glass: document.getElementById('preview-glass'),
@@ -17722,7 +18659,13 @@ class AssemblySection(QtWidgets.QWidget):
       vsmTempEmpty: document.getElementById('preview-vsm-temp-empty'),
       dma: document.getElementById('preview-dma'),
       dmaEmpty: document.getElementById('preview-dma-empty'),
+      fmr: document.getElementById('preview-fmr'),
+      fmrEmpty: document.getElementById('preview-fmr-empty'),
     }};
+    const comparePanel = document.getElementById('compare-panel');
+    const compareTable = document.getElementById('compare-table');
+    const compareCount = document.getElementById('compare-count');
+    const compareClear = document.getElementById('compare-clear');
 
     function setImage(imgEl, emptyEl, data) {{
       if (!imgEl || !emptyEl) {{
@@ -17768,24 +18711,163 @@ class AssemblySection(QtWidgets.QWidget):
       }}
       setImage(preview.high, preview.highEmpty, row.dataset.high);
       setImage(preview.low, preview.lowEmpty, row.dataset.low);
+      setImageList(preview.other, preview.otherEmpty, row.dataset.other);
       setImage(preview.core, preview.coreEmpty, row.dataset.core);
       setImage(preview.glass, preview.glassEmpty, row.dataset.glass);
       setImageList(preview.vsmHyst, preview.vsmHystEmpty, row.dataset.vsmHyst);
       setImageList(preview.vsmTemp, preview.vsmTempEmpty, row.dataset.vsmTemp);
       setImageList(preview.dma, preview.dmaEmpty, row.dataset.dma);
+      setImageList(preview.fmr, preview.fmrEmpty, row.dataset.fmr);
+    }}
+
+    function rowLabel(row, headers) {{
+      const compositionIndex = headers.indexOf('Composition');
+      const microwireIndex = headers.indexOf('Microwire');
+      const cells = row.children;
+      const composition = compositionIndex >= 0 && cells[compositionIndex]
+        ? cells[compositionIndex].innerText.trim()
+        : '';
+      const microwire = microwireIndex >= 0 && cells[microwireIndex]
+        ? cells[microwireIndex].innerText.trim()
+        : '';
+      const combined = `${{composition}} ${{microwire}}`.trim();
+      return combined || `Row ${{row.rowIndex}}`;
+    }}
+
+    function graphDataForField(field, row) {{
+      if (field === 'Figure — 1000 mA') {{
+        return row.dataset.high || '';
+      }}
+      if (field === 'Figure — low mA') {{
+        return row.dataset.low || '';
+      }}
+      if (field === 'Figure — other mA') {{
+        return row.dataset.other || '';
+      }}
+      if (field === 'VSM hysteresis graphs') {{
+        return row.dataset.vsmHyst || '';
+      }}
+      if (field === 'VSM temperature scan graphs') {{
+        return row.dataset.vsmTemp || '';
+      }}
+      if (field === 'DMA iso-stress graphs') {{
+        return row.dataset.dma || '';
+      }}
+      if (field === 'FMR graphs') {{
+        return row.dataset.fmr || '';
+      }}
+      return '';
+    }}
+
+    function renderGraphCell(cell, data) {{
+      const items = data ? data.split('|').filter(Boolean) : [];
+      if (!items.length) {{
+        cell.textContent = '';
+        return;
+      }}
+      const stack = document.createElement('div');
+      stack.className = 'preview-stack';
+      items.forEach((uri) => {{
+        const img = document.createElement('img');
+        img.src = uri;
+        img.className = 'preview-image';
+        img.style.display = 'block';
+        img.alt = 'Graph preview';
+        stack.appendChild(img);
+      }});
+      cell.appendChild(stack);
+    }}
+
+    function updateCompare() {{
+      if (!comparePanel || !compareTable) {{
+        return;
+      }}
+      const selected = rows.filter((row) => row.classList.contains('compare'));
+      if (compareCount) {{
+        compareCount.textContent = `${{selected.length}} selected`;
+      }}
+      if (selected.length < 2) {{
+        comparePanel.classList.add('hidden');
+        compareTable.innerHTML = '';
+        return;
+      }}
+      const headers = Array.from(table.querySelectorAll('thead th')).map((th) =>
+        th.innerText.trim()
+      );
+      const graphColumns = new Set([
+        'Figure — 1000 mA',
+        'Figure — low mA',
+        'Figure — other mA',
+        'VSM hysteresis graphs',
+        'VSM temperature scan graphs',
+        'DMA iso-stress graphs',
+        'FMR graphs',
+      ]);
+      const compare = document.createElement('table');
+      compare.className = 'compare-table';
+      const headerRow = document.createElement('tr');
+      headerRow.appendChild(document.createElement('th')).innerText = 'Field';
+      selected.forEach((row) => {{
+        const th = document.createElement('th');
+        th.innerText = rowLabel(row, headers);
+        headerRow.appendChild(th);
+      }});
+      const thead = document.createElement('thead');
+      thead.appendChild(headerRow);
+      compare.appendChild(thead);
+      const tbody = document.createElement('tbody');
+      headers.forEach((field, index) => {{
+        if (!field) {{
+          return;
+        }}
+        const rowEl = document.createElement('tr');
+        const fieldCell = document.createElement('td');
+        fieldCell.innerText = field;
+        rowEl.appendChild(fieldCell);
+        selected.forEach((row) => {{
+          const cell = document.createElement('td');
+          if (graphColumns.has(field)) {{
+            const data = graphDataForField(field, row);
+            renderGraphCell(cell, data);
+          }} else {{
+            const cellValue = row.children[index]
+              ? row.children[index].innerText.trim()
+              : '';
+            cell.innerText = cellValue;
+          }}
+          rowEl.appendChild(cell);
+        }});
+        tbody.appendChild(rowEl);
+      }});
+      compare.appendChild(tbody);
+      compareTable.innerHTML = '';
+      compareTable.appendChild(compare);
+      comparePanel.classList.remove('hidden');
     }}
 
     rows.forEach((row) => {{
-      row.addEventListener('click', () => {{
+      row.addEventListener('click', (event) => {{
         rows.forEach((item) => item.classList.remove('active'));
         row.classList.add('active');
+        if (event.ctrlKey || event.metaKey) {{
+          row.classList.toggle('compare');
+        }}
         updatePreview(row);
+        updateCompare();
       }});
     }});
 
     if (rows.length > 0) {{
       rows[0].classList.add('active');
       updatePreview(rows[0]);
+    }}
+    updateCompare();
+
+    if (compareClear) {{
+      compareClear.addEventListener('click', () => {{
+        rows.forEach((row) => row.classList.remove('compare'));
+        updateCompare();
+      }});
     }}
 
     const headers = Array.from(table.querySelectorAll('th'));

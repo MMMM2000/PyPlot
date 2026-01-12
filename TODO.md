@@ -19,12 +19,18 @@
 - Add FMR PyPlot plugin + Data Builder section and validate sample CSV plotting/Origin export.
 - Add a Compare section to filter/select microwires and compare their data/graphs side-by-side.
 - Compare: add default samples-as-columns view with selectable field rows and inline graph previews.
+- Data Builder: treat microwire suffix tokens (e.g., 10-5oe) as distinct samples and propagate across sections.
+- Current annealing: support "other mA" graphs column + visibility and include in assemble/compare/HTML export.
+- HTML export: add compare mode alongside the preview panel.
 - Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).
 - VSM Data Builder: validate sweep/no-glass angle parsing + temperature labeling against PyPlot, confirm Open-in-PyPlot axes defaults, verify VSM temp scan + DMA multi-graph previews, and confirm Origin export stability.
 - Current Annealing: enable Plot after data import and fix directional Origin exports.
 - Assemble: validate merged Export dialog flow, column-driven section selection, .pydpj persistence for preview columns/order/sort, and confirm row-selection crashes are resolved.
 - Confirm Assemble preview no longer crashes (VSM/DMA group helpers + log review).
 - DMA iso-stress: verify new Origin export behavior from PyPlot/Data Builder.
+- VSM hysteresis grouping: merge stray single-angle temperature buckets and reduce log noise for empty files.
+- Compare matrix view: keep stacked graph rows tall enough for full-size previews.
+- Assemble column selector: show all section columns (including duplicates) and remove lingering Sample columns on load.
 - Document Database Builder and Origin output requirements (docs/database_builder.md, docs/origin_output.md).
 - Investigate PyPlot Current Annealing crash; capture message log output for repro.
 - Investigate Microwire Data Builder closing after Origin export / Assemble row selection (no error message).

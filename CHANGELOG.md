@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-01-12 07:42 UTC
+
+- Assemble now keeps zero-valued strain entries instead of dropping them as empty.
+
 ## 2026-01-08 17:24 UTC
 
 - Added an FMR PyPlot plugin plus a Data Builder FMR section with Field vs X/Y plots and Origin export support.
@@ -1270,6 +1274,13 @@
 - Enabled the Current Annealing plot button to allow plotting and data import without a preselected file list.
 - Updated FMR plotting labels to match the Field/X axes convention and carry units when available.
 - Improved VSM folder export visibility and default recursion in the GUI so nested folders are preserved.
+
+## 2026-01-09 18:30 UTC
+
+- Ensured Assemble column selection lists every section column (including duplicates), syncs duplicate selections, and fills current-density columns from phase points when needed.
+- Normalized Sample-column hiding and improved compare matrix row heights so stacked graph previews stay full size.
+- Merged stray single-angle VSM temperature buckets and downgraded empty VSM file parse failures to warnings to reduce log noise.
+- Documented updated builder behaviors in `docs/database_builder.md`.
 
 ## 2025-10-19
 

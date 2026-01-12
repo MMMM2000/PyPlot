@@ -5,7 +5,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Sections and Data Sources
 
 - Fabrication: metadata columns (length, datetime, mass, resistance, notes) plus any available video-related fields (temperature, winding speed, glass feeding, underpressure).
-- Current annealing: links high/low mA files and preview images; data should stay tied to the same composition + microwire key.
+- Current annealing: links high/low mA files plus any additional mA runs; extra runs surface in "Figure — other mA" and can be hidden via the visibility dialog.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
 - Videos: links or metadata when available; exports must not require videos to be processed.
@@ -21,8 +21,10 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Sample Naming and Grouping
 
 - Sample identification is always the leading composition + draw-piece pair in the folder/file name, e.g. `Ni50Fe27Ga23 5-4` -> Composition `Ni50Fe27Ga23`, Microwire `5/4`.
-- Extra suffixes (e.g. `no glass`, `NG CA`, `s1`, `s3`) define sub-versions for the same sample; they should appear as additional graphs in the same row.
+- Suffixes appended directly to the draw/piece (for example `10-5oe`) become part of the microwire key and create a separate sample row.
+- Extra suffixes after the microwire token (e.g. `no glass`, `NG CA`, `s1`, `s3`) define sub-versions for the same sample; they should appear as additional graphs in the same row.
 - One row per sample in the VSM/DMA sections; multiple graphs for the same sample are placed side-by-side in that row.
+- Hidden graphs (visibility dialogs) are excluded from Assemble/Compare/exports and from HTML compare output.
 - Graph titles should include the suffix label (for example, `Ni50Fe27Ga23 10/5 (NG CA)` or `Ni50Fe27Ga23 11/1 (s3)`).
 
 ## Current Density Requirements
@@ -31,6 +33,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Derived columns include the deltas between passes (As2-As1, Af2-Af1, Ms2-Ms1, Mf2-Mf1) and Mf1-Af1 / Mf2-Af2.
 - Provide the current density columns (A/mm^2) for each transition when diameter is known.
 - Respect the active selection (e.g. editing Af1 should not overwrite As1).
+- Assemble preview/export should include the As*/Af*/Ms*/Mf* columns even when they originate from the current density/phase-point inputs.
 
 ## Microscope + Strain Workflow
 
@@ -51,6 +54,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Microwire sorting is numeric (10/5 comes after 5/4).
 - Graph preview panel is optional. When enabled, selecting a row shows current annealing, VSM, and DMA previews for that row.
 - "Add to compare" uses the current row selection and populates the Compare tab.
+- Multi-graph previews in non-Compare sections are laid out horizontally; Compare stacks graphs vertically with rows tall enough to show full-size plots.
 
 ## Compare
 
@@ -61,7 +65,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Export Targets
 
 - CSV, Excel, HTML (self-contained) outputs are supported.
-- HTML export must not require the Videos section to be processed.
+- HTML export must not require the Videos section to be processed, and includes a compare view (Ctrl/Cmd-click rows to compare).
 - Matplotlib/Origin outputs should use the same rows and columns as the Assemble preview.
 - No PyPlot UI should be embedded inside the builder; graphs are rendered as static previews like the current annealing section.
 
