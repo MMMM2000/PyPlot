@@ -4,7 +4,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 
 ## Sections and Data Sources
 
-- Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (temperature, winding speed, glass feeding, underpressure).
+- Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.
 - Current annealing: links high/low mA files plus any additional mA runs; extra runs surface in "Figure — other mA" and can be hidden via the visibility dialog.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
@@ -17,7 +17,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
 - Assemble imports: spreadsheet rows can be imported and merged with the assembled dataset; imported rows are tagged via the "Data source" column and enriched with fabrication metadata where possible.
-- Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Imported workbooks appear under Project Explorer.
+- Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Optionally separate imported Fabrication rows under an "Imported data:" divider. Imported workbooks appear under Project Explorer.
 - Compare: subset of rows for side-by-side comparison.
 
 ## Sample Naming and Grouping

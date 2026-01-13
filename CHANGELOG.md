@@ -1,5 +1,17 @@
 # Changelog
 
+## 2026-01-13 17:26 UTC
+
+- Fixed a project-load syntax error after wiring the Data menu actions.
+
+## 2026-01-13 17:19 UTC
+
+- Added a Data menu toggle to separate imported Fabrication rows under an "Imported data:" divider.
+
+## 2026-01-13 17:04 UTC
+
+- Import workflow now shows a summary popup, marks projects dirty correctly, and syncs imported samples into the Fabrication section.
+
 ## 2026-01-13 16:36 UTC
 
 - Expanded e/a valence mapping (Co, Cu, Ge, Sn) and moved data import to the Data menu with dedupe/visibility controls.

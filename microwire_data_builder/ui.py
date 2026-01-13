@@ -2808,6 +2808,7 @@ def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     columns = [
         "Composition",
+        "Data source",
         "e/a",
         "Draw",
         "Piece",
@@ -2831,6 +2832,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         draw_record = index.get_draw(composition, draw)
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
+        row["Data source"] = None
         row["e/a"] = _compute_ea_from_composition(composition)
         row["Draw"] = draw
         row["Piece"] = piece
@@ -2861,6 +2863,10 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
             if resolved and resolved not in sources:
                 sources.append(resolved)
         row["_source_paths"] = sources
+        if any("Imported" in source for source in sources):
+            row["Data source"] = "Imported"
+        else:
+            row["Data source"] = "Measured"
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -6516,6 +6522,7 @@ class FabricationSection(MiniDatabaseSection):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         self._table_splitter: QtWidgets.QSplitter | None = None
+        self._separate_imported = False
         super().__init__(logger, log_callback, parent)
         self._hide_columns(["_source_paths", "_source_path"])
 
@@ -6864,6 +6871,7 @@ class FabricationSection(MiniDatabaseSection):
                     % (removed_draws, removed_pieces)
                 )
         table = _fabrication_index_to_frame(index)
+        table = self._apply_imported_separation(table)
         processed: Dict[str, float] = {}
         for path in filtered_paths:
             try:
@@ -6878,6 +6886,10 @@ class FabricationSection(MiniDatabaseSection):
 
     def refresh(self) -> None:
         super().refresh()
+        table = self.data.table
+        if isinstance(table, pd.DataFrame):
+            self.data.table = self._apply_imported_separation(table)
+            self.model.set_frame(self.data.table)
         self._hide_columns(["_source_paths", "_source_path"])
 
     def _row_sources(self, row: pd.Series) -> List[Path]:
@@ -11415,6 +11427,92 @@ class VideoSection(MiniDatabaseSection):
                 except Exception:
                     continue
         return sources
+
+    def set_import_separation(self, enabled: bool) -> None:
+        self._separate_imported = bool(enabled)
+        try:
+            index = self.store.load_payload("fabrication_index")
+        except Exception:
+            index = None
+        if not isinstance(index, FabricationIndex):
+            return
+        table = _fabrication_index_to_frame(index)
+        table = self._apply_imported_separation(table)
+        self.data.table = table
+        self.model.set_frame(table)
+        self._auto_fit_columns()
+        self._update_status()
+
+    def _apply_imported_separation(self, table: pd.DataFrame) -> pd.DataFrame:
+        if not self._separate_imported:
+            return table
+        if not isinstance(table, pd.DataFrame) or table.empty:
+            return table
+        if "Data source" not in table.columns:
+            return table
+        imported_mask = table["Data source"].astype(str).str.contains("Imported", na=False)
+        if not imported_mask.any():
+            return table
+        normal = table.loc[~imported_mask]
+        imported = table.loc[imported_mask]
+        separator = {column: None for column in table.columns}
+        separator["Composition"] = "Imported data:"
+        combined = pd.concat([normal, pd.DataFrame([separator]), imported], ignore_index=True)
+        return combined
+
+    def apply_imported_samples(self, records: Iterable[Dict[str, Any]]) -> int:
+        index = self.store.load_payload("fabrication_index")
+        if not isinstance(index, FabricationIndex):
+            index = FabricationIndex()
+        added = 0
+        for record in records:
+            composition = str(record.get("Composition") or "").strip()
+            microwire = str(record.get("Microwire") or "").strip()
+            if not composition or not microwire:
+                continue
+            parts = _microwire_parts_from_label_safe(microwire)
+            if parts is None:
+                continue
+            draw_x, piece_y, _suffix = parts
+            piece_data: Dict[str, object] = {
+                "length_m": record.get("Length (m)"),
+                "piece_date": record.get("Piece date"),
+                "fabrication_resistance_ohm": record.get("Resistance (Ω)"),
+                "notes": record.get("Notes"),
+                "_source_path": record.get("Data source") or "Imported",
+            }
+            draw_data: Dict[str, object] = {
+                "fabrication_temperature_c": record.get("Temperature (°C)"),
+                "mass_g": record.get("Mass (g)"),
+                "winding_speed_m_per_min": record.get("Winding speed (m/min)"),
+                "glass_feed_mm_per_min": record.get("Glass feeding (mm/min)"),
+                "underpressure": record.get("Underpressure"),
+                "production_datetime": record.get("Production datetime"),
+                "fabrication_resistance_ohm": record.get("Resistance (Ω)"),
+                "notes": record.get("Notes"),
+                "_source_path": record.get("Data source") or "Imported",
+            }
+            before = bool(index.get_piece(composition, draw_x, piece_y))
+            index.set_piece(composition, int(draw_x), int(piece_y), piece_data)
+            index.set_draw(composition, int(draw_x), draw_data)
+            if not before:
+                added += 1
+        table = _fabrication_index_to_frame(index)
+        table = self._apply_imported_separation(table)
+        self.data.table = table
+        self.store.save_payload("fabrication_index", index)
+        payload_map = dict(self.data.extra.get("payloads", {}))
+        payload_map["fabrication_index"] = "fabrication_index"
+        self.data.extra["payloads"] = payload_map
+        self.store.save(self.data)
+        self.model.set_frame(table)
+        self._auto_fit_columns()
+        self._update_status()
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+        return added
 
 
 class VsmHysteresisSection(MiniDatabaseSection):
@@ -16454,6 +16552,8 @@ class CompareSection(MiniDatabaseSection):
 class AssemblySection(QtWidgets.QWidget):
     """Final step that merges prepared mini-databases into a spreadsheet."""
 
+    data_updated = QtCore.pyqtSignal()
+
     def __init__(
         self,
         sections: Dict[str, MiniDatabaseSection],
@@ -16910,8 +17010,8 @@ class AssemblySection(QtWidgets.QWidget):
                 "No usable rows were found in that workbook.",
             )
             return
-        added = self._merge_imported_payload(new_rows)
-        if not added and not self._imported_rows:
+        stats = self._merge_imported_payload(new_rows)
+        if not stats["new_samples"] and not stats["updated_samples"] and not self._imported_rows:
             QtWidgets.QMessageBox.information(
                 self,
                 "Microwire Data Builder",
@@ -16925,6 +17025,23 @@ class AssemblySection(QtWidgets.QWidget):
             self._update_preview(merged)
         else:
             self._update_preview(pd.DataFrame(list(self._imported_rows.values())))
+        self._sync_imports_to_fabrication()
+        summary_lines = [
+            f"Imported workbook: {path.name}",
+            f"New samples added: {stats['new_samples']}",
+            f"Existing samples updated: {stats['updated_samples']}",
+        ]
+        if stats["added_fields"]:
+            summary_lines.append(f"Fields filled: {stats['added_fields']}")
+        if stats["new_labels"]:
+            summary_lines.append("New samples: " + ", ".join(stats["new_labels"][:8]))
+        if stats["updated_labels"]:
+            summary_lines.append("Updated samples: " + ", ".join(stats["updated_labels"][:8]))
+        QtWidgets.QMessageBox.information(
+            self,
+            "Microwire Data Builder",
+            "\n".join(summary_lines),
+        )
         self.log(f"Imported {len(new_rows)} row(s) from {path.name}.")
         self._mark_dirty()
 
@@ -17052,7 +17169,14 @@ class AssemblySection(QtWidgets.QWidget):
                         continue
                     if column not in merged_frame.columns:
                         merged_frame[column] = None
-                    if (row.get(column) in (None, "", pd.NA)) and value not in (None, ""):
+                    existing = row.get(column)
+                    is_missing = existing is None or existing == ""
+                    if not is_missing:
+                        try:
+                            is_missing = bool(pd.isna(existing))
+                        except Exception:
+                            is_missing = False
+                    if is_missing and value not in (None, ""):
                         merged_frame.at[row_idx, column] = value
                         updated = True
                 if updated:
@@ -17067,19 +17191,39 @@ class AssemblySection(QtWidgets.QWidget):
             )
         return merged_frame
 
-    def _merge_imported_payload(self, incoming: Dict[str, Dict[str, Any]]) -> int:
-        added = 0
+    def _merge_imported_payload(self, incoming: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
+        added_fields = 0
+        new_samples = 0
+        updated_samples = 0
+        new_labels: List[str] = []
+        updated_labels: List[str] = []
         for key, record in incoming.items():
             existing = self._imported_rows.get(key)
             if existing is None:
                 self._imported_rows[key] = dict(record)
-                added += 1
+                new_samples += 1
+                label = f"{record.get('Composition', '')} {record.get('Microwire', '')}".strip()
+                if label:
+                    new_labels.append(label)
                 continue
+            updated = False
             for column, value in record.items():
                 if existing.get(column) in (None, "") and value not in (None, ""):
                     existing[column] = value
-                    added += 1
-        return added
+                    added_fields += 1
+                    updated = True
+            if updated:
+                updated_samples += 1
+                label = f"{record.get('Composition', '')} {record.get('Microwire', '')}".strip()
+                if label:
+                    updated_labels.append(label)
+        return {
+            "new_samples": new_samples,
+            "updated_samples": updated_samples,
+            "added_fields": added_fields,
+            "new_labels": new_labels,
+            "updated_labels": updated_labels,
+        }
 
     def set_show_imported(self, enabled: bool) -> None:
         self._show_imported = bool(enabled)
@@ -17106,6 +17250,26 @@ class AssemblySection(QtWidgets.QWidget):
 
     def imported_sources(self) -> List[str]:
         return list(self._imported_sources)
+
+    def _mark_dirty(self) -> None:
+        try:
+            self.data_updated.emit()
+        except Exception:
+            pass
+
+    def _sync_imports_to_fabrication(self) -> None:
+        fabrication = self.sections.get("fabrication")
+        if not isinstance(fabrication, FabricationSection):
+            return
+        if not self._imported_rows:
+            return
+        try:
+            added = fabrication.apply_imported_samples(self._imported_rows.values())
+        except Exception:
+            self.logger.exception("Failed to sync imported samples into fabrication section")
+            return
+        if added:
+            self.log(f"Added {added} imported sample(s) to Fabrication.")
 
     def _update_export_summary(self) -> None:
         output_dir = self._output_dir or str(Path.cwd())
@@ -19961,6 +20125,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         self._auto_open_last_action: QtGui.QAction | None = None
         self._data_menu: QtWidgets.QMenu | None = None
         self._show_imported_action: QtGui.QAction | None = None
+        self._separate_imported_action: QtGui.QAction | None = None
         self._remove_imported_action: QtGui.QAction | None = None
         self._imported_item: QtWidgets.QTreeWidgetItem | None = None
         self._fullscreen_snap_pending = False
@@ -20122,6 +20287,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         )
         self.assembly_section = assembly
         self.tab_widget.addTab(assembly, "Assemble")
+        try:
+            assembly.data_updated.connect(self._handle_section_data_updated)
+        except Exception:
+            pass
         _pump_events()
 
         self.compare_section = CompareSection(
@@ -20816,12 +20985,22 @@ class BuilderWindow(QtWidgets.QMainWindow):
         show_imported_action.toggled.connect(self._toggle_show_imported)
         data_menu.addAction(show_imported_action)
 
+        separate_action = QtGui.QAction("Separate imported data", self)
+        separate_action.setCheckable(True)
+        initial_separate = bool(
+            self.settings.value(self._project_settings_key("separate_imported"), False)
+        )
+        separate_action.setChecked(initial_separate)
+        separate_action.toggled.connect(self._toggle_separate_imported)
+        data_menu.addAction(separate_action)
+
         remove_action = QtGui.QAction("Remove imported data", self)
         remove_action.triggered.connect(self._remove_imported_data)
         data_menu.addAction(remove_action)
 
         self._data_menu = data_menu
         self._show_imported_action = show_imported_action
+        self._separate_imported_action = separate_action
         self._remove_imported_action = remove_action
 
     def _handle_import_data(self) -> None:
@@ -20836,6 +21015,17 @@ class BuilderWindow(QtWidgets.QMainWindow):
         if isinstance(assembly, AssemblySection):
             assembly.set_show_imported(bool(enabled))
             self._update_project_actions()
+
+    def _toggle_separate_imported(self, enabled: bool) -> None:
+        try:
+            self.settings.setValue(
+                self._project_settings_key("separate_imported"), bool(enabled)
+            )
+        except Exception:
+            pass
+        fabrication = getattr(self, "fabrication_section", None)
+        if isinstance(fabrication, FabricationSection):
+            fabrication.set_import_separation(bool(enabled))
 
     def _remove_imported_data(self) -> None:
         assembly = getattr(self, "assembly_section", None)
@@ -21230,6 +21420,14 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 show_imported = getattr(assembly, "_show_imported", True)
                 if self._show_imported_action is not None:
                     self._show_imported_action.setChecked(bool(show_imported))
+            if self._separate_imported_action is not None:
+                separate = bool(
+                    self.settings.value(self._project_settings_key("separate_imported"), False)
+                )
+                self._separate_imported_action.setChecked(separate)
+                fabrication = getattr(self, "fabrication_section", None)
+                if isinstance(fabrication, FabricationSection):
+                    fabrication.set_import_separation(separate)
 
             self._project_path = target
             self._remember_project_directory(target.parent)

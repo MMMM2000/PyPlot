@@ -5246,3 +5246,8 @@ TypeError: arg must be a list, tuple, 1-d array, or Series
 2026-01-13 14:31:59 [INFO] Preview worksheet exported to C:\Users\Martin\Downloads\microwire_database_worksheet.xlsx
 2026-01-13 16:07:16 [INFO] Imported 40 row(s) from new data.xlsx.
 2026-01-13 16:11:33 [INFO] Imported 40 row(s) from new data.xlsx.
+2026-01-13 16:42:43 [ERROR] ERROR: Unhandled exception: boolean value of NA is ambiguous
+2026-01-13 16:53:04 [INFO] Imported 39 row(s) from new data.xlsx.
+2026-01-13 16:53:04 [ERROR] ERROR: Unhandled exception: 'AssemblySection' object has no attribute '_mark_dirty'
+2026-01-13 16:55:37 [INFO] Fabrication data: skipped 53 draw(s) and 651 piece(s) without matching current annealing records.
+2026-01-13 16:55:38 [INFO] Fabrication data: processed 80 file(s).

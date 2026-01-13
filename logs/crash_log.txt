@@ -393,3 +393,32 @@ Traceback (most recent call last):
     raise TypeError("arg must be a list, tuple, 1-d array, or Series")
 TypeError: arg must be a list, tuple, 1-d array, or Series
 
+2026-01-13 16:42:43 [EXCEPTION] TypeError: boolean value of NA is ambiguous
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 20830, in _handle_import_data
+    assembly.open_import_dialog()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 16932, in open_import_dialog
+    self._open_import_dialog()
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 16924, in _open_import_dialog
+    merged = self._merge_imported_rows(base_frame)
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17055, in _merge_imported_rows
+    if (row.get(column) in (None, "", pd.NA)) and value not in (None, ""):
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "pandas/_libs/missing.pyx", line 392, in pandas._libs.missing.NAType.__bool__
+TypeError: boolean value of NA is ambiguous
+
+2026-01-13 16:53:04 [EXCEPTION] AttributeError: 'AssemblySection' object has no attribute '_mark_dirty'
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 20837, in _handle_import_data
+    assembly.open_import_dialog()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 16932, in open_import_dialog
+    self._open_import_dialog()
+    ~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 16929, in _open_import_dialog
+    self._mark_dirty()
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute '_mark_dirty'
+
