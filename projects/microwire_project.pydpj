@@ -1,7 +1,7 @@
 {
   "version": 1,
   "kind": "MicrowireDataBuilder",
-  "saved_at": "2026-01-12 09:33",
+  "saved_at": "2026-01-13 13:24",
   "sections": {
     "annealing": {
       "section": "annealing",
@@ -8179,7 +8179,28 @@
       "extra": {
         "payloads": {
           "vsm_hysteresis_records": "vsm_hysteresis_records"
-        }
+        },
+        "hidden_paths": [
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101115-Hys-a000-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101115-Hys-a010-T-30-01.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101116-Hys-a020-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101116-Hys-a030-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a040-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a050-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a060-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a070-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a080-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a090-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a100-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a110-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a120-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a130-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a140-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a150-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a160-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a170-T-30-00.VSM-Hys-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops\\Ni50Fe27Ga23 5-4\\202507101320-Hys-a180-T-30-00.VSM-Hys-Data"
+        ]
       },
       "sources": [
         "G:\\My Drive\\1 Projects\\Praha\\VSM hysteresis loops"
@@ -8325,6 +8346,7 @@
       "section": "vsm_temperature_scan",
       "title": "VSM temperature scan",
       "columns": [
+        "_sample",
         "Composition",
         "Microwire",
         "VSM temperature scan graphs",
@@ -8333,6 +8355,7 @@
       ],
       "rows": [
         {
+          "_sample": "Ni50Fe27Ga23 10-5",
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "10/5",
           "VSM temperature scan graphs": [
@@ -8350,6 +8373,7 @@
           ]
         },
         {
+          "_sample": "Ni50Fe27Ga23 11-1",
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "11/1",
           "VSM temperature scan graphs": [
@@ -8373,6 +8397,7 @@
           ]
         },
         {
+          "_sample": "Ni50Fe27Ga23 5-4",
           "Composition": "Ni50Fe27Ga23",
           "Microwire": "5/4",
           "VSM temperature scan graphs": [
@@ -8398,7 +8423,19 @@
       "extra": {
         "payloads": {
           "vsm_temperature_scan_records": "vsm_temperature_scan_records"
-        }
+        },
+        "hidden_paths": [
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 10-5 NG CA\\202503121042-TSCN-a000-T025-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 10-5 NG CA\\202503121042-TSCN-a000-T150-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 11-1 NG CA N\\202501121013-TSCN-a000-T025-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 11-1 NG CA\\202528111326-TSCN-a000-T025-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 11-1 NG CA\\202528111326-TSCN-a000-T150-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 11-1 s2\\202502120952-TSCN-a000-T025-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 11-1 s2\\202502120952-TSCN-a000-T150-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 5-4 no glass\\202519110959-TSCN-a000-T150-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 5-4 no glass\\202519111427-TSCN-a000-T200-00.VSM-TSCN-Data",
+          "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan\\Ni50Fe27Ga23 5-4 no glass\\202520111001-TSCN-a000-T025-00.VSM-TSCN-Data"
+        ]
       },
       "sources": [
         "G:\\My Drive\\1 Projects\\Praha\\VSM temp scan"
@@ -8452,7 +8489,10 @@
       "extra": {
         "payloads": {
           "dma_iso_stress_records": "dma_iso_stress_records"
-        }
+        },
+        "hidden_paths": [
+          "G:\\My Drive\\1 Projects\\Praha\\DMA\\Ni50Fe27Ga23 11_1 s3.txt"
+        ]
       },
       "sources": [
         "G:\\My Drive\\1 Projects\\Praha\\DMA"
@@ -13223,59 +13263,59 @@
         51
       ],
       "selected_columns": [
-        "Ms2 (mA)",
-        "File low mA",
-        "Piece",
-        "Mf (°C)",
-        "As2 (mA)",
-        "Clamp span (mm)",
-        "Ms (°C)",
-        "Mf1-Af1 (mA)",
-        "Composition",
         "Ms1 (mA)",
-        "Mf2-Af2 (mA)",
-        "File 1000 mA",
+        "File low mA",
         "Broke",
-        "M length",
-        "Ms (mA)",
-        "Stress (MPa)",
-        "d/D",
-        "As1 (mA)",
-        "As current density (A/mm^2)",
-        "Underpressure",
-        "Af2 (mA)",
-        "Mf1 (mA)",
-        "Resistance (Ω)",
-        "Mf2-Mf1 (mA)",
-        "As2-As1 (mA)",
-        "Sources",
-        "Mass (g)",
-        "Glass feeding (mm/min)",
-        "Af1 (mA)",
-        "Setpoints (mA)",
-        "Low mA value (mA)",
-        "Ms2-Ms1 (mA)",
-        "m",
         "D (µm) image",
-        "Microwire",
-        "Af2-Af1 (mA)",
-        "Af (°C)",
-        "D (µm)",
-        "Temperature (°C)",
-        "d (µm)",
-        "As (mA)",
-        "d (µm) image",
-        "Draw",
-        "Production datetime",
-        "Ms current density (A/mm^2)",
-        "Winding speed (m/min)",
-        "Notes",
         "Mf2 (mA)",
-        "Length (m)",
+        "Low mA value (mA)",
+        "Mf (°C)",
+        "Af2-Af1 (mA)",
+        "Notes",
+        "A length",
+        "File 1000 mA",
+        "d (µm) image",
+        "As current density (A/mm^2)",
+        "As1 (mA)",
+        "As2 (mA)",
+        "Stress (MPa)",
+        "Mass (g)",
+        "Draw",
+        "As (mA)",
+        "Microwire",
+        "Composition",
+        "Ms current density (A/mm^2)",
+        "Af2 (mA)",
         "As (°C)",
+        "Af (°C)",
+        "Temperature (°C)",
+        "As2-As1 (mA)",
+        "Resistance (Ω)",
+        "D (µm)",
+        "Ms2 (mA)",
+        "Af1 (mA)",
         "Strain",
+        "d (µm)",
+        "d/D",
         "Calc mode",
-        "A length"
+        "Sources",
+        "Glass feeding (mm/min)",
+        "Mf1 (mA)",
+        "m",
+        "Length (m)",
+        "Piece",
+        "Mf2-Af2 (mA)",
+        "Production datetime",
+        "Mf2-Mf1 (mA)",
+        "Ms (mA)",
+        "Clamp span (mm)",
+        "Underpressure",
+        "Setpoints (mA)",
+        "Ms (°C)",
+        "Winding speed (m/min)",
+        "M length",
+        "Ms2-Ms1 (mA)",
+        "Mf1-Af1 (mA)"
       ],
       "column_order": [
         "Composition",
@@ -13334,7 +13374,7 @@
       ],
       "sort_spec": [
         [
-          "Composition",
+          "Strain",
           true
         ],
         [

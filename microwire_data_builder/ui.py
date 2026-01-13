@@ -35,6 +35,11 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 import matplotlib.pyplot as plt
 
+try:
+    import openpyxl
+except Exception:  # pragma: no cover - optional dependency
+    openpyxl = None  # type: ignore[assignment]
+
 from plotting.plugins.current_annealing.core import plot_one as plot_annealing_curve
 from plotting.pyplot.window import _DockSwitcherWidget
 from plotting.shared.utils import (
@@ -99,6 +104,7 @@ from .core import (
     _compose_notes,
     _format_dimension_display,
     _clean_str,
+    _compute_ea_from_composition,
 )
 
 try:
@@ -312,6 +318,58 @@ def _json_safe(value: Any) -> Any:
         except Exception:
             pass
     return str(value)
+
+
+def _normalise_import_header(text: str) -> str:
+    cleaned = str(text or "").strip().lower()
+    if not cleaned:
+        return ""
+    return re.sub(r"[^a-z0-9]+", "", cleaned)
+
+
+def _map_import_header(raw_header: object) -> Optional[str]:
+    raw = str(raw_header or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower().strip()
+    if "e/a" in lowered or lowered == "ea":
+        return "e/a"
+    if re.search(r"d\s*/\s*d", raw, re.IGNORECASE):
+        return "d/D"
+    cleaned = _normalise_import_header(raw)
+    direct_map = {
+        "composition": "Composition",
+        "microwire": "Microwire",
+        "strain": "Strain",
+        "stressmpa": "Stress (MPa)",
+        "mlength": "M length",
+        "alength": "A length",
+        "m": "m",
+    }
+    if cleaned in direct_map:
+        return direct_map[cleaned]
+    if cleaned in {"d", "dum", "dµm", "diameter"}:
+        return "d (µm)"
+    if raw.strip().upper().startswith("D"):
+        return "D (µm)"
+    if cleaned == "dd":
+        return "d/D"
+    if cleaned in {"as1", "af1", "ms1", "mf1", "as2", "af2", "ms2", "mf2"}:
+        prefix = cleaned[:2].capitalize()
+        suffix = cleaned[2:]
+        return f"{prefix}{suffix} (mA)"
+    return raw
+
+
+def _normalise_import_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned in {"-", "#VALUE!", "#N/A"}:
+            return None
+        return cleaned
+    return value
 
 
 @dataclass
@@ -999,6 +1057,10 @@ class PreviewWorker(QtCore.QObject):
         try:
             result = build_database(self._config, logger=self._logger, **self._build_kwargs)
         except Exception as exc:
+            try:
+                self._logger.exception("Preview build failed")
+            except Exception:
+                pass
             self.failed.emit(str(exc))
             return
         try:
@@ -2746,6 +2808,7 @@ def _dimension_display(field: str, *records: Dict[str, Any]) -> Optional[str]:
 def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
     columns = [
         "Composition",
+        "e/a",
         "Draw",
         "Piece",
         "Length (m)",
@@ -2768,6 +2831,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         draw_record = index.get_draw(composition, draw)
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
+        row["e/a"] = _compute_ea_from_composition(composition)
         row["Draw"] = draw
         row["Piece"] = piece
         row["Length (m)"] = _value_for_output(piece_record, "length_m")
@@ -3436,16 +3500,15 @@ def _plot_vsm_hysteresis_figure(
         records = [entry for entry in record if isinstance(entry, VsmHysteresisRecord)]
     if not records:
         return None
-    frame = None
-    columns: List[str] = []
+    columns_set: set[str] = set()
     for entry in records:
         entry_frame = entry.data if isinstance(entry.data, pd.DataFrame) else pd.DataFrame()
-        if not entry_frame.empty:
-            frame = entry_frame
-            columns = [str(column) for column in entry_frame.columns]
-            break
-    if frame is None or not columns:
+        if entry_frame.empty:
+            continue
+        columns_set.update(str(column) for column in entry_frame.columns)
+    if not columns_set:
         return None
+    columns = sorted(columns_set)
     x_preferences = [
         "Applied Field For Plot",
         "Raw Applied Field For Plot",
@@ -3491,6 +3554,21 @@ def _plot_vsm_hysteresis_figure(
             "Signal",
         ],
     )
+    if y_column == x_column and y_column:
+        remaining = [column for column in columns if column != y_column]
+        fallback = _choose_axis_column(
+            remaining,
+            [
+                "Signal X direction",
+                "Signal parallel with sample",
+                "Signal Magnitude",
+                "Moment [emu]",
+                "Signal",
+            ],
+            records=records,
+        )
+        if fallback:
+            y_column = fallback
     if not x_column or not y_column:
         logger.debug("VSM hysteresis plot missing axis columns: %s", ", ".join(columns))
         return None
@@ -5143,6 +5221,32 @@ def _visibility_items_from_records(records: Sequence[object]) -> List[Tuple[str,
             label = Path(path).name
         items.append((label, path))
     return items
+
+
+def _visibility_groups_from_records(
+    records: Sequence[object],
+) -> Dict[str, List[Tuple[str, str]]]:
+    groups: Dict[str, List[Tuple[str, str]]] = {}
+    seen: Set[str] = set()
+    for record in records:
+        path = _record_path_key(record)
+        if not path or path in seen:
+            continue
+        seen.add(path)
+        label = _record_label_for_display(record)
+        sample = getattr(record, "sample", None)
+        group_label = label
+        if isinstance(sample, str) and sample.strip():
+            if group_label:
+                if sample not in group_label:
+                    group_label = f"{sample} — {group_label}"
+            else:
+                group_label = sample
+        if not group_label:
+            group_label = Path(path).name
+        item_label = Path(path).name
+        groups.setdefault(group_label, []).append((item_label, path))
+    return groups
 
 
 def _hidden_paths_from_section(section: object) -> Set[str]:
@@ -6991,10 +7095,12 @@ class AnnealingSection(MiniDatabaseSection):
                 "No annealing graphs are available yet.",
             )
             return
+        groups = _visibility_groups_from_records(self._all_records)
         dialog = _GraphVisibilityDialog(
             "Annealing graph visibility",
             items,
             self._hidden_paths,
+            groups=groups,
             parent=self,
         )
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -11389,6 +11495,38 @@ class VsmHysteresisSection(MiniDatabaseSection):
                     except Exception:
                         pass
                 continue
+            columns = [str(column) for column in frame.columns]
+            x_column = _choose_axis_column(
+                columns,
+                [
+                    "Applied Field For Plot",
+                    "Raw Applied Field For Plot",
+                    "Applied Field",
+                    "Raw Applied Field",
+                    "Applied Field [Oe]",
+                    "Field",
+                ],
+            )
+            y_column = _choose_axis_column(
+                columns,
+                [
+                    "Signal X direction",
+                    "Signal parallel with sample",
+                    "Signal Magnitude",
+                    "Moment [emu]",
+                    "Signal",
+                ],
+            )
+            if not x_column or not y_column:
+                message = f"Skipped {Path(path).name}: missing field/signal columns."
+                self.logger.warning(message)
+                self.log(message, level=logging.WARNING)
+                if progress is not None:
+                    try:
+                        progress(idx, total, message)
+                    except Exception:
+                        pass
+                continue
             raw_sample = _sample_from_path(Path(path), self.data.sources)
             sample, variant = _split_sample_variant(raw_sample)
             key = _microwire_key_from_path(Path(path), sample or raw_sample)
@@ -11470,10 +11608,12 @@ class VsmHysteresisSection(MiniDatabaseSection):
                 "No VSM hysteresis graphs are available yet.",
             )
             return
+        groups = _visibility_groups_from_records(self._all_records)
         dialog = _GraphVisibilityDialog(
             "VSM hysteresis visibility",
             items,
             self._hidden_paths,
+            groups=groups,
             parent=self,
         )
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -11905,10 +12045,12 @@ class VsmTemperatureScanSection(MiniDatabaseSection):
                 "No VSM temperature scan graphs are available yet.",
             )
             return
+        groups = _visibility_groups_from_records(self._all_records)
         dialog = _GraphVisibilityDialog(
             "VSM temperature scan visibility",
             items,
             self._hidden_paths,
+            groups=groups,
             parent=self,
         )
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -12318,10 +12460,12 @@ class DmaIsoStressSection(MiniDatabaseSection):
                 "No DMA iso-stress graphs are available yet.",
             )
             return
+        groups = _visibility_groups_from_records(self._all_records)
         dialog = _GraphVisibilityDialog(
             "DMA iso-stress visibility",
             items,
             self._hidden_paths,
+            groups=groups,
             parent=self,
         )
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -12732,10 +12876,12 @@ class FmrSection(MiniDatabaseSection):
                 "No FMR graphs are available yet.",
             )
             return
+        groups = _visibility_groups_from_records(self._all_records)
         dialog = _GraphVisibilityDialog(
             "FMR visibility",
             items,
             self._hidden_paths,
+            groups=groups,
             parent=self,
         )
         if dialog.exec() == QtWidgets.QDialog.DialogCode.Accepted:
@@ -14596,31 +14742,66 @@ class _GraphVisibilityDialog(QtWidgets.QDialog):
         title: str,
         items: Sequence[Tuple[str, str]],
         hidden_paths: Set[str],
+        *,
+        groups: Optional[Mapping[str, Sequence[Tuple[str, str]]]] = None,
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(title)
         self._hidden_paths = set(hidden_paths)
+        self._updating_tree = False
 
         layout = QtWidgets.QVBoxLayout(self)
         intro = QtWidgets.QLabel("Toggle which graphs should be visible.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        self.list = QtWidgets.QListWidget()
-        layout.addWidget(self.list, 1)
+        self.tree = QtWidgets.QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        layout.addWidget(self.tree, 1)
+        self.tree.itemChanged.connect(self._handle_item_changed)
 
-        for label, path in items:
-            item = QtWidgets.QListWidgetItem(label)
-            item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
-            item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
-            state = (
-                QtCore.Qt.CheckState.Unchecked
-                if path in self._hidden_paths
-                else QtCore.Qt.CheckState.Checked
-            )
-            item.setCheckState(state)
-            self.list.addItem(item)
+        if groups:
+            for group_label, group_items in groups.items():
+                parent_item = QtWidgets.QTreeWidgetItem([group_label])
+                parent_item.setFlags(
+                    parent_item.flags()
+                    | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                    | QtCore.Qt.ItemFlag.ItemIsAutoTristate
+                )
+                child_states: List[QtCore.Qt.CheckState] = []
+                for label, path in group_items:
+                    child = QtWidgets.QTreeWidgetItem([label])
+                    child.setData(0, QtCore.Qt.ItemDataRole.UserRole, path)
+                    child.setFlags(child.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                    state = (
+                        QtCore.Qt.CheckState.Unchecked
+                        if path in self._hidden_paths
+                        else QtCore.Qt.CheckState.Checked
+                    )
+                    child.setCheckState(0, state)
+                    child_states.append(state)
+                    parent_item.addChild(child)
+                if child_states:
+                    if all(state == QtCore.Qt.CheckState.Checked for state in child_states):
+                        parent_item.setCheckState(0, QtCore.Qt.CheckState.Checked)
+                    elif all(state == QtCore.Qt.CheckState.Unchecked for state in child_states):
+                        parent_item.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+                    else:
+                        parent_item.setCheckState(0, QtCore.Qt.CheckState.PartiallyChecked)
+                self.tree.addTopLevelItem(parent_item)
+        else:
+            for label, path in items:
+                item = QtWidgets.QTreeWidgetItem([label])
+                item.setData(0, QtCore.Qt.ItemDataRole.UserRole, path)
+                item.setFlags(item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable)
+                state = (
+                    QtCore.Qt.CheckState.Unchecked
+                    if path in self._hidden_paths
+                    else QtCore.Qt.CheckState.Checked
+                )
+                item.setCheckState(0, state)
+                self.tree.addTopLevelItem(item)
 
         button_row = QtWidgets.QHBoxLayout()
         show_all = QtWidgets.QPushButton("Show all")
@@ -14642,23 +14823,64 @@ class _GraphVisibilityDialog(QtWidgets.QDialog):
 
     def hidden_paths(self) -> Set[str]:
         hidden: Set[str] = set()
-        for idx in range(self.list.count()):
-            item = self.list.item(idx)
-            if item is None:
+        for idx in range(self.tree.topLevelItemCount()):
+            parent_item = self.tree.topLevelItem(idx)
+            if parent_item is None:
                 continue
-            path = item.data(QtCore.Qt.ItemDataRole.UserRole)
-            if not isinstance(path, str):
+            if parent_item.childCount() == 0:
+                path = parent_item.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if isinstance(path, str) and parent_item.checkState(0) != QtCore.Qt.CheckState.Checked:
+                    hidden.add(path)
                 continue
-            if item.checkState() != QtCore.Qt.CheckState.Checked:
-                hidden.add(path)
+            for child_idx in range(parent_item.childCount()):
+                child = parent_item.child(child_idx)
+                if child is None:
+                    continue
+                path = child.data(0, QtCore.Qt.ItemDataRole.UserRole)
+                if not isinstance(path, str):
+                    continue
+                if child.checkState(0) != QtCore.Qt.CheckState.Checked:
+                    hidden.add(path)
         return hidden
 
     def _set_all(self, state: QtCore.Qt.CheckState) -> None:
-        for idx in range(self.list.count()):
-            item = self.list.item(idx)
-            if item is None:
-                continue
-            item.setCheckState(state)
+        self._updating_tree = True
+        try:
+            for idx in range(self.tree.topLevelItemCount()):
+                item = self.tree.topLevelItem(idx)
+                if item is None:
+                    continue
+                item.setCheckState(0, state)
+                for child_idx in range(item.childCount()):
+                    child = item.child(child_idx)
+                    if child is not None:
+                        child.setCheckState(0, state)
+        finally:
+            self._updating_tree = False
+
+    def _handle_item_changed(self, item: QtWidgets.QTreeWidgetItem, *_: Any) -> None:
+        if self._updating_tree:
+            return
+        self._updating_tree = True
+        try:
+            if item.childCount() > 0:
+                state = item.checkState(0)
+                for idx in range(item.childCount()):
+                    child = item.child(idx)
+                    if child is not None:
+                        child.setCheckState(0, state)
+            else:
+                parent = item.parent()
+                if parent is not None:
+                    states = [parent.child(idx).checkState(0) for idx in range(parent.childCount())]
+                    if all(state == QtCore.Qt.CheckState.Checked for state in states):
+                        parent.setCheckState(0, QtCore.Qt.CheckState.Checked)
+                    elif all(state == QtCore.Qt.CheckState.Unchecked for state in states):
+                        parent.setCheckState(0, QtCore.Qt.CheckState.Unchecked)
+                    else:
+                        parent.setCheckState(0, QtCore.Qt.CheckState.PartiallyChecked)
+        finally:
+            self._updating_tree = False
 
 
 class _ColumnOrderDialog(QtWidgets.QDialog):
@@ -15102,7 +15324,7 @@ class CompareSection(MiniDatabaseSection):
         self.matrix_view.horizontalHeader().setStretchLastSection(True)
         self.matrix_view.setAlternatingRowColors(True)
         self.matrix_view.setSelectionBehavior(
-            QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems
+            QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows
         )
         self.matrix_view.setSelectionMode(
             QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
@@ -15114,6 +15336,12 @@ class CompareSection(MiniDatabaseSection):
         self.matrix_view.setHorizontalScrollMode(
             QtWidgets.QAbstractItemView.ScrollMode.ScrollPerPixel
         )
+        try:
+            self.matrix_view.setViewportUpdateMode(
+                QtWidgets.QAbstractItemView.ViewportUpdateMode.MinimalViewportUpdate
+            )
+        except Exception:
+            pass
         try:
             self.matrix_view.setIconSize(
                 QtCore.QSize(ANNEALING_GRAPH_WIDTH, ANNEALING_GRAPH_HEIGHT)
@@ -15555,6 +15783,26 @@ class CompareSection(MiniDatabaseSection):
             return None
         if column_label == "Field":
             return None
+        matrix_view = getattr(self, "matrix_view", None)
+        if isinstance(matrix_view, QtWidgets.QTableView):
+            try:
+                row_idx = int(row.name)
+            except Exception:
+                row_idx = None
+            if row_idx is None:
+                frame = self.matrix_model.frame()
+                if isinstance(frame, pd.DataFrame):
+                    try:
+                        row_idx = int(frame.index.get_loc(row.name))
+                    except Exception:
+                        row_idx = None
+            if row_idx is not None:
+                top = matrix_view.rowAt(0)
+                bottom = matrix_view.rowAt(matrix_view.viewport().height() - 1)
+                if bottom == -1:
+                    bottom = top
+                if top != -1 and bottom != -1 and (row_idx < top or row_idx > bottom):
+                    return None
         key = self._matrix_column_keys.get(column_label)
         if not key:
             return None
@@ -16136,6 +16384,16 @@ class CompareSection(MiniDatabaseSection):
                 self._cached_fmr_records = list(records)
                 self._cached_fmr_groups = _group_graph_records_by_key(records)
                 groups = self._cached_fmr_groups
+            if not groups:
+                section = self.sections.get("fmr")
+                if isinstance(section, FmrSection):
+                    fallback = getattr(section, "_record_groups_by_key", None)
+                    if isinstance(fallback, dict) and fallback:
+                        self._cached_fmr_records = list(
+                            getattr(section, "_all_records", []) or []
+                        )
+                        self._cached_fmr_groups = dict(fallback)
+                        groups = self._cached_fmr_groups
         return groups
 
     def _group_annealing_records(
@@ -16219,6 +16477,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._cached_fmr_groups: Dict[str, List[FmrRecord]] = {}
         self._compare_section: Optional["CompareSection"] = None
         self._raw_preview_frame: Optional[pd.DataFrame] = None
+        self._measured_preview_frame: Optional[pd.DataFrame] = None
         self._preview_row_index_map: List[int] = []
         self._selected_columns: Optional[Set[str]] = None
         self._column_order: List[str] = []
@@ -16246,6 +16505,9 @@ class AssemblySection(QtWidgets.QWidget):
         self._combine_dialog: QtWidgets.QProgressDialog | None = None
         self._combine_output_dir: Optional[Path] = None
         self._combine_output_name: str = ""
+        self._imported_rows: Dict[str, Dict[str, Any]] = {}
+        self._imported_sources: List[str] = []
+        self._show_imported = True
 
         self._output_dir = str(Path.cwd())
         self._output_name = DEFAULT_OUTPUT_NAME
@@ -16318,6 +16580,10 @@ class AssemblySection(QtWidgets.QWidget):
         self.open_dma_button.clicked.connect(lambda: self._open_preview_graph("dma_iso_stress"))
         self.open_dma_button.setEnabled(False)
         graph_row.addWidget(self.open_dma_button)
+        self.open_fmr_button = QtWidgets.QPushButton("Open FMR graphs")
+        self.open_fmr_button.clicked.connect(lambda: self._open_preview_graph("fmr"))
+        self.open_fmr_button.setEnabled(False)
+        graph_row.addWidget(self.open_fmr_button)
         graph_row.addStretch(1)
         layout.addLayout(graph_row)
 
@@ -16412,6 +16678,11 @@ class AssemblySection(QtWidgets.QWidget):
             self.graph_preview_panel,
         )
         self.graph_preview_tabs.addTab(self.dma_iso_gallery, "DMA iso-stress")
+        self.fmr_gallery = _GraphGalleryWidget(
+            "Select a row to preview FMR graphs.",
+            self.graph_preview_panel,
+        )
+        self.graph_preview_tabs.addTab(self.fmr_gallery, "FMR")
         self.graph_preview_panel.setVisible(False)
 
         self.preview_splitter = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -16476,6 +16747,12 @@ class AssemblySection(QtWidgets.QWidget):
             "sort_spec": list(self._sort_spec),
             "export_settings": self._export_settings_payload(),
             "graph_preview": bool(self.graph_panel_checkbox.isChecked()),
+            "imported_rows": [
+                {str(key): _json_safe(val) for key, val in row.items()}
+                for row in self._imported_rows.values()
+            ],
+            "imported_sources": list(self._imported_sources),
+            "show_imported": bool(self._show_imported),
         }
 
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:
@@ -16536,6 +16813,23 @@ class AssemblySection(QtWidgets.QWidget):
             frame = self._apply_column_universe(frame)
         if self._selected_columns is not None:
             self._sync_section_states_from_columns(self._selected_columns, frame.columns)
+        imported_rows = payload.get("imported_rows")
+        if isinstance(imported_rows, list):
+            cleaned_rows: Dict[str, Dict[str, Any]] = {}
+            for row in imported_rows:
+                if isinstance(row, Mapping):
+                    record = {str(k): v for k, v in row.items()}
+                    key = _row_to_microwire_key(pd.Series(record))
+                    if key:
+                        cleaned_rows[key] = record
+            self._imported_rows = cleaned_rows
+        imported_sources = payload.get("imported_sources")
+        if isinstance(imported_sources, list):
+            self._imported_sources = [str(entry) for entry in imported_sources if entry]
+        show_imported = payload.get("show_imported")
+        if isinstance(show_imported, bool):
+            self._show_imported = show_imported
+        self._measured_preview_frame = None
         self._raw_preview_frame = frame
         self._refresh_preview_frame()
 
@@ -16586,6 +16880,232 @@ class AssemblySection(QtWidgets.QWidget):
                 if key in sections:
                     self._section_states[key] = bool(sections.get(key))
         self._update_export_summary()
+
+    def _open_import_dialog(self) -> None:
+        if openpyxl is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Microwire Data Builder",
+                "Importing workbooks requires openpyxl.",
+            )
+            return
+        start_dir = _dialog_start_directory("sample_data")
+        path_text, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import data workbook",
+            str(start_dir),
+            "Excel files (*.xlsx *.xlsm *.xltx *.xltm);;All files (*.*)",
+        )
+        if not path_text:
+            return
+        path = Path(path_text)
+        fabrication_index = self._load_payload("fabrication", "fabrication_index")
+        if not isinstance(fabrication_index, FabricationIndex):
+            fabrication_index = FabricationIndex()
+        new_rows = self._load_import_rows(path, fabrication_index)
+        if not new_rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No usable rows were found in that workbook.",
+            )
+            return
+        added = self._merge_imported_payload(new_rows)
+        if not added and not self._imported_rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Microwire Data Builder",
+                "No new rows were added from that workbook.",
+            )
+        if str(path) not in self._imported_sources:
+            self._imported_sources.append(str(path))
+        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
+            merged = self._merge_imported_rows(base_frame)
+            self._update_preview(merged)
+        else:
+            self._update_preview(pd.DataFrame(list(self._imported_rows.values())))
+        self.log(f"Imported {len(new_rows)} row(s) from {path.name}.")
+        self._mark_dirty()
+
+    def open_import_dialog(self) -> None:
+        self._open_import_dialog()
+
+    def _load_import_rows(
+        self, path: Path, fabrication_index: FabricationIndex
+    ) -> Dict[str, Dict[str, Any]]:
+        if openpyxl is None:
+            return {}
+        try:
+            workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+        except Exception:
+            self.logger.exception("Failed to open import workbook %s", path)
+            return {}
+        sheet = workbook.active
+        rows_iter = sheet.iter_rows(values_only=True)
+        header_row = next(rows_iter, None)
+        if not header_row:
+            return {}
+        mapped_headers: List[Optional[str]] = []
+        seen: Dict[str, int] = {}
+        for header in header_row:
+            column = _map_import_header(header)
+            if column is None:
+                mapped_headers.append(None)
+                continue
+            count = seen.get(column, 0) + 1
+            seen[column] = count
+            if count > 1:
+                column = f"{column} ({count})"
+            mapped_headers.append(column)
+        rows: Dict[str, Dict[str, Any]] = {}
+        source_label = f"Imported ({path.name})"
+        for row in rows_iter:
+            record: Dict[str, Any] = {}
+            for idx, value in enumerate(row):
+                if idx >= len(mapped_headers):
+                    break
+                column = mapped_headers[idx]
+                if not column:
+                    continue
+                record[column] = _normalise_import_value(value)
+            composition = str(record.get("Composition") or "").strip()
+            microwire = str(record.get("Microwire") or "").strip()
+            if not composition or not microwire:
+                continue
+            normalised_wire = self._normalise_import_microwire(microwire)
+            record["Composition"] = composition
+            record["Microwire"] = normalised_wire or microwire
+            import_key = _row_to_microwire_key(pd.Series(record))
+            if not import_key:
+                continue
+            if not record.get("e/a"):
+                ea_value = _compute_ea_from_composition(composition)
+                if ea_value is not None:
+                    record["e/a"] = ea_value
+            record.setdefault("Data source", source_label)
+            self._apply_fabrication_defaults(record, fabrication_index)
+            rows[import_key] = record
+        return rows
+
+    def _normalise_import_microwire(self, microwire: str) -> Optional[str]:
+        parts = _microwire_parts_from_label_safe(str(microwire))
+        if parts is None:
+            return None
+        draw, piece, suffix = parts
+        try:
+            return _microwire_label(int(draw), int(piece), suffix)
+        except Exception:
+            return None
+
+    def _apply_fabrication_defaults(
+        self, record: Dict[str, Any], fabrication_index: FabricationIndex
+    ) -> None:
+        composition = str(record.get("Composition") or "").strip()
+        microwire = str(record.get("Microwire") or "").strip()
+        if not composition or not microwire:
+            return
+        parts = _microwire_parts_from_label_safe(microwire)
+        if parts is None:
+            return
+        draw_x, piece_y, _suffix = parts
+        draw_info = fabrication_index.get_draw(composition, draw_x)
+        piece_info = fabrication_index.get_piece(composition, draw_x, piece_y)
+
+        def fill(column: str, value: object) -> None:
+            if record.get(column) in (None, "") and value not in (None, ""):
+                record[column] = value
+
+        fill("Length (m)", _value_for_output(piece_info, "length_m"))
+        fill("Production datetime", _value_for_output(draw_info, "production_datetime"))
+        fill("Mass (g)", _value_for_output(draw_info, "mass_g"))
+        piece_resistance = _value_for_output(piece_info, "fabrication_resistance_ohm")
+        draw_resistance = _value_for_output(draw_info, "fabrication_resistance_ohm")
+        fill("Resistance (Ω)", piece_resistance if piece_resistance is not None else draw_resistance)
+        fill("Temperature (°C)", _value_for_output(draw_info, "fabrication_temperature_c"))
+        fill("Winding speed (m/min)", _value_for_output(draw_info, "winding_speed_m_per_min"))
+        fill("Glass feeding (mm/min)", _value_for_output(draw_info, "glass_feed_mm_per_min"))
+        fill("Underpressure", _value_for_output(draw_info, "underpressure"))
+        notes = _compose_notes(draw_info, piece_info)
+        fill("Notes", notes)
+
+    def _merge_imported_rows(self, frame: pd.DataFrame) -> pd.DataFrame:
+        if not self._imported_rows or not self._show_imported:
+            return frame
+        imported = pd.DataFrame(list(self._imported_rows.values()))
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return imported
+        merged_frame = frame.copy()
+        key_index: Dict[str, int] = {}
+        for idx, row in merged_frame.iterrows():
+            key = _row_to_microwire_key(row)
+            if key and key not in key_index:
+                key_index[key] = idx
+        append_rows: List[Dict[str, Any]] = []
+        for key, record in self._imported_rows.items():
+            if key in key_index:
+                row_idx = key_index[key]
+                row = merged_frame.loc[row_idx]
+                updated = False
+                for column, value in record.items():
+                    if column in {"Composition", "Microwire"}:
+                        continue
+                    if column not in merged_frame.columns:
+                        merged_frame[column] = None
+                    if (row.get(column) in (None, "", pd.NA)) and value not in (None, ""):
+                        merged_frame.at[row_idx, column] = value
+                        updated = True
+                if updated:
+                    current_source = str(row.get("Data source") or "").strip()
+                    if current_source and "Imported" not in current_source:
+                        merged_frame.at[row_idx, "Data source"] = "Measured + Imported"
+            else:
+                append_rows.append(record)
+        if append_rows:
+            merged_frame = pd.concat(
+                [merged_frame, pd.DataFrame(append_rows)], ignore_index=True, sort=False
+            )
+        return merged_frame
+
+    def _merge_imported_payload(self, incoming: Dict[str, Dict[str, Any]]) -> int:
+        added = 0
+        for key, record in incoming.items():
+            existing = self._imported_rows.get(key)
+            if existing is None:
+                self._imported_rows[key] = dict(record)
+                added += 1
+                continue
+            for column, value in record.items():
+                if existing.get(column) in (None, "") and value not in (None, ""):
+                    existing[column] = value
+                    added += 1
+        return added
+
+    def set_show_imported(self, enabled: bool) -> None:
+        self._show_imported = bool(enabled)
+        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        if isinstance(base_frame, pd.DataFrame) and not base_frame.empty:
+            merged = self._merge_imported_rows(base_frame)
+            self._update_preview(merged)
+        elif self._show_imported:
+            self._update_preview(pd.DataFrame(list(self._imported_rows.values())))
+        else:
+            self._update_preview(pd.DataFrame())
+
+    def clear_imported_data(self) -> None:
+        if not self._imported_rows and not self._imported_sources:
+            return
+        self._imported_rows = {}
+        self._imported_sources = []
+        base_frame = self._measured_preview_frame or self._raw_preview_frame
+        if isinstance(base_frame, pd.DataFrame):
+            self._update_preview(base_frame)
+        else:
+            self._update_preview(pd.DataFrame())
+        self._mark_dirty()
+
+    def imported_sources(self) -> List[str]:
+        return list(self._imported_sources)
 
     def _update_export_summary(self) -> None:
         output_dir = self._output_dir or str(Path.cwd())
@@ -17442,6 +17962,16 @@ class AssemblySection(QtWidgets.QWidget):
                 self._cached_fmr_records = list(records)
                 self._cached_fmr_groups = _group_graph_records_by_key(records)
                 groups = self._cached_fmr_groups
+            if not groups:
+                section = self.sections.get("fmr")
+                if isinstance(section, FmrSection):
+                    fallback = getattr(section, "_record_groups_by_key", None)
+                    if isinstance(fallback, dict) and fallback:
+                        self._cached_fmr_records = list(
+                            getattr(section, "_all_records", []) or []
+                        )
+                        self._cached_fmr_groups = dict(fallback)
+                        groups = self._cached_fmr_groups
         return groups
 
     def _selected_preview_row_index(self) -> Optional[int]:
@@ -19278,7 +19808,9 @@ class AssemblySection(QtWidgets.QWidget):
     def _handle_preview_finished(self, dataframe: object) -> None:
         self._close_preview_progress()
         if isinstance(dataframe, pd.DataFrame):
-            self._update_preview(dataframe)
+            self._measured_preview_frame = dataframe.copy()
+            merged = self._merge_imported_rows(dataframe)
+            self._update_preview(merged)
         else:
             self._update_preview(pd.DataFrame())
         self.log("Preview updated.")
@@ -19427,6 +19959,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
         raw_auto = self.settings.value(self._project_settings_key("auto_open_last"), False)
         self._auto_open_last: bool = bool(raw_auto)
         self._auto_open_last_action: QtGui.QAction | None = None
+        self._data_menu: QtWidgets.QMenu | None = None
+        self._show_imported_action: QtGui.QAction | None = None
+        self._remove_imported_action: QtGui.QAction | None = None
+        self._imported_item: QtWidgets.QTreeWidgetItem | None = None
         self._fullscreen_snap_pending = False
 
         central = QtWidgets.QWidget(self)
@@ -19630,6 +20166,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 initial_sources = section.data.sources
             self._handle_section_sources_changed(key, initial_sources)
 
+        self._imported_item = QtWidgets.QTreeWidgetItem(["Imported data", ""])
+        self.project_tree.addTopLevelItem(self._imported_item)
+        self._update_imported_data_item()
+
         self.project_dock = QtWidgets.QDockWidget("Project Explorer", self)
         self.project_dock.setObjectName("builderProjectExplorerDock")
         self.project_dock.setWidget(self.project_tree)
@@ -19688,6 +20228,7 @@ class BuilderWindow(QtWidgets.QMainWindow):
         menu_bar = install_standard_menu(self, help_topic="builder_database", console=self.log_view)
         self._setup_project_actions(menu_bar)
         self._setup_settings_menu(menu_bar)
+        self._setup_data_menu(menu_bar)
         self._update_project_actions()
         self._suppress_dirty = True
         for section in self.sections.values():
@@ -20263,6 +20804,66 @@ class BuilderWindow(QtWidgets.QMainWindow):
         settings_menu.addAction(auto_open_action)
         self._auto_open_last_action = auto_open_action
 
+    def _setup_data_menu(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        data_menu = menu_bar.addMenu("Data")
+        import_action = QtGui.QAction("Import workbook…", self)
+        import_action.triggered.connect(self._handle_import_data)
+        data_menu.addAction(import_action)
+
+        show_imported_action = QtGui.QAction("Show imported data", self)
+        show_imported_action.setCheckable(True)
+        show_imported_action.setChecked(True)
+        show_imported_action.toggled.connect(self._toggle_show_imported)
+        data_menu.addAction(show_imported_action)
+
+        remove_action = QtGui.QAction("Remove imported data", self)
+        remove_action.triggered.connect(self._remove_imported_data)
+        data_menu.addAction(remove_action)
+
+        self._data_menu = data_menu
+        self._show_imported_action = show_imported_action
+        self._remove_imported_action = remove_action
+
+    def _handle_import_data(self) -> None:
+        assembly = getattr(self, "assembly_section", None)
+        if isinstance(assembly, AssemblySection):
+            assembly.open_import_dialog()
+            self._update_imported_data_item()
+            self._update_project_actions()
+
+    def _toggle_show_imported(self, enabled: bool) -> None:
+        assembly = getattr(self, "assembly_section", None)
+        if isinstance(assembly, AssemblySection):
+            assembly.set_show_imported(bool(enabled))
+            self._update_project_actions()
+
+    def _remove_imported_data(self) -> None:
+        assembly = getattr(self, "assembly_section", None)
+        if isinstance(assembly, AssemblySection):
+            assembly.clear_imported_data()
+            self._update_imported_data_item()
+            self._update_project_actions()
+
+    def _update_imported_data_item(self) -> None:
+        item = self._imported_item
+        if not isinstance(item, QtWidgets.QTreeWidgetItem):
+            return
+        item.takeChildren()
+        assembly = getattr(self, "assembly_section", None)
+        sources: List[str] = []
+        if isinstance(assembly, AssemblySection):
+            try:
+                sources = assembly.imported_sources()
+            except Exception:
+                sources = []
+        item.setText(1, f"{len(sources)} file(s)" if sources else "")
+        for source in sources:
+            child = QtWidgets.QTreeWidgetItem(["", source])
+            child.setToolTip(1, source)
+            item.addChild(child)
+        if sources:
+            item.setExpanded(False)
+
     def _mark_dirty(self) -> None:
         if self._suppress_dirty:
             return
@@ -20624,6 +21225,11 @@ class BuilderWindow(QtWidgets.QMainWindow):
                         importer(assembly_payload or {})
                     except Exception as exc:
                         self.logger.error("Failed to load section assemble: %s", exc)
+            self._update_imported_data_item()
+            if isinstance(assembly, AssemblySection):
+                show_imported = getattr(assembly, "_show_imported", True)
+                if self._show_imported_action is not None:
+                    self._show_imported_action.setChecked(bool(show_imported))
 
             self._project_path = target
             self._remember_project_directory(target.parent)

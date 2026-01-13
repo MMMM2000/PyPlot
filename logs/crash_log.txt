@@ -375,3 +375,21 @@ Traceback (most recent call last):
            ~~~~~~~~~~^^^
 TypeError: only length-1 arrays can be converted to Python scalars
 
+2026-01-13 14:17:18 [EXCEPTION] TypeError: arg must be a list, tuple, 1-d array, or Series
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\plotting\pyplot\app.py", line 791, in _generate_plots
+    self._current_plugin.generate()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3935, in _generate_plots
+    self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 5776, in _render_matplotlib
+    numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Martin\PyPlot\.venv\Lib\site-packages\pandas\core\tools\numeric.py", line 209, in to_numeric
+    raise TypeError("arg must be a list, tuple, 1-d array, or Series")
+TypeError: arg must be a list, tuple, 1-d array, or Series
+

@@ -104,6 +104,40 @@ CURRENT_DENSITY_EXTRA_COLUMNS = [
     "Sources",
 ]
 
+EA_VALENCE = {
+    "Ni": 10,
+    "Fe": 8,
+    "Co": 9,
+    "Cu": 11,
+    "Ga": 3,
+    "Ge": 4,
+    "Si": 4,
+    "Sn": 4,
+}
+EA_COMPOSITION_RE = re.compile(r"([A-Z][a-z]?)(\d+(?:\.\d+)?)")
+
+
+def _compute_ea_from_composition(composition: str) -> Optional[float]:
+    if not composition:
+        return None
+    matches = EA_COMPOSITION_RE.findall(str(composition))
+    if not matches:
+        return None
+    total = 0.0
+    weighted = 0.0
+    for element, count_text in matches:
+        if element not in EA_VALENCE:
+            return None
+        try:
+            count = float(count_text)
+        except (TypeError, ValueError):
+            return None
+        total += count
+        weighted += count * EA_VALENCE[element]
+    if total <= 0:
+        return None
+    return round(weighted / total, 2)
+
 STRAIN_EXTRA_COLUMNS = [
     "Calc mode",
     "Clamp span (mm)",
@@ -117,6 +151,7 @@ STRAIN_EXTRA_COLUMNS = [
 OUTPUT_COLUMNS = [
     "Composition",
     "Microwire",
+    "e/a",
     "d (µm)",
     "D (µm)",
     "d/D",
@@ -138,6 +173,7 @@ OUTPUT_COLUMNS = [
     "Glass feeding (mm/min)",
     "Underpressure",
     "Notes",
+    "Data source",
     "Low mA value (mA)",
     "File 1000 mA",
     "File low mA",
@@ -153,9 +189,9 @@ OUTPUT_COLUMNS = [
     "FMR graphs",
 ]
 
-DIAMETER_COLUMN = OUTPUT_COLUMNS[2]
-GLASS_DIAMETER_COLUMN = OUTPUT_COLUMNS[3]
-DIAMETER_RATIO_COLUMN = OUTPUT_COLUMNS[4]
+DIAMETER_COLUMN = "d (µm)"
+GLASS_DIAMETER_COLUMN = "D (µm)"
+DIAMETER_RATIO_COLUMN = "d/D"
 
 MICROSCOPE_IMAGE_COLUMNS = (
     "d (µm) image",
@@ -1412,9 +1448,13 @@ def _split_microwire_key(
 
 
 def _microwire_key_to_str(
-    key: Tuple[str, int, int, Optional[str]],
+    key: Tuple[str, int, int, Optional[str]] | Tuple[str, int, int],
 ) -> str:
-    composition, draw, piece, suffix = key
+    if len(key) == 3:
+        composition, draw, piece = key
+        suffix = None
+    else:
+        composition, draw, piece, suffix = key
     base = f"{composition}|{draw}|{piece}"
     if suffix:
         return f"{base}|{suffix}"
@@ -4997,16 +5037,24 @@ def build_database(
         item: Tuple[Tuple[str, int, int, Optional[str]], List[MeasurementRecord]]
     ) -> Tuple[str, int, int, str]:
         key, _records = item
-        composition, draw_x, piece_y, suffix = key
+        parts = _split_microwire_key(key)
+        if parts is None:
+            return ("", 0, 0, "")
+        composition, draw_x, piece_y, suffix = parts
         return (composition.lower(), draw_x, piece_y, (suffix or "").lower())
 
     for key, records in sorted(grouped.items(), key=_group_sort_key):
-        composition, draw_x, piece_y, suffix = key
+        parts = _split_microwire_key(key)
+        if parts is None:
+            continue
+        composition, draw_x, piece_y, suffix = parts
+        key = parts
         draw_info = fabrication_index.get_draw(composition, draw_x)
         piece_info = fabrication_index.get_piece(composition, draw_x, piece_y)
         row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
         row["Microwire"] = _microwire_label(draw_x, piece_y, suffix)
+        row["e/a"] = _compute_ea_from_composition(composition)
         key_str = _microwire_key_to_str(key)
         row["d (µm)"] = None
         row["D (µm)"] = None
@@ -5020,6 +5068,7 @@ def build_database(
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
         row["Notes"] = _compose_notes(draw_info, piece_info)
+        row["Data source"] = "Measured"
         phase_entry = phase_points_map.get(key_str, {})
         if phase_entry:
             as_value = phase_entry.get("As1")
@@ -5624,6 +5673,7 @@ __all__ = [
     "FMR_COLUMN",
     "build_database",
     "build_fabrication_index",
+    "_compute_ea_from_composition",
     "LOGGER_NAME",
     "DEFAULT_OUTPUT_NAME",
 ]

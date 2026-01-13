@@ -4787,3 +4787,462 @@ TypeError: only length-1 arrays can be converted to Python scalars
 2026-01-12 10:33:53 [INFO] VSM temperature scan: processed 15 file(s).
 2026-01-12 10:33:59 [INFO] DMA iso-stress: processed 2 file(s).
 2026-01-12 10:34:01 [INFO] FMR: processed 3 file(s).
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-01.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-02.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-03.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-04.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-05.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-06.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-07.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-08.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-09.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-10.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-11.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-12.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-13.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-14.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-15.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:35 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-16.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-17.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-01.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-02.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-03.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-04.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-05.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-06.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-07.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-08.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-09.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-10.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-11.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-12.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-13.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-14.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-15.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-16.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:36 [WARNING] Skipped 202503121609-Hys-a000-T120-17.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:37 [WARNING] WARNING: Skipped 202503121614-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:37 [WARNING] Skipped 202503121614-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:37 [WARNING] WARNING: Skipped 202503121614-Hys-a010-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:37 [WARNING] Skipped 202503121614-Hys-a010-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a020-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a020-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a030-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a030-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a040-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a040-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a050-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a050-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a060-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a060-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a070-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a070-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a080-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a080-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a090-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a090-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a100-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a100-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a110-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a110-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a120-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a120-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a130-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a130-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a140-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a140-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a150-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a150-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a160-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a160-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a170-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a170-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121614-Hys-a180-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121614-Hys-a180-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] WARNING: Skipped 202503121615-Hys-a025-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:38 [WARNING] Skipped 202503121615-Hys-a025-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-01.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-01.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-02.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-02.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-03.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-03.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-04.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-04.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-05.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-05.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-06.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-06.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-07.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-07.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-08.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-08.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-09.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-09.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-10.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-10.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-11.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-11.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-12.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-12.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-13.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-13.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-14.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-14.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-15.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-15.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-16.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-16.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-17.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-17.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-18.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-18.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-19.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-19.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-20.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-20.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-21.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-21.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-22.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-22.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-23.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-23.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] WARNING: Skipped 202504120846-Hys-24.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:44 [WARNING] Skipped 202504120846-Hys-24.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-25.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-25.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-26.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-26.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-27.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-27.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-28.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-28.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-29.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-29.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-30.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-30.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-31.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-31.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-32.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-32.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-33.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-33.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-34.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-34.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-35.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-35.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-36.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-36.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] WARNING: Skipped 202504120846-Hys-37.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:45 [WARNING] Skipped 202504120846-Hys-37.VSM-HYS-DATA: no data rows detected.
+2026-01-13 11:37:49 [INFO] VSM hysteresis loops: processed 209 file(s).
+2026-01-13 11:38:14 [WARNING] Skipping videos because no data were found.
+2026-01-13 11:38:14 [INFO] Preview build started.
+2026-01-13 11:38:14 [ERROR] ERROR: Preview failed: not enough values to unpack (expected 4, got 3)
+2026-01-13 11:41:25 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:25 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:29 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:29 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:57 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:57 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:59 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:41:59 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:00 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:00 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:01 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:01 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:01 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:01 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:01 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:01 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:02 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:02 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:03 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:03 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:04 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:04 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:05 [ERROR] ERROR: Failed to update compare graph preview panel
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 17651, in _update_graph_preview_panel
+    self.fmr_gallery.set_items(
+    ^^^^^^^^^^^^^^^^
+AttributeError: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 11:42:05 [ERROR] Failed to update compare graph preview panel: 'AssemblySection' object has no attribute 'fmr_gallery'
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-01.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-02.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-03.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-04.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-05.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-06.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-07.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:49 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-08.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-09.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-10.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-11.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-12.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-13.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-14.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-15.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-16.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:50 [WARNING] WARNING: Skipped 202503121609-Hys-a000-T120-17.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-01.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-02.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-03.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-04.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-05.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-06.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-07.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-08.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-09.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-10.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-11.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-12.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-13.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-14.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-15.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-16.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:51 [WARNING] Skipped 202503121609-Hys-a000-T120-17.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] Skipped 202503121614-Hys-a000-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a010-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] Skipped 202503121614-Hys-a010-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a020-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] Skipped 202503121614-Hys-a020-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a030-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] Skipped 202503121614-Hys-a030-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a040-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] Skipped 202503121614-Hys-a040-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a050-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] Skipped 202503121614-Hys-a050-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a060-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a070-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a080-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a090-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a100-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a110-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a120-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a130-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a140-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a150-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:53 [WARNING] WARNING: Skipped 202503121614-Hys-a160-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] WARNING: Skipped 202503121614-Hys-a170-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] WARNING: Skipped 202503121614-Hys-a180-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] WARNING: Skipped 202503121615-Hys-a025-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a060-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a070-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a080-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a090-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a100-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a110-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a120-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a130-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a140-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a150-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a160-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a170-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121614-Hys-a180-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:54 [WARNING] Skipped 202503121615-Hys-a025-T120-00.VSM-Hys-Data: no data rows detected.
+2026-01-13 13:16:56 [INFO] VSM temperature scan: queued refresh while VSM hysteresis loops completes.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-01.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-01.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-02.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-02.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-03.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-03.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-04.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-04.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-05.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-05.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-06.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-06.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-07.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-07.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-08.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-08.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-09.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-09.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] WARNING: Skipped 202504120846-Hys-10.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:02 [WARNING] Skipped 202504120846-Hys-10.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-11.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-11.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-12.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-12.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-13.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-13.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-14.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-14.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-15.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-15.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-16.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-16.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-17.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-17.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-18.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-18.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-19.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-19.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-20.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-20.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-21.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-21.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-22.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-22.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-23.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-23.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-24.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-24.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-25.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-25.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-26.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-26.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-27.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-27.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-28.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-28.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-29.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-29.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-30.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-30.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-31.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-31.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-32.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-32.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-33.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-33.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-34.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-34.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-35.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-35.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-36.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-36.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] WARNING: Skipped 202504120846-Hys-37.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:03 [WARNING] Skipped 202504120846-Hys-37.VSM-HYS-DATA: no data rows detected.
+2026-01-13 13:17:08 [INFO] VSM hysteresis loops: processed 209 file(s).
+2026-01-13 13:17:12 [INFO] VSM temperature scan: processed 15 file(s).
+2026-01-13 13:20:08 [WARNING] Skipping videos because no data were found.
+2026-01-13 13:20:08 [INFO] Preview build started.
+2026-01-13 13:20:08 [ERROR] ERROR: Preview build failed
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 1000, in run
+    result = build_database(self._config, logger=self._logger, **self._build_kwargs)
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\core.py", line 5007, in build_database
+    for key, records in sorted(grouped.items(), key=_group_sort_key):
+                        ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\core.py", line 5004, in _group_sort_key
+    composition, draw_x, piece_y, suffix = key
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: not enough values to unpack (expected 4, got 3)
+2026-01-13 13:20:08 [ERROR] ERROR: Preview failed: not enough values to unpack (expected 4, got 3)
+2026-01-13 13:20:23 [WARNING] Skipping videos because no data were found.
+2026-01-13 13:20:23 [INFO] Preview build started.
+2026-01-13 13:20:23 [ERROR] ERROR: Preview build failed
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 1000, in run
+    result = build_database(self._config, logger=self._logger, **self._build_kwargs)
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\core.py", line 5007, in build_database
+    for key, records in sorted(grouped.items(), key=_group_sort_key):
+                        ~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\core.py", line 5004, in _group_sort_key
+    composition, draw_x, piece_y, suffix = key
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ValueError: not enough values to unpack (expected 4, got 3)
+2026-01-13 13:20:24 [ERROR] ERROR: Preview failed: not enough values to unpack (expected 4, got 3)
+2026-01-13 14:16:42 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-13 14:16:46 [ERROR] ERROR: Failed to plot in PyPlot.
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 4323, in _load_and_plot
+    plugin.generate()
+    ~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3935, in _generate_plots
+    self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 5776, in _render_matplotlib
+    numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Martin\PyPlot\.venv\Lib\site-packages\pandas\core\tools\numeric.py", line 209, in to_numeric
+    raise TypeError("arg must be a list, tuple, 1-d array, or Series")
+TypeError: arg must be a list, tuple, 1-d array, or Series
+2026-01-13 14:17:05 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-13 14:17:12 [ERROR] ERROR: Failed to plot in PyPlot.
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 4323, in _load_and_plot
+    plugin.generate()
+    ~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_plugin.py", line 219, in generate
+    self.host._generate_plots()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 3935, in _generate_plots
+    self._render_matplotlib(prepared_groups, rescale_info, x_axis, y_axis, rescale_enabled)
+    ~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "c:\Users\Martin\PyPlot\plotting\plugins\vsm_hysteresis\vsm_hysteresis_loops.py", line 5776, in _render_matplotlib
+    numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\Martin\PyPlot\.venv\Lib\site-packages\pandas\core\tools\numeric.py", line 209, in to_numeric
+    raise TypeError("arg must be a list, tuple, 1-d array, or Series")
+TypeError: arg must be a list, tuple, 1-d array, or Series
+2026-01-13 14:17:18 [ERROR] ERROR: Unhandled exception: arg must be a list, tuple, 1-d array, or Series
+2026-01-13 14:31:59 [INFO] Preview worksheet exported to C:\Users\Martin\Downloads\microwire_database_worksheet.xlsx
+2026-01-13 16:07:16 [INFO] Imported 40 row(s) from new data.xlsx.
+2026-01-13 16:11:33 [INFO] Imported 40 row(s) from new data.xlsx.

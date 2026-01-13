@@ -4,7 +4,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 
 ## Sections and Data Sources
 
-- Fabrication: metadata columns (length, datetime, mass, resistance, notes) plus any available video-related fields (temperature, winding speed, glass feeding, underpressure).
+- Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (temperature, winding speed, glass feeding, underpressure).
 - Current annealing: links high/low mA files plus any additional mA runs; extra runs surface in "Figure — other mA" and can be hidden via the visibility dialog.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
@@ -16,6 +16,8 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - FMR: Field vs X/Y voltage plots from CSV files; multiple graphs per sample row.
 - Strain: stress/strain entries tied to composition + microwire; d auto-filled from microscope when available.
 - Assemble: combined preview and export configuration.
+- Assemble imports: spreadsheet rows can be imported and merged with the assembled dataset; imported rows are tagged via the "Data source" column and enriched with fabrication metadata where possible.
+- Data menu: import external workbooks, toggle visibility of imported-only rows, or remove imported data entirely. Imported workbooks appear under Project Explorer.
 - Compare: subset of rows for side-by-side comparison.
 
 ## Sample Naming and Grouping
@@ -25,6 +27,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - Extra suffixes after the microwire token (e.g. `no glass`, `NG CA`, `s1`, `s3`) define sub-versions for the same sample; they should appear as additional graphs in the same row.
 - One row per sample in the VSM/DMA sections; multiple graphs for the same sample are placed side-by-side in that row.
 - Hidden graphs (visibility dialogs) are excluded from Assemble/Compare/exports and from HTML compare output.
+- Visibility dialogs support per-graph group toggles (for example, hide/show an entire temperature group in VSM).
 - Graph titles should include the suffix label (for example, `Ni50Fe27Ga23 10/5 (NG CA)` or `Ni50Fe27Ga23 11/1 (s3)`).
 
 ## Current Density Requirements
@@ -59,7 +62,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 ## Compare
 
 - Holds the selected rows from Assemble.
-- Default view is a samples-as-columns matrix: columns are `Composition Microwire`, rows are selected fields, and graph rows render inline previews for side-by-side comparison.
+- Default view is a samples-as-columns matrix: columns are `Composition Microwire`, rows are selected fields, and graph rows render inline previews for side-by-side comparison. Selecting any cell highlights the full field row.
 - Users can switch back to the row-based view and choose which fields to show + their order.
 
 ## Export Targets

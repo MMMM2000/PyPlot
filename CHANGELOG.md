@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-01-13 16:36 UTC
+
+- Expanded e/a valence mapping (Co, Cu, Ge, Sn) and moved data import to the Data menu with dedupe/visibility controls.
+- Imported workbooks now appear in Project Explorer with show/hide/remove support.
+
+## 2026-01-13 16:03 UTC
+
+- Added e/a calculation (Heusler valence convention) to Fabrication and Assemble outputs.
+- Added Assemble import workflow for external workbooks with automatic fabrication backfill and data-source tagging.
+
+## 2026-01-13 14:04 UTC
+
+- Assemble database preview now tolerates 3-part microwire keys during sorting.
+- Assemble preview falls back to live FMR section groups when payload grouping is missing.
+
+## 2026-01-13 13:02 UTC
+
+- Assemble preview no longer crashes on 3-part microwire keys and now logs preview failures with tracebacks.
+- VSM hysteresis processing skips files without field/signal columns and avoids picking mismatched axes for previews.
+- Graph visibility dialogs now support group-level hide/show toggles.
+- Compare matrix view highlights full rows on selection and skips off-screen graph rendering for better performance.
+
 ## 2026-01-12 10:42 UTC
 
 - Fixed VSM hysteresis metrics calculation for duplicate axis columns so PyPlot graphing no longer crashes.
