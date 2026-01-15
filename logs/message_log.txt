@@ -5251,3 +5251,9 @@ TypeError: arg must be a list, tuple, 1-d array, or Series
 2026-01-13 16:53:04 [ERROR] ERROR: Unhandled exception: 'AssemblySection' object has no attribute '_mark_dirty'
 2026-01-13 16:55:37 [INFO] Fabrication data: skipped 53 draw(s) and 651 piece(s) without matching current annealing records.
 2026-01-13 16:55:38 [INFO] Fabrication data: processed 80 file(s).
+2026-01-14 11:28:31 [ERROR] ERROR: Failed to load project C:\Users\Martin\PyPlot\projects\microwire_project.pydpj
+Traceback (most recent call last):
+  File "c:\Users\Martin\PyPlot\microwire_data_builder\ui.py", line 21430, in _load_project_from_path
+    fabrication.set_import_separation(separate)
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'FabricationSection' object has no attribute 'set_import_separation'

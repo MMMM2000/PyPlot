@@ -620,7 +620,7 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
 
     result = build_database(config)
     row = result.dataframe.iloc[0]
-    temperature_column = "Temperature (°C)"
+    temperature_column = "Core temperature (°C)"
     underpressure_column = "Underpressure"
     assert float(row[temperature_column]) == pytest.approx(382.5)
     assert float(row[underpressure_column]) == pytest.approx(-0.85)
@@ -628,7 +628,7 @@ def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.
     assert float(row["Glass feeding (mm/min)"]) == pytest.approx(37.2)
     highlights = result.ocr_highlights
     for column in (
-        "Temperature (°C)",
+        "Core temperature (°C)",
         "Underpressure",
         "Winding speed (m/min)",
         "Glass feeding (mm/min)",

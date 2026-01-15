@@ -4,11 +4,11 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 
 ## Sections and Data Sources
 
-- Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.
+- Fabrication: metadata columns (length, datetime, mass, resistance, notes), computed e/a ratio, plus any available video-related fields (core/glass temperature, winding speed, glass feeding, underpressure). Imported samples are added here so fabrication lookups work even when no spreadsheet exists yet.
 - Current annealing: links high/low mA files plus any additional mA runs; extra runs surface in "Figure — other mA" and can be hidden via the visibility dialog.
 - Microscope: d/D values, images, and review state; reviewed values must not be deleted on refresh.
 - Current density: As/Af/Ms/Mf markers (two passes if measured twice).
-- Videos: links or metadata when available; exports must not require videos to be processed.
+- Videos: shows the fabrication-style table for video-linked samples, supports manual edits for fabrication fields, and adds `Video end length (m)` + derived `Video microwire length (m)` (baseline minus cumulative Length (m) for the draw). Edits override assembled values. Videos can be opened from the selection.
 - VSM hysteresis: multiple graphs per sample row (angles grouped per temperature, sub-versions in the same row).
 - VSM temperature scan: multiple graphs per sample row (sub-versions in the same row).
 - Transition temps: pick As/Af/Ms/Mf from VSM temperature graphs without switching away from the active graph.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-01-14 11:42 UTC
+
+- Fixed Fabrication imported-row separation wiring to avoid load errors.
+
 ## 2026-01-13 17:26 UTC
 
 - Fixed a project-load syntax error after wiring the Data menu actions.
@@ -1329,6 +1333,14 @@
 - Normalized Sample-column hiding and improved compare matrix row heights so stacked graph previews stay full size.
 - Merged stray single-angle VSM temperature buckets and downgraded empty VSM file parse failures to warnings to reduce log noise.
 - Documented updated builder behaviors in `docs/database_builder.md`.
+
+## 2026-01-14 13:41
+
+- Updated video handling to compute cumulative baseline lengths per draw, and split the temperature column into `Core temperature (°C)` and `Glass temperature (°C)` across builder outputs.
+
+## 2026-01-14 13:05
+
+- Made the Videos section editable with the same fabrication-style fields, added `Video end length (mm)` + derived `Video microwire length (mm)` columns, and applied video overrides to assemble/preview/export outputs.
 
 ## 2025-10-19
 

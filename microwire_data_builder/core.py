@@ -148,6 +148,11 @@ STRAIN_EXTRA_COLUMNS = [
     "Broke",
 ]
 
+CORE_TEMPERATURE_COLUMN = "Core temperature (°C)"
+GLASS_TEMPERATURE_COLUMN = "Glass temperature (°C)"
+VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
+VIDEO_MW_LENGTH_COLUMN = "Video microwire length (m)"
+
 OUTPUT_COLUMNS = [
     "Composition",
     "Microwire",
@@ -168,10 +173,13 @@ OUTPUT_COLUMNS = [
     "Production datetime",
     "Mass (g)",
     "Resistance (Ω)",
-    "Temperature (°C)",
+    CORE_TEMPERATURE_COLUMN,
+    GLASS_TEMPERATURE_COLUMN,
     "Winding speed (m/min)",
     "Glass feeding (mm/min)",
     "Underpressure",
+    VIDEO_END_LENGTH_COLUMN,
+    VIDEO_MW_LENGTH_COLUMN,
     "Notes",
     "Data source",
     "Low mA value (mA)",
@@ -4686,6 +4694,7 @@ def build_database(
     phase_points: Optional[Dict[str, Dict[str, float]]] = None,
     transition_temps: Optional[Dict[str, Dict[str, float]]] = None,
     current_density_entries: Optional[Dict[str, Dict[str, object]]] = None,
+    video_overrides: Optional[Dict[str, Dict[str, object]]] = None,
 ) -> BuildResult:
     log = _logger(logger)
     output_dir = config.output_dir
@@ -4760,6 +4769,47 @@ def build_database(
         video_sources = list(dict.fromkeys(Path(p) for p in config.video_files))
     else:
         video_index = dict(video_index)
+    if isinstance(video_overrides, dict):
+        video_overrides_map: Dict[str, Dict[str, object]] = {
+            str(key): dict(payload)
+            for key, payload in video_overrides.items()
+            if isinstance(payload, dict)
+        }
+    else:
+        video_overrides_map = {}
+
+    cumulative_lengths: Dict[Tuple[str, int, int], Optional[float]] = {}
+    if fabrication_index.piece_level:
+        by_draw: Dict[Tuple[str, int], List[Tuple[int, Optional[float]]]] = {}
+        for (composition, draw_x, piece_y), piece_record in fabrication_index.piece_level.items():
+            length_val = _value_for_output(piece_record, "length_m")
+            length_num = _parse_numeric(length_val) if length_val is not None else None
+            by_draw.setdefault((composition, int(draw_x)), []).append((int(piece_y), length_num))
+        for key_str, overrides in video_overrides_map.items():
+            if not isinstance(overrides, dict):
+                continue
+            length_override = overrides.get("Length (m)")
+            length_num = _parse_numeric(length_override) if length_override is not None else None
+            if length_num is None:
+                continue
+            parts = _microwire_key_from_string(str(key_str))
+            if parts is None:
+                continue
+            composition, draw_x, piece_y, _suffix = parts
+            by_draw.setdefault((composition, int(draw_x)), []).append((int(piece_y), length_num))
+        for (composition, draw_x), entries in by_draw.items():
+            running: Optional[float] = 0.0
+            seen_pieces: Set[int] = set()
+            for piece_y, length_num in sorted(entries, key=lambda item: item[0]):
+                if piece_y in seen_pieces:
+                    continue
+                seen_pieces.add(piece_y)
+                if running is None or length_num is None:
+                    running = None
+                    cumulative_lengths[(composition, draw_x, piece_y)] = None
+                else:
+                    running += length_num
+                    cumulative_lengths[(composition, draw_x, piece_y)] = running
     if strain_records is None:
         strain_records = _load_strain_records(getattr(config, "strain_files", []), log)
     else:
@@ -5063,7 +5113,14 @@ def build_database(
         row["Production datetime"] = _value_for_output(draw_info, "production_datetime")
         row["Mass (g)"] = _value_for_output(draw_info, "mass_g")
         row["Resistance (Ω)"] = _value_for_output(draw_info, "fabrication_resistance_ohm")
-        row["Temperature (°C)"] = _value_for_output(draw_info, "fabrication_temperature_c")
+        row[CORE_TEMPERATURE_COLUMN] = _value_for_output(
+            draw_info,
+            "fabrication_temperature_c",
+        )
+        row[GLASS_TEMPERATURE_COLUMN] = _value_for_output(
+            draw_info,
+            "fabrication_glass_temperature_c",
+        )
         row["Winding speed (m/min)"] = _value_for_output(draw_info, "winding_speed_m_per_min")
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
@@ -5223,12 +5280,12 @@ def build_database(
         if video_data is None:
             video_data = video_index.get((composition, draw_x, None))
         if video_data:
-            temp_numeric = _parse_numeric(row["Temperature (°C)"])
+            temp_numeric = _parse_numeric(row[CORE_TEMPERATURE_COLUMN])
             if temp_numeric is None:
                 temp = video_data.temperature()
                 if temp is not None:
-                    row["Temperature (°C)"] = temp
-                    row_highlights.add("Temperature (°C)")
+                    row[CORE_TEMPERATURE_COLUMN] = temp
+                    row_highlights.add(CORE_TEMPERATURE_COLUMN)
             under_numeric = _parse_numeric(row["Underpressure"])
             if under_numeric is None:
                 under_value = video_data.underpressure()
@@ -5247,6 +5304,24 @@ def build_database(
                 if glass is not None:
                     row["Glass feeding (mm/min)"] = glass
                     row_highlights.add("Glass feeding (mm/min)")
+        overrides = video_overrides_map.get(key_str, {})
+        if overrides:
+            for column, value in overrides.items():
+                if column in output_columns:
+                    row[column] = value
+        end_length = row.get(VIDEO_END_LENGTH_COLUMN)
+        try:
+            end_numeric = float(end_length) if end_length is not None else None
+        except (TypeError, ValueError):
+            end_numeric = None
+        cumulative = cumulative_lengths.get((composition, draw_x, piece_y))
+        if (
+            end_numeric is not None
+            and cumulative is not None
+            and math.isfinite(end_numeric)
+            and math.isfinite(cumulative)
+        ):
+            row[VIDEO_MW_LENGTH_COLUMN] = round(end_numeric - cumulative, 3)
         strain_record = (
             strain_records.get(key)
             or strain_records.get((composition, draw_x, piece_y, None))
