@@ -193,6 +193,10 @@ class FmrPlugin(PyPlotPlugin):
         try:
             with origin_session(keep_open=True) as op:
                 exported = 0
+                show_markers = bool(
+                    self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
+                )
+                marker_size = 6.0 if show_markers else 0.0
                 for entry in self._dataset:
                     columns = [str(col) for col in entry.frame.columns]
                     field_col, x_col, y_col = select_fmr_axes(columns)
@@ -259,24 +263,63 @@ class FmrPlugin(PyPlotPlugin):
                     if layer is None:
                         continue
                     try:
-                        layer.add_plot(sheet, coly=1, colx=0, type="y")
-                        layer.add_plot(sheet, coly=2, colx=0, type="y")
+                        plot_x = layer.add_plot(sheet, coly=1, colx=0, type="y")
+                        plot_y = layer.add_plot(sheet, coly=2, colx=0, type="y")
                     except Exception:
                         continue
                     try:
                         layer.rescale()
                     except Exception:
                         pass
+                    graph_title = entry.sample
                     try:
+                        graph.set_str("title", graph_title)
+                        graph.name = self._origin_graph_name(graph_title)
                         graph.lname = f"{entry.sample} - FMR"
                     except Exception:
                         pass
+                    try:
+                        graph.activate()
+                        safe_title = graph_title.replace('"', "'")
+                        op.lt_exec(f'title -s "{safe_title}";')
+                    except Exception:
+                        pass
+                    for plot_obj, color in ((plot_x, "#111111"), (plot_y, "#dc2626")):
+                        if plot_obj is None:
+                            continue
+                        try:
+                            plot_obj.color = color
+                        except Exception:
+                            pass
+                        try:
+                            plot_obj.line_width = 1.2
+                        except Exception:
+                            pass
+                        if show_markers:
+                            try:
+                                plot_obj.symbol_shape = 2
+                                plot_obj.symbol_size = marker_size
+                                plot_obj.symbol_edge_color = color
+                                plot_obj.symbol_fill_color = color
+                            except Exception:
+                                pass
+                        else:
+                            try:
+                                plot_obj.symbol_size = 0
+                                plot_obj.symbol_shape = 0
+                            except Exception:
+                                pass
                     exported += 1
         except Exception as exc:
             QtWidgets.QMessageBox.critical(self.host, self.name, f"Failed to send data to Origin:\n{exc}")
             self._log(f"Origin export failed: {exc}", level="error")
             return
         self._log("Sent FMR data to Origin.")
+
+    @staticmethod
+    def _origin_graph_name(label: str) -> str:
+        cleaned = "".join(ch if ch.isalnum() else "_" for ch in label).strip("_")
+        return (cleaned or "FMR")[:18]
 
     def update_ui(self) -> None:  # type: ignore[override]
         has_data = bool(self._dataset)

@@ -3462,7 +3462,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         import_files_action.triggered.connect(self._import_data_from_files)
         self._import_files_action = import_files_action
 
-        import_folder_action = data_menu.addAction("Import Folder…")
+        import_folder_action = data_menu.addAction("Import Folders…")
         import_folder_action.triggered.connect(self._import_data_from_folder)
         self._import_folder_action = import_folder_action
 
@@ -5012,7 +5012,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             actions_added = True
 
         if isinstance(folder_action, QtGui.QAction):
-            label = folder_action.text() or "Import folder…"
+            label = folder_action.text() or "Import folders…"
             proxy = menu.addAction(label)
             proxy.triggered.connect(folder_action.trigger)
             actions_added = True
@@ -5725,14 +5725,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _import_data_from_folder(self) -> None:
         start_dir = self._project_dialog_start_directory()
-        directory = QtWidgets.QFileDialog.getExistingDirectory(
-            self,
-            "Import Data Folder",
-            str(start_dir),
-        )
-        if not directory:
+        dialog = QtWidgets.QFileDialog(self, "Import Data Folders", str(start_dir))
+        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
+        dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+        selection_mode = QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
+        view = dialog.findChild(QtWidgets.QListView)
+        if view is not None:
+            view.setSelectionMode(selection_mode)
+        tree = dialog.findChild(QtWidgets.QTreeView)
+        if tree is not None:
+            tree.setSelectionMode(selection_mode)
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
             return
-        self._import_paths([Path(directory)])
+        directories = dialog.selectedFiles()
+        if not directories:
+            return
+        self._import_paths(Path(path) for path in directories)
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         provided_paths: List[Path] = []
@@ -6487,14 +6496,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _clear_project_dirty(self) -> None:
         self._project_dirty = False
 
-    def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
-        super().showEvent(event)
-        try:
-            self._refresh_primary_dock_layout()
-            QtWidgets.QApplication.processEvents()
-        except Exception:
-            pass
-
     def _create_dock_widget(self, title: str, object_name: str) -> QtWidgets.QDockWidget:
         dock = QtWidgets.QDockWidget(title, self)
         dock.setObjectName(object_name)
@@ -6636,6 +6637,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return None
         self._primary_dock_widths[dock] = width
         return width
+
+    def _primary_dock_target_width(
+        self,
+        dock: QtWidgets.QDockWidget | None,
+        default_width: int,
+    ) -> int:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return default_width
+        width = self._load_primary_dock_width(dock)
+        if width is None:
+            width = self._primary_dock_widths.get(dock, 0)
+        if width <= 0:
+            width = default_width
+        return max(width, PRIMARY_DOCK_MIN_WIDTH)
 
     def _primary_dock_visibility_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
         if not isinstance(dock, QtWidgets.QDockWidget):
@@ -7303,33 +7318,33 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 legends.append(legend)
         except Exception:
             pass
+        try:
+            lines = list(axis.get_lines())
+        except Exception:
+            lines = []
+        for line_index, line in enumerate(lines, start=1):
             try:
-                lines = list(axis.get_lines())
+                line_label = line.get_label()
             except Exception:
-                lines = []
-            for line_index, line in enumerate(lines, start=1):
+                line_label = ""
+            if not line_label or line_label.startswith("_line") or line_label == "_nolegend_":
+                line_label = f"Line {line_index}"
+            line_item = _make_item(line_label)
+            if isinstance(line, Line2D):
+                line_item.setData(
+                    0,
+                    QtCore.Qt.ItemDataRole.UserRole,
+                    {"kind": "line", "object": line},
+                )
+            visible = True
+            getter = getattr(line, "get_visible", None)
+            if callable(getter):
                 try:
-                    line_label = line.get_label()
+                    visible = bool(getter())
                 except Exception:
-                    line_label = ""
-                if not line_label or line_label.startswith("_line") or line_label == "_nolegend_":
-                    line_label = f"Line {line_index}"
-                line_item = _make_item(line_label)
-                if isinstance(line, Line2D):
-                    line_item.setData(
-                        0,
-                        QtCore.Qt.ItemDataRole.UserRole,
-                        {"kind": "line", "object": line},
-                    )
-                visible = True
-                getter = getattr(line, "get_visible", None)
-                if callable(getter):
-                    try:
-                        visible = bool(getter())
-                    except Exception:
-                        visible = True
-                self._apply_object_item_visibility(line_item, visible)
-                axis_item.addChild(line_item)
+                    visible = True
+            self._apply_object_item_visibility(line_item, visible)
+            axis_item.addChild(line_item)
         # add legends as top-level children under the figure root
         legend_seen: set[int] = set()
         for legend in legends + figure_legends:
@@ -8097,19 +8112,49 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         """Ensure primary docks start at readable sizes and stay visible."""
 
         try:
-            docks: list[QtWidgets.QDockWidget] = []
-            widths: list[int] = []
-            if getattr(self, "project_dock", None):
-                docks.append(self.project_dock)
-                widths.append(max(PRIMARY_DOCK_MIN_WIDTH, 260))
-            if getattr(self, "object_dock", None):
-                docks.append(self.object_dock)
-                widths.append(max(PRIMARY_DOCK_MIN_WIDTH, 260))
-            visible_docks = [dock for dock in docks if dock.isVisible()]
-            if visible_docks and widths:
+            dock_specs: list[tuple[QtWidgets.QDockWidget, int]] = []
+            for dock in (
+                getattr(self, "project_dock", None),
+                getattr(self, "object_dock", None),
+            ):
+                if not isinstance(dock, QtWidgets.QDockWidget):
+                    continue
+                width = self._primary_dock_target_width(dock, PRIMARY_DOCK_DEFAULT_WIDTH)
+                dock_specs.append((dock, width))
+                if self._primary_dock_should_show(dock):
+                    try:
+                        dock.setFloating(False)
+                        dock.show()
+                    except Exception:
+                        pass
+            for dock, width in dock_specs:
                 try:
-                    self.resizeDocks(visible_docks, widths[: len(visible_docks)], QtCore.Qt.Orientation.Horizontal)
-                    self.resizeDocks(visible_docks, [max(360, self.height() // 2)] * len(visible_docks), QtCore.Qt.Orientation.Vertical)
+                    self._apply_dock_width(dock, width)
+                except Exception:
+                    pass
+            if dock_specs:
+                docks = [dock for dock, _ in dock_specs]
+                widths = [width for _, width in dock_specs]
+                try:
+                    self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
+                    self.resizeDocks(
+                        docks,
+                        [max(360, self.height() // 2)] * len(docks),
+                        QtCore.Qt.Orientation.Vertical,
+                    )
+                except Exception:
+                    pass
+            panels = [
+                panel
+                for panel in getattr(self, "_dock_switcher_panels", [])
+                if isinstance(panel, QtWidgets.QDockWidget)
+            ]
+            for panel in panels:
+                panel_width = max(panel.minimumWidth(), panel.sizeHint().width(), 0)
+                if panel_width <= 0:
+                    continue
+                try:
+                    self._apply_dock_width(panel, panel_width)
                 except Exception:
                     pass
         except Exception:
@@ -8119,7 +8164,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         super().showEvent(event)
         if not getattr(self, "_layout_fixed_once", False):
             self._layout_fixed_once = True
+            QtCore.QTimer.singleShot(0, self._apply_initial_dock_sizes)
+            QtCore.QTimer.singleShot(0, self._refresh_primary_dock_layout)
+            QtCore.QTimer.singleShot(10, self._ensure_primary_docks_pinned)
+            QtCore.QTimer.singleShot(25, self._queue_retabify_primary_docks)
             QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
+            QtCore.QTimer.singleShot(150, self._normalize_docks_initial)
         QtCore.QTimer.singleShot(100, self._normalize_docks_initial)
         QtCore.QTimer.singleShot(300, self._normalize_docks_initial)
 

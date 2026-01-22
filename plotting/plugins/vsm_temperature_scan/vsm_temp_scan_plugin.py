@@ -39,6 +39,10 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         attach = getattr(self._processor, "attach_logger", None)
         if callable(attach):
             attach(lambda message: self._log(message))
+        self._processor.set_origin_style("main", line_width=1.4, show_markers=False, marker_size=0.0)
+        self._processor.set_origin_style("smoothed", line_width=1.4, show_markers=False, marker_size=0.0)
+        self._processor.set_origin_style("derivative", line_width=1.2, show_markers=False, marker_size=0.0)
+        self._processor.set_origin_style("derivative_smoothed", line_width=1.2, show_markers=False, marker_size=0.0)
         self._dataset: list[VSMEntry] | None = None
         self._loaded_paths: list[Path] = []
         self._panel_widget: QtWidgets.QWidget | None = None
@@ -47,6 +51,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         self._smoothed_derivative_cb: QtWidgets.QCheckBox | None = None
         self._smooth_cb: QtWidgets.QCheckBox | None = None
         self._split_cb: QtWidgets.QCheckBox | None = None
+        self._combine_fields_cb: QtWidgets.QCheckBox | None = None
         self._median_spin: QtWidgets.QSpinBox | None = None
         self._ma_spin: QtWidgets.QSpinBox | None = None
         self._deriv_median_spin: QtWidgets.QSpinBox | None = None
@@ -107,6 +112,12 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
         split_cb.toggled.connect(lambda checked: self._on_split_changed(bool(checked)))
         options_layout.addWidget(split_cb)
         self._split_cb = split_cb
+
+        combine_cb = QtWidgets.QCheckBox("Combine low/high field runs (dual-axis)", options_section)
+        combine_cb.setChecked(bool(getattr(self._processor, "combine_fields", False)))
+        combine_cb.toggled.connect(lambda checked: self._on_combine_fields_changed(bool(checked)))
+        options_layout.addWidget(combine_cb)
+        self._combine_fields_cb = combine_cb
 
         derivative_cb = QtWidgets.QCheckBox("Plot derivatives", options_section)
         derivative_cb.setChecked(bool(self._processor.show_derivative))
@@ -224,13 +235,18 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             color_map = self._processor.series_color_map(series)
             include_raw_derivative = bool(self._processor.show_derivative)
             field_order = self._processor.field_axis_order([s.field for s in series])
+            fields = [s.field for s in series]
+            field_label = self._processor._format_field_label(fields)
             x_label = "Temperature (°C)"
             y_label = "Signal X (emu)"
+            use_magnetization = len({round(val, 6) for val in fields}) > 1
 
             def _plot_main(smoothed: bool = False) -> None:
                 fig = Figure(figsize=(8.5, 5))
                 ax_left = fig.add_subplot(111)
-                ax_left.set_title(f"{entry.sample} - {'Smoothed' if smoothed else 'VSM Temperature Scan'}")
+                base_title = "Smoothed Signal X" if smoothed else "VSM Temperature Scan"
+                plot_title = self._processor._plot_title(entry.sample, base_title, fields)
+                ax_left.set_title(plot_title)
                 axes_map: dict[float, Any] = {}
                 ax_right = None
                 for idx, entry_series in enumerate(series):
@@ -257,9 +273,23 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     axis = axes_map[entry_series.field]
                     axis.plot(temps, signal, color=color, linewidth=1.4, label=label)
                     ax_left.set_xlabel(x_label)
-                    ax_left.set_ylabel(y_label)
-                    if ax_right is not None:
-                        ax_right.set_ylabel(f"{y_label} (secondary)")
+                left_fields = [field for field, axis in axes_map.items() if axis is ax_left]
+                base_label = "Magnetization" if use_magnetization else None
+                if left_fields:
+                    y_label_left = self._processor._axis_label_for_fields(left_fields, base=base_label)
+                else:
+                    y_label_left = y_label
+                ax_left.set_ylabel(y_label_left)
+                if ax_right is not None:
+                    right_fields = [field for field, axis in axes_map.items() if axis is ax_right]
+                    if right_fields:
+                        y_label_right = self._processor._axis_label_for_fields(
+                            right_fields,
+                            base=base_label,
+                        )
+                    else:
+                        y_label_right = y_label
+                    ax_right.set_ylabel(y_label_right)
                 ax_left.legend(loc="best")
                 tab = QtWidgets.QWidget()
                 layout = QtWidgets.QVBoxLayout(tab)
@@ -272,14 +302,14 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan",
-                    title=f"{entry.sample} - {'Smoothed' if smoothed else 'VSM Temperature Scan'}",
-                    root_label=f"{entry.sample} - {'Smoothed' if smoothed else 'TScan'}",
+                    title=plot_title,
+                    root_label=f"{entry.sample} - {'Smoothed' if smoothed else 'TScan'}{f' ({field_label})' if field_label else ''}",
                     x_label=x_label,
-                    y_label=y_label,
+                    y_label=y_label_left,
                     canvas=canvas,
                     axes=ax_left,
                     lines={},
-                    metadata={"sample": entry.sample, "smoothed": smoothed, "fields": [s.field for s in series]},
+                    metadata={"sample": entry.sample, "smoothed": smoothed, "fields": fields},
                 )
                 index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Plot")
                 setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
@@ -296,6 +326,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             if include_raw_derivative:
                 fig = Figure(figsize=(8.5, 5))
                 ax = fig.add_subplot(111)
+                deriv_title = self._processor._plot_title(entry.sample, "d(Signal X)/dT", fields)
                 for idx, entry_series in enumerate(series):
                     frame = self._processor._smooth_frame(entry_series.frame)
                     temps = frame["temperature"]
@@ -318,14 +349,14 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan_derivative",
-                    title=f"{entry.sample} - d(Signal X)/dT",
-                    root_label=f"{entry.sample} - d(Signal X)/dT",
+                    title=deriv_title,
+                    root_label=f"{entry.sample} - d(Signal X)/dT{f' ({field_label})' if field_label else ''}",
                     x_label=x_label,
                     y_label="d(Signal X)/dT (emu/°C)",
                     canvas=canvas,
                     axes=ax,
                     lines={},
-                    metadata={"sample": entry.sample, "derivative": True, "fields": [s.field for s in series]},
+                    metadata={"sample": entry.sample, "derivative": True, "fields": fields},
                 )
                 index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Derivative")
                 setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
@@ -337,6 +368,7 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
             if self._processor.show_derivative and getattr(self._processor, "smooth_derivative", False):
                 fig = Figure(figsize=(8.5, 5))
                 ax = fig.add_subplot(111)
+                deriv_sm_title = self._processor._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
                 for idx, entry_series in enumerate(series):
                     frame = self._processor._smooth_frame(entry_series.frame)
                     temps = frame["temperature"]
@@ -359,14 +391,14 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                 layout.addWidget(canvas)
                 descriptor = window_module.TabDescriptor(
                     kind="vsm_temperature_scan_derivative_smoothed",
-                    title=f"{entry.sample} - Smoothed d(Signal X)/dT",
-                    root_label=f"{entry.sample} - d(Signal X)/dT (smoothed)",
+                    title=deriv_sm_title,
+                    root_label=f"{entry.sample} - d(Signal X)/dT (smoothed){f' ({field_label})' if field_label else ''}",
                     x_label=x_label,
                     y_label="d(Signal X)/dT (emu/°C)",
                     canvas=canvas,
                     axes=ax,
                     lines={},
-                    metadata={"sample": entry.sample, "derivative": True, "smoothed": True, "fields": [s.field for s in series]},
+                    metadata={"sample": entry.sample, "derivative": True, "smoothed": True, "fields": fields},
                 )
                 index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Derivative")
                 setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
@@ -585,6 +617,28 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
     def _on_split_changed(self, enabled: bool) -> None:
         self._processor.set_split_directions(enabled)
         self._register_workbooks()
+
+    def _on_combine_fields_changed(self, enabled: bool) -> None:
+        setter = getattr(self._processor, "set_combine_fields", None)
+        if callable(setter):
+            setter(enabled)
+        else:
+            setattr(self._processor, "combine_fields", bool(enabled))
+        if not self._loaded_paths:
+            return
+        try:
+            dataset = self._processor.load(list(self._loaded_paths))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"Failed to reload VSM scan data:\n{exc}",
+            )
+            return
+        self._dataset = dataset
+        self._data = dataset
+        self._register_workbooks()
+        self.update_ui()
 
     def _workbook_key(self, entry: VSMEntry, kind: str) -> str:
         try:

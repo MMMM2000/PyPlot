@@ -19,7 +19,8 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 ## Origin export checklist
 - Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.
 - Preserve sample labels on X and long name/units/comments rows in the Origin worksheets (baseline, deltas, relative values documented).
-- Match symbol sizes/colours and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
+- Match line/symbol styles, widths, sizes, and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
+- Use descriptive graph names/long names that match the Matplotlib title and include distinguishing metadata (field strength, temperature, or variant) when multiple graphs share a sample name.
 - Build worksheets with units and comments filled (including baselines/deltas/relative columns) and avoid terminal spam (disable tqdm/console progress); keep graph extents so nothing is cropped after export.
 
 ## Built-in Plug-ins
@@ -32,7 +33,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Stress Dependence       | `plotting.plugins.stress_dependence`                  | Converts TXT exports into worksheets + line graphs. |
 | Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. |
 | VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. Workbooks group each temperature graph into a single worksheet with XY column pairs per angle. |
-| VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. |
+| VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; can combine low/high field runs into a dual-axis plot; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. |
 | DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level; Origin export is available from the toolbar. |
 | FMR                     | `plotting.plugins.fmr`                                | Plots Field vs X/Y voltage traces from FMR CSV files and exports to Origin with X/Y columns. |
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
@@ -41,7 +42,7 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
 
 ## Importing Data
 
-1. Use the **Import data…** button (or the Data menu) to select files/folders.
+1. Use the **Import data…** button (or the Data menu) to select files/folders (multi-select folders are supported).
 2. Supported formats: CSV/TSV/TXT/XLS/XLSX/XLSM/JSON/VSM `.vsm-hys-data`. Plug-ins can add their own loaders (see `PyPlotPlugin.load_data` implementations).
 3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Plug-ins that declare `requires_imported_data` keep Plot disabled until Load Data (or auto-load) populates their data.
 4. All worksheets live under `Imported Data` → `<folder>` → `<workbook>` so every plug-in can reuse them (export to Origin, duplicate, edit columns, etc.).

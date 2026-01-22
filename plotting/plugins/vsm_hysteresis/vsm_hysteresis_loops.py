@@ -6030,6 +6030,9 @@ class VSMPlotter(PyPlotWindow):
                 except Exception:
                     pass
 
+        style = self._line_style_kwargs()
+        show_markers = "marker" in style
+        marker_size = float(style.get("markersize", 4)) if show_markers else 0.0
         for x_name, y_name, angle_label, color_index in plot_pairs:
             x_idx = col_index.get(x_name)
             y_idx = col_index.get(y_name)
@@ -6041,10 +6044,14 @@ class VSMPlotter(PyPlotWindow):
                 try:
                     plot_obj.color = color
                     plot_obj.line_width = 1.5
-                    plot_obj.symbol_shape = 2
-                    plot_obj.symbol_size = 4
-                    plot_obj.symbol_edge_color = color
-                    plot_obj.symbol_fill_color = color
+                    if show_markers:
+                        plot_obj.symbol_shape = 2
+                        plot_obj.symbol_size = marker_size
+                        plot_obj.symbol_edge_color = color
+                        plot_obj.symbol_fill_color = color
+                    else:
+                        plot_obj.symbol_shape = 0
+                        plot_obj.symbol_size = 0
                     plot_obj.legend = f"{angle_label}"
                 except Exception:
                     pass

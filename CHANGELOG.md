@@ -1,5 +1,21 @@
 # Changelog
 
+## 2026-01-22 09:04 UTC
+
+- Refined initial dock normalization to better enforce Project Explorer/Object Manager widths on first open.
+- VSM Temperature Scan now supports combining low/high field runs into a dual-axis plot with magnetization axis labels (including Origin export titles).
+- Import Folders now supports selecting multiple directories in one action.
+
+## 2026-01-21 09:22 UTC
+
+- Improved initial dock layout normalization so Project Explorer/Object Manager resize correctly on first open.
+- Origin exports now mirror PyPlot line/symbol styles and titles across VSM Temperature Scan, VSM Hysteresis, DMA Iso-Stress, and FMR; VSM Temperature Scan graph titles/names include field labels.
+
+## 2026-01-21 08:44 UTC
+
+- Fixed VSM Temperature Scan Origin exports so all selected datasets plot and section ordering stays consistent.
+- Object Manager now lists line items even when legends are present so plots can be toggled.
+
 ## 2026-01-14 11:42 UTC
 
 - Fixed Fabrication imported-row separation wiring to avoid load errors.

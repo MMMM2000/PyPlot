@@ -5257,3 +5257,93 @@ Traceback (most recent call last):
     fabrication.set_import_separation(separate)
     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 AttributeError: 'FabricationSection' object has no attribute 'set_import_separation'
+2026-01-21 08:26:08 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-21 08:26:29 [INFO] Loaded 2 dataset(s).
+2026-01-21 08:26:29 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:26:29 [INFO] Loaded 2 VSM temperature file(s).
+2026-01-21 08:26:30 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:26:31 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:26:57 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:27:04 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:27:07 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-21 08:27:07 [INFO] Sent VSM temperature scan data to Origin.
+2026-01-21 08:48:27 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-21 08:48:36 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-21 08:49:58 [INFO] Loaded 2 dataset(s).
+2026-01-21 08:49:58 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:49:58 [INFO] Loaded 2 VSM temperature file(s).
+2026-01-21 08:49:59 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:49:59 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:50:24 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:50:30 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-21 08:50:30 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:50:32 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-21 08:50:32 [INFO] Sent VSM temperature scan data to Origin.
+2026-01-21 08:52:42 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:52:47 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-21 08:52:47 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-21 08:52:48 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-21 08:52:49 [INFO] Sent VSM temperature scan data to Origin.
+2026-01-22 08:13:40 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-01-22 08:16:16 [INFO] Loaded 1 dataset(s).
+2026-01-22 08:16:16 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:16:16 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:16:16 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:16:16 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:16:16 [INFO] Loaded 1 VSM temperature file(s).
+2026-01-22 08:16:21 [INFO] Loaded 2 dataset(s).
+2026-01-22 08:16:21 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:16:21 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:16:21 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:16:21 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:16:21 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:16:21 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-22 08:16:21 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-22 08:16:21 [INFO] Loaded 2 VSM temperature file(s).
+2026-01-22 08:16:26 [INFO] Loaded 4 dataset(s).
+2026-01-22 08:16:26 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:16:26 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:16:26 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:16:26 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:16:26 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:16:26 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-22 08:16:26 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-22 08:16:26 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:16:26 [INFO] Loaded 4 VSM temperature file(s).
+2026-01-22 08:19:05 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:19:05 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:19:05 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:19:05 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:19:05 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:19:05 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-22 08:19:05 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-22 08:19:05 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:19:05 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:19:05 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:19:05 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:19:05 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:19:05 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:19:05 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-22 08:19:05 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-22 08:19:05 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:23:23 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:23:23 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:23:23 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:23:23 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:23:23 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:23:23 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-22 08:23:23 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-22 08:23:23 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:23:30 [INFO] Removed 2 duplicate temperature point(s) for 5 Oe section 1.
+2026-01-22 08:23:31 [INFO] Removed 3 duplicate temperature point(s) for 5 Oe section 2.
+2026-01-22 08:23:31 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 3.
+2026-01-22 08:23:31 [INFO] Removed 1 duplicate temperature point(s) for 5 Oe section 4.
+2026-01-22 08:23:33 [INFO] Sent Ni50Fe27Ga23 5-4 NG LF to Origin.
+2026-01-22 08:23:33 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:23:33 [INFO] Removed 1 duplicate temperature point(s) for 10000 Oe section 3.
+2026-01-22 08:23:33 [INFO] Removed 4 duplicate temperature point(s) for 10000 Oe section 4.
+2026-01-22 08:23:35 [INFO] Sent Ni50Fe27Ga23 5-4 HF to Origin.
+2026-01-22 08:23:36 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-22 08:23:36 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
+2026-01-22 08:23:37 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
+2026-01-22 08:23:37 [INFO] Sent VSM temperature scan data to Origin.

@@ -202,6 +202,10 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                 sort_stress = bool(
                     self._sort_checkbox.isChecked() if self._sort_checkbox is not None else True
                 )
+                show_markers = bool(
+                    self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
+                )
+                marker_size = 6.0 if show_markers else 0.0
                 for entry in self._dataset:
                     if not entry.datasets:
                         continue
@@ -219,12 +223,20 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     layer = graph[0] if graph else None
                     if layer is None:
                         continue
+                    graph_title = f"{entry.sample} - DMA Iso-Stress"
                     try:
-                        graph.lname = entry.sample
+                        graph.set_str("title", graph_title)
+                        graph.lname = graph_title
                     except Exception:
                         pass
                     try:
-                        graph.name = self._origin_graph_name(entry.sample)
+                        graph.activate()
+                        safe_title = graph_title.replace('"', "'")
+                        op.lt_exec(f'title -s "{safe_title}";')
+                    except Exception:
+                        pass
+                    try:
+                        graph.name = self._origin_graph_name(graph_title)
                     except Exception:
                         pass
 
@@ -256,9 +268,26 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                         except Exception:
                             pass
                         try:
-                            layer.add_plot(sheet, coly=col_index + 1, colx=col_index, type="y")
+                            plot_obj = layer.add_plot(sheet, coly=col_index + 1, colx=col_index, type="y")
                         except Exception:
-                            pass
+                            plot_obj = None
+                        if plot_obj is not None:
+                            try:
+                                plot_obj.line_width = 1.4
+                            except Exception:
+                                pass
+                            if show_markers:
+                                try:
+                                    plot_obj.symbol_shape = 2
+                                    plot_obj.symbol_size = marker_size
+                                except Exception:
+                                    pass
+                            else:
+                                try:
+                                    plot_obj.symbol_size = 0
+                                    plot_obj.symbol_shape = 0
+                                except Exception:
+                                    pass
                         col_index += 2
 
                     try:
