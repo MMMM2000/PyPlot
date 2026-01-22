@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-01-22 13:22 UTC
+
+- Switched PyInstaller launcher builds to onedir output so startup avoids one-file extraction delays.
+
 ## 2026-01-22 09:04 UTC
 
 - Refined initial dock normalization to better enforce Project Explorer/Object Manager widths on first open.
