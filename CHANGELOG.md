@@ -1,5 +1,13 @@
 # Changelog
 
+## 2026-01-23 13:56 UTC
+
+- Videos tab now mirrors Fabrication rows even without video OCR results, and Open video(s) reports when no matching file is available.
+
+## 2026-01-23 13:24 UTC
+
+- Microwire Data Builder Fabrication section now includes an estimated transition temperature column (derived from e/a) plus a glass pull-off field, with notes retained in the table/export flow.
+
 ## 2026-01-22 13:22 UTC
 
 - Switched PyInstaller launcher builds to onedir output so startup avoids one-file extraction delays.

@@ -105,8 +105,11 @@ from .core import (
     _format_dimension_display,
     _clean_str,
     _compute_ea_from_composition,
+    _estimate_transition_temp_c,
     CORE_TEMPERATURE_COLUMN,
     GLASS_TEMPERATURE_COLUMN,
+    ESTIMATED_TRANSITION_COLUMN,
+    GLASS_PULL_COLUMN,
     VIDEO_END_LENGTH_COLUMN,
     VIDEO_MW_LENGTH_COLUMN,
 )
@@ -2822,6 +2825,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Composition",
         "Data source",
         "e/a",
+        ESTIMATED_TRANSITION_COLUMN,
         "Draw",
         "Piece",
         "Length (m)",
@@ -2836,6 +2840,7 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         "Winding speed (m/min)",
         "Glass feeding (mm/min)",
         "Underpressure",
+        GLASS_PULL_COLUMN,
         "Notes",
         "Production datetime",
         "_source_paths",
@@ -2846,7 +2851,9 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
         row["Data source"] = None
-        row["e/a"] = _compute_ea_from_composition(composition)
+        ea_value = _compute_ea_from_composition(composition)
+        row["e/a"] = ea_value
+        row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
         row["Draw"] = draw
         row["Piece"] = piece
         row["Length (m)"] = _value_for_output(piece_record, "length_m")
@@ -2866,6 +2873,10 @@ def _fabrication_index_to_frame(index: FabricationIndex) -> pd.DataFrame:
         row["Winding speed (m/min)"] = _value_for_output(draw_record, "winding_speed_m_per_min")
         row["Glass feeding (mm/min)"] = _value_for_output(draw_record, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_record, "underpressure")
+        pull_value = _value_for_output(piece_record, "glass_pull_off")
+        if pull_value is None:
+            pull_value = _value_for_output(draw_record, "glass_pull_off")
+        row[GLASS_PULL_COLUMN] = pull_value
         row["Notes"] = _compose_notes(draw_record, piece_record)
         row["Production datetime"] = _value_for_output(draw_record, "production_datetime")
         sources: List[str] = []
@@ -5018,6 +5029,16 @@ def _video_index_to_frame(
     index: Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary],
     fabrication_frame: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
+    def _is_missing(value: object) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        try:
+            return bool(pd.isna(value))
+        except Exception:
+            return False
+
     base_columns: List[str] = []
     if isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty:
         for column in fabrication_frame.columns:
@@ -5031,6 +5052,7 @@ def _video_index_to_frame(
             "Composition",
             "Data source",
             "e/a",
+            ESTIMATED_TRANSITION_COLUMN,
             "Draw",
             "Piece",
             "Length (m)",
@@ -5045,6 +5067,7 @@ def _video_index_to_frame(
             "Winding speed (m/min)",
             "Glass feeding (mm/min)",
             "Underpressure",
+            GLASS_PULL_COLUMN,
             "Notes",
             "Production datetime",
         ]
@@ -5072,6 +5095,7 @@ def _video_index_to_frame(
                 continue
             fabrication_lookup[(composition, draw, piece)] = row
     rows: List[Dict[str, Any]] = []
+    seen_keys: Set[Tuple[str, int, int]] = set()
     for (composition, draw, piece), summary in sorted(index.items()):
         row: Dict[str, Any] = {column: None for column in columns}
         row["Composition"] = composition
@@ -5081,7 +5105,9 @@ def _video_index_to_frame(
             row["Microwire"] = f"{draw}/?"
         else:
             row["Microwire"] = _microwire_label(draw, piece, None)
-        row["e/a"] = _compute_ea_from_composition(composition)
+        ea_value = _compute_ea_from_composition(composition)
+        row["e/a"] = ea_value
+        row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
         fabrication_row = None
         if piece is not None:
             fabrication_row = fabrication_lookup.get((composition, draw, piece))
@@ -5089,7 +5115,13 @@ def _video_index_to_frame(
             for column in base_columns:
                 if column in {"Composition", "Draw", "Piece", "Microwire"}:
                     continue
-                row[column] = fabrication_row.get(column)
+                candidate = fabrication_row.get(column)
+                if not _is_missing(candidate) and _is_missing(row.get(column)):
+                    row[column] = candidate
+        if piece is not None:
+            seen_keys.add((composition, draw, piece))
+        if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
+            row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
         if row.get(CORE_TEMPERATURE_COLUMN) in (None, ""):
             row[CORE_TEMPERATURE_COLUMN] = summary.temperature()
         if row.get("Underpressure") in (None, ""):
@@ -5103,6 +5135,30 @@ def _video_index_to_frame(
             row["_group_key"] = ""
         else:
             row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
+        rows.append(row)
+    for (composition, draw, piece), fabrication_row in sorted(fabrication_lookup.items()):
+        if (composition, draw, piece) in seen_keys:
+            continue
+        row: Dict[str, Any] = {column: None for column in columns}
+        row["Composition"] = composition
+        row["Draw"] = draw
+        row["Piece"] = piece
+        row["Microwire"] = _microwire_label(draw, piece, None)
+        ea_value = fabrication_row.get("e/a")
+        if _is_missing(ea_value):
+            ea_value = _compute_ea_from_composition(composition)
+        row["e/a"] = ea_value
+        row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
+        for column in base_columns:
+            if column in {"Composition", "Draw", "Piece", "Microwire"}:
+                continue
+            candidate = fabrication_row.get(column)
+            if not _is_missing(candidate):
+                row[column] = candidate
+        if row.get(ESTIMATED_TRANSITION_COLUMN) in (None, ""):
+            row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(row.get("e/a"))
+        row["_sources"] = []
+        row["_group_key"] = _microwire_key_to_str((composition, draw, piece, None))
         rows.append(row)
     if not rows:
         return pd.DataFrame(columns=columns)
@@ -6606,6 +6662,12 @@ class FabricationSection(MiniDatabaseSection):
         super().__init__(logger, log_callback, parent)
         self._normalize_temperature_columns()
         self._hide_columns(["_source_paths", "_source_path"])
+        self.model.set_editable_columns(self._editable_columns())
+        self.model.set_text_columns({GLASS_PULL_COLUMN, "Notes"})
+        try:
+            self.model.dataChanged.connect(self._handle_cell_edited)
+        except Exception:
+            pass
 
     def _normalize_temperature_columns(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else None
@@ -6625,6 +6687,20 @@ class FabricationSection(MiniDatabaseSection):
                 updated = updated.drop(columns=["Temperature (°C)"])
         if GLASS_TEMPERATURE_COLUMN not in updated.columns:
             updated[GLASS_TEMPERATURE_COLUMN] = None
+        if ESTIMATED_TRANSITION_COLUMN not in updated.columns:
+            if "e/a" in updated.columns:
+                updated[ESTIMATED_TRANSITION_COLUMN] = updated["e/a"].map(
+                    _estimate_transition_temp_c
+                )
+            else:
+                updated[ESTIMATED_TRANSITION_COLUMN] = None
+        elif "e/a" in updated.columns:
+            series = updated[ESTIMATED_TRANSITION_COLUMN]
+            computed = updated["e/a"].map(_estimate_transition_temp_c)
+            mask = series.isna() | (series == "")
+            updated[ESTIMATED_TRANSITION_COLUMN] = series.where(~mask, computed)
+        if GLASS_PULL_COLUMN not in updated.columns:
+            updated[GLASS_PULL_COLUMN] = None
         if updated is not frame:
             self.data.table = updated
             self.model.set_frame(updated)
@@ -6998,6 +7074,29 @@ class FabricationSection(MiniDatabaseSection):
             if "Temperature (°C)" in table.columns and CORE_TEMPERATURE_COLUMN not in table.columns:
                 table = table.rename(columns={"Temperature (°C)": CORE_TEMPERATURE_COLUMN})
                 table[GLASS_TEMPERATURE_COLUMN] = None
+            if ESTIMATED_TRANSITION_COLUMN not in table.columns:
+                if "e/a" in table.columns:
+                    table[ESTIMATED_TRANSITION_COLUMN] = table["e/a"].map(
+                        _estimate_transition_temp_c
+                    )
+                else:
+                    table[ESTIMATED_TRANSITION_COLUMN] = None
+            elif "e/a" in table.columns:
+                series = table[ESTIMATED_TRANSITION_COLUMN]
+                computed = table["e/a"].map(_estimate_transition_temp_c)
+                mask = series.isna() | (series == "")
+                table[ESTIMATED_TRANSITION_COLUMN] = series.where(~mask, computed)
+            if GLASS_PULL_COLUMN not in table.columns:
+                table[GLASS_PULL_COLUMN] = None
+            self.data.table = self._apply_imported_separation(table)
+            self.model.set_frame(self.data.table)
+        self._hide_columns(["_source_paths", "_source_path"])
+
+    def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
+        super().import_project_payload(payload)
+        self._normalize_temperature_columns()
+        table = self.data.table
+        if isinstance(table, pd.DataFrame):
             self.data.table = self._apply_imported_separation(table)
             self.model.set_frame(self.data.table)
         self._hide_columns(["_source_paths", "_source_path"])
@@ -7050,6 +7149,82 @@ class FabricationSection(MiniDatabaseSection):
         combined = pd.concat([normal, pd.DataFrame([separator]), imported], ignore_index=True)
         return combined
 
+    @staticmethod
+    def _coerce_text(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except Exception:
+            if isinstance(value, float) and math.isnan(value):
+                return None
+        text = str(value).strip()
+        return text if text else None
+
+    def _editable_columns(self) -> Set[str]:
+        return {GLASS_PULL_COLUMN, "Notes"}
+
+    def _handle_cell_edited(
+        self,
+        top_left: QtCore.QModelIndex,
+        bottom_right: QtCore.QModelIndex,
+        roles: Tuple[QtCore.Qt.ItemDataRole, ...] = (),
+    ) -> None:
+        if roles and QtCore.Qt.ItemDataRole.EditRole not in roles:
+            return
+        frame = self.model.frame()
+        if not isinstance(frame, pd.DataFrame) or frame.empty:
+            return
+        columns = list(frame.columns[top_left.column() : bottom_right.column() + 1])
+        relevant = self._editable_columns()
+        if not any(column in relevant for column in columns):
+            return
+        try:
+            index = self.store.load_payload("fabrication_index")
+        except Exception:
+            index = None
+        if not isinstance(index, FabricationIndex):
+            index = FabricationIndex()
+        updated_any = False
+        for row_idx in range(top_left.row(), bottom_right.row() + 1):
+            if row_idx < 0 or row_idx >= len(frame.index):
+                continue
+            series = frame.iloc[row_idx]
+            composition = str(series.get("Composition") or "").strip()
+            if not composition:
+                continue
+            try:
+                draw = int(series.get("Draw"))
+                piece = int(series.get("Piece"))
+            except (TypeError, ValueError):
+                continue
+            key = (composition, draw, piece)
+            piece_data = dict(index.piece_level.get(key, {}))
+            row_updated = False
+            for column in columns:
+                if column not in relevant:
+                    continue
+                field = "notes" if column == "Notes" else "glass_pull_off"
+                value = self._coerce_text(series.get(column))
+                if value is None:
+                    piece_data.pop(field, None)
+                else:
+                    piece_data[field] = value
+                row_updated = True
+                updated_any = True
+            if row_updated:
+                if piece_data:
+                    piece_data.setdefault("_source_path", piece_data.get("_source_path") or "Manual")
+                index.piece_level[key] = piece_data
+        if updated_any:
+            self.data.table = frame
+            self.store.save_payload("fabrication_index", index)
+            payload_map = dict(self.data.extra.get("payloads", {}))
+            payload_map["fabrication_index"] = "fabrication_index"
+            self.data.extra["payloads"] = payload_map
+            self.store.save(self.data)
+
     def apply_imported_samples(self, records: Iterable[Dict[str, Any]]) -> int:
         index = self.store.load_payload("fabrication_index")
         if not isinstance(index, FabricationIndex):
@@ -7068,6 +7243,7 @@ class FabricationSection(MiniDatabaseSection):
                 "length_m": record.get("Length (m)"),
                 "piece_date": record.get("Piece date"),
                 "fabrication_resistance_ohm": record.get("Resistance (Ω)"),
+                "glass_pull_off": record.get(GLASS_PULL_COLUMN),
                 "notes": record.get("Notes"),
                 "_source_path": record.get("Data source") or "Imported",
             }
@@ -11667,6 +11843,74 @@ class VideoSection(MiniDatabaseSection):
                     continue
         return sources
 
+    def _selected_rows(self) -> List[int]:
+        if not isinstance(self.table_view, QtWidgets.QTableView):
+            return []
+        selection = self.table_view.selectionModel()
+        if selection is None:
+            return []
+        indexes = selection.selectedIndexes()
+        if not indexes:
+            return []
+        rows = {index.row() for index in indexes if index.isValid()}
+        return sorted(rows)
+
+    def _update_open_sources_enabled(self) -> None:
+        if not hasattr(self, "open_sources_button"):
+            return
+        rows = self._selected_rows()
+        self.open_sources_button.setEnabled(bool(rows))
+
+    def _open_selected_sources(self) -> None:
+        rows = self._selected_rows()
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self,
+                self.section_title,
+                "Select one or more rows to open their video files.",
+            )
+            return
+        opened_any = False
+        missing_paths: List[Path] = []
+        missing_labels: List[str] = []
+        seen: set[Path] = set()
+        for row_index in rows:
+            series = self._row_series(row_index)
+            if series is None:
+                continue
+            sources = self._row_sources(series)
+            if not sources:
+                composition = str(series.get("Composition") or "").strip()
+                microwire = str(series.get("Microwire") or "").strip()
+                label = f"{composition} {microwire}".strip()
+                missing_labels.append(label or f"Row {row_index + 1}")
+                continue
+            for path in sources:
+                if path in seen:
+                    continue
+                seen.add(path)
+                if self._open_file(path):
+                    opened_any = True
+                else:
+                    missing_paths.append(path)
+        if opened_any:
+            return
+        details: List[str] = []
+        if missing_labels:
+            preview = ", ".join(missing_labels[:5])
+            if len(missing_labels) > 5:
+                preview += ", …"
+            details.append(f"No video found for: {preview}")
+        if missing_paths:
+            path_preview = "\n".join(str(p) for p in missing_paths[:5])
+            if len(missing_paths) > 5:
+                path_preview += "\n…"
+            details.append(f"Missing files:\n{path_preview}")
+        message = "No video files are available for the selected row(s)."
+        if details:
+            message = f"{message}\n\n" + "\n".join(details)
+        QtWidgets.QMessageBox.warning(self, self.section_title, message)
+
     def import_project_payload(self, payload: Mapping[str, Any]) -> None:  # type: ignore[override]
         super().import_project_payload(payload)
         self._load_overrides()
@@ -11677,6 +11921,10 @@ class VideoSection(MiniDatabaseSection):
     def _handle_worker_finished(self, result: SectionProcessResult) -> None:
         super()._handle_worker_finished(result)
         self._normalize_temperature_columns()
+        self._apply_overrides_to_model()
+        self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
+
+    def sync_with_fabrication(self) -> None:
         self._apply_overrides_to_model()
         self._hide_columns(["_sources", "_group_key", "_cumulative_length_m"])
 
@@ -11772,6 +12020,15 @@ class VideoSection(MiniDatabaseSection):
         else:
             self._overrides = {}
 
+    def _load_video_index(self) -> Dict[Tuple[str, int, Optional[int]], VideoMetricsSummary]:
+        try:
+            payload = self.store.load_payload("video_index")
+        except Exception:
+            payload = None
+        if isinstance(payload, dict):
+            return payload
+        return {}
+
     def _store_overrides(self) -> None:
         self.data.extra["overrides"] = self._overrides
         try:
@@ -11814,6 +12071,15 @@ class VideoSection(MiniDatabaseSection):
 
     def _apply_overrides_to_model(self) -> None:
         frame = self.model.frame()
+        fabrication_frame = self._fabrication_table()
+        index = self._load_video_index()
+        if (
+            (isinstance(fabrication_frame, pd.DataFrame) and not fabrication_frame.empty)
+            or index
+            or not isinstance(frame, pd.DataFrame)
+            or frame.empty
+        ):
+            frame = _video_index_to_frame(index, fabrication_frame)
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
         updated = frame.copy()
@@ -17633,8 +17899,16 @@ class AssemblySection(QtWidgets.QWidget):
         fill("Winding speed (m/min)", _value_for_output(draw_info, "winding_speed_m_per_min"))
         fill("Glass feeding (mm/min)", _value_for_output(draw_info, "glass_feed_mm_per_min"))
         fill("Underpressure", _value_for_output(draw_info, "underpressure"))
+        pull_value = _value_for_output(piece_info, "glass_pull_off")
+        if pull_value is None:
+            pull_value = _value_for_output(draw_info, "glass_pull_off")
+        fill(GLASS_PULL_COLUMN, pull_value)
         notes = _compose_notes(draw_info, piece_info)
         fill("Notes", notes)
+        ea_value = record.get("e/a")
+        if ea_value in (None, ""):
+            ea_value = _compute_ea_from_composition(composition)
+        fill(ESTIMATED_TRANSITION_COLUMN, _estimate_transition_temp_c(ea_value))
 
     def _merge_imported_rows(self, frame: pd.DataFrame) -> pd.DataFrame:
         if not self._imported_rows or not self._show_imported:
@@ -18897,7 +19171,9 @@ class AssemblySection(QtWidgets.QWidget):
                 "Resistance (Ω)",
                 CORE_TEMPERATURE_COLUMN,
                 GLASS_TEMPERATURE_COLUMN,
+                ESTIMATED_TRANSITION_COLUMN,
                 "Notes",
+                GLASS_PULL_COLUMN,
             ],
         )
         add(
@@ -20812,6 +21088,10 @@ class BuilderWindow(QtWidgets.QMainWindow):
             self._handle_fabrication_sources_changed
         )
         self._handle_fabrication_sources_changed(self.fabrication_section.data.sources)
+        try:
+            self.fabrication_section.data_updated.connect(self.video_section.sync_with_fabrication)
+        except Exception:
+            pass
         try:
             if hasattr(self.annealing_section, "_sanitize_graph_columns"):
                 self.annealing_section._sanitize_graph_columns()

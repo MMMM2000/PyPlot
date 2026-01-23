@@ -5347,3 +5347,6 @@ AttributeError: 'FabricationSection' object has no attribute 'set_import_separat
 2026-01-22 08:23:36 [INFO] Removed 4530 duplicate temperature point(s) for 10000 Oe section 1.
 2026-01-22 08:23:37 [INFO] Sent Ni50Fe27Ga23 5-4 LF to Origin.
 2026-01-22 08:23:37 [INFO] Sent VSM temperature scan data to Origin.
+2026-01-23 13:30:29 [INFO] Fabrication data: skipped 53 draw(s) and 651 piece(s) without matching current annealing records.
+2026-01-23 13:30:30 [INFO] Fabrication data: processed 80 file(s).
+2026-01-23 13:40:12 [INFO] Current annealing: processed 100 file(s).

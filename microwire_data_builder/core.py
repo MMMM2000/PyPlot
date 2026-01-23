@@ -138,6 +138,20 @@ def _compute_ea_from_composition(composition: str) -> Optional[float]:
         return None
     return round(weighted / total, 2)
 
+
+def _estimate_transition_temp_c(ea_value: Optional[float]) -> Optional[float]:
+    if ea_value is None:
+        return None
+    try:
+        numeric = float(ea_value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    temp_k = 3000.0 * numeric - 22880.0
+    temp_c = temp_k - 273.15
+    return round(temp_c, 1)
+
 STRAIN_EXTRA_COLUMNS = [
     "Calc mode",
     "Clamp span (mm)",
@@ -150,6 +164,8 @@ STRAIN_EXTRA_COLUMNS = [
 
 CORE_TEMPERATURE_COLUMN = "Core temperature (°C)"
 GLASS_TEMPERATURE_COLUMN = "Glass temperature (°C)"
+ESTIMATED_TRANSITION_COLUMN = "Tt est (°C)"
+GLASS_PULL_COLUMN = "Glass pull-off"
 VIDEO_END_LENGTH_COLUMN = "Video end length (m)"
 VIDEO_MW_LENGTH_COLUMN = "Video microwire length (m)"
 
@@ -157,6 +173,7 @@ OUTPUT_COLUMNS = [
     "Composition",
     "Microwire",
     "e/a",
+    ESTIMATED_TRANSITION_COLUMN,
     "d (µm)",
     "D (µm)",
     "d/D",
@@ -178,6 +195,7 @@ OUTPUT_COLUMNS = [
     "Winding speed (m/min)",
     "Glass feeding (mm/min)",
     "Underpressure",
+    GLASS_PULL_COLUMN,
     VIDEO_END_LENGTH_COLUMN,
     VIDEO_MW_LENGTH_COLUMN,
     "Notes",
@@ -292,6 +310,10 @@ HEADER_HINTS: Dict[str, str] = {
     "winding speed (m/min)": "winding_speed_m_per_min",
     "glass feeding (mm/min)": "glass_feed_mm_per_min",
     "underpressure": "underpressure",
+    "glass pull-off": "glass_pull_off",
+    "glass pull off": "glass_pull_off",
+    "glass pull-away": "glass_pull_off",
+    "glass pull away": "glass_pull_off",
     "bistabilny/nebistabilny": "bistable_status",
     "poznÃ¡mka": "notes",
     "PoznÃ¡mka": "notes",
@@ -1260,6 +1282,8 @@ def _header_key(value: object) -> Optional[str]:
         return "winding_speed_m_per_min"
     if "glass" in lowered and ("feed" in lowered or "feeding" in lowered):
         return "glass_feed_mm_per_min"
+    if "glass" in lowered and "pull" in lowered:
+        return "glass_pull_off"
     if "underpressure" in lowered:
         return "underpressure"
     if "bistabil" in lowered:
@@ -5104,7 +5128,9 @@ def build_database(
         row: Dict[str, object] = {column: None for column in output_columns}
         row["Composition"] = composition
         row["Microwire"] = _microwire_label(draw_x, piece_y, suffix)
-        row["e/a"] = _compute_ea_from_composition(composition)
+        ea_value = _compute_ea_from_composition(composition)
+        row["e/a"] = ea_value
+        row[ESTIMATED_TRANSITION_COLUMN] = _estimate_transition_temp_c(ea_value)
         key_str = _microwire_key_to_str(key)
         row["d (µm)"] = None
         row["D (µm)"] = None
@@ -5124,6 +5150,10 @@ def build_database(
         row["Winding speed (m/min)"] = _value_for_output(draw_info, "winding_speed_m_per_min")
         row["Glass feeding (mm/min)"] = _value_for_output(draw_info, "glass_feed_mm_per_min")
         row["Underpressure"] = _value_for_output(draw_info, "underpressure")
+        pull_value = _value_for_output(piece_info, "glass_pull_off")
+        if pull_value is None:
+            pull_value = _value_for_output(draw_info, "glass_pull_off")
+        row[GLASS_PULL_COLUMN] = pull_value
         row["Notes"] = _compose_notes(draw_info, piece_info)
         row["Data source"] = "Measured"
         phase_entry = phase_points_map.get(key_str, {})

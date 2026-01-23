@@ -19,7 +19,8 @@
 - Origin exports: verify line/symbol styles and graph titles mirror PyPlot across plugins (VSM hysteresis, VSM temp scan, DMA iso-stress, FMR).
 
 ## In Progress
-- Videos section: editable fabrication fields, video end-length columns, and open-video action; apply overrides in assemble/exports.
+- Fabrication section: add estimated transition temperature + glass pull-off columns (with notes entry).
+- Videos section: show fabrication rows even without videos, keep editable fabrication fields + video end-length columns, and add open-video warnings; apply overrides in assemble/exports.
 - Add Data Builder sections for VSM hysteresis loops, VSM temperature scan, and DMA iso-stress (reuse PyPlot plotting scripts; handle multiple graphs per microwire).
 - Add FMR PyPlot plugin + Data Builder section and validate sample CSV plotting/Origin export.
 - Add a Compare section to filter/select microwires and compare their data/graphs side-by-side.
