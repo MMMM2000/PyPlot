@@ -26,6 +26,7 @@
 - Add a Compare section to filter/select microwires and compare their data/graphs side-by-side.
 - Compare: add default samples-as-columns view with selectable field rows and inline graph previews.
 - Data Builder: treat microwire suffix tokens (e.g., 10-5oe) as distinct samples and propagate across sections.
+- Microscope OCR: resolve PaddleOCR import failure in `.venv-wsl` (Python 3.13) so OCR runs in the Data Builder.
 - Current annealing: support "other mA" graphs column + visibility and include in assemble/compare/HTML export.
 - HTML export: add compare mode alongside the preview panel.
 - Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).

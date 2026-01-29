@@ -521,7 +521,7 @@ def test_microscope_ocr_extracts_bracketed_values(tmp_path: Path, monkeypatch: p
     assert any(abs(value - 6.7) < 1e-3 for value in result.values)
     assert any(abs(value - 134.5) < 1e-3 for value in result.values)
 
-    grouped = core._group_microscope_measurements([image_path], logging.getLogger("test"))
+    grouped, _ = core._group_microscope_measurements([image_path], logging.getLogger("test"))
     key = core._microscope_key(image_path)
     assert key in grouped
     measurements = grouped[key]
@@ -551,7 +551,7 @@ def test_microscope_ocr_fallback_without_units(tmp_path: Path, monkeypatch: pyte
     result = core._extract_microscope_diameters(image_path, logging.getLogger("test"))
     assert any(abs(value - 6.7) < 1e-3 for value in result.values)
 
-    grouped = core._group_microscope_measurements([image_path], logging.getLogger("test"))
+    grouped, _ = core._group_microscope_measurements([image_path], logging.getLogger("test"))
     key = core._microscope_key(image_path)
     assert key in grouped
     measurements = grouped[key]
@@ -581,8 +581,13 @@ def test_parse_microscope_candidates_filters_outliers() -> None:
 def test_microscope_key_handles_additional_delimiters() -> None:
     dashed = Path("Ni50Fe27Ga23 5-4 core.jpg")
     spaced = Path("Ni50Fe27Ga23 5 4 glass.png")
-    assert core._microscope_key(dashed) == ("Ni50Fe27Ga23", 5, 4)
-    assert core._microscope_key(spaced) == ("Ni50Fe27Ga23", 5, 4)
+    assert core._microscope_key(dashed) == ("Ni50Fe27Ga23", 5, 4, None)
+    assert core._microscope_key(spaced) == ("Ni50Fe27Ga23", 5, 4, None)
+
+
+def test_microscope_key_parses_other_end_suffix() -> None:
+    sample = Path("Ni50Fe27Ga23 10-5oe glass.png")
+    assert core._microscope_key(sample) == ("Ni50Fe27Ga23", 10, 5, "oe")
 
 
 def test_video_metrics_populate_draw_fields(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

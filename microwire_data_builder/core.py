@@ -1827,6 +1827,25 @@ def _microscope_key(path: Path) -> Optional[Tuple[str, int, int, Optional[str]]]
     return None
 
 
+def _suffix_from_path(
+    path: Optional[Path],
+    draw_x: Optional[int],
+    piece_y: Optional[int],
+) -> Optional[str]:
+    if path is None or draw_x is None or piece_y is None:
+        return None
+    try:
+        parsed = _microscope_key(path)
+    except Exception:
+        return None
+    if parsed is None:
+        return None
+    _, parsed_draw, parsed_piece, suffix = parsed
+    if parsed_draw == draw_x and parsed_piece == piece_y:
+        return suffix
+    return None
+
+
 def _microscope_category(path: Path) -> str:
     stem = path.stem.lower()
     if "core" in stem:
@@ -5051,7 +5070,21 @@ def build_database(
                 )
                 stats.skipped += 1
             else:
-                key = (metadata.composition_token, metadata.draw_x, metadata.piece_y)
+                path = getattr(record, "path", None)
+                path_obj: Optional[Path]
+                if isinstance(path, Path):
+                    path_obj = path
+                elif isinstance(path, str) and path:
+                    path_obj = Path(path)
+                else:
+                    path_obj = None
+                suffix = _suffix_from_path(path_obj, metadata.draw_x, metadata.piece_y)
+                key = (
+                    metadata.composition_token,
+                    metadata.draw_x,
+                    metadata.piece_y,
+                    suffix,
+                )
                 grouped.setdefault(key, []).append(record)
                 stats.parsed += 1
             if progress_callback:

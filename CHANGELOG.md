@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-01-29 14:11 UTC
+
+- Data Builder now preserves microwire suffix tokens (for example, `10-5oe`) when grouping annealing records so other-end measurements stay separate.
+
 ## 2026-01-23 13:56 UTC
 
 - Videos tab now mirrors Fabrication rows even without video OCR results, and Open video(s) reports when no matching file is available.
