@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026-02-02 19:31 UTC
+
+- Avoided redundant subwindow maximize state changes so macOS title-bar zooming no longer locks up the PyPlot window.
+- Guarded subwindow maximize state propagation to prevent recursive state-change loops when zooming the main window.
+- Stopped forcing subwindow maximize state during fullscreen geometry updates to avoid macOS zoom hangs.
+- Disabled native QMdiSubWindow maximize handling on macOS to prevent freeze loops when zooming/restoring the main window.
+- PyPlot no longer auto-maximizes on macOS at launch to avoid UI stalls before interaction.
+- Debounced dock normalization on macOS to avoid layout thrash that can block initial UI interaction.
+- Re-enabled the dock switcher on macOS with hover/overlay disabled so side panel tabs return without flashing.
+- Added View menu toggles for Project Explorer/Object Manager/Message Log so closed panels can be reopened on macOS.
+
 ## 2026-01-29 14:11 UTC
 
 - Data Builder now preserves microwire suffix tokens (for example, `10-5oe`) when grouping annealing records so other-end measurements stay separate.

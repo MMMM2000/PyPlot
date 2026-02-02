@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import sys
+import time
 import weakref
 import numpy as np
 from dataclasses import dataclass, field
@@ -334,6 +336,9 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         docks: Sequence[QtWidgets.QDockWidget],
         *,
         side: Literal["left", "right"],
+        enable_hover: bool = True,
+        enable_overlay: bool = True,
+        auto_collapse: bool = True,
         parent: QtWidgets.QWidget | None = None,
         settings: QtCore.QSettings | None = None,
         pinned_setting_key: str | None = None,
@@ -349,6 +354,9 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._panel_dock = parent if isinstance(parent, QtWidgets.QDockWidget) else None
         self._tabbed_docks: set[QtWidgets.QDockWidget] = set()
         self._last_hover_index: int | None = None
+        self._enable_hover = enable_hover
+        self._enable_overlay = enable_overlay
+        self._auto_collapse = auto_collapse
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -444,28 +452,30 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                             self._activate_index(index)
                             self._tab_bar.setCurrentIndex(index)
                         return True
-            if event.type() in (
-                QtCore.QEvent.Type.MouseMove,
-                QtCore.QEvent.Type.HoverMove,
-                QtCore.QEvent.Type.HoverEnter,
-            ):
-                index = self._tab_index_from_event(event)
-                if index >= 0 and index != self._last_hover_index:
-                    self._last_hover_index = index
-                    QtCore.QTimer.singleShot(0, lambda idx=index: self._activate_index(idx))
-            elif event.type() in (
-                QtCore.QEvent.Type.HoverLeave,
-                QtCore.QEvent.Type.Leave,
-            ):
-                self._last_hover_index = None
-                self._schedule_collapse()
-        elif obj in self._docks:
-            if event.type() == QtCore.QEvent.Type.Enter:
-                self._collapse_timer.stop()
-            elif event.type() == QtCore.QEvent.Type.Leave:
-                index = self._docks.index(obj)
-                if not self._is_persistent(index):
+            if self._enable_hover:
+                if event.type() in (
+                    QtCore.QEvent.Type.MouseMove,
+                    QtCore.QEvent.Type.HoverMove,
+                    QtCore.QEvent.Type.HoverEnter,
+                ):
+                    index = self._tab_index_from_event(event)
+                    if index >= 0 and index != self._last_hover_index:
+                        self._last_hover_index = index
+                        QtCore.QTimer.singleShot(0, lambda idx=index: self._activate_index(idx))
+                elif event.type() in (
+                    QtCore.QEvent.Type.HoverLeave,
+                    QtCore.QEvent.Type.Leave,
+                ):
+                    self._last_hover_index = None
                     self._schedule_collapse()
+        elif obj in self._docks:
+            if self._auto_collapse:
+                if event.type() == QtCore.QEvent.Type.Enter:
+                    self._collapse_timer.stop()
+                elif event.type() == QtCore.QEvent.Type.Leave:
+                    index = self._docks.index(obj)
+                    if not self._is_persistent(index):
+                        self._schedule_collapse()
         return super().eventFilter(obj, event)
 
     def _tab_index_from_event(self, event: QtCore.QEvent) -> int:
@@ -490,7 +500,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         self._syncing = True
         self._collapse_all(exclude=index)
         dock = self._docks[index]
-        prefer_overlay = bool(dock.property("mwOverlayPreferred"))
+        prefer_overlay = bool(dock.property("mwOverlayPreferred")) and self._enable_overlay
         persistent = self._is_persistent(index)
         if prefer_overlay:
             try:
@@ -502,6 +512,11 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             except Exception:
                 pass
         elif not persistent and dock.isFloating():
+            try:
+                dock.setFloating(False)
+            except Exception:
+                pass
+        if not self._enable_overlay and dock.isFloating():
             try:
                 dock.setFloating(False)
             except Exception:
@@ -674,11 +689,15 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             break
 
     def _schedule_collapse(self) -> None:
+        if not self._auto_collapse:
+            return
         if self._collapse_timer.isActive() or self._floating_indices:
             return
         self._collapse_timer.start(self._HOVER_CLOSE_DELAY_MS)
 
     def _collapse_if_outside(self) -> None:
+        if not self._auto_collapse:
+            return
         if self._floating_indices:
             return
         if self._pointer_over_tab_bar() or self._pointer_over_any_dock():
@@ -3260,7 +3279,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
         object_dock.setMinimumWidth(PRIMARY_DOCK_MIN_WIDTH)
         self.object_dock = object_dock
-        object_dock.visibilityChanged.connect(lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial))
+        if sys.platform != "darwin":
+            object_dock.visibilityChanged.connect(
+                lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
+            )
 
         graph_dock: QtWidgets.QDockWidget | None = None
         graph_panel: QtWidgets.QWidget | None = None
@@ -3274,7 +3296,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self._normalize_docks_initial)
         self._layout_fixed_once = False
         if isinstance(project_dock, QtWidgets.QDockWidget):
-            project_dock.visibilityChanged.connect(lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial))
+            if sys.platform != "darwin":
+                project_dock.visibilityChanged.connect(
+                    lambda _: QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
+                )
 
         self._dock_switcher_panels: list[QtWidgets.QDockWidget | None] = []
         dock_switcher_enabled = self._dock_switcher_supported()
@@ -3286,6 +3311,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._create_dock_switcher(
                     left_docks,
                     side="left",
+                    enable_hover=sys.platform != "darwin",
+                    enable_overlay=sys.platform != "darwin",
+                    auto_collapse=sys.platform != "darwin",
                     initial_visible=(0,),
                 )
             )
@@ -3298,6 +3326,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._create_dock_switcher(
                     right_docks,
                     side="right",
+                    enable_hover=sys.platform != "darwin",
+                    enable_overlay=sys.platform != "darwin",
+                    auto_collapse=sys.platform != "darwin",
                     initial_visible=(0,),
                 )
             )
@@ -6372,7 +6403,38 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             edit_menu.setObjectName("mw_shared_edit")
             menu_bar.addMenu(edit_menu)
         self._install_history_actions(edit_menu)
+        self._install_view_dock_actions(menu_bar)
         self._reorder_shared_menus(menu_bar)
+
+    def _install_view_dock_actions(self, menu_bar: QtWidgets.QMenuBar) -> None:
+        if getattr(self, "_dock_view_actions_added", False):
+            return
+        view_menu = None
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if menu is not None and menu.objectName() == "mw_shared_view":
+                view_menu = menu
+                break
+        if view_menu is None:
+            return
+        docks = [
+            ("Project Explorer", getattr(self, "project_dock", None)),
+            ("Object Manager", getattr(self, "object_dock", None)),
+            ("Message Log", getattr(self, "log_dock", None)),
+        ]
+        actions: list[QtGui.QAction] = []
+        for label, dock in docks:
+            if not isinstance(dock, QtWidgets.QDockWidget):
+                continue
+            action = dock.toggleViewAction()
+            action.setText(label)
+            actions.append(action)
+        if not actions:
+            return
+        view_menu.addSeparator()
+        for action in actions:
+            view_menu.addAction(action)
+        self._dock_view_actions_added = True
 
     def _reorder_shared_menus(self, menu_bar: QtWidgets.QMenuBar) -> None:
         desired = [
@@ -6512,6 +6574,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         docks: Sequence[QtWidgets.QDockWidget],
         *,
         side: Literal["left", "right"],
+        enable_hover: bool = True,
+        enable_overlay: bool = True,
+        auto_collapse: bool = True,
         initial_visible: Iterable[int] | None = None,
     ) -> QtWidgets.QDockWidget | None:
         if not docks:
@@ -6531,6 +6596,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         switcher = _DockSwitcherWidget(
             docks,
             side=side,
+            enable_hover=enable_hover,
+            enable_overlay=enable_overlay,
+            auto_collapse=auto_collapse,
             parent=panel,
             settings=getattr(self, "settings", None),
             pinned_setting_key=pinned_key,
@@ -7916,13 +7984,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if visible:
             maximized = bool(getattr(self.tab_widget, "_global_maximized", False))
             fitter = getattr(self.tab_widget, "_fit_subwindow", None)
+            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
             self._hidden_tabs.discard(tab)
             sub = self.tab_widget._subwindow_for(tab)  # type: ignore[attr-defined]
             if sub is not None and sub in self._hidden_subwindows:
                 self._hidden_subwindows.discard(sub)
                 sub.show()
                 if maximized:
-                    sub.showMaximized()
+                    if callable(maybe_maximize):
+                        maybe_maximize(sub)
                 elif callable(fitter):
                     fitter(sub, use_half_width=True, preferred_width=None)
         else:
@@ -8111,6 +8181,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _normalize_docks_initial(self) -> None:
         """Ensure primary docks start at readable sizes and stay visible."""
 
+        if getattr(self, "_normalizing_docks", False):
+            return
+        now = time.monotonic()
+        last_run = getattr(self, "_last_normalize_docks_ts", 0.0)
+        if now - last_run < 0.1:
+            return
+        self._normalizing_docks = True
+        self._last_normalize_docks_ts = now
         try:
             dock_specs: list[tuple[QtWidgets.QDockWidget, int]] = []
             for dock in (
@@ -8159,6 +8237,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     pass
         except Exception:
             pass
+        finally:
+            self._normalizing_docks = False
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -8169,9 +8249,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             QtCore.QTimer.singleShot(10, self._ensure_primary_docks_pinned)
             QtCore.QTimer.singleShot(25, self._queue_retabify_primary_docks)
             QtCore.QTimer.singleShot(50, self._normalize_docks_initial)
+            if sys.platform != "darwin":
+                QtCore.QTimer.singleShot(150, self._normalize_docks_initial)
+        if sys.platform == "darwin":
             QtCore.QTimer.singleShot(150, self._normalize_docks_initial)
-        QtCore.QTimer.singleShot(100, self._normalize_docks_initial)
-        QtCore.QTimer.singleShot(300, self._normalize_docks_initial)
+        else:
+            QtCore.QTimer.singleShot(100, self._normalize_docks_initial)
+            QtCore.QTimer.singleShot(300, self._normalize_docks_initial)
 
     def _restore_tab_from_info(self, info: _RemovedTabInfo) -> None:
         insert_index = min(info.index, self.tab_widget.count())
@@ -8360,6 +8444,8 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
 
     def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
         super().changeEvent(event)
+        if sys.platform == "darwin":
+            return
         if self._handling_change:
             return
         self._handling_change = True
@@ -8417,7 +8503,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
         layout.setSpacing(0)
         self._mdi = QtWidgets.QMdiArea(self)
         self._mdi.setViewMode(QtWidgets.QMdiArea.ViewMode.SubWindowView)
-        self._mdi.setOption(QtWidgets.QMdiArea.AreaOption.DontMaximizeSubWindowOnActivation, False)
+        self._native_subwindow_maximize = sys.platform != "darwin"
+        self._mdi.setOption(
+            QtWidgets.QMdiArea.AreaOption.DontMaximizeSubWindowOnActivation,
+            not self._native_subwindow_maximize,
+        )
         self._mdi.viewport().installEventFilter(self)
         layout.addWidget(self._mdi)
 
@@ -8452,8 +8542,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if not rect.isValid() or rect.width() < 40 or rect.height() < 40:
             return False
         sub.setGeometry(rect)
-        sub.setWindowState(QtCore.Qt.WindowState.WindowMaximized)
         return True
+
+    def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:
+        if self._native_subwindow_maximize:
+            sub.showMaximized()
+        else:
+            self._apply_fullscreen_geometry(sub)
+            sub.show()
 
     def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
         if self._blocking:
@@ -8461,7 +8557,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
         if sub is not None:
-            is_max = sub.isMaximized() or sub.isFullScreen() or self._fullscreen_lock
+            if self._native_subwindow_maximize:
+                is_max = sub.isMaximized() or sub.isFullScreen() or self._fullscreen_lock
+            else:
+                is_max = self._fullscreen_lock
             self._global_maximized = is_max
             if is_max:
                 self._fullscreen_lock = True
@@ -8472,7 +8571,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         if self._global_maximized and sub is not None and not sub.isMaximized():
             self._syncing_state = True
             try:
-                sub.showMaximized()
+                self._maybe_apply_maximize(sub)
             finally:
                 self._syncing_state = False
         self.currentChanged.emit(index)
@@ -8508,19 +8607,23 @@ class _MdiTabProxy(QtWidgets.QWidget):
     def _handle_subwindow_state_change(self, maximized: bool) -> None:
         if self._syncing_state:
             return
-        if maximized:
-            self._fullscreen_lock = True
-            self._global_maximized = True
-            active = self._mdi.activeSubWindow()
-            if active is not None:
-                self._maximize_single(active)
+        self._syncing_state = True
+        try:
+            if maximized:
+                self._fullscreen_lock = True
+                self._global_maximized = True
+                active = self._mdi.activeSubWindow()
+                if active is not None:
+                    self._maximize_single(active)
+                else:
+                    self._apply_global_window_state()
             else:
+                # Do not clear fullscreen lock on incidental restores; only a manual restore should clear it.
+                if not self._fullscreen_lock:
+                    self._global_maximized = False
                 self._apply_global_window_state()
-        else:
-            # Do not clear fullscreen lock on incidental restores; only a manual restore should clear it.
-            if not self._fullscreen_lock:
-                self._global_maximized = False
-            self._apply_global_window_state()
+        finally:
+            self._syncing_state = False
 
     def _handle_subwindow_hidden(self, sub: _ManagedSubWindow) -> None:
         self._hidden_subwindows.add(sub)
@@ -8595,7 +8698,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             if sub is target:
                 sub.show()
                 applied = self._apply_fullscreen_geometry(sub)
-                sub.showMaximized()
+                if not (sub.isMaximized() or sub.isFullScreen()):
+                    self._maybe_apply_maximize(sub)
                 sub.raise_()
                 self._maximized_hidden.discard(sub)
                 if not applied:
@@ -8867,7 +8971,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._maximized_hidden.discard(sub)
             sub.show()
             if self._global_maximized:
-                sub.showMaximized()
+                self._maybe_apply_maximize(sub)
             else:
                 sub.showNormal()
                 self._arrange_subwindows()

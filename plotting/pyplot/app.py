@@ -100,7 +100,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._last_graph_dir: Path | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
-        if not sys.platform.startswith("win"):
+        if not sys.platform.startswith("win") and sys.platform != "darwin":
             try:
                 self.setWindowState(
                     self.windowState() | QtCore.Qt.WindowState.WindowMaximized

@@ -19,6 +19,7 @@
 - Origin exports: verify line/symbol styles and graph titles mirror PyPlot across plugins (VSM hysteresis, VSM temp scan, DMA iso-stress, FMR).
 
 ## In Progress
+- Investigate PyPlot macOS UI unresponsiveness and zoom/maximize freezes.
 - Fabrication section: add estimated transition temperature + glass pull-off columns (with notes entry).
 - Videos section: show fabrication rows even without videos, keep editable fabrication fields + video end-length columns, and add open-video warnings; apply overrides in assemble/exports.
 - Add Data Builder sections for VSM hysteresis loops, VSM temperature scan, and DMA iso-stress (reuse PyPlot plotting scripts; handle multiple graphs per microwire).
