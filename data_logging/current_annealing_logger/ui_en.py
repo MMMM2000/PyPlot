@@ -193,6 +193,11 @@ class Ui_MainWindow(object):
         self.pushButton_refresh_ports = QtWidgets.QPushButton("Refresh")
         gb_layout.addWidget(self.pushButton_refresh_ports)
 
+        self.label_supply = QtWidgets.QLabel("Supply:")
+        gb_layout.addWidget(self.label_supply)
+        self.comboBox_supply = QtWidgets.QComboBox()
+        gb_layout.addWidget(self.comboBox_supply)
+
         # Legacy numeric COM spin kept for compatibility, but hidden
         self.label_port_number = QtWidgets.QLabel("COM:")
         self.label_port_number.hide()
@@ -314,6 +319,13 @@ class Ui_MainWindow(object):
         self.spinBox_hold_duration.setMaximumWidth(90)
         ramp.addWidget(self.label_hold_duration, 1, 0)
         ramp.addWidget(self.spinBox_hold_duration, 1, 1)
+        self.label_start_current = QtWidgets.QLabel("Start current [mA]:")
+        self.spinBox_start_current = QtWidgets.QSpinBox()
+        self.spinBox_start_current.setRange(1, 10000)
+        self.spinBox_start_current.setValue(10)
+        self.spinBox_start_current.setMaximumWidth(90)
+        ramp.addWidget(self.label_start_current, 1, 2)
+        ramp.addWidget(self.spinBox_start_current, 1, 3)
         ramp.addItem(
             QtWidgets.QSpacerItem(
                 0,
@@ -357,14 +369,32 @@ class Ui_MainWindow(object):
 
         # Voltage limit behaviour
         limit_layout = QtWidgets.QHBoxLayout()
-        limit_layout.addWidget(QtWidgets.QLabel("When the 30 V limit is hit:"))
+        limit_layout.addWidget(QtWidgets.QLabel("Voltage limit [V]:"))
+        self.spinBox_max_voltage = QtWidgets.QSpinBox()
+        self.spinBox_max_voltage.setRange(1, 200)
+        self.spinBox_max_voltage.setValue(30)
+        self.spinBox_max_voltage.setMaximumWidth(90)
+        limit_layout.addWidget(self.spinBox_max_voltage)
+        self.label_channel = QtWidgets.QLabel("Channel:")
+        limit_layout.addWidget(self.label_channel)
+        self.spinBox_channel = QtWidgets.QSpinBox()
+        self.spinBox_channel.setRange(0, 4)
+        self.spinBox_channel.setValue(3)
+        self.spinBox_channel.setMaximumWidth(60)
+        self.spinBox_channel.setToolTip("Set to 0 to skip channel selection (for single-channel supplies).")
+        limit_layout.addWidget(self.spinBox_channel)
+        self.checkBox_reset_on_start = QtWidgets.QCheckBox("Reset supply on start")
+        self.checkBox_reset_on_start.setChecked(True)
+        limit_layout.addWidget(self.checkBox_reset_on_start)
+        limit_layout.addSpacing(12)
+        limit_layout.addWidget(QtWidgets.QLabel("When the limit is hit:"))
         self.comboBox_max_voltage_action = QtWidgets.QComboBox()
         self.comboBox_max_voltage_action.addItem("Ask every time", "ask")
         self.comboBox_max_voltage_action.addItem("Hold current (stop increasing)", "hold")
         self.comboBox_max_voltage_action.addItem("Reverse to zero", "reverse")
         self.comboBox_max_voltage_action.addItem("Stop measurement", "stop")
         self.comboBox_max_voltage_action.setToolTip(
-            "Choose how the logger reacts when the power supply reaches its 30 V compliance limit"
+            "Choose how the logger reacts when the power supply reaches its voltage compliance limit"
         )
         limit_layout.addWidget(self.comboBox_max_voltage_action)
         limit_layout.addStretch(1)
@@ -471,7 +501,7 @@ class Ui_MainWindow(object):
         grid.addWidget(self.progressBar_process, 7, 0, 1, 2)
         self.label_time_remaining = QtWidgets.QLabel("Time remaining: N/A")
         grid.addWidget(self.label_time_remaining, 8, 0, 1, 2)
-        self.label_time_to_limit = QtWidgets.QLabel("To 30 V: N/A")
+        self.label_time_to_limit = QtWidgets.QLabel("To limit: N/A")
         grid.addWidget(self.label_time_to_limit, 9, 0, 1, 2)
 
         # Live values group

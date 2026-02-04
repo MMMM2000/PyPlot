@@ -114,6 +114,27 @@ MAX_VOLTAGE_ACTION_LABELS = {
     "stop": "Stop measurement",
 }
 
+SUPPLY_PROFILES: Dict[str, Dict[str, Any]] = {
+    "hmp4030": {
+        "label": "HMP4030 (original)",
+        "start_current_mA": 1,
+        "min_start_current_mA": 1,
+        "max_voltage": 30.0,
+        "channel_select": 3,
+        "reset_on_start": True,
+        "voltage_first": False,
+    },
+    "owon_spe6102": {
+        "label": "Owon SPE6102",
+        "start_current_mA": 10,
+        "min_start_current_mA": 10,
+        "max_voltage": 62.0,
+        "channel_select": 0,
+        "reset_on_start": False,
+        "voltage_first": True,
+    },
+}
+
 
 class MeasurementHistoryDialog(QtWidgets.QDialog):
     """Display recently recorded resistance-current traces."""
@@ -230,6 +251,9 @@ class MainWindow(QtWidgets.QMainWindow):
         # Remember last log directory and file separately
         self.settings = QtCore.QSettings("microwire", "current_annealing")
         self._last_loop_value = max(1, int(self.settings.value("loops", 1) or 1))
+        self.supply_profile_id = "hmp4030"
+        self.min_start_current_mA = 1
+        self.voltage_first = False
         if hasattr(self.ui, 'lineEdit_log_dir'):
             self.ui.lineEdit_log_dir.setText(
                 self.settings.value("log_dir", DEFAULT_LOG_DIR, type=str)
@@ -248,6 +272,11 @@ class MainWindow(QtWidgets.QMainWindow):
             self.max_current_mA = self.ui.spinBox_max_current.value()
         except Exception:
             pass
+        self.start_current_mA = 1
+        self.max_voltage = 30.0
+        self.reset_on_start = True
+        self.channel_select = 3
+        self._init_supply_profile()
         self.max_voltage_action: str = MAX_VOLTAGE_DEFAULT_ACTION
         self._init_max_voltage_action()
         self.init_live_values()
@@ -289,18 +318,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.resistance_drop_percent = 10
         self.hold_duration_s = 1
-        self.max_current_mA = 10
+        if not hasattr(self, "max_current_mA"):
+            self.max_current_mA = 10
         self.operation_mode = 2  # 0 - VCP, 1 - manual, 2 - automatic (default auto)
         self.process_running = False
 
-        self.current_current_set = 0.001
+        self.current_current_set = self._start_current_A()
         self.current_current_read = 0.0
         self.current_increment = 0.001
         self.temp_resistance_maximum = 0.0
         self.current_voltage = 0.0
         self.current_resistance = 0.0
-        self.open_threshold = 30
-        self.max_voltage = 30.0
+        self.max_voltage = float(getattr(self, "max_voltage", 30.0))
+        self.open_threshold = self.max_voltage
         self._max_voltage_dialog = False
         self.direction_ascending = True
         self.sample_ready = False
@@ -364,6 +394,14 @@ class MainWindow(QtWidgets.QMainWindow):
         
         
         self.ui.spinBox_max_current.valueChanged.connect(self.handle_max_current_value_changed)
+        if hasattr(self.ui, 'spinBox_max_voltage'):
+            self.ui.spinBox_max_voltage.valueChanged.connect(self.handle_max_voltage_value_changed)
+        if hasattr(self.ui, 'spinBox_channel'):
+            self.ui.spinBox_channel.valueChanged.connect(self.handle_channel_select_value_changed)
+        if hasattr(self.ui, 'checkBox_reset_on_start'):
+            self.ui.checkBox_reset_on_start.toggled.connect(self.handle_reset_on_start_toggled)
+        if hasattr(self.ui, 'spinBox_start_current'):
+            self.ui.spinBox_start_current.valueChanged.connect(self.handle_start_current_value_changed)
         self.ui.spinBox_hold_duration.valueChanged.connect(self.handle_hold_duration_value_changed)
         self.ui.pushButton_hold_current.clicked.connect(self.handle_hold_current_button_clicked)
         
@@ -384,6 +422,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.comboBox_port.currentIndexChanged.connect(self.handle_comboBox_port_changed)
         if hasattr(self.ui, 'pushButton_refresh_ports'):
             self.ui.pushButton_refresh_ports.clicked.connect(self.populate_ports)
+        if hasattr(self.ui, 'comboBox_supply'):
+            self.ui.comboBox_supply.currentIndexChanged.connect(self.handle_supply_profile_changed)
         if hasattr(self.ui, 'pushButton_browse_dir'):
             self.ui.pushButton_browse_dir.clicked.connect(self.handle_browse_log_dir)
         if hasattr(self.ui, 'pushButton_open_dir'):
@@ -475,26 +515,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.resistance_at_hold_current = 0
         self.resistance_percent_from_hold = 0
         
-        self.commands_init = [
-                                #"*IDN?\n",
-                                "*RST\n",
-                                "SYST:REM\n",
-                                "INST:NSEL 3\n",
-                                "CURR 0.001\n",
-                                "VOLT 30.0\n",
-                                "OUTP ON\n"
-                                
-        ]
-        
-        
-        self.commands_safe_end = [
-                                "INST:NSEL 3\n",
-                                "OUTP OFF\n",
-                                "VOLT 1.0\n",
-                                "CURR 0.001\n",
-                                "SYST:LOC\n",
-                                "OUTP:GEN 0\n"
-        ]
+        self._refresh_command_profiles()
         
         self.f_out = None
         self.f_name = self.build_log_path() if hasattr(self, 'build_log_path') else self.ui.lineEdit_log_file_full.text()
@@ -1334,7 +1355,7 @@ class MainWindow(QtWidgets.QMainWindow):
                                 "Measured current is zero. The wire likely burned through. Stopping the process.",
                             )
                             if self.process_running:
-                                self.handle_toggle_process_clicked()
+                                self.stop_annealing("Contact lost; stopping measurement.", show_dialog=False)
                         self.lock.unlock()
                         return
                     self._skip_current_sample = False
@@ -1385,7 +1406,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ui.label_serial_response.setText(self.serial_response)
 
     def _reset_voltage_projection(self) -> None:
-        """Clear the running 30 V projection state."""
+        """Clear the running voltage-limit projection state."""
 
         self._voltage_history.clear()
         self._time_to_voltage_limit = None
@@ -1394,7 +1415,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_voltage_projection_to_progress(None, force=True)
 
     def _note_voltage_limit_reached(self) -> None:
-        """Record that the 30 V ceiling has been hit."""
+        """Record that the voltage ceiling has been hit."""
 
         self._voltage_history.clear()
         self._time_to_voltage_limit = 0.0
@@ -1409,7 +1430,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._apply_voltage_projection_to_progress(self._estimated_limit_current_mA, force=True)
 
     def _update_voltage_projection(self, timestamp: float) -> None:
-        """Update the projection to the 30 V limit using recent samples."""
+        """Update the projection to the voltage limit using recent samples."""
 
         history = self._voltage_history
         limit = float(getattr(self, "max_voltage", 30.0))
@@ -1529,7 +1550,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_voltage_projection(now)
 
     def _format_voltage_limit_label(self) -> str:
-        prefix = "To 30 V"
+        prefix = self._voltage_limit_prefix()
         if not self.process_running:
             return f"{prefix}: N/A"
         if self._time_to_voltage_limit == 0:
@@ -1591,6 +1612,291 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             return f"{prefix}: {secs}s"
 
+    @staticmethod
+    def _percent_from_hold(current_resistance: float, hold_resistance: float) -> float | None:
+        try:
+            current_resistance = float(current_resistance)
+            hold_resistance = float(hold_resistance)
+        except Exception:
+            return None
+        if not math.isfinite(current_resistance) or not math.isfinite(hold_resistance):
+            return None
+        if hold_resistance == 0.0:
+            return None
+        return (current_resistance / hold_resistance) * 100.0
+
+    def _profile_setting_key(self, profile_id: str, name: str) -> str:
+        return f"supply_profile/{profile_id}/{name}"
+
+    def _load_profile_setting(self, profile_id: str, name: str, default: Any, value_type: type) -> Any:
+        key = self._profile_setting_key(profile_id, name)
+        try:
+            if self.settings.contains(key):
+                return self.settings.value(key, default, type=value_type)
+            return self.settings.value(name, default, type=value_type)
+        except Exception:
+            return default
+
+    def _store_profile_setting(self, name: str, value: Any) -> None:
+        profile_id = getattr(self, "supply_profile_id", "hmp4030")
+        try:
+            self.settings.setValue(self._profile_setting_key(profile_id, name), value)
+        except Exception:
+            pass
+
+    def _init_supply_profile(self) -> None:
+        combo = getattr(self.ui, 'comboBox_supply', None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        combo.blockSignals(True)
+        combo.clear()
+        for key, profile in SUPPLY_PROFILES.items():
+            combo.addItem(profile["label"], key)
+        stored = self.settings.value("supply_profile", "hmp4030")
+        idx = combo.findData(stored)
+        if idx < 0:
+            idx = combo.findData("hmp4030")
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+        selected = combo.currentData()
+        if isinstance(selected, str):
+            self._apply_supply_profile(selected)
+
+    def _apply_supply_profile(self, profile_id: str) -> None:
+        profile = SUPPLY_PROFILES.get(profile_id, SUPPLY_PROFILES["hmp4030"])
+        self.supply_profile_id = profile_id
+        self.min_start_current_mA = int(profile.get("min_start_current_mA", 1))
+        self.voltage_first = bool(profile.get("voltage_first", False))
+        # Apply defaults to UI and internal state.
+        start_spin = getattr(self.ui, 'spinBox_start_current', None)
+        if isinstance(start_spin, QtWidgets.QSpinBox):
+            try:
+                start_spin.setMinimum(self.min_start_current_mA)
+            except Exception:
+                pass
+            default_start = int(profile.get("start_current_mA", self.min_start_current_mA))
+            start_value = self._load_profile_setting(profile_id, "start_current", default_start, int)
+            if start_value < self.min_start_current_mA:
+                start_value = self.min_start_current_mA
+            start_spin.blockSignals(True)
+            start_spin.setValue(int(start_value))
+            start_spin.blockSignals(False)
+            self.start_current_mA = int(start_spin.value())
+        volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
+        if isinstance(volt_spin, QtWidgets.QSpinBox):
+            default_voltage = float(profile.get("max_voltage", 30.0))
+            voltage_value = self._load_profile_setting(profile_id, "max_voltage", default_voltage, float)
+            volt_spin.blockSignals(True)
+            volt_spin.setValue(int(round(float(voltage_value))))
+            volt_spin.blockSignals(False)
+            self.max_voltage = float(volt_spin.value())
+            self.open_threshold = self.max_voltage
+        reset_box = getattr(self.ui, 'checkBox_reset_on_start', None)
+        if isinstance(reset_box, QtWidgets.QCheckBox):
+            default_reset = int(bool(profile.get("reset_on_start", True)))
+            reset_value = int(self._load_profile_setting(profile_id, "reset_on_start", default_reset, int))
+            reset_box.blockSignals(True)
+            reset_box.setChecked(bool(reset_value))
+            reset_box.blockSignals(False)
+            self.reset_on_start = bool(reset_box.isChecked())
+        channel_spin = getattr(self.ui, 'spinBox_channel', None)
+        if isinstance(channel_spin, QtWidgets.QSpinBox):
+            default_channel = int(profile.get("channel_select", 0))
+            channel_value = int(self._load_profile_setting(profile_id, "channel_select", default_channel, int))
+            channel_spin.blockSignals(True)
+            channel_spin.setValue(int(channel_value))
+            channel_spin.blockSignals(False)
+            self.channel_select = int(channel_spin.value())
+        max_spin = getattr(self.ui, 'spinBox_max_current', None)
+        if isinstance(max_spin, QtWidgets.QSpinBox):
+            if max_spin.value() < self.start_current_mA:
+                max_spin.blockSignals(True)
+                max_spin.setValue(self.start_current_mA)
+                max_spin.blockSignals(False)
+            self.max_current_mA = int(max_spin.value())
+            try:
+                self.settings.setValue("max_current", self.max_current_mA)
+            except Exception:
+                pass
+        try:
+            self.settings.setValue("supply_profile", profile_id)
+        except Exception:
+            pass
+        self._refresh_command_profiles()
+
+    def handle_supply_profile_changed(self) -> None:
+        combo = getattr(self.ui, 'comboBox_supply', None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        profile_id = combo.currentData(QtCore.Qt.ItemDataRole.UserRole)
+        if not isinstance(profile_id, str):
+            profile_id = "hmp4030"
+        self._apply_supply_profile(profile_id)
+        self.update_planned_time_label()
+
+    def _voltage_limit_value(self) -> float:
+        try:
+            return float(getattr(self, "max_voltage", 30.0))
+        except Exception:
+            return 30.0
+
+    def _format_voltage_limit(self) -> str:
+        limit = self._voltage_limit_value()
+        if abs(limit - round(limit)) < 1e-6:
+            return str(int(round(limit)))
+        text = f"{limit:.1f}".rstrip("0").rstrip(".")
+        return text or str(limit)
+
+    def _voltage_limit_prefix(self) -> str:
+        return f"To {self._format_voltage_limit()} V"
+
+    def _sync_runtime_settings(self) -> None:
+        """Refresh runtime parameters from the UI spinboxes."""
+
+        max_spin = getattr(self.ui, 'spinBox_max_current', None)
+        if isinstance(max_spin, QtWidgets.QSpinBox):
+            try:
+                max_spin.interpretText()
+            except Exception:
+                pass
+            try:
+                self.max_current_mA = int(max_spin.value())
+                min_start = int(getattr(self, "min_start_current_mA", 1))
+                if self.max_current_mA < min_start:
+                    max_spin.blockSignals(True)
+                    max_spin.setValue(min_start)
+                    max_spin.blockSignals(False)
+                    self.max_current_mA = min_start
+            except Exception:
+                pass
+        start_spin = getattr(self.ui, 'spinBox_start_current', None)
+        if isinstance(start_spin, QtWidgets.QSpinBox):
+            try:
+                start_spin.interpretText()
+            except Exception:
+                pass
+            try:
+                value = int(start_spin.value())
+                min_value = int(getattr(self, "min_start_current_mA", 1))
+                if value < min_value:
+                    start_spin.blockSignals(True)
+                    start_spin.setValue(min_value)
+                    start_spin.blockSignals(False)
+                    value = min_value
+                self.start_current_mA = value
+            except Exception:
+                pass
+        step_spin = getattr(self.ui, 'spinBox_step_mA', None)
+        if isinstance(step_spin, QtWidgets.QSpinBox):
+            try:
+                step_spin.interpretText()
+            except Exception:
+                pass
+            try:
+                self.current_step_mA = int(step_spin.value())
+                self.current_step_A = self.current_step_mA / 1000.0
+            except Exception:
+                pass
+        hold_spin = getattr(self.ui, 'spinBox_hold_duration', None)
+        if isinstance(hold_spin, QtWidgets.QSpinBox):
+            try:
+                hold_spin.interpretText()
+            except Exception:
+                pass
+            try:
+                self.hold_duration_s = int(hold_spin.value())
+            except Exception:
+                pass
+        volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
+        if isinstance(volt_spin, QtWidgets.QSpinBox):
+            try:
+                volt_spin.interpretText()
+            except Exception:
+                pass
+            try:
+                self.max_voltage = float(volt_spin.value())
+                self.open_threshold = self.max_voltage
+            except Exception:
+                pass
+
+    def _start_current_A(self) -> float:
+        """Return the configured start current in amps."""
+
+        try:
+            start_mA = int(getattr(self, "start_current_mA", 1))
+        except Exception:
+            start_mA = 1
+        min_mA = int(getattr(self, "min_start_current_mA", 1))
+        return max(min_mA, start_mA) / 1000.0
+
+    def _warn_start_at_max(self) -> None:
+        try:
+            start_spin = getattr(self.ui, 'spinBox_start_current', None)
+            if isinstance(start_spin, QtWidgets.QSpinBox):
+                try:
+                    start_spin.interpretText()
+                except Exception:
+                    pass
+                start_mA = int(start_spin.value())
+            else:
+                start_mA = int(getattr(self, "start_current_mA", 1))
+        except Exception:
+            start_mA = 1
+        try:
+            max_spin = getattr(self.ui, 'spinBox_max_current', None)
+            if isinstance(max_spin, QtWidgets.QSpinBox):
+                try:
+                    max_spin.interpretText()
+                except Exception:
+                    pass
+                max_mA = int(max_spin.value())
+            else:
+                max_mA = int(getattr(self, "max_current_mA", start_mA))
+        except Exception:
+            max_mA = start_mA
+        if start_mA >= max_mA:
+            message = (
+                "Start current is at or above Max current; ramp will not increase. "
+                "Increase Max current to see a ramp."
+            )
+            self._show_status_message(message, timeout_ms=15000)
+            try:
+                QtWidgets.QMessageBox.information(self, "Start current", message)
+            except Exception:
+                pass
+
+    def _refresh_command_profiles(self) -> None:
+        """Sync command templates with the configured start current."""
+
+        start_a = self._start_current_A()
+        limit_v = self._voltage_limit_value()
+        channel = int(getattr(self, "channel_select", 0) or 0)
+        commands_init: list[str] = []
+        if bool(getattr(self, "reset_on_start", True)):
+            commands_init.append("*RST\n")
+        commands_init.append("SYST:REM\n")
+        if channel > 0:
+            commands_init.append(f"INST:NSEL {channel}\n")
+        if bool(getattr(self, "voltage_first", False)):
+            commands_init.append(f"VOLT {limit_v:.1f}\n")
+            commands_init.append(f"CURR {start_a:.3f}\n")
+        else:
+            commands_init.append(f"CURR {start_a:.3f}\n")
+            commands_init.append(f"VOLT {limit_v:.1f}\n")
+        commands_init.append("OUTP ON\n")
+        self.commands_init = commands_init
+        safe_end = [
+            "OUTP OFF\n",
+            "VOLT 1.0\n",
+            f"CURR {start_a:.3f}\n",
+            "SYST:LOC\n",
+        ]
+        if channel > 0:
+            safe_end.insert(0, f"INST:NSEL {channel}\n")
+            safe_end.append("OUTP:GEN 0\n")
+        self.commands_safe_end = safe_end
+
     def compute_planned_seconds(self) -> int | None:
         """Estimate duration based on UI parameters, even when idle.
 
@@ -1598,6 +1904,7 @@ class MainWindow(QtWidgets.QMainWindow):
         """
         try:
             max_mA = int(self.ui.spinBox_max_current.value())
+            start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
             hold_s = int(self.ui.spinBox_hold_duration.value())
             loops = int(self.ui.spinBox_loops.value()) if hasattr(self.ui, 'spinBox_loops') else 1
             reverse = bool(self.ui.checkBox_reverse.isChecked()) if hasattr(self.ui, 'checkBox_reverse') else False
@@ -1607,8 +1914,15 @@ class MainWindow(QtWidgets.QMainWindow):
             return None
         if infinite:
             return None
-        # steps up from 1 mA to max in increments of step_mA
-        up_steps = max(0, math.ceil(max(0, max_mA - 1) / max(1, step_mA)))
+        min_start = int(getattr(self, "min_start_current_mA", 1))
+        min_start = max(1, min_start)
+        if max_mA < min_start:
+            start_mA = max_mA
+        else:
+            start_mA = max(min_start, min(start_mA, max_mA))
+        step_mA = max(1, step_mA)
+        # steps up from start current to max in increments of step_mA
+        up_steps = max(0, math.ceil(max(0, max_mA - start_mA) / step_mA))
         down_steps = up_steps if reverse else 0
         per_loop = up_steps + hold_s + down_steps
         return per_loop * max(1, loops)
@@ -1623,7 +1937,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             label.setText(self._format_secs("Time remaining", secs))
         if hasattr(self.ui, 'label_time_to_limit'):
-            self.ui.label_time_to_limit.setText("To 30 V: N/A")
+            self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
 
     def update_file_name_from_preset(self):
         # Build file name based on naming preset
@@ -1818,10 +2132,123 @@ class MainWindow(QtWidgets.QMainWindow):
         
     def handle_max_current_value_changed(self):
         self.max_current_mA = self.ui.spinBox_max_current.value()
+        min_start = int(getattr(self, "min_start_current_mA", 1))
+        if self.max_current_mA < min_start:
+            try:
+                self.ui.spinBox_max_current.blockSignals(True)
+                self.ui.spinBox_max_current.setValue(min_start)
+            finally:
+                self.ui.spinBox_max_current.blockSignals(False)
+            self.max_current_mA = min_start
         try:
             self.settings.setValue("max_current", self.max_current_mA)
         except Exception:
             pass
+        spin = getattr(self.ui, 'spinBox_start_current', None)
+        if isinstance(spin, QtWidgets.QSpinBox):
+            try:
+                if spin.value() > self.max_current_mA:
+                    spin.blockSignals(True)
+                    spin.setValue(self.max_current_mA)
+                    spin.blockSignals(False)
+                self.start_current_mA = int(spin.value())
+                self.settings.setValue("start_current", self.start_current_mA)
+                self._refresh_command_profiles()
+            except Exception:
+                pass
+
+    def handle_max_voltage_value_changed(self):
+        spin = getattr(self.ui, 'spinBox_max_voltage', None)
+        if not isinstance(spin, QtWidgets.QSpinBox):
+            return
+        try:
+            value = float(spin.value())
+        except Exception:
+            return
+        if value <= 0:
+            return
+        self.max_voltage = value
+        self.open_threshold = value
+        try:
+            self.settings.setValue("max_voltage", value)
+            self._store_profile_setting("max_voltage", value)
+        except Exception:
+            pass
+        self._refresh_command_profiles()
+        self._reset_voltage_projection()
+        self.update_planned_time_label()
+
+    def handle_channel_select_value_changed(self):
+        spin = getattr(self.ui, 'spinBox_channel', None)
+        if not isinstance(spin, QtWidgets.QSpinBox):
+            return
+        try:
+            spin.interpretText()
+        except Exception:
+            pass
+        try:
+            value = int(spin.value())
+        except Exception:
+            value = 0
+        self.channel_select = value
+        try:
+            self.settings.setValue("channel_select", value)
+            self._store_profile_setting("channel_select", value)
+        except Exception:
+            pass
+        self._refresh_command_profiles()
+
+    def handle_reset_on_start_toggled(self, checked: bool) -> None:
+        self.reset_on_start = bool(checked)
+        try:
+            reset_value = int(self.reset_on_start)
+            self.settings.setValue("reset_on_start", reset_value)
+            self._store_profile_setting("reset_on_start", reset_value)
+        except Exception:
+            pass
+        self._refresh_command_profiles()
+
+    def handle_start_current_value_changed(self):
+        spin = getattr(self.ui, 'spinBox_start_current', None)
+        if not isinstance(spin, QtWidgets.QSpinBox):
+            return
+        try:
+            start_mA = int(spin.value())
+        except Exception:
+            return
+        max_spin = getattr(self.ui, 'spinBox_max_current', None)
+        try:
+            max_mA = int(max_spin.value()) if isinstance(max_spin, QtWidgets.QSpinBox) else start_mA
+        except Exception:
+            max_mA = start_mA
+        if start_mA > max_mA and isinstance(max_spin, QtWidgets.QSpinBox):
+            try:
+                max_spin.blockSignals(True)
+                max_spin.setValue(start_mA)
+            finally:
+                max_spin.blockSignals(False)
+            max_mA = start_mA
+            self.max_current_mA = max_mA
+            try:
+                self.settings.setValue("max_current", max_mA)
+            except Exception:
+                pass
+        min_value = int(getattr(self, "min_start_current_mA", 1))
+        if start_mA < min_value:
+            try:
+                spin.blockSignals(True)
+                spin.setValue(min_value)
+            finally:
+                spin.blockSignals(False)
+            start_mA = min_value
+        self.start_current_mA = start_mA
+        try:
+            self.settings.setValue("start_current", start_mA)
+            self._store_profile_setting("start_current", start_mA)
+        except Exception:
+            pass
+        self._refresh_command_profiles()
+        self.update_planned_time_label()
         
     def handle_hold_duration_value_changed(self):
         self.hold_duration_s = self.ui.spinBox_hold_duration.value()
@@ -1849,8 +2276,13 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def handle_hold_timer_timeout(self):
         self.elapsed_seconds += 1
-        self.resistance_percent_from_hold = self.current_resistance/self.resistance_at_hold_current*100
-        self.ui.label_resistance_percent_from_hold.setText("{:.1f}".format(self.resistance_percent_from_hold))
+        percent = self._percent_from_hold(self.current_resistance, self.resistance_at_hold_current)
+        if percent is None:
+            self.resistance_percent_from_hold = 0.0
+            self.ui.label_resistance_percent_from_hold.setText("N/A")
+            return
+        self.resistance_percent_from_hold = percent
+        self.ui.label_resistance_percent_from_hold.setText(f"{self.resistance_percent_from_hold:.1f}")
 
     def handle_show_history_clicked(self) -> None:
         dialog = MeasurementHistoryDialog(self, list(self._measurement_history))
@@ -1860,6 +2292,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.process_running:
             self.process_running = True
             self._update_mode_action_state()
+            self._sync_runtime_settings()
+            self._refresh_command_profiles()
             self.elapsed_seconds = 0
             self._max_voltage_dialog = False
             self._contact_lost = False
@@ -1902,10 +2336,10 @@ class MainWindow(QtWidgets.QMainWindow):
                 if hasattr(self.ui, 'label_time_remaining'):
                     self.ui.label_time_remaining.setText("Time remaining: N/A")
                 if hasattr(self.ui, 'label_time_to_limit'):
-                    self.ui.label_time_to_limit.setText("To 30 V: N/A")
+                    self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
                 self.current_increment = self.current_step_A
                 self.direction_ascending = True
-                self.current_current_set = 0.001
+                self.current_current_set = self._start_current_A()
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
@@ -1934,13 +2368,14 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._record_name_history()
                 self.current_increment = self.current_step_A
                 self.direction_ascending = True
-                self.current_current_set = 0.001
+                self.current_current_set = self._start_current_A()
                 self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
                 self.temp_resistance_maximum = 0
                 self.current_voltage = 0
                 self.current_resistance = 0
                 self._display_ui_value('lcd_current_mA', "0")
                 self._display_ui_value('label_live_voltage', "0")
+                self._warn_start_at_max()
                 # reverse + loop configuration
                 self.reverse_enabled = getattr(self.ui, 'checkBox_reverse', None) is not None and self.ui.checkBox_reverse.isChecked()
                 self.loop_target = self.ui.spinBox_loops.value() if hasattr(self.ui, 'spinBox_loops') else 1
@@ -1948,7 +2383,19 @@ class MainWindow(QtWidgets.QMainWindow):
                 self.loop_idx = 0
                 # progress plan
                 step_mA = self.current_step_mA if hasattr(self, 'current_step_mA') else 1
-                up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - 1) / max(1, step_mA)))
+                try:
+                    start_mA = int(self.ui.spinBox_start_current.value()) if hasattr(self.ui, 'spinBox_start_current') else 1
+                except Exception:
+                    start_mA = 1
+                min_start = int(getattr(self, "min_start_current_mA", 1))
+                min_start = max(1, min_start)
+                max_mA = int(self.ui.spinBox_max_current.value())
+                if max_mA < min_start:
+                    start_mA = max_mA
+                else:
+                    start_mA = max(min_start, min(start_mA, max_mA))
+                step_mA = max(1, step_mA)
+                up_steps = max(0, math.ceil(max(0, int(self.ui.spinBox_max_current.value()) - start_mA) / step_mA))
                 hold_steps = int(self.ui.spinBox_hold_duration.value())
                 down_steps = up_steps if self.reverse_enabled else 0
                 per_loop = max(1, up_steps + hold_steps + down_steps)
@@ -1960,7 +2407,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     else:
                         self.ui.progressBar_process.setMaximum(0)
                 if hasattr(self.ui, 'label_time_to_limit'):
-                    self.ui.label_time_to_limit.setText("To 30 V: N/A")
+                    self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
                 self.ui.label_resistance_at_hold_current.setText("0")
                 self.ui.label_resistance_percent_from_hold.setText("0")
                 self.line_color="r"
@@ -1974,7 +2421,7 @@ class MainWindow(QtWidgets.QMainWindow):
             else:
                 pass
         else:
-            self.stop_annealing()
+            self.stop_annealing("Stopped by user.", show_dialog=False)
     def handle_pushButton_reverse_now_clicked(self):
         """Immediately ramp current down toward zero."""
         if not self.process_running:
@@ -2015,7 +2462,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if hasattr(self.ui, 'pushButton_reverse_now'):
             self.ui.pushButton_reverse_now.setEnabled(False)
 
-    def stop_annealing(self):
+    def stop_annealing(self, reason: str | None = None, *, show_dialog: bool = False):
         """Abort the annealing run and power down the supply safely."""
         self.process_running = False
         self.wait = False  # break any pending delays
@@ -2042,7 +2489,15 @@ class MainWindow(QtWidgets.QMainWindow):
             self.ui.pushButton_hold_current.setText("Hold current now!")
         # Immediately ramp the supply to zero before running the shutdown sequence
         try:
-            for cmd in ("INST:NSEL 3\n", "CURR 0.000\n", "OUTP OFF\n"):
+            channel = int(getattr(self, "channel_select", 0) or 0)
+        except Exception:
+            channel = 0
+        try:
+            ramp_cmds = []
+            if channel > 0:
+                ramp_cmds.append(f"INST:NSEL {channel}\n")
+            ramp_cmds.extend(["CURR 0.000\n", "OUTP OFF\n"])
+            for cmd in ramp_cmds:
                 self.serial_command = cmd
                 self.send_serial_command()
                 self.simple_delay(100)
@@ -2059,15 +2514,24 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_mode_action_state()
         self._reset_voltage_projection()
         if hasattr(self.ui, 'label_time_to_limit'):
-            self.ui.label_time_to_limit.setText("To 30 V: N/A")
+            self.ui.label_time_to_limit.setText(self._format_voltage_limit_label())
         self._display_ui_value('label_set_current', "0")
         self._max_voltage_dialog = False
         self.first_sample = True
         self._reset_loop_tracking()
+        message = reason or "Measurement stopped."
+        self._show_status_message(message, timeout_ms=15000)
+        if show_dialog:
+            try:
+                QtWidgets.QMessageBox.information(self, "Measurement stopped", message)
+            except Exception:
+                pass
         
     def handle_send_new_command(self):
         if not self.process_running:
             return
+
+        self._sync_runtime_settings()
 
         # Manual annealing
         if self.operation_mode == 1:
@@ -2113,9 +2577,9 @@ class MainWindow(QtWidgets.QMainWindow):
             self.current_current_set += self.current_increment
             self._display_ui_value('label_set_current', f"{self.current_current_set*1000:.1f}")
 
-            # Stop the process just like pressing the stop button
-            if(self.current_current_set < 0.001):
-                self.handle_toggle_process_clicked()
+            # Stop the process once we are below the configured start current.
+            if self.current_current_set < self._start_current_A():
+                self.stop_annealing("Reached minimum current; stopping measurement.", show_dialog=True)
 
             if not self.process_running:
                 return
@@ -2195,31 +2659,31 @@ class MainWindow(QtWidgets.QMainWindow):
                     self.direction_ascending = False
                     self._reset_voltage_projection()
                 else:
-                    self.handle_toggle_process_clicked()
+                    self.stop_annealing("Hold complete; stopping measurement.", show_dialog=True)
 
             if not self.process_running:
                 return
             self.serial_command = f"CURR {self.current_current_set:.3f}\n"
             self.send_serial_command()
             # completed descending to zero? manage loops or stop
-            if (self.current_increment < 0) and (self.current_current_set < self.current_step_A):
+            if (self.current_increment < 0) and (self.current_current_set < self._start_current_A()):
                 next_loop = int(getattr(self, 'loop_idx', 0)) + 1
                 loops_pending = self._has_remaining_loops(next_loop)
                 force_stop = bool(getattr(self, 'force_stop_at_zero', False))
                 self.loop_idx = next_loop
                 self._finalize_loop_cycle()
                 if force_stop:
-                    self.handle_toggle_process_clicked()
+                    self.stop_annealing("Reverse completed; stopping measurement.", show_dialog=True)
                 elif loops_pending:
                     # prepare next loop
                     self.current_increment = self.current_step_A
-                    self.current_current_set = 0.001
+                    self.current_current_set = self._start_current_A()
                     self.line_color = "r"
                     self.direction_ascending = True
                     self._reset_voltage_projection()
                     self.elapsed_seconds = 0
                 else:
-                    self.handle_toggle_process_clicked()
+                    self.stop_annealing("Run complete; stopping measurement.", show_dialog=True)
 
         else:
             pass
@@ -2242,11 +2706,15 @@ class MainWindow(QtWidgets.QMainWindow):
                 break
             self.serial_command = cmd
             self.send_serial_command()
-            # The original implementation paused for a full second between
-            # initialisation commands, which caused a noticeable start-up
-            # delay.  A brief 200 ms gap gives the supply time to process
-            # each command while keeping the UI responsive.
-            self.simple_delay(200)
+            if cmd.strip() == "*RST":
+                # Allow extra time after reset before sending follow-up commands.
+                self.simple_delay(1200)
+            else:
+                # The original implementation paused for a full second between
+                # initialisation commands, which caused a noticeable start-up
+                # delay.  A brief 200 ms gap gives the supply time to process
+                # each command while keeping the UI responsive.
+                self.simple_delay(200)
             
     def simple_delay(self, delay_ms):
         self.wait = True
@@ -2298,7 +2766,7 @@ class MainWindow(QtWidgets.QMainWindow):
             "No response from power supply. Is it turned on? Aborting the process.",
         )
         if self.process_running:
-            self.stop_annealing()
+            self.stop_annealing("No response from power supply. Measurement stopped.", show_dialog=False)
         self._serial_quiet_failures = 0
 
     def handle_legacy_log_path_changed(self):
@@ -2410,6 +2878,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _apply_max_voltage_action(self, action: str) -> None:
         if action not in MAX_VOLTAGE_ACTION_LABELS:
             action = MAX_VOLTAGE_DEFAULT_ACTION
+        limit_label = f"{self._format_voltage_limit()} V"
         if action == "reverse":
             step = abs(getattr(self, "current_step_A", 0.0))
             if step == 0.0:
@@ -2427,26 +2896,26 @@ class MainWindow(QtWidgets.QMainWindow):
             self._note_voltage_limit_reached()
             self._adjust_progress_for_reverse()
             self.update_time_estimate()
-            self._show_status_message("30 V reached — reversing to zero.")
+            self._show_status_message(f"{limit_label} reached — reversing to zero.")
         elif action == "stop":
-            self._show_status_message("30 V reached — stopping measurement.")
+            self._show_status_message(f"{limit_label} reached — stopping measurement.")
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
             if self.process_running:
-                self.handle_toggle_process_clicked()
+                self.stop_annealing(f"{limit_label} reached — stopping measurement.", show_dialog=False)
         else:  # hold current
             self.current_increment = 0
             self.force_stop_at_zero = False
             self.direction_ascending = False
             self._note_voltage_limit_reached()
             self.update_time_estimate()
-            self._show_status_message("30 V reached — holding current.")
+            self._show_status_message(f"{limit_label} reached — holding current.")
 
     def _show_max_voltage_prompt(self) -> None:
         msg = QtWidgets.QMessageBox(self)
         msg.setWindowTitle("Voltage limit reached")
-        msg.setText("Power supply reached 30 V. What do you want to do?")
+        msg.setText(f"Power supply reached {self._format_voltage_limit()} V. What do you want to do?")
         _hold_btn = msg.addButton("Hold current", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
         reverse_btn = msg.addButton("Reverse to zero", QtWidgets.QMessageBox.ButtonRole.ActionRole)
         stop_btn = msg.addButton("Stop measurement", QtWidgets.QMessageBox.ButtonRole.RejectRole)

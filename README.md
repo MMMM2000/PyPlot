@@ -10,7 +10,7 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 2. Create a virtual environment with that interpreter:
    `python3.13 -m venv .venv` (macOS/Linux) or `py -3.13 -m venv .venv` (Windows)
 3. Activate it (`source .venv/bin/activate` on macOS/Linux or
-   `.venv\Scripts\activate` on Windows)
+   `.\.venv\Scripts\Activate.ps1` on Windows PowerShell)
 4. Upgrade pip: `python -m pip install --upgrade pip`
 5. Install the runtime stack for every non-experiment tool:
    - macOS/Linux: `pip install -r requirements.txt`
@@ -23,11 +23,27 @@ loggers, plotters, emulators, and builders without starting individual scripts.
 ## WSL-specific setup
 
 1. Enable WSL and install your preferred distro (Microsoft’s [WSL installation guide](https://learn.microsoft.com/windows/wsl/install) is the easiest reference).
-2. Inside the distro install Python 3.13 (`sudo apt install python3.13 python3.13-venv`) and run `python3 -m venv .venv-wsl` from the repo root.
-3. Activate the WSL-only environment: `source .venv-wsl/bin/activate`.
-4. Install the same dependencies from the Linux lockfile: `pip install -r requirements.txt pytest`.
-5. Use `/mnt/c/Users/Martin/PyPlot/.venv-wsl/bin/python3 -m pytest ...` for tests and `/mnt/c/Users/Martin/PyPlot/.venv-wsl/bin/python3 launcher.py` (or `python3 launcher.py` while activated) so every component uses the Linux toolchain that PyPlot expects.
-6. The GUI can still open via the Windows display server; WSL+X or WSLg will surface the PyQt windows you launch from inside WSL.
+2. Open a WSL shell (Ubuntu, Debian, etc.). From PowerShell you can run `wsl`,
+   but make sure you end up in a Linux prompt (for example `user@host:...$`).
+3. `cd` to the repo path under `/mnt/c/...`, for example:
+   `cd /mnt/c/Users/<you>/microwire-data-plotting-logging`
+4. Inside WSL install Python 3.13 and the venv module
+   (`sudo apt install python3.13 python3.13-venv`), then run
+   `python3 -m venv .venv-wsl` from the repo root.
+5. Activate the WSL-only environment (this only works in a Linux shell):
+   `source .venv-wsl/bin/activate`
+6. Upgrade pip and install dependencies:
+   `python -m pip install --upgrade pip`
+   `pip install -r requirements.txt pytest`
+7. Use `.venv-wsl/bin/python3 -m pytest ...` for tests and
+   `.venv-wsl/bin/python3 launcher.py` (or `python3 launcher.py` while activated)
+   so every component uses the Linux toolchain that PyPlot expects.
+8. The GUI can still open via the Windows display server; WSL+X or WSLg will
+   surface the PyQt windows you launch from inside WSL.
+
+> **Note:** `.venv-wsl` is Linux-only. If you created it from PowerShell and it
+> contains a `Scripts/` folder, delete/rename it and recreate the environment
+> inside WSL so it has a `bin/` directory instead.
 
 > **Tip:** The `pip install -r requirements.txt` command pulls in every
 > dependency required to run the launcher and builder tools. Run `pip install '.[test]'`

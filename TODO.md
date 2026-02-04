@@ -19,6 +19,7 @@
 - Origin exports: verify line/symbol styles and graph titles mirror PyPlot across plugins (VSM hysteresis, VSM temp scan, DMA iso-stress, FMR).
 
 ## In Progress
+- Current Annealing: add supply profiles for HMP4030 vs Owon SPE6102 (min start current, voltage-first init, reset/channel defaults) and confirm Owon ramp/voltage behavior.
 - Investigate PyPlot macOS UI unresponsiveness and zoom/maximize freezes.
 - Fabrication section: add estimated transition temperature + glass pull-off columns (with notes entry).
 - Videos section: show fabrication rows even without videos, keep editable fabrication fields + video end-length columns, and add open-video warnings; apply overrides in assemble/exports.
@@ -65,4 +66,6 @@
 - Validate microscope inline editing/review workflow: Enter navigation (`d`→`D`→next row), project-persisted per-cell review flags, row highlighting for missing images, core/glass preview swapping without zoom, and no `QWindowsWindow::setGeometry` warnings when maximizing.
 
 ## Done
+- Current Annealing Logger: add configurable start current (default 10 mA) for supplies with higher minimum output.
+- Current Annealing Logger: add configurable voltage limit (default 30 V) for higher-voltage supplies.
 - Added cursor readout scaffolding and duplicate-temperature averaging for VSM Temp Scan; integrated tab-selection fixes to avoid MDI proxy crashes.

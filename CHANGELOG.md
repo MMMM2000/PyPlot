@@ -1,5 +1,38 @@
 # Changelog
 
+## 2026-02-04 18:00 UTC
+
+- Current Annealing Logger now supports explicit supply profiles for HMP4030 vs Owon SPE6102, applying per-supply defaults (min start current, voltage limit, reset/channel settings) and restoring per-supply preferences.
+- Fixed Current Annealing Logger ramp initialization so max-current caps are no longer reset to 10 mA and start-current minimums are enforced when profiles change or runs begin.
+- Initialization command ordering now respects voltage-first supplies (Owon) and refreshes templates at run start so the voltage limit is set before ramping.
+- Expanded the README WSL setup steps to make the Linux-only `.venv-wsl` flow explicit.
+
+## 2026-02-04 15:28 UTC
+
+- Current Annealing Logger now syncs ramp settings from the UI at run start/step boundaries, and adds an optional channel selector (set 0 to skip) to avoid HMP-only commands on single-channel supplies.
+
+## 2026-02-04 15:19 UTC
+
+- Current Annealing Logger now offers a “Reset supply on start” toggle and adds a longer post-reset delay to avoid ignored init commands on some supplies.
+
+## 2026-02-04 15:11 UTC
+
+- Current Annealing Logger now warns when Start current is at/above Max current (to avoid no-ramp runs) and surfaces stop reasons via status messaging/dialogs for automatic stops.
+
+## 2026-02-04 12:11 UTC
+
+- Fixed Current Annealing Logger hold-percent updates to avoid division-by-zero crashes when the hold resistance is zero or invalid (now shows N/A).
+- Current Annealing Logger now lifts the max-current value when needed so a higher Start current is honored instead of silently clamping back down.
+- Clarified WSL virtualenv setup in the README (WSL shell vs PowerShell, proper `.venv-wsl` layout).
+
+## 2026-02-04 10:35 UTC
+
+- Current Annealing Logger now lets you set the voltage limit (default 30 V) so higher-voltage supplies can use their full compliance range.
+
+## 2026-02-04 10:28 UTC
+
+- Current Annealing Logger now includes a Start current setting (default 10 mA) and uses it for initialization/ramp start to support supplies with higher minimum output.
+
 ## 2026-02-02 19:31 UTC
 
 - Avoided redundant subwindow maximize state changes so macOS title-bar zooming no longer locks up the PyPlot window.

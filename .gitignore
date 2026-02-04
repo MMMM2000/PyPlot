@@ -40,3 +40,7 @@ OriginC/OC??Tmp*/
 *.opju_backup
 *.tmp
 .DS_Store
+
+# Virtual environments
+.venv/
+.venv-wsl/
