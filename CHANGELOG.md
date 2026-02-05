@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-02-05 15:27 UTC
+
+- FMR PyPlot now offers a combined X-only plot option that overlays all samples with a per-sample legend.
+
 ## 2026-02-04 18:00 UTC
 
 - Current Annealing Logger now supports explicit supply profiles for HMP4030 vs Owon SPE6102, applying per-supply defaults (min start current, voltage limit, reset/channel settings) and restoring per-supply preferences.

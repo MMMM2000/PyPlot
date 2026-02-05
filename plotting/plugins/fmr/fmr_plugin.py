@@ -35,6 +35,7 @@ class FmrPlugin(PyPlotPlugin):
         self._plot_tabs: List[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
         self._markers_checkbox: QtWidgets.QCheckBox | None = None
+        self._combine_x_checkbox: QtWidgets.QCheckBox | None = None
         self._loaded_paths: List[Path] = []
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -65,6 +66,9 @@ class FmrPlugin(PyPlotPlugin):
             "Plot options",
             parent=container,
         )
+        self._combine_x_checkbox = QtWidgets.QCheckBox("Plot all samples (X only)", options_section)
+        self._combine_x_checkbox.setChecked(False)
+        options_layout.addWidget(self._combine_x_checkbox)
         self._markers_checkbox = QtWidgets.QCheckBox("Show markers", options_section)
         self._markers_checkbox.setChecked(False)
         options_layout.addWidget(self._markers_checkbox)
@@ -115,6 +119,14 @@ class FmrPlugin(PyPlotPlugin):
         show_markers = bool(
             self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
         )
+        combine_x = bool(
+            self._combine_x_checkbox.isChecked() if self._combine_x_checkbox is not None else False
+        )
+
+        if combine_x:
+            self._plot_combined_x(show_markers)
+            self._set_tab_bar_visible(False)
+            return
 
         for entry in self._dataset:
             fig = Figure(figsize=(8.5, 5))
@@ -184,6 +196,96 @@ class FmrPlugin(PyPlotPlugin):
             self.host._register_plot_tab(tab, canvas, ax, descriptor)
             self._plot_tabs.append(tab)
         self._set_tab_bar_visible(False)
+
+    def _plot_combined_x(self, show_markers: bool) -> None:
+        window_module = window_api()
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
+        fig = Figure(figsize=(8.5, 5))
+        ax = fig.add_subplot(111)
+        marker = "o" if show_markers else None
+        base_labels = None
+        mismatch_logged = False
+        plotted = 0
+
+        for entry in self._dataset:
+            columns = [str(col) for col in entry.frame.columns]
+            field_col, x_col, _y_col = select_fmr_axes(columns)
+            if not field_col or not x_col:
+                self._log(
+                    f"Missing Field/X columns in {entry.path.name}; available: {columns}",
+                    level="error",
+                )
+                continue
+            data = entry.frame[[field_col, x_col]].apply(pd.to_numeric, errors="coerce")
+            data = data.dropna(how="any")
+            if data.empty:
+                self._log(f"No numeric data in {entry.path.name}.", level="error")
+                continue
+            if base_labels is None:
+                x_unit = entry.units.get(field_col, "Oe")
+                y_unit = entry.units.get(x_col, "V")
+                axis_field = "Field" if "field" in field_col.lower() else field_col
+                ax.set_xlabel(f"{axis_field} [{x_unit}]" if x_unit else axis_field)
+                ax.set_ylabel(f"X [{y_unit}]" if y_unit else "X")
+                base_labels = (field_col, x_col, x_unit, y_unit, entry.sample)
+            elif not mismatch_logged:
+                base_field, base_x, base_x_unit, base_y_unit, base_sample = base_labels
+                if (
+                    field_col != base_field
+                    or x_col != base_x
+                    or entry.units.get(field_col, "Oe") != base_x_unit
+                    or entry.units.get(x_col, "V") != base_y_unit
+                ):
+                    self._log(
+                        f"Combined plot axis labels follow {base_sample}; {entry.sample} uses {field_col}/{x_col}.",
+                        level="warning",
+                    )
+                    mismatch_logged = True
+            ax.plot(
+                data[field_col],
+                data[x_col],
+                linewidth=1.2,
+                marker=marker,
+                label=entry.sample,
+            )
+            plotted += 1
+
+        if plotted == 0:
+            self._log("No FMR data available for combined X plot.", level="error")
+            return
+
+        ax.set_title("FMR X (All Samples)")
+        ax.legend(loc="best")
+        fig.tight_layout()
+
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        canvas = FigureCanvas(fig)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(canvas)
+        descriptor = window_module.TabDescriptor(
+            kind="fmr",
+            title="FMR X - All Samples",
+            root_label="FMR X (All)",
+            x_label=ax.get_xlabel(),
+            y_label=ax.get_ylabel(),
+            canvas=canvas,
+            axes=ax,
+            lines={},
+            metadata={"mode": "combined_x"},
+        )
+        index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Plot")
+        setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
+        if callable(setter):
+            setter(index)
+        self.host._register_plot_tab(tab, canvas, ax, descriptor)
+        self._plot_tabs.append(tab)
 
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._dataset:

@@ -5350,3 +5350,12 @@ AttributeError: 'FabricationSection' object has no attribute 'set_import_separat
 2026-01-23 13:30:29 [INFO] Fabrication data: skipped 53 draw(s) and 651 piece(s) without matching current annealing records.
 2026-01-23 13:30:30 [INFO] Fabrication data: processed 80 file(s).
 2026-01-23 13:40:12 [INFO] Current annealing: processed 100 file(s).
+2026-02-05 15:15:48 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-02-05 15:16:34 [INFO] Loaded 9 FMR file(s).
+2026-02-05 15:17:41 [INFO] Sent FMR data to Origin.
+2026-02-05 15:25:45 [INFO] FMR: processed 8 file(s).
+2026-02-05 15:25:53 [INFO] FMR: processed 8 file(s).
+2026-02-05 15:27:50 [INFO] Message log capture enabled: C:\Users\Martin\PyPlot\logs\message_log.txt
+2026-02-05 15:27:51 [INFO] Loaded 8 FMR file(s).
+2026-02-05 15:27:52 [INFO] Loaded 8 FMR file(s).
+2026-02-05 15:28:05 [INFO] Sent FMR data to Origin.
