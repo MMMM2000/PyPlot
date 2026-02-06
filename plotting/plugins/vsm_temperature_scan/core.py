@@ -1,24 +1,17 @@
-#!/usr/bin/env python3
-"""Tkinter UI for plotting VSM temperature scan data (Signal X vs Temperature)."""
+"""Core processing for the VSM Temperature Scan PyPlot plugin."""
 
 from __future__ import annotations
 
 import csv
+import json
 import re
 from dataclasses import dataclass
 from itertools import zip_longest
 from pathlib import Path
-from typing import Any, Dict, List, Sequence, Tuple, cast
+from typing import Any, Callable, Dict, List, Sequence, Tuple, cast
 
-import pandas as pd
-try:
-    import tkinter as tk  # noqa: F401 - required for Tk dialogs used in _shared
-    from tkinter import ttk
-except Exception:  # pragma: no cover - allow headless/plugin use without Tk
-    tk = None  # type: ignore
-    ttk = None  # type: ignore
 import numpy as np
-import json
+import pandas as pd
 
 try:
     import matplotlib.pyplot as plt
@@ -33,17 +26,6 @@ try:
     from plotting.shared.origin import origin_session
 except Exception:  # pragma: no cover - optional dependency
     origin_session = None  # type: ignore
-
-try:
-    from experiments.simple_scripts._shared import SimpleScriptApp, SimpleScriptProcessor
-except ModuleNotFoundError:
-    # Allow running as a standalone script without package context.
-    from pathlib import Path as _Path
-    import sys as _sys
-
-    root = _Path(__file__).resolve().parent
-    _sys.path.append(str(root))
-    from _shared import SimpleScriptApp, SimpleScriptProcessor  # type: ignore
 
 
 @dataclass
@@ -76,11 +58,11 @@ class PreparedSeries:
     color: str
 
 
-class VSMTemperatureScanProcessor(SimpleScriptProcessor):
-    """Processor powering the Tk UI."""
+class VSMTemperatureScanProcessor:
+    """Parser, plotting, and export utilities for VSM temperature scans."""
 
     def __init__(self) -> None:
-        super().__init__()
+        self._logger: Callable[[str], None] = lambda message: None
         self.split_directions: bool = True
         self.combine_fields: bool = False
         self.show_derivative: bool = False
@@ -94,6 +76,15 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
         self.derivative_moving_avg_window: int = 201
         self._prefs_path = Path.home() / ".vsm_temp_scan_prefs.json"
         self._load_prefs()
+
+    def attach_logger(self, callback: Callable[[str], None]) -> None:
+        self._logger = callback
+
+    def log(self, message: str) -> None:
+        try:
+            self._logger(message)
+        except Exception:
+            pass
 
     def _load_prefs(self) -> None:
         try:
@@ -636,6 +627,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
 
     def set_show_derivative(self, enabled: bool) -> None:
         self.show_derivative = bool(enabled)
+        self._save_prefs()
+
+    def set_smooth_derivative(self, enabled: bool) -> None:
+        self.smooth_derivative = bool(enabled)
         self._save_prefs()
 
     def set_show_smoothed_derivative(self, enabled: bool) -> None:
@@ -1664,95 +1659,10 @@ class VSMTemperatureScanProcessor(SimpleScriptProcessor):
         self.log(f"TXT export complete: {output_dir}")
 
 
-def main() -> None:
-    processor = VSMTemperatureScanProcessor()
-    app = SimpleScriptApp("VSM Temperature Scan", processor)
-    split_var = tk.BooleanVar(app, value=True)
-    processor.set_split_directions(True)
-    ttk.Checkbutton(
-        app.options_frame,
-        text="Separate heating/cooling",
-        variable=split_var,
-        command=lambda: processor.set_split_directions(split_var.get()),
-    ).pack(side=tk.LEFT, padx=(0, 12))
-
-    deriv_var = tk.BooleanVar(app, value=False)
-    ttk.Checkbutton(
-        app.options_frame,
-        text="Plot derivatives",
-        variable=deriv_var,
-        command=lambda: processor.set_show_derivative(deriv_var.get()),
-    ).pack(side=tk.LEFT)
-
-    smooth_deriv_var = tk.BooleanVar(app, value=processor.smooth_derivative)
-    ttk.Checkbutton(
-        app.options_frame,
-        text="Smooth derivatives",
-        variable=smooth_deriv_var,
-        command=lambda: processor.set_smooth_derivative(smooth_deriv_var.get()),
-    ).pack(side=tk.LEFT, padx=(12, 0))
-
-    sm_deriv_var = tk.BooleanVar(app, value=processor.show_smoothed_derivative)
-    ttk.Checkbutton(
-        app.options_frame,
-        text="Plot smoothed derivatives",
-        variable=sm_deriv_var,
-        command=lambda: processor.set_show_smoothed_derivative(sm_deriv_var.get()),
-    ).pack(side=tk.LEFT, padx=(12, 0))
-
-    smooth_plot_var = tk.BooleanVar(app, value=processor.show_smoothed_plot)
-    ttk.Checkbutton(
-        app.options_frame,
-        text="Show smoothed plot",
-        variable=smooth_plot_var,
-        command=lambda: processor.set_show_smoothed(smooth_plot_var.get()),
-    ).pack(side=tk.LEFT, padx=(12, 0))
-
-    med_label = ttk.Label(app.options_frame, text="Median window:")
-    med_label.pack(side=tk.LEFT, padx=(12, 4))
-    med_entry = ttk.Entry(app.options_frame, width=4)
-    med_entry.insert(0, str(processor.median_window))
-    med_entry.pack(side=tk.LEFT)
-    ma_label = ttk.Label(app.options_frame, text="MA window:")
-    ma_label.pack(side=tk.LEFT, padx=(4, 4))
-    ma_entry = ttk.Entry(app.options_frame, width=4)
-    ma_entry.insert(0, str(processor.moving_avg_window))
-    ma_entry.pack(side=tk.LEFT)
-
-    dmed_label = ttk.Label(app.options_frame, text="d/dT median:")
-    dmed_label.pack(side=tk.LEFT, padx=(12, 4))
-    dmed_entry = ttk.Entry(app.options_frame, width=4)
-    dmed_entry.insert(0, str(processor.derivative_median_window))
-    dmed_entry.pack(side=tk.LEFT)
-    dma_label = ttk.Label(app.options_frame, text="d/dT MA:")
-    dma_label.pack(side=tk.LEFT, padx=(4, 4))
-    dma_entry = ttk.Entry(app.options_frame, width=4)
-    dma_entry.insert(0, str(processor.derivative_moving_avg_window))
-    dma_entry.pack(side=tk.LEFT)
-
-    def _apply_smoothing() -> None:
-        try:
-            median = int(med_entry.get())
-            ma = int(ma_entry.get())
-        except Exception:
-            median = processor.median_window
-            ma = processor.moving_avg_window
-        try:
-            d_median = int(dmed_entry.get())
-            d_ma = int(dma_entry.get())
-        except Exception:
-            d_median = processor.derivative_median_window
-            d_ma = processor.derivative_moving_avg_window
-        processor.set_smoothing_windows(median, ma)
-        processor.set_derivative_smoothing_windows(d_median, d_ma)
-
-    ttk.Button(
-        app.options_frame,
-        text="Apply smoothing",
-        command=_apply_smoothing,
-    ).pack(side=tk.LEFT, padx=(6, 0))
-    app.mainloop()
-
-
-if __name__ == "__main__":
-    main()
+__all__ = [
+    "PlotSeries",
+    "PreparedSeries",
+    "VSMEntry",
+    "VSMTemperatureScanProcessor",
+    "VSM_TEMP_SCAN_COLORS",
+]

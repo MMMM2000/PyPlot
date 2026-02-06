@@ -6,6 +6,7 @@ import re
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
 
 _HEADER_RE = re.compile(r"^\s*time\s*,", re.IGNORECASE)
@@ -88,3 +89,95 @@ def select_fmr_axes(columns: Iterable[str]) -> Tuple[Optional[str], Optional[str
     x_column = _match_column(columns, ("X", "Signal X", "X (V)", "X [V]"))
     y_column = _match_column(columns, ("Y", "Signal Y", "Y (V)", "Y [V]"))
     return field_column, x_column, y_column
+
+
+def rotate_lockin_phase(
+    x_values: Iterable[float],
+    y_values: Iterable[float],
+    angle_deg: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Rotate lock-in X/Y channels by ``angle_deg``.
+
+    The transform follows:
+      X' = X*cos(theta) + Y*sin(theta)
+      Y' = -X*sin(theta) + Y*cos(theta)
+    """
+
+    theta = np.deg2rad(float(angle_deg))
+    cos_theta = float(np.cos(theta))
+    sin_theta = float(np.sin(theta))
+    x_arr = np.asarray(list(x_values), dtype=float)
+    y_arr = np.asarray(list(y_values), dtype=float)
+    x_rot = x_arr * cos_theta + y_arr * sin_theta
+    y_rot = -x_arr * sin_theta + y_arr * cos_theta
+    return x_rot, y_rot
+
+
+def _phase_score(field: np.ndarray, x_vals: np.ndarray, y_vals: np.ndarray, angle_deg: float) -> float:
+    _, y_rot = rotate_lockin_phase(x_vals, y_vals, angle_deg)
+    if y_rot.size < 3:
+        return float(np.inf)
+    centered_field = field - float(np.nanmean(field))
+    try:
+        slope, intercept = np.polyfit(centered_field, y_rot, 1)
+        baseline = slope * centered_field + intercept
+        residual = y_rot - baseline
+    except Exception:
+        residual = y_rot - float(np.nanmean(y_rot))
+    score = float(np.nanmean(np.square(residual)))
+    if not np.isfinite(score):
+        return float(np.inf)
+    return score
+
+
+def _search_best_phase(
+    field: np.ndarray,
+    x_vals: np.ndarray,
+    y_vals: np.ndarray,
+    start: float,
+    stop: float,
+    step: float,
+) -> float:
+    best_angle = 0.0
+    best_score = float(np.inf)
+    if step <= 0:
+        return best_angle
+    count = int(round((stop - start) / step)) + 1
+    for idx in range(max(count, 1)):
+        angle = start + idx * step
+        score = _phase_score(field, x_vals, y_vals, angle)
+        if score < best_score:
+            best_score = score
+            best_angle = angle
+    return float(best_angle)
+
+
+def estimate_phase_rotation_angle(
+    field_values: Iterable[float],
+    x_values: Iterable[float],
+    y_values: Iterable[float],
+) -> float:
+    """Estimate a phase angle that makes Y as flat as possible.
+
+    The objective minimizes the RMS of Y' after subtracting a linear baseline
+    versus field, which is robust to small drift.
+    """
+
+    field_arr = np.asarray(list(field_values), dtype=float)
+    x_arr = np.asarray(list(x_values), dtype=float)
+    y_arr = np.asarray(list(y_values), dtype=float)
+    valid = np.isfinite(field_arr) & np.isfinite(x_arr) & np.isfinite(y_arr)
+    if int(np.count_nonzero(valid)) < 3:
+        return 0.0
+
+    field = field_arr[valid]
+    x_vals = x_arr[valid]
+    y_vals = y_arr[valid]
+    if np.nanstd(x_vals) == 0 and np.nanstd(y_vals) == 0:
+        return 0.0
+
+    coarse = _search_best_phase(field, x_vals, y_vals, -90.0, 90.0, 1.0)
+    fine_start = max(-90.0, coarse - 2.0)
+    fine_stop = min(90.0, coarse + 2.0)
+    fine = _search_best_phase(field, x_vals, y_vals, fine_start, fine_stop, 0.05)
+    return float(fine)

@@ -1,7 +1,7 @@
 # TODO
 
 ## Planned
-- Verify initial Project Explorer/Object Manager layout fix so panes render correctly without reopening; ensure status-bar cursor readout is fully visible.
+- Verify initial Project Explorer/Object Manager layout fix so panes render correctly without reopening and side docks scale appropriately after maximize; ensure status-bar cursor readout is fully visible.
 - Verify multi-folder import dialog supports selecting multiple directories on Windows (Import Folders).
 - VSM Temperature Scan: confirm combine low/high field runs (dual-axis) option, axis labels, and Origin export labels for mixed-field samples.
 - VSM Temperature Scan: design and implement outlier detection workflow (criteria, preview, confirm delete).
@@ -21,6 +21,8 @@
 ## In Progress
 - Current Annealing: add supply profiles for HMP4030 vs Owon SPE6102 (min start current, voltage-first init, reset/channel defaults) and confirm Owon ramp/voltage behavior.
 - Investigate PyPlot macOS UI unresponsiveness and zoom/maximize freezes.
+- Verify PyPlot MDI save/export + graph-format toolbar flow on macOS (especially `Save graph…` false “No plot area” and fullscreen bottom cropping). (Offscreen automation, full test suite, and launcher smoke startup passed on 2026-02-06; waiting for manual desktop confirmation.)
+- Investigate/monitor PyPlot macOS hard aborts from Project Explorer/Object Manager double-click activation paths.
 - Fabrication section: add estimated transition temperature + glass pull-off columns (with notes entry).
 - Videos section: show fabrication rows even without videos, keep editable fabrication fields + video end-length columns, and add open-video warnings; apply overrides in assemble/exports.
 - Add Data Builder sections for VSM hysteresis loops, VSM temperature scan, and DMA iso-stress (reuse PyPlot plotting scripts; handle multiple graphs per microwire).
@@ -29,9 +31,14 @@
 - Compare: add default samples-as-columns view with selectable field rows and inline graph previews.
 - Data Builder: treat microwire suffix tokens (e.g., 10-5oe) as distinct samples and propagate across sections.
 - Microscope OCR: resolve PaddleOCR import failure in `.venv-wsl` (Python 3.13) so OCR runs in the Data Builder.
+- Microwire Data Builder: harden Videos legacy table migration (`Composition`/`Draw`/`Piece`/`Microwire`) and pending-scan thread shutdown paths; keep verifying close/start stability. (Automated tests passed on 2026-02-05; OCR integration remains gated to Python 3.12 unless unsafe override is enabled.)
 - Current annealing: support "other mA" graphs column + visibility and include in assemble/compare/HTML export.
 - HTML export: add compare mode alongside the preview panel.
 - Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).
+- DMA iso-stress: remove Tkinter coupling in the PyPlot parser path so the plugin launches on macOS Python builds without `_tkinter`.
+- DMA iso-stress: verify legend-only-visible-series behavior and new graph formatting controls (title/labels with visibility toggles, editable legend-entry labels, line style, limits, selective copy to chosen graphs) on macOS. (Automated offscreen checks passed on 2026-02-06; pending manual visual verification.)
+- Migrate remaining Data Builder/VSM temp scan parser imports off `experiments/simple_scripts` and keep only plugin-local plotting modules.
+- Validate new shared PyPlot graph-formatting controls (title/axes/ticks/scale/limits/PDF export + tick increment/count controls + figure dimensions/aspect + direct double-click title/axis editing) across plugins, including dual-axis edge cases. (Automated offscreen checks passed on 2026-02-06; pending manual visual verification.)
 - VSM Data Builder: validate sweep/no-glass angle parsing + temperature labeling against PyPlot, confirm Open-in-PyPlot axes defaults, verify VSM temp scan + DMA multi-graph previews, and confirm Origin export stability.
 - Optimize VSM/DMA/FMR preview rendering performance (downsample plot points for faster section load).
 - Compare matrix: improve initial render performance (lazy graph previews) and ensure row-level selection highlighting.

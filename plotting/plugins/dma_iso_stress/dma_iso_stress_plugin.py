@@ -2,18 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from plotting.shared.origin import origin_session
-
-try:
-    from experiments.simple_scripts.dma_isostress import parse_dma_txt
-except Exception:  # pragma: no cover - optional dependency
-    parse_dma_txt = None  # type: ignore[assignment]
+from .parser import parse_dma_txt
 
 
 @dataclass
@@ -28,16 +24,33 @@ class DmaIsoStressPlugin(PyPlotPlugin):
     """PyPlot integration for DMA iso-stress TXT files."""
 
     requires_imported_data = True
+    _DEFAULT_X_LABEL = "Temperature (°C)"
+    _DEFAULT_Y_LABEL = "Strain (%)"
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
-        if parse_dma_txt is None:  # pragma: no cover - defensive import guard
-            raise RuntimeError("parse_dma_txt is not available.")
         self._dataset: List[DmaIsoStressEntry] = []
         self._plot_tabs: List[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
         self._markers_checkbox: QtWidgets.QCheckBox | None = None
         self._sort_checkbox: QtWidgets.QCheckBox | None = None
+        self._grid_checkbox: QtWidgets.QCheckBox | None = None
+        self._legend_checkbox: QtWidgets.QCheckBox | None = None
+        self._legend_location_combo: QtWidgets.QComboBox | None = None
+        self._line_width_spin: QtWidgets.QDoubleSpinBox | None = None
+        self._font_size_spin: QtWidgets.QSpinBox | None = None
+        self._title_edit: QtWidgets.QLineEdit | None = None
+        self._xlabel_edit: QtWidgets.QLineEdit | None = None
+        self._ylabel_edit: QtWidgets.QLineEdit | None = None
+        self._show_title_checkbox: QtWidgets.QCheckBox | None = None
+        self._show_xlabel_checkbox: QtWidgets.QCheckBox | None = None
+        self._show_ylabel_checkbox: QtWidgets.QCheckBox | None = None
+        self._auto_x_limits_checkbox: QtWidgets.QCheckBox | None = None
+        self._auto_y_limits_checkbox: QtWidgets.QCheckBox | None = None
+        self._x_min_spin: QtWidgets.QDoubleSpinBox | None = None
+        self._x_max_spin: QtWidgets.QDoubleSpinBox | None = None
+        self._y_min_spin: QtWidgets.QDoubleSpinBox | None = None
+        self._y_max_spin: QtWidgets.QDoubleSpinBox | None = None
         self._loaded_paths: List[Path] = []
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -76,8 +89,147 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         )
         self._sort_checkbox.setChecked(True)
         options_layout.addWidget(self._sort_checkbox)
-        options_layout.addStretch(1)
         layout.addWidget(options_section)
+
+        formatting_section, formatting_layout = window_module.create_toolbar_section(
+            "Graph formatting",
+            parent=container,
+        )
+        formatting_form = QtWidgets.QFormLayout()
+        formatting_form.setContentsMargins(0, 0, 0, 0)
+        formatting_form.setSpacing(6)
+        formatting_layout.addLayout(formatting_form)
+
+        self._title_edit = QtWidgets.QLineEdit(formatting_section)
+        self._title_edit.setPlaceholderText("{sample} - DMA Iso-Stress")
+        self._show_title_checkbox = QtWidgets.QCheckBox("Show", formatting_section)
+        self._show_title_checkbox.setChecked(True)
+        formatting_form.addRow("Title", self._with_show_checkbox(self._title_edit, self._show_title_checkbox))
+
+        self._xlabel_edit = QtWidgets.QLineEdit(formatting_section)
+        self._xlabel_edit.setText(self._DEFAULT_X_LABEL)
+        self._show_xlabel_checkbox = QtWidgets.QCheckBox("Show", formatting_section)
+        self._show_xlabel_checkbox.setChecked(True)
+        formatting_form.addRow("X label", self._with_show_checkbox(self._xlabel_edit, self._show_xlabel_checkbox))
+
+        self._ylabel_edit = QtWidgets.QLineEdit(formatting_section)
+        self._ylabel_edit.setText(self._DEFAULT_Y_LABEL)
+        self._show_ylabel_checkbox = QtWidgets.QCheckBox("Show", formatting_section)
+        self._show_ylabel_checkbox.setChecked(True)
+        formatting_form.addRow("Y label", self._with_show_checkbox(self._ylabel_edit, self._show_ylabel_checkbox))
+
+        self._line_width_spin = QtWidgets.QDoubleSpinBox(formatting_section)
+        self._line_width_spin.setRange(0.2, 12.0)
+        self._line_width_spin.setSingleStep(0.1)
+        self._line_width_spin.setValue(1.4)
+        formatting_form.addRow("Line width", self._line_width_spin)
+
+        self._font_size_spin = QtWidgets.QSpinBox(formatting_section)
+        self._font_size_spin.setRange(6, 36)
+        self._font_size_spin.setValue(12)
+        formatting_form.addRow("Font size", self._font_size_spin)
+
+        self._grid_checkbox = QtWidgets.QCheckBox("Show grid", formatting_section)
+        self._grid_checkbox.setChecked(False)
+        formatting_form.addRow("", self._grid_checkbox)
+
+        self._legend_checkbox = QtWidgets.QCheckBox("Show legend", formatting_section)
+        self._legend_checkbox.setChecked(True)
+        formatting_form.addRow("", self._legend_checkbox)
+
+        self._legend_location_combo = QtWidgets.QComboBox(formatting_section)
+        self._legend_location_combo.addItem("Best", "best")
+        self._legend_location_combo.addItem("Upper right", "upper right")
+        self._legend_location_combo.addItem("Upper left", "upper left")
+        self._legend_location_combo.addItem("Lower left", "lower left")
+        self._legend_location_combo.addItem("Lower right", "lower right")
+        self._legend_location_combo.addItem("Right", "right")
+        self._legend_location_combo.addItem("Center left", "center left")
+        self._legend_location_combo.addItem("Center right", "center right")
+        self._legend_location_combo.addItem("Lower center", "lower center")
+        self._legend_location_combo.addItem("Upper center", "upper center")
+        self._legend_location_combo.addItem("Center", "center")
+        formatting_form.addRow("Legend location", self._legend_location_combo)
+
+        legend_labels_row = QtWidgets.QHBoxLayout()
+        edit_legend_labels_button = QtWidgets.QPushButton("Edit legend entries…", formatting_section)
+        edit_legend_labels_button.clicked.connect(self._edit_current_legend_entries)
+        legend_labels_row.addWidget(edit_legend_labels_button)
+        reset_legend_labels_button = QtWidgets.QPushButton("Reset legend entries", formatting_section)
+        reset_legend_labels_button.clicked.connect(self._reset_current_legend_entries)
+        legend_labels_row.addWidget(reset_legend_labels_button)
+        formatting_form.addRow("Legend labels", legend_labels_row)
+
+        self._auto_x_limits_checkbox = QtWidgets.QCheckBox("Auto X limits", formatting_section)
+        self._auto_x_limits_checkbox.setChecked(True)
+        formatting_form.addRow("", self._auto_x_limits_checkbox)
+
+        x_limits_row = QtWidgets.QWidget(formatting_section)
+        x_limits_layout = QtWidgets.QHBoxLayout(x_limits_row)
+        x_limits_layout.setContentsMargins(0, 0, 0, 0)
+        x_limits_layout.setSpacing(4)
+        self._x_min_spin = QtWidgets.QDoubleSpinBox(x_limits_row)
+        self._x_min_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._x_min_spin.setDecimals(3)
+        self._x_min_spin.setValue(-200.0)
+        self._x_max_spin = QtWidgets.QDoubleSpinBox(x_limits_row)
+        self._x_max_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._x_max_spin.setDecimals(3)
+        self._x_max_spin.setValue(600.0)
+        x_limits_layout.addWidget(QtWidgets.QLabel("X min", x_limits_row))
+        x_limits_layout.addWidget(self._x_min_spin)
+        x_limits_layout.addWidget(QtWidgets.QLabel("X max", x_limits_row))
+        x_limits_layout.addWidget(self._x_max_spin)
+        formatting_form.addRow("", x_limits_row)
+
+        self._auto_y_limits_checkbox = QtWidgets.QCheckBox("Auto Y limits", formatting_section)
+        self._auto_y_limits_checkbox.setChecked(True)
+        formatting_form.addRow("", self._auto_y_limits_checkbox)
+
+        y_limits_row = QtWidgets.QWidget(formatting_section)
+        y_limits_layout = QtWidgets.QHBoxLayout(y_limits_row)
+        y_limits_layout.setContentsMargins(0, 0, 0, 0)
+        y_limits_layout.setSpacing(4)
+        self._y_min_spin = QtWidgets.QDoubleSpinBox(y_limits_row)
+        self._y_min_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._y_min_spin.setDecimals(3)
+        self._y_min_spin.setValue(-1.0)
+        self._y_max_spin = QtWidgets.QDoubleSpinBox(y_limits_row)
+        self._y_max_spin.setRange(-1_000_000.0, 1_000_000.0)
+        self._y_max_spin.setDecimals(3)
+        self._y_max_spin.setValue(20.0)
+        y_limits_layout.addWidget(QtWidgets.QLabel("Y min", y_limits_row))
+        y_limits_layout.addWidget(self._y_min_spin)
+        y_limits_layout.addWidget(QtWidgets.QLabel("Y max", y_limits_row))
+        y_limits_layout.addWidget(self._y_max_spin)
+        formatting_form.addRow("", y_limits_row)
+
+        if self._auto_x_limits_checkbox is not None:
+            self._auto_x_limits_checkbox.toggled.connect(
+                lambda checked: self._set_limit_controls_enabled("x", not checked)
+            )
+        if self._auto_y_limits_checkbox is not None:
+            self._auto_y_limits_checkbox.toggled.connect(
+                lambda checked: self._set_limit_controls_enabled("y", not checked)
+            )
+        self._set_limit_controls_enabled("x", False)
+        self._set_limit_controls_enabled("y", False)
+
+        apply_row = QtWidgets.QHBoxLayout()
+        apply_current_button = QtWidgets.QPushButton("Apply to current graph", formatting_section)
+        apply_current_button.clicked.connect(self._apply_formatting_to_current_plot)
+        apply_row.addWidget(apply_current_button)
+        apply_all_button = QtWidgets.QPushButton("Apply to all DMA graphs", formatting_section)
+        apply_all_button.clicked.connect(self._apply_formatting_to_all_plots)
+        apply_row.addWidget(apply_all_button)
+        apply_selected_button = QtWidgets.QPushButton("Apply selected formatting…", formatting_section)
+        apply_selected_button.clicked.connect(self._apply_selected_formatting_to_chosen_plots)
+        apply_row.addWidget(apply_selected_button)
+        formatting_layout.addLayout(apply_row)
+        formatting_layout.addStretch(1)
+
+        options_layout.addStretch(1)
+        layout.addWidget(formatting_section)
         layout.addStretch(1)
 
         self._settings_widget = container
@@ -124,6 +276,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         sort_stress = bool(
             self._sort_checkbox.isChecked() if self._sort_checkbox is not None else True
         )
+        line_width = self._line_width_value()
 
         for entry in self._dataset:
             fig = Figure(figsize=(8.5, 5))
@@ -135,11 +288,9 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                 temps, strains = entry.datasets[stress]
                 label = f"{stress} MPa"
                 marker = "o" if show_markers else None
-                ax.plot(temps, strains, linewidth=1.4, marker=marker, label=label)
-            ax.set_title(f"{entry.sample} - DMA Iso-Stress")
-            ax.set_xlabel("Temperature (°C)")
-            ax.set_ylabel("Strain (%)")
-            ax.legend(loc="best")
+                line = ax.plot(temps, strains, linewidth=line_width, marker=marker, label=label)[0]
+                setattr(line, "_mw_dma_base_label", label)
+            self._apply_axes_formatting(ax, sample=entry.sample)
             tab = QtWidgets.QWidget()
             layout = QtWidgets.QVBoxLayout(tab)
             layout.setContentsMargins(0, 0, 0, 0)
@@ -149,16 +300,23 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                 QtWidgets.QSizePolicy.Policy.Expanding,
             )
             layout.addWidget(canvas)
+            title_text = self._title_for_sample(entry.sample)
+            x_label = self._x_label_text()
+            y_label = self._y_label_text()
             descriptor = window_module.TabDescriptor(
                 kind="dma_iso_stress",
-                title=f"{entry.sample} - DMA Iso-Stress",
+                title=title_text,
                 root_label=f"{entry.sample} - IsoStress",
-                x_label="Temperature (°C)",
-                y_label="Strain (%)",
+                x_label=x_label,
+                y_label=y_label,
                 canvas=canvas,
                 axes=ax,
                 lines={},
-                metadata={"sample": entry.sample, "path": str(entry.path)},
+                metadata={
+                    "sample": entry.sample,
+                    "path": str(entry.path),
+                    "legend_label_overrides": {},
+                },
             )
             index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Plot")
             setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
@@ -191,6 +349,666 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                 self._summary_label.clear()
         self.host._update_project_actions()
 
+    def _set_limit_controls_enabled(self, axis: str, enabled: bool) -> None:
+        widgets: Iterable[QtWidgets.QDoubleSpinBox | None]
+        if axis == "x":
+            widgets = (self._x_min_spin, self._x_max_spin)
+        else:
+            widgets = (self._y_min_spin, self._y_max_spin)
+        for widget in widgets:
+            if widget is not None:
+                widget.setEnabled(enabled)
+
+    def _line_width_value(self) -> float:
+        if self._line_width_spin is None:
+            return 1.4
+        return float(self._line_width_spin.value())
+
+    @staticmethod
+    def _with_show_checkbox(
+        line_edit: QtWidgets.QLineEdit,
+        checkbox: QtWidgets.QCheckBox,
+    ) -> QtWidgets.QWidget:
+        row = QtWidgets.QWidget(line_edit.parentWidget())
+        layout = QtWidgets.QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(line_edit, 1)
+        layout.addWidget(checkbox, 0)
+        return row
+
+    def _font_size_value(self) -> int:
+        if self._font_size_spin is None:
+            return 12
+        return int(self._font_size_spin.value())
+
+    def _x_label_text(self) -> str:
+        text = self._xlabel_edit.text().strip() if self._xlabel_edit is not None else ""
+        return text or self._DEFAULT_X_LABEL
+
+    def _y_label_text(self) -> str:
+        text = self._ylabel_edit.text().strip() if self._ylabel_edit is not None else ""
+        return text or self._DEFAULT_Y_LABEL
+
+    def _title_for_sample(self, sample: str) -> str:
+        template = self._title_edit.text().strip() if self._title_edit is not None else ""
+        if not template:
+            return f"{sample} - DMA Iso-Stress"
+        if "{sample}" in template:
+            try:
+                return template.format(sample=sample)
+            except Exception:
+                return template
+        return template
+
+    def _axis_limits(self, axis: str) -> tuple[float, float] | None:
+        if axis == "x":
+            auto_checkbox = self._auto_x_limits_checkbox
+            min_spin = self._x_min_spin
+            max_spin = self._x_max_spin
+        else:
+            auto_checkbox = self._auto_y_limits_checkbox
+            min_spin = self._y_min_spin
+            max_spin = self._y_max_spin
+        if auto_checkbox is None or bool(auto_checkbox.isChecked()):
+            return None
+        if min_spin is None or max_spin is None:
+            return None
+        low = float(min_spin.value())
+        high = float(max_spin.value())
+        if low == high:
+            high = low + 1.0
+        if low > high:
+            low, high = high, low
+        return (low, high)
+
+    def _legend_location(self) -> str:
+        if self._legend_location_combo is None:
+            return "best"
+        value = self._legend_location_combo.currentData()
+        return str(value) if value else "best"
+
+    def _current_dma_descriptor(self) -> tuple[QtWidgets.QWidget, Any] | None:
+        tab = self.host.tab_widget.currentWidget()
+        if tab is None:
+            return None
+        descriptors = getattr(self.host, "_tab_descriptors", {})
+        descriptor = descriptors.get(tab) if isinstance(descriptors, dict) else None
+        if descriptor is None or getattr(descriptor, "kind", "") != "dma_iso_stress":
+            return None
+        return tab, descriptor
+
+    @staticmethod
+    def _legend_overrides_for_descriptor(descriptor: Any) -> dict[str, str]:
+        metadata = getattr(descriptor, "metadata", None)
+        if not isinstance(metadata, dict):
+            return {}
+        raw = metadata.get("legend_label_overrides")
+        if not isinstance(raw, dict):
+            return {}
+        cleaned: dict[str, str] = {}
+        for key, value in raw.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            clean_key = key.strip()
+            clean_value = value.strip()
+            if not clean_key:
+                continue
+            cleaned[clean_key] = clean_value or clean_key
+        return cleaned
+
+    @staticmethod
+    def _set_legend_overrides_for_descriptor(
+        descriptor: Any, overrides: dict[str, str]
+    ) -> None:
+        metadata = getattr(descriptor, "metadata", None)
+        if not isinstance(metadata, dict):
+            return
+        metadata["legend_label_overrides"] = dict(overrides)
+
+    @staticmethod
+    def _iter_legend_lines(axes: Any) -> list[tuple[Any, str, str]]:
+        try:
+            lines = list(axes.get_lines())
+        except Exception:
+            lines = []
+        entries: list[tuple[Any, str, str]] = []
+        for line in lines:
+            try:
+                current_label = str(line.get_label() or "").strip()
+            except Exception:
+                current_label = ""
+            if not current_label or current_label.startswith("_") or current_label == "_nolegend_":
+                continue
+            base_label = str(getattr(line, "_mw_dma_base_label", "") or "").strip()
+            if not base_label or base_label.startswith("_"):
+                base_label = current_label
+                try:
+                    setattr(line, "_mw_dma_base_label", base_label)
+                except Exception:
+                    pass
+            entries.append((line, base_label, current_label))
+        return entries
+
+    def _apply_legend_overrides_to_axes(
+        self,
+        axes: Any,
+        overrides: dict[str, str],
+    ) -> None:
+        for line, base_label, _ in self._iter_legend_lines(axes):
+            new_label = overrides.get(base_label, base_label).strip() or base_label
+            try:
+                line.set_label(new_label)
+            except Exception:
+                continue
+
+    def _refresh_legend_after_label_change(self, axes: Any) -> None:
+        sync_legend = getattr(self.host, "_sync_axes_legend_with_visible_lines", None)
+        if callable(sync_legend):
+            try:
+                sync_legend(axes, plugin_name=self.name)
+                return
+            except Exception:
+                pass
+        try:
+            legend = axes.get_legend()
+        except Exception:
+            legend = None
+        if legend is not None:
+            try:
+                legend.remove()
+            except Exception:
+                pass
+        try:
+            axes.legend(loc=self._legend_location())
+        except Exception:
+            pass
+
+    def _edit_current_legend_entries(self) -> None:
+        current = self._current_dma_descriptor()
+        if current is None:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Select a DMA graph before editing legend entries.",
+            )
+            return
+        tab, descriptor = current
+        axes = getattr(descriptor, "axes", None)
+        if axes is None:
+            return
+        rows = self._iter_legend_lines(axes)
+        if not rows:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "No visible legend entries are available to edit.",
+            )
+            return
+
+        dialog = QtWidgets.QDialog(self.host)
+        dialog.setWindowTitle("Edit legend entries")
+        dialog.resize(460, 360)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        info = QtWidgets.QLabel(
+            "Rename legend entries for the current DMA graph. Leave a field empty to use the original label.",
+            dialog,
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form_host = QtWidgets.QWidget(dialog)
+        form = QtWidgets.QFormLayout(form_host)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+        edits: list[tuple[str, QtWidgets.QLineEdit]] = []
+        for _line, base_label, current_label in rows:
+            edit = QtWidgets.QLineEdit(form_host)
+            edit.setText(current_label)
+            edit.setPlaceholderText(base_label)
+            form.addRow(base_label, edit)
+            edits.append((base_label, edit))
+        layout.addWidget(form_host, 1)
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        overrides: dict[str, str] = {}
+        for base_label, edit in edits:
+            value = edit.text().strip()
+            if not value:
+                value = base_label
+            if value != base_label:
+                overrides[base_label] = value
+        self._set_legend_overrides_for_descriptor(descriptor, overrides)
+        self._apply_legend_overrides_to_axes(axes, overrides)
+        self._refresh_legend_after_label_change(axes)
+
+        canvas = getattr(descriptor, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+        self.host._rebuild_object_manager_for_tab(tab)
+        self._log("Updated DMA legend entry labels for current graph.")
+
+    def _reset_current_legend_entries(self) -> None:
+        current = self._current_dma_descriptor()
+        if current is None:
+            return
+        tab, descriptor = current
+        axes = getattr(descriptor, "axes", None)
+        if axes is None:
+            return
+        self._set_legend_overrides_for_descriptor(descriptor, {})
+        self._apply_legend_overrides_to_axes(axes, {})
+        self._refresh_legend_after_label_change(axes)
+        canvas = getattr(descriptor, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+        self.host._rebuild_object_manager_for_tab(tab)
+        self._log("Reset DMA legend entries to default labels.")
+
+    def _checked_groups(self) -> set[str]:
+        return set(self._FORMAT_GROUP_LABELS.keys())
+
+    def _show_title(self) -> bool:
+        return bool(
+            self._show_title_checkbox.isChecked()
+            if self._show_title_checkbox is not None
+            else True
+        )
+
+    def _show_x_label(self) -> bool:
+        return bool(
+            self._show_xlabel_checkbox.isChecked()
+            if self._show_xlabel_checkbox is not None
+            else True
+        )
+
+    def _show_y_label(self) -> bool:
+        return bool(
+            self._show_ylabel_checkbox.isChecked()
+            if self._show_ylabel_checkbox is not None
+            else True
+        )
+
+    def _apply_axes_formatting(
+        self,
+        axes: Any,
+        *,
+        sample: str,
+        groups: set[str] | None = None,
+    ) -> None:
+        if axes is None:
+            return
+        active_groups = groups if groups is not None else self._checked_groups()
+        title_text = self._title_for_sample(sample)
+        x_label = self._x_label_text()
+        y_label = self._y_label_text()
+        font_size = self._font_size_value()
+        line_width = self._line_width_value()
+        show_title = self._show_title()
+        show_x_label = self._show_x_label()
+        show_y_label = self._show_y_label()
+        show_markers = bool(
+            self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
+        )
+        show_grid = bool(self._grid_checkbox.isChecked() if self._grid_checkbox is not None else False)
+
+        if "title" in active_groups:
+            axes.set_title(title_text)
+            try:
+                axes.title.set_visible(show_title)
+            except Exception:
+                pass
+        if "x_label" in active_groups:
+            axes.set_xlabel(x_label)
+            try:
+                axes.xaxis.label.set_visible(show_x_label)
+            except Exception:
+                pass
+        if "y_label" in active_groups:
+            axes.set_ylabel(y_label)
+            try:
+                axes.yaxis.label.set_visible(show_y_label)
+            except Exception:
+                pass
+        if "font" in active_groups:
+            try:
+                axes.title.set_fontsize(font_size + 1)
+                axes.xaxis.label.set_fontsize(font_size)
+                axes.yaxis.label.set_fontsize(font_size)
+                axes.tick_params(axis="both", labelsize=max(6, font_size - 1))
+            except Exception:
+                pass
+        if "grid" in active_groups:
+            try:
+                axes.grid(show_grid, which="major", axis="both")
+            except Exception:
+                pass
+
+        try:
+            lines = list(axes.get_lines())
+        except Exception:
+            lines = []
+        if "line_style" in active_groups:
+            for line in lines:
+                try:
+                    line.set_linewidth(line_width)
+                except Exception:
+                    pass
+                if show_markers:
+                    try:
+                        marker = line.get_marker()
+                    except Exception:
+                        marker = None
+                    if str(marker).strip().lower() in {"", "none"}:
+                        try:
+                            line.set_marker("o")
+                        except Exception:
+                            pass
+                    try:
+                        if float(line.get_markersize()) <= 0.0:
+                            line.set_markersize(5.5)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        line.set_marker(None)
+                    except Exception:
+                        pass
+
+        x_limits = self._axis_limits("x")
+        y_limits = self._axis_limits("y")
+        if "x_limits" in active_groups:
+            if x_limits is None:
+                try:
+                    axes.autoscale(enable=True, axis="x", tight=False)
+                except Exception:
+                    pass
+            else:
+                axes.set_xlim(*x_limits)
+        if "y_limits" in active_groups:
+            if y_limits is None:
+                try:
+                    axes.autoscale(enable=True, axis="y", tight=False)
+                except Exception:
+                    pass
+            else:
+                axes.set_ylim(*y_limits)
+
+        show_legend = bool(self._legend_checkbox.isChecked() if self._legend_checkbox is not None else True)
+        if "legend" in active_groups:
+            legend = None
+            if show_legend:
+                sync_legend = getattr(self.host, "_sync_axes_legend_with_visible_lines", None)
+                if callable(sync_legend):
+                    try:
+                        legend = sync_legend(axes, plugin_name=self.name)
+                    except Exception:
+                        legend = None
+                if legend is None:
+                    try:
+                        legend = axes.legend(loc=self._legend_location())
+                    except Exception:
+                        legend = None
+                if legend is not None:
+                    try:
+                        legend.set_loc(self._legend_location())
+                    except Exception:
+                        pass
+                    try:
+                        legend.set_fontsize(font_size)
+                        legend.get_title().set_fontsize(font_size)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    legend = axes.get_legend()
+                except Exception:
+                    legend = None
+                if legend is not None:
+                    try:
+                        legend.remove()
+                    except Exception:
+                        pass
+
+    def _iter_dma_descriptors(self) -> Iterable[tuple[QtWidgets.QWidget, Any]]:
+        descriptors = getattr(self.host, "_tab_descriptors", {})
+        if not isinstance(descriptors, dict):
+            return []
+        return (
+            (tab, descriptor)
+            for tab, descriptor in descriptors.items()
+            if getattr(descriptor, "kind", "") == "dma_iso_stress"
+        )
+
+    def _apply_formatting_to_descriptor(
+        self,
+        tab: QtWidgets.QWidget,
+        descriptor: Any,
+        *,
+        groups: set[str] | None = None,
+        source_legend_overrides: dict[str, str] | None = None,
+    ) -> None:
+        sample = ""
+        metadata = getattr(descriptor, "metadata", None)
+        if isinstance(metadata, dict):
+            sample_value = metadata.get("sample")
+            if isinstance(sample_value, str):
+                sample = sample_value
+        if not sample:
+            sample = getattr(descriptor, "root_label", "") or "DMA Iso-Stress"
+
+        axes = getattr(descriptor, "axes", None)
+        active_groups = groups if groups is not None else self._checked_groups()
+        if axes is not None and "legend_labels" in active_groups:
+            legend_overrides = (
+                dict(source_legend_overrides)
+                if source_legend_overrides is not None
+                else self._legend_overrides_for_descriptor(descriptor)
+            )
+            self._set_legend_overrides_for_descriptor(descriptor, legend_overrides)
+            self._apply_legend_overrides_to_axes(axes, legend_overrides)
+        self._apply_axes_formatting(axes, sample=sample, groups=active_groups)
+        if axes is not None and "legend_labels" in active_groups and "legend" not in active_groups:
+            self._refresh_legend_after_label_change(axes)
+        if "title" in active_groups:
+            descriptor.title = self._title_for_sample(sample)
+        if "x_label" in active_groups:
+            descriptor.x_label = self._x_label_text()
+        if "y_label" in active_groups:
+            descriptor.y_label = self._y_label_text()
+
+        graph_items = getattr(self.host, "_graph_tree_items", {})
+        if isinstance(graph_items, dict) and "title" in active_groups:
+            item = graph_items.get(tab)
+            if isinstance(item, QtWidgets.QTreeWidgetItem):
+                item.setText(1, descriptor.title or "")
+
+        canvas = getattr(descriptor, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+
+    def _apply_formatting_to_current_plot(self) -> None:
+        tab = self.host.tab_widget.currentWidget()
+        if tab is None:
+            return
+        descriptors = getattr(self.host, "_tab_descriptors", {})
+        descriptor = descriptors.get(tab) if isinstance(descriptors, dict) else None
+        if descriptor is None or getattr(descriptor, "kind", "") != "dma_iso_stress":
+            return
+        self._apply_formatting_to_descriptor(tab, descriptor)
+        self.host._rebuild_object_manager_for_tab(tab)
+        self._log("Applied DMA formatting to current graph.")
+
+    def _apply_formatting_to_all_plots(self) -> None:
+        count = 0
+        for tab, descriptor in self._iter_dma_descriptors():
+            self._apply_formatting_to_descriptor(tab, descriptor)
+            count += 1
+        current_tab = self.host.tab_widget.currentWidget()
+        if current_tab is not None:
+            self.host._rebuild_object_manager_for_tab(current_tab)
+        if count:
+            self._log(f"Applied DMA formatting to {count} graph(s).")
+
+    def _apply_selected_formatting_to_chosen_plots(self) -> None:
+        selected = self._prompt_selected_formatting_targets()
+        if selected is None:
+            return
+        targets, groups = selected
+        source_overrides: dict[str, str] | None = None
+        if "legend_labels" in groups:
+            current = self._current_dma_descriptor()
+            if current is not None:
+                _tab, current_descriptor = current
+                source_overrides = self._legend_overrides_for_descriptor(
+                    current_descriptor
+                )
+        count = 0
+        for tab, descriptor in targets:
+            self._apply_formatting_to_descriptor(
+                tab,
+                descriptor,
+                groups=groups,
+                source_legend_overrides=source_overrides,
+            )
+            count += 1
+        current_tab = self.host.tab_widget.currentWidget()
+        if current_tab is not None:
+            self.host._rebuild_object_manager_for_tab(current_tab)
+        if count:
+            self._log(
+                f"Applied selected DMA formatting groups to {count} graph(s)."
+            )
+
+    def _prompt_selected_formatting_targets(
+        self,
+    ) -> tuple[list[tuple[QtWidgets.QWidget, Any]], set[str]] | None:
+        current_tab = self.host.tab_widget.currentWidget()
+        candidates: list[tuple[QtWidgets.QWidget, Any]] = []
+        for tab, descriptor in self._iter_dma_descriptors():
+            if tab is current_tab:
+                continue
+            candidates.append((tab, descriptor))
+        if not candidates:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Open at least one additional DMA graph before applying selected formatting.",
+            )
+            return None
+
+        dialog = QtWidgets.QDialog(self.host)
+        dialog.setWindowTitle("Apply selected formatting")
+        dialog.resize(500, 430)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        info = QtWidgets.QLabel(
+            "Choose target graph(s) and formatting groups to copy from the current settings.",
+            dialog,
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        target_list = QtWidgets.QListWidget(dialog)
+        target_list.setSelectionMode(
+            QtWidgets.QAbstractItemView.SelectionMode.NoSelection
+        )
+        for index, (tab, descriptor) in enumerate(candidates, start=1):
+            root_label = str(getattr(descriptor, "root_label", "") or "").strip()
+            title = str(getattr(descriptor, "title", "") or "").strip()
+            label = root_label or title or f"DMA graph {index}"
+            item = QtWidgets.QListWidgetItem(label, target_list)
+            item.setFlags(
+                item.flags() | QtCore.Qt.ItemFlag.ItemIsUserCheckable
+            )
+            item.setCheckState(
+                QtCore.Qt.CheckState.Checked
+                if index == 1
+                else QtCore.Qt.CheckState.Unchecked
+            )
+        layout.addWidget(target_list, 2)
+
+        group_box = QtWidgets.QGroupBox("Formatting groups", dialog)
+        group_layout = QtWidgets.QGridLayout(group_box)
+        group_layout.setContentsMargins(8, 8, 8, 8)
+        group_layout.setHorizontalSpacing(12)
+        group_layout.setVerticalSpacing(4)
+
+        group_checkboxes: dict[str, QtWidgets.QCheckBox] = {}
+        for idx, (key, label) in enumerate(self._FORMAT_GROUP_LABELS.items()):
+            cb = QtWidgets.QCheckBox(label, group_box)
+            cb.setChecked(True)
+            row = idx // 2
+            col = idx % 2
+            group_layout.addWidget(cb, row, col)
+            group_checkboxes[key] = cb
+        layout.addWidget(group_box, 1)
+
+        button_box = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout.addWidget(button_box)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return None
+
+        targets: list[tuple[QtWidgets.QWidget, Any]] = []
+        for row, candidate in enumerate(candidates):
+            item = target_list.item(row)
+            if item is None:
+                continue
+            if item.checkState() == QtCore.Qt.CheckState.Checked:
+                targets.append(candidate)
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Select at least one target graph.",
+            )
+            return None
+
+        groups = {
+            key for key, checkbox in group_checkboxes.items() if checkbox.isChecked()
+        }
+        if not groups:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Select at least one formatting group.",
+            )
+            return None
+        return targets, groups
+
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._dataset:
             self.load_data()
@@ -206,6 +1024,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
                 )
                 marker_size = 6.0 if show_markers else 0.0
+                line_width = self._line_width_value()
                 for entry in self._dataset:
                     if not entry.datasets:
                         continue
@@ -223,7 +1042,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     layer = graph[0] if graph else None
                     if layer is None:
                         continue
-                    graph_title = f"{entry.sample} - DMA Iso-Stress"
+                    graph_title = self._title_for_sample(entry.sample)
                     try:
                         graph.set_str("title", graph_title)
                         graph.lname = graph_title
@@ -273,7 +1092,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                             plot_obj = None
                         if plot_obj is not None:
                             try:
-                                plot_obj.line_width = 1.4
+                                plot_obj.line_width = line_width
                             except Exception:
                                 pass
                             if show_markers:
@@ -305,12 +1124,14 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     except Exception:
                         pass
                     try:
-                        layer.axis(0).title = "Temperature (°C)"
-                        layer.axis(1).title = "Strain (%)"
+                        layer.axis(0).title = self._x_label_text()
+                        layer.axis(1).title = self._y_label_text()
                     except Exception:
                         try:
-                            op.lt_exec('lab -xb "Temperature (°C)";')
-                            op.lt_exec('lab -yl "Strain (%)";')
+                            safe_x_label = self._x_label_text().replace('"', "'")
+                            safe_y_label = self._y_label_text().replace('"', "'")
+                            op.lt_exec(f'lab -xb "{safe_x_label}";')
+                            op.lt_exec(f'lab -yl "{safe_y_label}";')
                         except Exception:
                             pass
                     try:
@@ -381,3 +1202,15 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                         pass
             except Exception:
                 pass
+    _FORMAT_GROUP_LABELS: Dict[str, str] = {
+        "title": "Title text/visibility",
+        "x_label": "X label text/visibility",
+        "y_label": "Y label text/visibility",
+        "line_style": "Line width + markers",
+        "font": "Font sizes",
+        "grid": "Grid visibility",
+        "legend": "Legend visibility/location",
+        "legend_labels": "Legend entry text",
+        "x_limits": "X limits (auto/manual)",
+        "y_limits": "Y limits (auto/manual)",
+    }

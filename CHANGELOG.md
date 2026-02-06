@@ -1,5 +1,78 @@
 # Changelog
 
+## 2026-02-06 15:05 UTC
+
+- Shared Graph formatting now supports tick-placement control per axis with selectable mode (`Auto`, `By increment`, `By count`) so you can set explicit major-tick spacing or target tick count.
+- Shared Graph formatting now also exposes figure dimensions (width/height in inches) plus axes aspect mode (`Auto`, `Equal`, custom Y/X ratio) so graph size/shape can be adjusted directly from the panel.
+- Improved direct double-click editing hit detection so title/axis-label edits also trigger when the click lands outside the axes patch bounds (for example, graph titles above the plot area).
+- Tuned side-dock auto-resize behavior on large windows/maximize so Project Explorer/Object Manager widths expand more aggressively instead of staying near small startup widths.
+
+## 2026-02-06 13:50 UTC
+
+- Launcher plotting list now enforces recent-first ordering (`last opened`) and refreshes ordering when the launcher regains focus, so tools opened from inside PyPlot are immediately reflected in the list.
+- PyPlot primary side docks (Project Explorer/Object Manager) now re-evaluate width targets on main-window resize and scale up on large/maximized windows instead of remaining fixed at small startup widths.
+
+## 2026-02-06 11:05 UTC
+
+- Added Origin-style direct graph edits on Matplotlib canvases: double-click the title/X label/Y label text to rename it in place, and double-click near an axis to open scale/limits controls (linear/log + auto/manual limits).
+- Synced direct-edit changes with PyPlot state so Object Manager labels, graph-format controls, and saved tab descriptors stay consistent after in-canvas edits.
+
+## 2026-02-06 10:48 UTC
+
+- DMA Iso-Stress graph formatting now supports direct legend-entry renaming on the current graph (`Edit legend entries…` / `Reset legend entries`), so legend text can be fully customized without changing source data labels.
+- The DMA selective copy flow (`Apply selected formatting…`) now includes legend entry text as an independent formatting group and can propagate renamed legend labels to chosen target DMA graphs.
+
+## 2026-02-06 09:44 UTC
+
+- DMA Iso-Stress graph formatting now includes show/hide toggles for Title, X label, and Y label (text remains editable while visibility is controlled independently).
+- Added `Apply selected formatting…` in DMA Iso-Stress so you can choose target DMA graph(s) and copy only selected formatting groups (title/x/y labels, line style, font, grid, legend, and axis limits).
+
+## 2026-02-06 09:18 UTC
+
+- Fixed PyPlot graph save/export actions (`Save graph…`, `Export TXT…`, `Open in Matplotlib`) to work with the MDI tab proxy, resolving false “No plot area is available…” dialogs when a graph is open.
+- Restored shared Graph formatting behavior for active MDI graphs by fixing current-canvas/current-axes resolution (title/label/tick/scale/legend edits now apply from the toolbar controls as expected).
+- Updated MDI single-window layout so a lone visible subwindow fills the available viewport in windowed/fullscreen use, preventing the bottom cropped gray region seen after fullscreen/resize on macOS.
+
+## 2026-02-05 22:49 UTC
+
+- Microwire Data Builder `Videos` section now auto-normalizes legacy tables that are missing core columns (`Composition`, `Draw`, `Piece`, `Microwire`) so Builder startup and project loading no longer crash on old schemas.
+- Runtime requirement note: PaddleOCR is now disabled by default on Python 3.13 because of observed native-runtime crashes in microscope OCR/build integration paths. Set `MICROWIRE_ENABLE_PADDLE_OCR_UNSAFE=1` to force-enable, or use Python 3.12 for supported OCR behavior.
+
+## 2026-02-05 22:24 UTC
+
+- FMR plugin now supports lock-in phase rotation with both manual angle input and automatic angle estimation (minimizes detrended Y residual to flatten Y).
+- FMR plotting and Origin export now apply the selected phase rotation, label rotated channels as `X'`/`Y'`, and annotate plot titles with the applied phase angle.
+
+## 2026-02-05 22:13 UTC
+
+- Fixed Object Manager tree population so line items and per-axis legends are gathered from every axes in a figure (including multi-axis plots), not just the final axes.
+- Graph formatting apply now rebuilds legends from currently visible lines, ensuring hidden series are removed from legend entries.
+
+## 2026-02-05 22:07 UTC
+
+- Added a shared `Graph formatting` panel in PyPlot (works across plugins) with controls for title/X/Y labels, title/label/tick font sizes, tick length/width, line width, marker size, linear/log axis scale, explicit axis limits, and grid/legend visibility.
+- Added one-click `Export PDF…` from the shared graph formatting panel; `Save graph…` now supports preferred default extension ordering (`PNG`/`PDF`/`SVG`) based on the requested export type.
+- Fixed blank-graph tab activation so manual graph creation uses `setCurrentIndex(...)` with the MDI tab proxy.
+
+## 2026-02-05 21:40 UTC
+
+- Retired `experiments/simple_scripts` and moved VSM temperature scan processing into `plotting.plugins.vsm_temperature_scan.core`, then repointed PyPlot and Data Builder imports to plugin-local modules.
+- Data Builder now uses `plotting.plugins.dma_iso_stress.parser.parse_dma_txt` directly (no experiment script dependency).
+- Hardened VSM hysteresis plotting/export numeric column coercion so duplicate axis labels no longer trigger `TypeError: arg must be a list, tuple, 1-d array, or Series`.
+
+## 2026-02-05 21:17 UTC
+
+- Object Manager line visibility toggles now resync Matplotlib legends to include only currently visible plotted series.
+- `DMA Iso-Stress` adds a Graph formatting section (title/x-y labels, line width, font size, grid/legend, legend location, optional axis limits) with one-click apply to the current graph or all DMA graphs.
+
+## 2026-02-05 20:41 UTC
+
+- Hardened PyPlot Project Explorer/Object Manager activation handlers so exceptions from tree double-click/activation events are logged instead of aborting the app process on macOS.
+
+## 2026-02-05 19:20 UTC
+
+- Fixed `DMA Iso-Stress` startup in PyPlot when Tkinter is unavailable (for example, some macOS Python builds) by moving TXT parsing to a Tk-independent module.
+
 ## 2026-02-05 15:27 UTC
 
 - FMR PyPlot now offers a combined X-only plot option that overlays all samples with a per-sample legend.

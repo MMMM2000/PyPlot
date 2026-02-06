@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import sys
 import uuid
 from dataclasses import asdict
@@ -11,6 +12,7 @@ import logging
 import time
 
 from PyQt6 import QtCore, QtGui, QtWidgets
+from matplotlib import ticker as mticker
 
 import pandas as pd
 
@@ -98,6 +100,8 @@ class PyPlotWorkbench(PyPlotWindow):
         self._plotter_history: list[str] = self._load_plotter_history()
         self._spawned_windows: list[PyPlotWorkbench] = []
         self._last_graph_dir: Path | None = None
+        self._graph_format_controls: Dict[str, QtWidgets.QWidget] = {}
+        self._graph_format_updating = False
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         if not sys.platform.startswith("win") and sys.platform != "darwin":
@@ -108,6 +112,9 @@ class PyPlotWorkbench(PyPlotWindow):
             except Exception:
                 pass
         self.tab_widget.currentChanged.connect(lambda _: self._update_action_states())
+        self.tab_widget.currentChanged.connect(
+            lambda _: self._sync_graph_format_controls_from_current_axes()
+        )
 
         stored_sources = self.settings.value("sources", "")
         if isinstance(stored_sources, str) and stored_sources.strip():
@@ -131,6 +138,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._select_initial_plotter()
         self._update_window_title()
         QtCore.QTimer.singleShot(0, self._show_primary_docks)
+        QtCore.QTimer.singleShot(0, self._sync_graph_format_controls_from_current_axes)
 
 
     def _update_window_title(self) -> None:
@@ -849,6 +857,195 @@ class PyPlotWorkbench(PyPlotWindow):
             panel.setObjectName("mw_plugin_settings_panel")
             self._plugin_settings_panel = panel
 
+        graph_section, graph_section_layout = create_toolbar_section(
+            "Graph formatting",
+            parent=panel or self,
+        )
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+
+        title_edit = QtWidgets.QLineEdit(graph_section)
+        x_label_edit = QtWidgets.QLineEdit(graph_section)
+        y_label_edit = QtWidgets.QLineEdit(graph_section)
+        form.addRow("Title:", title_edit)
+        form.addRow("X label:", x_label_edit)
+        form.addRow("Y label:", y_label_edit)
+
+        title_font_spin = QtWidgets.QSpinBox(graph_section)
+        title_font_spin.setRange(6, 96)
+        title_font_spin.setValue(16)
+        label_font_spin = QtWidgets.QSpinBox(graph_section)
+        label_font_spin.setRange(6, 96)
+        label_font_spin.setValue(12)
+        tick_font_spin = QtWidgets.QSpinBox(graph_section)
+        tick_font_spin.setRange(6, 96)
+        tick_font_spin.setValue(10)
+        form.addRow("Title font:", title_font_spin)
+        form.addRow("Label font:", label_font_spin)
+        form.addRow("Tick label font:", tick_font_spin)
+
+        tick_length_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        tick_length_spin.setRange(0.0, 40.0)
+        tick_length_spin.setSingleStep(0.5)
+        tick_length_spin.setValue(3.5)
+        tick_width_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        tick_width_spin.setRange(0.1, 10.0)
+        tick_width_spin.setSingleStep(0.1)
+        tick_width_spin.setValue(0.8)
+        form.addRow("Tick length:", tick_length_spin)
+        form.addRow("Tick width:", tick_width_spin)
+
+        line_width_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        line_width_spin.setRange(0.1, 20.0)
+        line_width_spin.setSingleStep(0.1)
+        line_width_spin.setValue(1.5)
+        marker_size_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        marker_size_spin.setRange(0.1, 30.0)
+        marker_size_spin.setSingleStep(0.2)
+        marker_size_spin.setValue(6.0)
+        form.addRow("Line width:", line_width_spin)
+        form.addRow("Marker size:", marker_size_spin)
+
+        figure_width_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        figure_width_spin.setRange(1.0, 40.0)
+        figure_width_spin.setSingleStep(0.2)
+        figure_width_spin.setValue(6.0)
+        figure_height_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        figure_height_spin.setRange(1.0, 30.0)
+        figure_height_spin.setSingleStep(0.2)
+        figure_height_spin.setValue(4.0)
+        form.addRow("Figure width (in):", figure_width_spin)
+        form.addRow("Figure height (in):", figure_height_spin)
+
+        axes_aspect_combo = QtWidgets.QComboBox(graph_section)
+        axes_aspect_combo.addItem("Auto", "auto")
+        axes_aspect_combo.addItem("Equal", "equal")
+        axes_aspect_combo.addItem("Custom (Y/X)", "custom")
+        axes_aspect_ratio_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        axes_aspect_ratio_spin.setRange(0.05, 20.0)
+        axes_aspect_ratio_spin.setSingleStep(0.05)
+        axes_aspect_ratio_spin.setDecimals(3)
+        axes_aspect_ratio_spin.setValue(1.0)
+        axes_aspect_combo.currentIndexChanged.connect(self._sync_aspect_controls)
+        form.addRow("Axes aspect:", axes_aspect_combo)
+        form.addRow("Aspect ratio (Y/X):", axes_aspect_ratio_spin)
+
+        x_scale_combo = QtWidgets.QComboBox(graph_section)
+        x_scale_combo.addItem("Linear", "linear")
+        x_scale_combo.addItem("Log", "log")
+        y_scale_combo = QtWidgets.QComboBox(graph_section)
+        y_scale_combo.addItem("Linear", "linear")
+        y_scale_combo.addItem("Log", "log")
+        form.addRow("X scale:", x_scale_combo)
+        form.addRow("Y scale:", y_scale_combo)
+
+        x_tick_mode_combo = QtWidgets.QComboBox(graph_section)
+        x_tick_mode_combo.addItem("Auto", "auto")
+        x_tick_mode_combo.addItem("By increment", "step")
+        x_tick_mode_combo.addItem("By count", "count")
+        y_tick_mode_combo = QtWidgets.QComboBox(graph_section)
+        y_tick_mode_combo.addItem("Auto", "auto")
+        y_tick_mode_combo.addItem("By increment", "step")
+        y_tick_mode_combo.addItem("By count", "count")
+        x_tick_step_edit = QtWidgets.QLineEdit(graph_section)
+        x_tick_step_edit.setPlaceholderText("auto")
+        y_tick_step_edit = QtWidgets.QLineEdit(graph_section)
+        y_tick_step_edit.setPlaceholderText("auto")
+        x_tick_count_spin = QtWidgets.QSpinBox(graph_section)
+        x_tick_count_spin.setRange(2, 20)
+        x_tick_count_spin.setValue(5)
+        y_tick_count_spin = QtWidgets.QSpinBox(graph_section)
+        y_tick_count_spin.setRange(2, 20)
+        y_tick_count_spin.setValue(5)
+        x_tick_mode_combo.currentIndexChanged.connect(self._sync_tick_mode_inputs)
+        y_tick_mode_combo.currentIndexChanged.connect(self._sync_tick_mode_inputs)
+        form.addRow("X ticks:", x_tick_mode_combo)
+        form.addRow("X increment:", x_tick_step_edit)
+        form.addRow("X count:", x_tick_count_spin)
+        form.addRow("Y ticks:", y_tick_mode_combo)
+        form.addRow("Y increment:", y_tick_step_edit)
+        form.addRow("Y count:", y_tick_count_spin)
+
+        x_min_edit = QtWidgets.QLineEdit(graph_section)
+        x_min_edit.setPlaceholderText("auto")
+        x_max_edit = QtWidgets.QLineEdit(graph_section)
+        x_max_edit.setPlaceholderText("auto")
+        y_min_edit = QtWidgets.QLineEdit(graph_section)
+        y_min_edit.setPlaceholderText("auto")
+        y_max_edit = QtWidgets.QLineEdit(graph_section)
+        y_max_edit.setPlaceholderText("auto")
+        form.addRow("X min:", x_min_edit)
+        form.addRow("X max:", x_max_edit)
+        form.addRow("Y min:", y_min_edit)
+        form.addRow("Y max:", y_max_edit)
+
+        show_grid_cb = QtWidgets.QCheckBox("Show grid", graph_section)
+        show_grid_cb.setChecked(True)
+        show_legend_cb = QtWidgets.QCheckBox("Show legend", graph_section)
+        show_legend_cb.setChecked(True)
+        form.addRow(show_grid_cb)
+        form.addRow(show_legend_cb)
+
+        graph_section_layout.addLayout(form)
+
+        button_row = QtWidgets.QHBoxLayout()
+        button_row.setContentsMargins(0, 2, 0, 0)
+        button_row.setSpacing(6)
+        apply_current_btn = QtWidgets.QPushButton("Apply current graph", graph_section)
+        apply_current_btn.clicked.connect(lambda: self._apply_graph_format(apply_all=False))
+        apply_all_btn = QtWidgets.QPushButton("Apply all graphs", graph_section)
+        apply_all_btn.clicked.connect(lambda: self._apply_graph_format(apply_all=True))
+        refresh_btn = QtWidgets.QPushButton("Read from current", graph_section)
+        refresh_btn.clicked.connect(self._sync_graph_format_controls_from_current_axes)
+        export_pdf_btn = QtWidgets.QPushButton("Export PDF…", graph_section)
+        export_pdf_btn.clicked.connect(self._export_current_graph_pdf)
+        button_row.addWidget(apply_current_btn)
+        button_row.addWidget(apply_all_btn)
+        button_row.addWidget(refresh_btn)
+        button_row.addWidget(export_pdf_btn)
+        graph_section_layout.addLayout(button_row)
+        layout.addWidget(graph_section)
+
+        self._graph_format_controls = {
+            "section": graph_section,
+            "title_edit": title_edit,
+            "x_label_edit": x_label_edit,
+            "y_label_edit": y_label_edit,
+            "title_font_spin": title_font_spin,
+            "label_font_spin": label_font_spin,
+            "tick_font_spin": tick_font_spin,
+            "tick_length_spin": tick_length_spin,
+            "tick_width_spin": tick_width_spin,
+            "line_width_spin": line_width_spin,
+            "marker_size_spin": marker_size_spin,
+            "figure_width_spin": figure_width_spin,
+            "figure_height_spin": figure_height_spin,
+            "axes_aspect_combo": axes_aspect_combo,
+            "axes_aspect_ratio_spin": axes_aspect_ratio_spin,
+            "x_scale_combo": x_scale_combo,
+            "y_scale_combo": y_scale_combo,
+            "x_tick_mode_combo": x_tick_mode_combo,
+            "y_tick_mode_combo": y_tick_mode_combo,
+            "x_tick_step_edit": x_tick_step_edit,
+            "y_tick_step_edit": y_tick_step_edit,
+            "x_tick_count_spin": x_tick_count_spin,
+            "y_tick_count_spin": y_tick_count_spin,
+            "x_min_edit": x_min_edit,
+            "x_max_edit": x_max_edit,
+            "y_min_edit": y_min_edit,
+            "y_max_edit": y_max_edit,
+            "show_grid_cb": show_grid_cb,
+            "show_legend_cb": show_legend_cb,
+            "apply_current_btn": apply_current_btn,
+            "apply_all_btn": apply_all_btn,
+            "refresh_btn": refresh_btn,
+            "export_pdf_btn": export_pdf_btn,
+        }
+        self._sync_tick_mode_inputs()
+        self._sync_aspect_controls()
+
         container = QtWidgets.QFrame(panel or self)
         container.setObjectName("mw_plugin_settings_container")
         container_layout = QtWidgets.QVBoxLayout(container)
@@ -858,6 +1055,705 @@ class PyPlotWorkbench(PyPlotWindow):
 
         self._plugin_settings_container = container
         self._plugin_settings_layout = container_layout
+
+    def _control_widget(self, key: str) -> QtWidgets.QWidget | None:
+        widget = self._graph_format_controls.get(key)
+        return widget if isinstance(widget, QtWidgets.QWidget) else None
+
+    def _set_graph_format_controls_enabled(self, enabled: bool) -> None:
+        for key, widget in self._graph_format_controls.items():
+            if key in {"section"}:
+                continue
+            if isinstance(widget, QtWidgets.QWidget):
+                widget.setEnabled(enabled)
+        if enabled:
+            self._sync_tick_mode_inputs()
+            self._sync_aspect_controls()
+
+    def _float_from_edit(self, key: str) -> float | None:
+        widget = self._control_widget(key)
+        if not isinstance(widget, QtWidgets.QLineEdit):
+            return None
+        text = widget.text().strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _sync_tick_mode_inputs(self) -> None:
+        if self._graph_format_updating:
+            return
+        for axis in ("x", "y"):
+            mode_widget = self._control_widget(f"{axis}_tick_mode_combo")
+            step_widget = self._control_widget(f"{axis}_tick_step_edit")
+            count_widget = self._control_widget(f"{axis}_tick_count_spin")
+            mode = (
+                str(mode_widget.currentData())
+                if isinstance(mode_widget, QtWidgets.QComboBox)
+                else "auto"
+            )
+            if isinstance(step_widget, QtWidgets.QLineEdit):
+                step_widget.setEnabled(mode == "step")
+            if isinstance(count_widget, QtWidgets.QSpinBox):
+                count_widget.setEnabled(mode == "count")
+
+    def _sync_aspect_controls(self) -> None:
+        if self._graph_format_updating:
+            return
+        mode_widget = self._control_widget("axes_aspect_combo")
+        ratio_widget = self._control_widget("axes_aspect_ratio_spin")
+        mode = (
+            str(mode_widget.currentData())
+            if isinstance(mode_widget, QtWidgets.QComboBox)
+            else "auto"
+        )
+        if isinstance(ratio_widget, QtWidgets.QDoubleSpinBox):
+            ratio_widget.setEnabled(mode == "custom")
+
+    @staticmethod
+    def _axes_aspect_from_axes(axes: Any) -> tuple[str, float]:
+        try:
+            aspect_value = axes.get_aspect()
+        except Exception:
+            return "auto", 1.0
+        if isinstance(aspect_value, str):
+            token = aspect_value.strip().lower()
+            if token == "auto":
+                return "auto", 1.0
+            if token == "equal":
+                return "equal", 1.0
+            try:
+                numeric = float(token)
+            except Exception:
+                return "auto", 1.0
+            if math.isfinite(numeric) and numeric > 0:
+                return "custom", numeric
+            return "auto", 1.0
+        try:
+            numeric = float(aspect_value)
+        except Exception:
+            return "auto", 1.0
+        if not math.isfinite(numeric) or numeric <= 0:
+            return "auto", 1.0
+        if math.isclose(numeric, 1.0, rel_tol=1e-3, abs_tol=1e-3):
+            return "equal", 1.0
+        return "custom", numeric
+
+    @staticmethod
+    def _multiple_locator_step(locator: Any) -> float | None:
+        for attr in ("base", "_base"):
+            value = getattr(locator, attr, None)
+            try:
+                step = float(value)
+            except Exception:
+                continue
+            if math.isfinite(step) and step > 0:
+                return step
+        edge = getattr(locator, "_edge", None)
+        step = getattr(edge, "step", None)
+        try:
+            step_value = float(step)
+        except Exception:
+            return None
+        if not math.isfinite(step_value) or step_value <= 0:
+            return None
+        return step_value
+
+    @staticmethod
+    def _tick_mode_from_axis(axis_obj: Any) -> tuple[str, float | None, int]:
+        locator = None
+        try:
+            locator = axis_obj.get_major_locator()
+        except Exception:
+            locator = None
+        if isinstance(locator, mticker.MultipleLocator):
+            step = PyPlotWorkbench._multiple_locator_step(locator)
+            return "step", step, 5
+        if isinstance(locator, mticker.AutoLocator):
+            return "auto", None, 5
+        if isinstance(locator, mticker.MaxNLocator):
+            nbins = getattr(locator, "_nbins", None)
+            try:
+                count = int(nbins) + 1
+            except Exception:
+                count = 5
+            count = max(2, min(count, 20))
+            return "count", None, count
+        return "auto", None, 5
+
+    @staticmethod
+    def _apply_tick_locator(
+        axis_obj: Any,
+        mode: str,
+        *,
+        step: float | None,
+        count: int,
+    ) -> None:
+        resolved = str(mode or "auto").strip().lower()
+        if resolved == "step" and step is not None and step > 0:
+            axis_obj.set_major_locator(mticker.MultipleLocator(step))
+            return
+        if resolved == "count":
+            count = max(2, int(count))
+            axis_obj.set_major_locator(
+                mticker.MaxNLocator(nbins=max(1, count - 1), min_n_ticks=count)
+            )
+            return
+        axis_obj.set_major_locator(mticker.AutoLocator())
+
+    @staticmethod
+    def _tick_style_from_axes(axes: Any) -> tuple[float, float]:
+        try:
+            tick = axes.xaxis.get_major_ticks()[0]
+            length = float(tick.tick1line.get_markersize())
+            width = float(tick.tick1line.get_markeredgewidth())
+            if math.isfinite(length) and math.isfinite(width):
+                return length, width
+        except Exception:
+            pass
+        return 3.5, 0.8
+
+    @staticmethod
+    def _tick_font_from_axes(axes: Any) -> float:
+        for getter in (axes.get_xticklabels, axes.get_yticklabels):
+            try:
+                labels = getter()
+            except Exception:
+                labels = []
+            for label in labels:
+                try:
+                    size = float(label.get_fontsize())
+                except Exception:
+                    continue
+                if math.isfinite(size) and size > 0:
+                    return size
+        return 10.0
+
+    def _sync_graph_format_controls_from_current_axes(self) -> None:
+        axes = self._current_axes()
+        if axes is None:
+            self._set_graph_format_controls_enabled(False)
+            return
+
+        self._set_graph_format_controls_enabled(True)
+        title_edit = self._control_widget("title_edit")
+        x_label_edit = self._control_widget("x_label_edit")
+        y_label_edit = self._control_widget("y_label_edit")
+        title_font_spin = self._control_widget("title_font_spin")
+        label_font_spin = self._control_widget("label_font_spin")
+        tick_font_spin = self._control_widget("tick_font_spin")
+        tick_length_spin = self._control_widget("tick_length_spin")
+        tick_width_spin = self._control_widget("tick_width_spin")
+        line_width_spin = self._control_widget("line_width_spin")
+        marker_size_spin = self._control_widget("marker_size_spin")
+        figure_width_spin = self._control_widget("figure_width_spin")
+        figure_height_spin = self._control_widget("figure_height_spin")
+        axes_aspect_combo = self._control_widget("axes_aspect_combo")
+        axes_aspect_ratio_spin = self._control_widget("axes_aspect_ratio_spin")
+        x_scale_combo = self._control_widget("x_scale_combo")
+        y_scale_combo = self._control_widget("y_scale_combo")
+        x_tick_mode_combo = self._control_widget("x_tick_mode_combo")
+        y_tick_mode_combo = self._control_widget("y_tick_mode_combo")
+        x_tick_step_edit = self._control_widget("x_tick_step_edit")
+        y_tick_step_edit = self._control_widget("y_tick_step_edit")
+        x_tick_count_spin = self._control_widget("x_tick_count_spin")
+        y_tick_count_spin = self._control_widget("y_tick_count_spin")
+        x_min_edit = self._control_widget("x_min_edit")
+        x_max_edit = self._control_widget("x_max_edit")
+        y_min_edit = self._control_widget("y_min_edit")
+        y_max_edit = self._control_widget("y_max_edit")
+        show_grid_cb = self._control_widget("show_grid_cb")
+        show_legend_cb = self._control_widget("show_legend_cb")
+
+        self._graph_format_updating = True
+        try:
+            if isinstance(title_edit, QtWidgets.QLineEdit):
+                title_edit.setText(str(getattr(axes, "get_title", lambda: "")() or ""))
+            if isinstance(x_label_edit, QtWidgets.QLineEdit):
+                x_label_edit.setText(str(getattr(axes, "get_xlabel", lambda: "")() or ""))
+            if isinstance(y_label_edit, QtWidgets.QLineEdit):
+                y_label_edit.setText(str(getattr(axes, "get_ylabel", lambda: "")() or ""))
+
+            if isinstance(title_font_spin, QtWidgets.QSpinBox):
+                try:
+                    title_font_spin.setValue(int(round(float(axes.title.get_fontsize()))))
+                except Exception:
+                    pass
+            if isinstance(label_font_spin, QtWidgets.QSpinBox):
+                try:
+                    label_size = float(axes.xaxis.label.get_fontsize())
+                except Exception:
+                    label_size = 12.0
+                if not math.isfinite(label_size) or label_size <= 0:
+                    label_size = 12.0
+                label_font_spin.setValue(int(round(label_size)))
+            if isinstance(tick_font_spin, QtWidgets.QSpinBox):
+                tick_font_spin.setValue(int(round(self._tick_font_from_axes(axes))))
+            length, width = self._tick_style_from_axes(axes)
+            if isinstance(tick_length_spin, QtWidgets.QDoubleSpinBox):
+                tick_length_spin.setValue(length)
+            if isinstance(tick_width_spin, QtWidgets.QDoubleSpinBox):
+                tick_width_spin.setValue(width)
+
+            line_width = 1.5
+            marker_size = 6.0
+            try:
+                lines = list(axes.get_lines())
+            except Exception:
+                lines = []
+            if lines:
+                try:
+                    line_width = float(lines[0].get_linewidth())
+                except Exception:
+                    pass
+                for line in lines:
+                    try:
+                        marker = str(line.get_marker()).strip().lower()
+                    except Exception:
+                        marker = ""
+                    if marker and marker != "none":
+                        try:
+                            marker_size = float(line.get_markersize())
+                        except Exception:
+                            pass
+                        break
+            if isinstance(line_width_spin, QtWidgets.QDoubleSpinBox):
+                line_width_spin.setValue(max(0.1, line_width))
+            if isinstance(marker_size_spin, QtWidgets.QDoubleSpinBox):
+                marker_size_spin.setValue(max(0.1, marker_size))
+
+            figure = getattr(axes, "figure", None)
+            try:
+                size_inches = figure.get_size_inches() if figure is not None else None
+            except Exception:
+                size_inches = None
+            if (
+                size_inches is not None
+                and hasattr(size_inches, "__len__")
+                and len(size_inches) >= 2
+            ):
+                try:
+                    width_in = float(size_inches[0])
+                    height_in = float(size_inches[1])
+                except Exception:
+                    width_in = height_in = None
+                if isinstance(figure_width_spin, QtWidgets.QDoubleSpinBox) and width_in:
+                    figure_width_spin.setValue(max(1.0, width_in))
+                if isinstance(figure_height_spin, QtWidgets.QDoubleSpinBox) and height_in:
+                    figure_height_spin.setValue(max(1.0, height_in))
+
+            aspect_mode, aspect_ratio = self._axes_aspect_from_axes(axes)
+            if isinstance(axes_aspect_combo, QtWidgets.QComboBox):
+                index = axes_aspect_combo.findData(aspect_mode)
+                if index >= 0:
+                    axes_aspect_combo.setCurrentIndex(index)
+            if isinstance(axes_aspect_ratio_spin, QtWidgets.QDoubleSpinBox):
+                axes_aspect_ratio_spin.setValue(max(0.05, min(float(aspect_ratio), 20.0)))
+
+            x_scale = str(getattr(axes, "get_xscale", lambda: "linear")() or "linear").lower()
+            y_scale = str(getattr(axes, "get_yscale", lambda: "linear")() or "linear").lower()
+            if isinstance(x_scale_combo, QtWidgets.QComboBox):
+                index = x_scale_combo.findData(x_scale)
+                if index >= 0:
+                    x_scale_combo.setCurrentIndex(index)
+            if isinstance(y_scale_combo, QtWidgets.QComboBox):
+                index = y_scale_combo.findData(y_scale)
+                if index >= 0:
+                    y_scale_combo.setCurrentIndex(index)
+
+            x_tick_mode, x_tick_step, x_tick_count = self._tick_mode_from_axis(axes.xaxis)
+            y_tick_mode, y_tick_step, y_tick_count = self._tick_mode_from_axis(axes.yaxis)
+            if isinstance(x_tick_mode_combo, QtWidgets.QComboBox):
+                index = x_tick_mode_combo.findData(x_tick_mode)
+                if index >= 0:
+                    x_tick_mode_combo.setCurrentIndex(index)
+            if isinstance(y_tick_mode_combo, QtWidgets.QComboBox):
+                index = y_tick_mode_combo.findData(y_tick_mode)
+                if index >= 0:
+                    y_tick_mode_combo.setCurrentIndex(index)
+            if isinstance(x_tick_step_edit, QtWidgets.QLineEdit):
+                x_tick_step_edit.setText(
+                    f"{x_tick_step:.6g}" if x_tick_step is not None and math.isfinite(x_tick_step) else ""
+                )
+            if isinstance(y_tick_step_edit, QtWidgets.QLineEdit):
+                y_tick_step_edit.setText(
+                    f"{y_tick_step:.6g}" if y_tick_step is not None and math.isfinite(y_tick_step) else ""
+                )
+            if isinstance(x_tick_count_spin, QtWidgets.QSpinBox):
+                x_tick_count_spin.setValue(max(2, min(int(x_tick_count), 20)))
+            if isinstance(y_tick_count_spin, QtWidgets.QSpinBox):
+                y_tick_count_spin.setValue(max(2, min(int(y_tick_count), 20)))
+
+            try:
+                x_min, x_max = axes.get_xlim()
+                y_min, y_max = axes.get_ylim()
+            except Exception:
+                x_min = x_max = y_min = y_max = None
+            if isinstance(x_min_edit, QtWidgets.QLineEdit):
+                x_min_edit.setText(f"{float(x_min):.6g}" if x_min is not None else "")
+            if isinstance(x_max_edit, QtWidgets.QLineEdit):
+                x_max_edit.setText(f"{float(x_max):.6g}" if x_max is not None else "")
+            if isinstance(y_min_edit, QtWidgets.QLineEdit):
+                y_min_edit.setText(f"{float(y_min):.6g}" if y_min is not None else "")
+            if isinstance(y_max_edit, QtWidgets.QLineEdit):
+                y_max_edit.setText(f"{float(y_max):.6g}" if y_max is not None else "")
+
+            if isinstance(show_grid_cb, QtWidgets.QCheckBox):
+                try:
+                    grid_lines = list(axes.get_xgridlines()) + list(axes.get_ygridlines())
+                    show_grid_cb.setChecked(any(bool(line.get_visible()) for line in grid_lines))
+                except Exception:
+                    show_grid_cb.setChecked(False)
+            if isinstance(show_legend_cb, QtWidgets.QCheckBox):
+                legend = None
+                try:
+                    legend = axes.get_legend()
+                except Exception:
+                    legend = None
+                show_legend_cb.setChecked(bool(legend is not None and legend.get_visible()))
+        finally:
+            self._graph_format_updating = False
+        self._sync_tick_mode_inputs()
+        self._sync_aspect_controls()
+
+    def _target_axes(self, apply_all: bool) -> List[Any]:
+        if not apply_all:
+            axes = self._current_axes()
+            return [axes] if axes is not None else []
+        targets: List[Any] = []
+        seen: set[int] = set()
+        for axes in self._axes_by_tab.values():
+            if axes is None:
+                continue
+            marker = id(axes)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            targets.append(axes)
+        return targets
+
+    def _plugin_name_for_axes(self, axes: Any) -> str | None:
+        axes_by_tab = getattr(self, "_axes_by_tab", {})
+        tab_descriptors = getattr(self, "_tab_descriptors", {})
+        for tab, candidate in axes_by_tab.items():
+            if candidate is not axes:
+                continue
+            descriptor = tab_descriptors.get(tab)
+            return self._tab_plugin_name(descriptor)
+        return None
+
+    def _apply_graph_format(self, *, apply_all: bool) -> None:
+        if self._graph_format_updating:
+            return
+        targets = self._target_axes(apply_all)
+        if not targets:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Graph formatting",
+                "Select a graph before applying formatting.",
+            )
+            return
+
+        title_edit = self._control_widget("title_edit")
+        x_label_edit = self._control_widget("x_label_edit")
+        y_label_edit = self._control_widget("y_label_edit")
+        title_font_spin = self._control_widget("title_font_spin")
+        label_font_spin = self._control_widget("label_font_spin")
+        tick_font_spin = self._control_widget("tick_font_spin")
+        tick_length_spin = self._control_widget("tick_length_spin")
+        tick_width_spin = self._control_widget("tick_width_spin")
+        line_width_spin = self._control_widget("line_width_spin")
+        marker_size_spin = self._control_widget("marker_size_spin")
+        figure_width_spin = self._control_widget("figure_width_spin")
+        figure_height_spin = self._control_widget("figure_height_spin")
+        axes_aspect_combo = self._control_widget("axes_aspect_combo")
+        axes_aspect_ratio_spin = self._control_widget("axes_aspect_ratio_spin")
+        x_scale_combo = self._control_widget("x_scale_combo")
+        y_scale_combo = self._control_widget("y_scale_combo")
+        x_tick_mode_combo = self._control_widget("x_tick_mode_combo")
+        y_tick_mode_combo = self._control_widget("y_tick_mode_combo")
+        x_tick_count_spin = self._control_widget("x_tick_count_spin")
+        y_tick_count_spin = self._control_widget("y_tick_count_spin")
+        show_grid_cb = self._control_widget("show_grid_cb")
+        show_legend_cb = self._control_widget("show_legend_cb")
+
+        title = title_edit.text() if isinstance(title_edit, QtWidgets.QLineEdit) else ""
+        x_label = x_label_edit.text() if isinstance(x_label_edit, QtWidgets.QLineEdit) else ""
+        y_label = y_label_edit.text() if isinstance(y_label_edit, QtWidgets.QLineEdit) else ""
+        title_font = float(title_font_spin.value()) if isinstance(title_font_spin, QtWidgets.QSpinBox) else 16.0
+        label_font = float(label_font_spin.value()) if isinstance(label_font_spin, QtWidgets.QSpinBox) else 12.0
+        tick_font = float(tick_font_spin.value()) if isinstance(tick_font_spin, QtWidgets.QSpinBox) else 10.0
+        tick_length = (
+            float(tick_length_spin.value())
+            if isinstance(tick_length_spin, QtWidgets.QDoubleSpinBox)
+            else 3.5
+        )
+        tick_width = (
+            float(tick_width_spin.value())
+            if isinstance(tick_width_spin, QtWidgets.QDoubleSpinBox)
+            else 0.8
+        )
+        line_width = (
+            float(line_width_spin.value())
+            if isinstance(line_width_spin, QtWidgets.QDoubleSpinBox)
+            else 1.5
+        )
+        marker_size = (
+            float(marker_size_spin.value())
+            if isinstance(marker_size_spin, QtWidgets.QDoubleSpinBox)
+            else 6.0
+        )
+        figure_width = (
+            float(figure_width_spin.value())
+            if isinstance(figure_width_spin, QtWidgets.QDoubleSpinBox)
+            else 6.0
+        )
+        figure_height = (
+            float(figure_height_spin.value())
+            if isinstance(figure_height_spin, QtWidgets.QDoubleSpinBox)
+            else 4.0
+        )
+        axes_aspect_mode = (
+            str(axes_aspect_combo.currentData())
+            if isinstance(axes_aspect_combo, QtWidgets.QComboBox)
+            else "auto"
+        )
+        axes_aspect_ratio = (
+            float(axes_aspect_ratio_spin.value())
+            if isinstance(axes_aspect_ratio_spin, QtWidgets.QDoubleSpinBox)
+            else 1.0
+        )
+        x_scale = (
+            str(x_scale_combo.currentData())
+            if isinstance(x_scale_combo, QtWidgets.QComboBox)
+            else "linear"
+        )
+        y_scale = (
+            str(y_scale_combo.currentData())
+            if isinstance(y_scale_combo, QtWidgets.QComboBox)
+            else "linear"
+        )
+        x_tick_mode = (
+            str(x_tick_mode_combo.currentData())
+            if isinstance(x_tick_mode_combo, QtWidgets.QComboBox)
+            else "auto"
+        )
+        y_tick_mode = (
+            str(y_tick_mode_combo.currentData())
+            if isinstance(y_tick_mode_combo, QtWidgets.QComboBox)
+            else "auto"
+        )
+        x_tick_count = (
+            int(x_tick_count_spin.value())
+            if isinstance(x_tick_count_spin, QtWidgets.QSpinBox)
+            else 5
+        )
+        y_tick_count = (
+            int(y_tick_count_spin.value())
+            if isinstance(y_tick_count_spin, QtWidgets.QSpinBox)
+            else 5
+        )
+        x_tick_step = self._float_from_edit("x_tick_step_edit")
+        y_tick_step = self._float_from_edit("y_tick_step_edit")
+        show_grid = bool(show_grid_cb.isChecked()) if isinstance(show_grid_cb, QtWidgets.QCheckBox) else False
+        show_legend = (
+            bool(show_legend_cb.isChecked()) if isinstance(show_legend_cb, QtWidgets.QCheckBox) else True
+        )
+
+        x_min = self._float_from_edit("x_min_edit")
+        x_max = self._float_from_edit("x_max_edit")
+        y_min = self._float_from_edit("y_min_edit")
+        y_max = self._float_from_edit("y_max_edit")
+        if x_min is not None and x_max is not None and x_min >= x_max:
+            QtWidgets.QMessageBox.warning(self, "Graph formatting", "X min must be less than X max.")
+            return
+        if y_min is not None and y_max is not None and y_min >= y_max:
+            QtWidgets.QMessageBox.warning(self, "Graph formatting", "Y min must be less than Y max.")
+            return
+        if x_scale == "log" and ((x_min is not None and x_min <= 0) or (x_max is not None and x_max <= 0)):
+            QtWidgets.QMessageBox.warning(self, "Graph formatting", "Log X scale requires positive X limits.")
+            return
+        if y_scale == "log" and ((y_min is not None and y_min <= 0) or (y_max is not None and y_max <= 0)):
+            QtWidgets.QMessageBox.warning(self, "Graph formatting", "Log Y scale requires positive Y limits.")
+            return
+        if x_tick_mode == "step" and (x_tick_step is None or x_tick_step <= 0):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "X tick increment must be a positive number when using 'By increment'.",
+            )
+            return
+        if y_tick_mode == "step" and (y_tick_step is None or y_tick_step <= 0):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Y tick increment must be a positive number when using 'By increment'.",
+            )
+            return
+        if figure_width <= 0 or figure_height <= 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Figure width and height must be positive.",
+            )
+            return
+        if axes_aspect_mode == "custom" and axes_aspect_ratio <= 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Custom aspect ratio must be positive.",
+            )
+            return
+
+        touched = 0
+        for axes in targets:
+            if axes is None:
+                continue
+            try:
+                figure = getattr(axes, "figure", None)
+                sibling_axes: List[Any] = []
+                if figure is not None:
+                    try:
+                        sibling_axes = [entry for entry in figure.axes if entry is not None]
+                    except Exception:
+                        sibling_axes = []
+                if not sibling_axes:
+                    sibling_axes = [axes]
+
+                if figure is not None:
+                    try:
+                        figure.set_size_inches(
+                            max(1.0, figure_width),
+                            max(1.0, figure_height),
+                            forward=True,
+                        )
+                    except Exception:
+                        pass
+
+                axes.set_title(title)
+                axes.set_xlabel(x_label)
+                axes.set_ylabel(y_label)
+                axes.title.set_fontsize(title_font)
+                axes.xaxis.label.set_fontsize(label_font)
+                axes.yaxis.label.set_fontsize(label_font)
+                plugin_name = self._plugin_name_for_axes(axes)
+                for axis in sibling_axes:
+                    axis.tick_params(
+                        axis="both",
+                        which="both",
+                        labelsize=tick_font,
+                        length=tick_length,
+                        width=tick_width,
+                    )
+                    axis.set_xscale(x_scale)
+                    axis.set_yscale(y_scale)
+                    if x_min is not None and x_max is not None:
+                        axis.set_xlim(x_min, x_max)
+                    if y_min is not None and y_max is not None:
+                        axis.set_ylim(y_min, y_max)
+                    self._apply_tick_locator(
+                        axis.xaxis,
+                        x_tick_mode,
+                        step=x_tick_step,
+                        count=x_tick_count,
+                    )
+                    self._apply_tick_locator(
+                        axis.yaxis,
+                        y_tick_mode,
+                        step=y_tick_step,
+                        count=y_tick_count,
+                    )
+                    try:
+                        if axes_aspect_mode == "equal":
+                            axis.set_aspect("equal", adjustable="box")
+                        elif axes_aspect_mode == "custom":
+                            axis.set_aspect(max(0.05, axes_aspect_ratio), adjustable="box")
+                        else:
+                            axis.set_aspect("auto")
+                    except Exception:
+                        pass
+                    axis.grid(show_grid)
+                    for line in axis.get_lines():
+                        try:
+                            line.set_linewidth(line_width)
+                        except Exception:
+                            pass
+                        try:
+                            marker = str(line.get_marker()).strip().lower()
+                        except Exception:
+                            marker = ""
+                        if marker and marker != "none":
+                            try:
+                                line.set_markersize(marker_size)
+                            except Exception:
+                                pass
+
+                for axis in sibling_axes:
+                    if show_legend:
+                        try:
+                            self._sync_axes_legend_with_visible_lines(
+                                axis,
+                                plugin_name=plugin_name,
+                            )
+                        except Exception:
+                            legend = None
+                            try:
+                                legend = axis.get_legend()
+                            except Exception:
+                                legend = None
+                            if legend is None:
+                                try:
+                                    axis.legend(loc="best")
+                                except Exception:
+                                    pass
+                    else:
+                        legend = None
+                        try:
+                            legend = axis.get_legend()
+                        except Exception:
+                            legend = None
+                        if legend is not None:
+                            legend.set_visible(False)
+                canvas = getattr(figure, "canvas", None) if figure is not None else None
+                if canvas is not None:
+                    try:
+                        canvas.draw_idle()
+                    except Exception:
+                        canvas.draw()
+
+                tab = self._tab_for_axes(axes)  # noqa: SLF001 - shared helper
+                if tab is not None:
+                    subwindow_for = getattr(self.tab_widget, "_subwindow_for", None)
+                    if callable(subwindow_for):
+                        try:
+                            sub = subwindow_for(tab)
+                        except Exception:
+                            sub = None
+                        if sub is not None:
+                            try:
+                                dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
+                            except Exception:
+                                dpi = 100.0
+                            target_w = int(max(360.0, figure_width * dpi + 48.0))
+                            target_h = int(max(260.0, figure_height * dpi + 72.0))
+                            try:
+                                sub.resize(target_w, target_h)
+                            except Exception:
+                                pass
+                touched += 1
+            except Exception:
+                continue
+        if touched == 0:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Could not apply formatting to the selected graph(s).",
+            )
+
+    def _export_current_graph_pdf(self) -> None:
+        self._save_graph_for_current_tab(preferred_suffix=".pdf")
 
     def _apply_selected_plotter(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None

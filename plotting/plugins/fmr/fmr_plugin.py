@@ -11,7 +11,13 @@ from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
 from plotting.shared.origin import origin_session
 
-from .core import FmrParseResult, parse_fmr_csv, select_fmr_axes
+from .core import (
+    FmrParseResult,
+    estimate_phase_rotation_angle,
+    parse_fmr_csv,
+    rotate_lockin_phase,
+    select_fmr_axes,
+)
 
 
 @dataclass
@@ -36,6 +42,9 @@ class FmrPlugin(PyPlotPlugin):
         self._summary_label: QtWidgets.QLabel | None = None
         self._markers_checkbox: QtWidgets.QCheckBox | None = None
         self._combine_x_checkbox: QtWidgets.QCheckBox | None = None
+        self._phase_rotate_checkbox: QtWidgets.QCheckBox | None = None
+        self._phase_auto_checkbox: QtWidgets.QCheckBox | None = None
+        self._phase_angle_spin: QtWidgets.QDoubleSpinBox | None = None
         self._loaded_paths: List[Path] = []
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -72,6 +81,26 @@ class FmrPlugin(PyPlotPlugin):
         self._markers_checkbox = QtWidgets.QCheckBox("Show markers", options_section)
         self._markers_checkbox.setChecked(False)
         options_layout.addWidget(self._markers_checkbox)
+        self._phase_rotate_checkbox = QtWidgets.QCheckBox("Rotate lock-in phase", options_section)
+        self._phase_rotate_checkbox.setChecked(True)
+        options_layout.addWidget(self._phase_rotate_checkbox)
+        self._phase_auto_checkbox = QtWidgets.QCheckBox("Auto phase (flatten Y)", options_section)
+        self._phase_auto_checkbox.setChecked(True)
+        options_layout.addWidget(self._phase_auto_checkbox)
+        angle_row = QtWidgets.QHBoxLayout()
+        angle_label = QtWidgets.QLabel("Manual phase angle (deg):", options_section)
+        self._phase_angle_spin = QtWidgets.QDoubleSpinBox(options_section)
+        self._phase_angle_spin.setRange(-180.0, 180.0)
+        self._phase_angle_spin.setDecimals(2)
+        self._phase_angle_spin.setSingleStep(0.1)
+        self._phase_angle_spin.setValue(0.0)
+        angle_row.addWidget(angle_label)
+        angle_row.addWidget(self._phase_angle_spin, 1)
+        options_layout.addLayout(angle_row)
+        if self._phase_rotate_checkbox is not None and self._phase_auto_checkbox is not None:
+            self._phase_rotate_checkbox.toggled.connect(self._sync_phase_controls)
+            self._phase_auto_checkbox.toggled.connect(self._sync_phase_controls)
+        self._sync_phase_controls()
         options_layout.addStretch(1)
         layout.addWidget(options_section)
         layout.addStretch(1)
@@ -144,6 +173,13 @@ class FmrPlugin(PyPlotPlugin):
             if data.empty:
                 self._log(f"No numeric data in {entry.path.name}.", level="error")
                 continue
+            data, rotation_angle, rotated = self._phase_adjusted_data(
+                entry=entry,
+                data=data,
+                field_col=field_col,
+                x_col=x_col,
+                y_col=y_col,
+            )
             marker = "o" if show_markers else None
             ax.plot(
                 data[field_col],
@@ -151,7 +187,7 @@ class FmrPlugin(PyPlotPlugin):
                 color="#111111",
                 linewidth=1.2,
                 marker=marker,
-                label="X",
+                label="X'" if rotated else "X",
             )
             ax.plot(
                 data[field_col],
@@ -159,14 +195,18 @@ class FmrPlugin(PyPlotPlugin):
                 color="#dc2626",
                 linewidth=1.2,
                 marker=marker,
-                label="Y",
+                label="Y'" if rotated else "Y",
             )
             x_unit = entry.units.get(field_col, "Oe")
             y_unit = entry.units.get(x_col) or entry.units.get(y_col) or "V"
-            ax.set_title(entry.sample)
+            if rotated:
+                ax.set_title(f"{entry.sample} (phase {rotation_angle:.2f}°)")
+            else:
+                ax.set_title(entry.sample)
             axis_field = "Field" if "field" in field_col.lower() else field_col
             ax.set_xlabel(f"{axis_field} [{x_unit}]" if x_unit else axis_field)
-            ax.set_ylabel(f"X [{y_unit}]" if y_unit else "X")
+            y_name = "X'" if rotated else "X"
+            ax.set_ylabel(f"{y_name} [{y_unit}]" if y_unit else y_name)
             ax.legend(loc="best")
             fig.tight_layout()
             tab = QtWidgets.QWidget()
@@ -223,12 +263,37 @@ class FmrPlugin(PyPlotPlugin):
             if data.empty:
                 self._log(f"No numeric data in {entry.path.name}.", level="error")
                 continue
+            plot_label = entry.sample
+            if self._phase_rotate_checkbox is not None and self._phase_rotate_checkbox.isChecked():
+                expanded = entry.frame[[field_col, x_col]].copy()
+                y_candidate = None
+                _field_tmp, _x_tmp, y_candidate = select_fmr_axes(columns)
+                if y_candidate and y_candidate in entry.frame.columns:
+                    expanded[y_candidate] = entry.frame[y_candidate]
+                    expanded = expanded[[field_col, x_col, y_candidate]].apply(
+                        pd.to_numeric, errors="coerce"
+                    )
+                    expanded = expanded.dropna(how="any")
+                    if not expanded.empty:
+                        expanded, angle, rotated = self._phase_adjusted_data(
+                            entry=entry,
+                            data=expanded,
+                            field_col=field_col,
+                            x_col=x_col,
+                            y_col=y_candidate,
+                        )
+                        if rotated:
+                            data = expanded[[field_col, x_col]]
+                            plot_label = f"{entry.sample} ({angle:.2f}°)"
             if base_labels is None:
                 x_unit = entry.units.get(field_col, "Oe")
                 y_unit = entry.units.get(x_col, "V")
                 axis_field = "Field" if "field" in field_col.lower() else field_col
                 ax.set_xlabel(f"{axis_field} [{x_unit}]" if x_unit else axis_field)
-                ax.set_ylabel(f"X [{y_unit}]" if y_unit else "X")
+                if self._phase_rotate_checkbox is not None and self._phase_rotate_checkbox.isChecked():
+                    ax.set_ylabel(f"X' [{y_unit}]" if y_unit else "X'")
+                else:
+                    ax.set_ylabel(f"X [{y_unit}]" if y_unit else "X")
                 base_labels = (field_col, x_col, x_unit, y_unit, entry.sample)
             elif not mismatch_logged:
                 base_field, base_x, base_x_unit, base_y_unit, base_sample = base_labels
@@ -248,7 +313,7 @@ class FmrPlugin(PyPlotPlugin):
                 data[x_col],
                 linewidth=1.2,
                 marker=marker,
-                label=entry.sample,
+                label=plot_label,
             )
             plotted += 1
 
@@ -310,6 +375,13 @@ class FmrPlugin(PyPlotPlugin):
                     data = data.dropna(how="any")
                     if data.empty:
                         continue
+                    data, rotation_angle, rotated = self._phase_adjusted_data(
+                        entry=entry,
+                        data=data,
+                        field_col=field_col,
+                        x_col=x_col,
+                        y_col=y_col,
+                    )
                     try:
                         book = op.new_book("w")
                     except Exception:
@@ -340,8 +412,8 @@ class FmrPlugin(PyPlotPlugin):
                         y_col: entry.units.get(y_col, "V"),
                     }
                     comments = {
-                        x_col: "X",
-                        y_col: "Y",
+                        x_col: "X'" if rotated else "X",
+                        y_col: "Y'" if rotated else "Y",
                     }
                     for idx, name in enumerate([field_col, x_col, y_col]):
                         try:
@@ -373,7 +445,11 @@ class FmrPlugin(PyPlotPlugin):
                         layer.rescale()
                     except Exception:
                         pass
-                    graph_title = entry.sample
+                    graph_title = (
+                        f"{entry.sample} (phase {rotation_angle:.2f}°)"
+                        if rotated
+                        else entry.sample
+                    )
                     try:
                         graph.set_str("title", graph_title)
                         graph.name = self._origin_graph_name(graph_title)
@@ -417,6 +493,69 @@ class FmrPlugin(PyPlotPlugin):
             self._log(f"Origin export failed: {exc}", level="error")
             return
         self._log("Sent FMR data to Origin.")
+
+    def _sync_phase_controls(self) -> None:
+        rotate_enabled = bool(
+            self._phase_rotate_checkbox.isChecked()
+            if self._phase_rotate_checkbox is not None
+            else False
+        )
+        auto_enabled = bool(
+            self._phase_auto_checkbox.isChecked()
+            if self._phase_auto_checkbox is not None
+            else False
+        )
+        if self._phase_auto_checkbox is not None:
+            self._phase_auto_checkbox.setEnabled(rotate_enabled)
+        if self._phase_angle_spin is not None:
+            self._phase_angle_spin.setEnabled(rotate_enabled and not auto_enabled)
+
+    def _phase_adjusted_data(
+        self,
+        *,
+        entry: FmrEntry,
+        data: pd.DataFrame,
+        field_col: str,
+        x_col: str,
+        y_col: str,
+    ) -> tuple[pd.DataFrame, float, bool]:
+        rotate_enabled = bool(
+            self._phase_rotate_checkbox.isChecked()
+            if self._phase_rotate_checkbox is not None
+            else False
+        )
+        if not rotate_enabled:
+            return data, 0.0, False
+
+        auto_enabled = bool(
+            self._phase_auto_checkbox.isChecked()
+            if self._phase_auto_checkbox is not None
+            else False
+        )
+        if auto_enabled:
+            angle = estimate_phase_rotation_angle(
+                data[field_col].to_numpy(),
+                data[x_col].to_numpy(),
+                data[y_col].to_numpy(),
+            )
+        else:
+            angle = float(
+                self._phase_angle_spin.value()
+                if self._phase_angle_spin is not None
+                else 0.0
+            )
+        x_rot, y_rot = rotate_lockin_phase(
+            data[x_col].to_numpy(),
+            data[y_col].to_numpy(),
+            angle,
+        )
+        rotated = data.copy()
+        rotated.loc[:, x_col] = x_rot
+        rotated.loc[:, y_col] = y_rot
+        self._log(
+            f"{entry.sample}: phase rotated by {angle:.2f}° ({'auto' if auto_enabled else 'manual'})."
+        )
+        return rotated, float(angle), True
 
     @staticmethod
     def _origin_graph_name(label: str) -> str:

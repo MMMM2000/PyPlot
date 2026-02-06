@@ -489,6 +489,17 @@ def _estimate_edge_values(df: pd.DataFrame, x_axis: str, y_axis: str) -> tuple[f
     return left, right
 
 
+def _numeric_column(frame: pd.DataFrame, column: str) -> pd.Series:
+    """Return a numeric Series even when duplicate column labels exist."""
+
+    if column not in frame.columns:
+        return pd.Series(dtype=float)
+    values: pd.Series | pd.DataFrame = frame.loc[:, column]
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, 0]
+    return pd.to_numeric(values, errors="coerce")
+
+
 def _apply_rescaling(
     entries: Sequence[tuple[Path, pd.DataFrame]],
     x_axis: str,
@@ -501,7 +512,7 @@ def _apply_rescaling(
         if subset.empty:
             continue
         left, right = _estimate_edge_values(subset, x_axis, y_axis)
-        series_y = pd.to_numeric(subset[y_axis], errors="coerce")
+        series_y = _numeric_column(subset, y_axis)
         y_min = float(series_y.min()) if not series_y.empty else float(left)
         y_max = float(series_y.max()) if not series_y.empty else float(right)
         prepared.append((path, subset, float(left), float(right), y_min, y_max))
@@ -563,7 +574,7 @@ def _apply_rescaling(
 
         delta = source_right - source_left
         if _is_near_zero(delta, source_left, source_right, y_min, y_max):
-            numeric_series = pd.to_numeric(subset[y_axis], errors="coerce").dropna()
+            numeric_series = _numeric_column(subset, y_axis).dropna()
             if not numeric_series.empty:
                 alt_min = float(numeric_series.min())
                 alt_max = float(numeric_series.max())
@@ -3993,7 +4004,16 @@ class VSMPlotter(PyPlotWindow):
         return lookup
 
     def _line_style_kwargs(self) -> Dict[str, Any]:
-        style = self.style_combo.currentData()
+        style = None
+        try:
+            combo = self.style_combo
+        except Exception:
+            combo = None
+        if combo is not None:
+            try:
+                style = combo.currentData()
+            except Exception:
+                style = None
         if style == "line_markers":
             return {"linestyle": "-", "marker": "o", "markersize": 4}
         return {"linestyle": "-"}
@@ -4687,7 +4707,7 @@ class VSMPlotter(PyPlotWindow):
                         continue
                     if measurement.sample_name:
                         raw_sample_names.add(str(measurement.sample_name))
-                    series_y = subset[y_axis]
+                    series_y = _numeric_column(subset, y_axis)
                     if rescale_enabled:
                         result = rescale_info.get(temperature, {}).get(measurement.path)
                         if result is not None:
@@ -4696,7 +4716,7 @@ class VSMPlotter(PyPlotWindow):
                                 series_y = replacement
                             else:
                                 series_y = series_y * result.scale + result.offset
-                    numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                    numeric_x = _numeric_column(subset, x_axis).to_numpy()
                     numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
                     if numeric_x.size == 0 or numeric_y.size == 0:
                         continue
@@ -5764,7 +5784,7 @@ class VSMPlotter(PyPlotWindow):
                 if measurement.angle is None:
                     continue
                 angle = float(measurement.angle)
-                series_y = subset[y_axis]
+                series_y = _numeric_column(subset, y_axis)
                 if rescale_enabled:
                     result = rescale_info.get(temperature, {}).get(measurement.path)
                     if result is not None:
@@ -5773,7 +5793,7 @@ class VSMPlotter(PyPlotWindow):
                             series_y = replacement
                         else:
                             series_y = series_y * result.scale + result.offset
-                numeric_x = pd.to_numeric(subset[x_axis], errors="coerce").to_numpy()
+                numeric_x = _numeric_column(subset, x_axis).to_numpy()
                 numeric_y = pd.to_numeric(series_y, errors="coerce").to_numpy()
                 label = self._series_label(
                     measurement,
@@ -5869,15 +5889,17 @@ class VSMPlotter(PyPlotWindow):
                 for temperature, entries in sorted(prepared_groups.items()):
                     valid = []
                     for measurement, subset in entries:
-                        series_y = subset[y_axis]
+                        series_y = _numeric_column(subset, y_axis)
                         if rescale_enabled:
                             result = rescale_info.get(temperature, {}).get(measurement.path)
                             if result is not None:
                                 series_y = series_y * result.scale + result.offset
-                        export_subset = pd.DataFrame({
-                            x_axis: subset[x_axis],
-                            y_axis: series_y,
-                        }).astype(float)
+                        export_subset = pd.DataFrame(
+                            {
+                                x_axis: _numeric_column(subset, x_axis),
+                                y_axis: pd.to_numeric(series_y, errors="coerce"),
+                            }
+                        ).dropna().astype(float)
                         if export_subset.empty:
                             continue
                         valid.append((measurement, export_subset))
@@ -5923,7 +5945,7 @@ class VSMPlotter(PyPlotWindow):
     ) -> None:
         sample_label: str | None = None
         for measurement, _subset in entries:
-            candidate = measurement.sample_name or measurement.path.stem
+            candidate = measurement.sample_name
             if candidate:
                 sample_label = str(candidate)
                 break
@@ -5979,24 +6001,31 @@ class VSMPlotter(PyPlotWindow):
         if not y_unit and "emu" in y_axis.lower():
             y_unit = "emu"
 
+        def _unique_column_name(base: str) -> str:
+            candidate = base
+            suffix = 2
+            while candidate in data:
+                candidate = f"{base} #{suffix}"
+                suffix += 1
+            return candidate
+
         for measurement, subset in entries:
             angle_label = (
                 f"{measurement.angle:g}°"
                 if measurement.angle is not None
                 else measurement.path.stem
             )
-            x_name = f"X{plot_idx}"
-            y_name = f"Y{plot_idx}"
-            data[x_name] = pd.to_numeric(subset[x_axis], errors="coerce").reset_index(drop=True)
-            data[y_name] = pd.to_numeric(subset[y_axis], errors="coerce").reset_index(drop=True)
+            x_name = _unique_column_name(f"{x_label or x_axis} ({angle_label})")
+            y_name = _unique_column_name(f"{y_label or y_axis} ({angle_label})")
+            data[x_name] = _numeric_column(subset, x_axis).reset_index(drop=True)
+            data[y_name] = _numeric_column(subset, y_axis).reset_index(drop=True)
             column_names.extend([x_name, y_name])
             axis_roles.extend(["X", "Y"])
-            column_labels[x_name] = x_label or x_axis
+            column_labels[x_name] = x_name
             column_units[x_name] = x_unit
-            column_comments[x_name] = angle_label
-            column_labels[y_name] = y_label or y_axis
+            column_labels[y_name] = y_name
             column_units[y_name] = y_unit
-            column_comments[y_name] = angle_label
+            column_comments[y_name] = f"Angle {angle_label}"
             plot_pairs.append((x_name, y_name, angle_label, plot_idx - 1))
             plot_idx += 1
 
@@ -6013,8 +6042,14 @@ class VSMPlotter(PyPlotWindow):
 
         col_index = {name: idx for idx, name in enumerate(column_names)}
         for name, index in col_index.items():
+            label_text = column_labels.get(name, name)
             try:
-                sheet.set_label(index, column_labels.get(name, name), "L")
+                sheet.set_label(index, label_text, "L")
+            except TypeError:
+                try:
+                    sheet.set_label(index, label_text)
+                except Exception:
+                    pass
             except Exception:
                 pass
             unit = column_units.get(name)
@@ -6027,6 +6062,18 @@ class VSMPlotter(PyPlotWindow):
             if comment:
                 try:
                     sheet.set_label(index, comment, "C")
+                except TypeError:
+                    try:
+                        setter = getattr(sheet, "set_comment", None)
+                        if callable(setter):
+                            setter(index, comment)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+                try:
+                    safe_comment = self._escape_origin_text(comment)
+                    origin_any.lt_exec(f'wks.col{index + 1}.comment$="{safe_comment}";')
                 except Exception:
                     pass
 

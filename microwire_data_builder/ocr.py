@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import shutil
+import sys
 import tempfile
 from functools import lru_cache
 from pathlib import Path
@@ -17,6 +18,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checkers only
 
 DEFAULT_LOGGER = "microwire_data_builder"
 _MISSING_PADDLE_WARNED = False
+_UNSAFE_RUNTIME_WARNED = False
 
 if os.name == "nt":
     _ORIGINAL_HOME = Path(os.environ.get("USERPROFILE") or os.path.expanduser("~"))
@@ -236,7 +238,31 @@ def get_paddle_ocr(logger: Optional[logging.Logger] = None):
     """Return a configured PaddleOCR instance or ``None`` when unavailable."""
 
     log = logger or logging.getLogger(DEFAULT_LOGGER)
-    global _MISSING_PADDLE_WARNED
+    global _MISSING_PADDLE_WARNED, _UNSAFE_RUNTIME_WARNED
+    force_unsafe = os.environ.get("MICROWIRE_ENABLE_PADDLE_OCR_UNSAFE", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    disable_requested = os.environ.get("MICROWIRE_DISABLE_PADDLE_OCR", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if disable_requested:
+        return None
+    if sys.version_info >= (3, 13) and not force_unsafe:
+        if not _UNSAFE_RUNTIME_WARNED:
+            log.warning(
+                "PaddleOCR is disabled on Python %s.%s due runtime instability. "
+                "Set MICROWIRE_ENABLE_PADDLE_OCR_UNSAFE=1 to override.",
+                sys.version_info.major,
+                sys.version_info.minor,
+            )
+            _UNSAFE_RUNTIME_WARNED = True
+        return None
     try:
         ocr = _create_default_ocr()
         setattr(ocr, "_microwire_backend", "PaddleOCR")

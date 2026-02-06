@@ -9,19 +9,7 @@ from PyQt6 import QtCore, QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
 from plotting.plugins._window import window_api
-
-try:
-    from experiments.simple_scripts.vsm_temperature_scan import (
-        PlotSeries,
-        VSMEntry,
-        VSMTemperatureScanProcessor,
-        VSM_TEMP_SCAN_COLORS,
-    )
-except Exception:  # pragma: no cover - fallback when optional dependency missing
-    PlotSeries = Any  # type: ignore
-    VSMEntry = Any  # type: ignore
-    VSMTemperatureScanProcessor = None  # type: ignore
-    VSM_TEMP_SCAN_COLORS = ["#dc2626", "#2563eb", "#f97316", "#16a34a"]  # type: ignore
+from .core import PlotSeries, VSMEntry, VSMTemperatureScanProcessor, VSM_TEMP_SCAN_COLORS
 
 
 @register_plugin("VSM Temperature Scan")

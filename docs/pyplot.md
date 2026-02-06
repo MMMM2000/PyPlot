@@ -6,8 +6,13 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 
 - **Project Explorer** lists imported workbooks, worksheets, and generated graphs. Every plug-in uses the same tree so you can keep one set of worksheets available while switching tools.
 - **Object Manager** mirrors the current Matplotlib tab (axes, lines, legends, annotations) and lets you tweak selections via the toolbar actions.
+- **Legend sync** now follows line visibility toggles and graph-format applies: legends are rebuilt from currently visible lines so hidden series are not listed.
 - **Toolbars** (Plugin, Plot actions, Navigation, Format) live at the top. Enabled actions now show a subtle highlight so you can immediately see what is clickable; disabled items stay muted.
+- **Graph formatting** is shared across plugins: a built-in Graph formatting panel lets you edit title/X/Y labels, font sizes, tick size/width, tick mode (`Auto`, by increment, or by target count), figure width/height, axes aspect mode (`Auto`/`Equal`/custom ratio), line+marker size, linear/log axis scale, explicit axis limits, grid, and legend visibility, then apply to the current graph or all open graphs.
+  Access note: use the top-toolbar `Graph formatting` section button to open the controls popover for the active plugin/workbench settings.
+- **Direct on-canvas editing** is available on Matplotlib graphs: double-click title/X/Y label text to edit it, or double-click near an axis line to edit that axis scale/limits (linear/log + auto/manual bounds).
 - **Dock switchers** sit on the left/right edges so you can collapse/restore the Project Explorer, Message Log, and Object Manager without losing their placement.
+- **Responsive side docks**: Project Explorer/Object Manager widths now reflow on window resize and expand on large/maximized windows, so the side panels do not stay locked to tiny startup widths.
 - **Undo/Redo** are exposed on the Edit menu (Ctrl+Z / Ctrl+Y). They track tab changes, worksheet tabs, and other session actions.
 - **Saving** uses `.pypj` project files. When a session contains imported data or generated worksheets PyPlot prompts you to save, discard, or cancel if you try to close the window.
 - **Folder memory** is scoped per plug-in. Import file pickers, graph saves, and TXT exports reopen in the last folder used by that plug-in instead of sharing a single global path; plug-ins can also call `PyPlotPlugin.preferred_export_directory(...)` / `remember_export_directory(...)` to share the same history.
@@ -15,6 +20,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Legends** default to “text colour follows plot” for every plug-in. Legend options (show symbols, placement, orientation, drag, follow colours) are remembered per plug-in between sessions so each workflow keeps its own defaults.
 - **Fullscreen**: maximizing any graph/workbook hides the others and maximizes the active subwindow; switching tabs or double-clicking a different graph keeps fullscreen on (only the active window is visible) until you restore a window to normal.
 - **TXT exports**: the default filename mirrors the current workbook/plot label so exported TXT/CSV files match the names shown in the Project Explorer and carry the sample/procedure context baked into those labels.
+- **Graph export**: Save graph supports `PNG`, `PDF`, and `SVG`; the Graph formatting panel also exposes a one-click `Export PDF…` action for LaTeX/document workflows.
 
 ## Origin export checklist
 - Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.
@@ -33,9 +39,9 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Stress Dependence       | `plotting.plugins.stress_dependence`                  | Converts TXT exports into worksheets + line graphs. |
 | Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. |
 | VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. Workbooks group each temperature graph into a single worksheet with XY column pairs per angle. |
-| VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; can combine low/high field runs into a dual-axis plot; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. |
-| DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level; Origin export is available from the toolbar. |
-| FMR                     | `plotting.plugins.fmr`                                | Plots Field vs X/Y voltage traces from FMR CSV files and exports to Origin with X/Y columns; includes an option to combine all samples into a single X-only plot with a per-sample legend. |
+| VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; can combine low/high field runs into a dual-axis plot; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. Core parsing/export logic now lives in `plotting.plugins.vsm_temperature_scan.core` so PyPlot and Data Builder share one implementation. |
+| DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level; includes a Graph formatting panel (title/X/Y label text + visibility toggles, grid, legend location, editable legend-entry text, line width/font size, optional axis limits, apply current/all, and selective copy to chosen DMA graphs), plus Origin export from the toolbar. Parsing is plugin-local (`plotting.plugins.dma_iso_stress.parser`) and Tk-independent. |
+| FMR                     | `plotting.plugins.fmr`                                | Plots Field vs X/Y voltage traces from FMR CSV files and exports to Origin with X/Y columns; includes an option to combine all samples into a single X-only plot with a per-sample legend, plus lock-in phase rotation controls (auto flatten-Y or manual angle). |
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
 
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.
@@ -50,6 +56,7 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
 ## Logs
 
 - The **Message Log** dock records plug-in output, path skips, and Origin export diagnostics. Toggle it via the dock switcher on the left edge whenever you need to inspect warnings.
+- Project Explorer/Object Manager activation errors (for example, stale item references) are now captured in the Message Log instead of hard-aborting the app.
 
 ## Extending / Debugging
 
@@ -57,6 +64,7 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
 - Use `docs/todo/pyplot_migration_todo.md` for open work. Update this `pyplot.md` file when you add major features or new plug-ins so other developers can discover them quickly.
 - Window layout conventions:
   - Graph/worksheet windows are MDI subwindows (no visible tab bar). Default width is half of the viewport; height follows the subwindow’s aspect ratio and shrinks width if needed to fit vertically. Aspect ratio is locked during manual resizing.
+  - When only one subwindow is visible in windowed mode, it expands to fill the available MDI viewport so content is not cropped at the bottom after fullscreen/resize transitions.
   - Maximizing any subwindow maximizes all of them when you switch via the Project Explorer; restoring one returns all to windowed mode.
   - When adding or updating plug-ins, keep these sizing/fullscreen rules intact and refresh this document if the behavior changes.
 - Subwindow lifecycle:

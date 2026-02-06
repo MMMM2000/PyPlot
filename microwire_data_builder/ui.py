@@ -115,12 +115,12 @@ from .core import (
 )
 
 try:
-    from experiments.simple_scripts.vsm_temperature_scan import VSMTemperatureScanProcessor
+    from plotting.plugins.vsm_temperature_scan.core import VSMTemperatureScanProcessor
 except Exception:  # pragma: no cover - optional dependency
     VSMTemperatureScanProcessor = None  # type: ignore[assignment]
 
 try:
-    from experiments.simple_scripts.dma_isostress import parse_dma_txt
+    from plotting.plugins.dma_iso_stress.parser import parse_dma_txt
 except Exception:  # pragma: no cover - optional dependency
     parse_dma_txt = None  # type: ignore[assignment]
 
@@ -4918,7 +4918,10 @@ class _PendingScanWorker(QtCore.QObject):
     def _compute_pending_count(self) -> int:
         candidates: Dict[str, Path] = {}
         suffixes = {s.lower() for s in self._supported_suffixes}
+        thread = QtCore.QThread.currentThread()
         for source in self._sources:
+            if thread is not None and thread.isInterruptionRequested():
+                return 0
             root = Path(source).expanduser()
             if not root.exists():
                 continue
@@ -4929,6 +4932,8 @@ class _PendingScanWorker(QtCore.QObject):
             except Exception:
                 continue
             for path in iterator:
+                if thread is not None and thread.isInterruptionRequested():
+                    return 0
                 if not path.is_file():
                     continue
                 if suffixes and path.suffix.lower() not in suffixes:
@@ -4941,6 +4946,8 @@ class _PendingScanWorker(QtCore.QObject):
         pending_count = 0
         processed = self._processed
         for path in candidates.values():
+            if thread is not None and thread.isInterruptionRequested():
+                return pending_count
             key = str(path)
             try:
                 mtime = path.stat().st_mtime
@@ -6237,9 +6244,37 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         return pending
 
     def _invalidate_pending_cache(self) -> None:
+        self._stop_pending_scan(wait_ms=200)
         self._pending_count_cache = None
         self._pending_scan_in_progress = False
         self._pending_scan_generation += 1
+
+    def _stop_pending_scan(self, *, wait_ms: int = 500) -> None:
+        thread = self._pending_scan_thread
+        self._pending_scan_thread = None
+        self._pending_scan_worker = None
+        self._pending_scan_in_progress = False
+        if thread is None:
+            return
+        try:
+            thread.requestInterruption()
+        except Exception:
+            pass
+        try:
+            thread.quit()
+        except Exception:
+            pass
+        try:
+            if thread.isRunning():
+                thread.wait(max(0, int(wait_ms)))
+        except Exception:
+            pass
+        try:
+            if thread.isRunning():
+                thread.terminate()
+                thread.wait(200)
+        except Exception:
+            pass
 
     def _request_pending_scan(self) -> None:
         if self._pending_scan_in_progress:
@@ -6247,6 +6282,7 @@ class MiniDatabaseSection(QtWidgets.QWidget):
         if not self.data.sources:
             self._pending_count_cache = 0
             return
+        self._stop_pending_scan(wait_ms=100)
         self._pending_scan_generation += 1
         generation = self._pending_scan_generation
         worker = _PendingScanWorker(
@@ -6574,6 +6610,32 @@ class MiniDatabaseSection(QtWidgets.QWidget):
             except Exception:
                 pass
             self._worker_thread = None
+
+    def _shutdown_background_threads(self) -> None:
+        self._cancel_requested = True
+        self._stop_pending_scan(wait_ms=800)
+        thread = self._worker_thread
+        if thread is not None:
+            try:
+                thread.quit()
+            except Exception:
+                pass
+            try:
+                if thread.isRunning():
+                    thread.wait(800)
+            except Exception:
+                pass
+            try:
+                if thread.isRunning():
+                    thread.terminate()
+                    thread.wait(200)
+            except Exception:
+                pass
+        self._cleanup_worker_thread()
+
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
+        self._shutdown_background_threads()
+        super().closeEvent(event)
 
     def _handle_worker_progress(self, current: int, total: int, message: object) -> None:
         text: Optional[str] = None
@@ -9788,14 +9850,29 @@ class MicroscopeSection(MiniDatabaseSection):
 
     def _prepopulate_image_refs(self, candidates: Iterable[Path]) -> None:
         expected = self._expected_keys_current or self._expected_microwire_keys()
-        allowed = (
-            {
-                _microwire_key_to_str((composition, draw, piece, suffix))
-                for composition, draw, piece, suffix in expected
-            }
-            if expected
-            else None
-        )
+        allowed: Set[str] | None = None
+        if expected:
+            allowed = set()
+            for item in expected:
+                composition: object
+                draw: object
+                piece: object
+                suffix: object | None
+                try:
+                    composition, draw, piece, suffix = item  # type: ignore[misc]
+                except Exception:
+                    try:
+                        composition, draw, piece = item  # type: ignore[misc]
+                    except Exception:
+                        continue
+                    suffix = None
+                try:
+                    key_token = _microwire_key_to_str(
+                        (str(composition), int(draw), int(piece), suffix)
+                    )
+                except Exception:
+                    continue
+                allowed.add(key_token)
         grouped: Dict[str, Dict[str, Any]] = {}
         for path in candidates:
             key_tuple = _microscope_key(path)
@@ -12046,7 +12123,7 @@ class VideoSection(MiniDatabaseSection):
     def _apply_overrides_to_table(self, table: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(table, pd.DataFrame) or table.empty:
             return table
-        updated = table.copy()
+        updated = self._ensure_core_columns(table.copy())
         fabrication_frame = self._fabrication_table()
         cumulative_map = self._build_cumulative_lengths(updated, fabrication_frame)
         for idx, row in updated.iterrows():
@@ -12082,7 +12159,7 @@ class VideoSection(MiniDatabaseSection):
             frame = _video_index_to_frame(index, fabrication_frame)
         if not isinstance(frame, pd.DataFrame) or frame.empty:
             return
-        updated = frame.copy()
+        updated = self._ensure_core_columns(frame.copy())
         if CORE_TEMPERATURE_COLUMN not in updated.columns and "Temperature (°C)" in updated.columns:
             updated = updated.rename(columns={"Temperature (°C)": CORE_TEMPERATURE_COLUMN})
         if GLASS_TEMPERATURE_COLUMN not in updated.columns:
@@ -12110,6 +12187,58 @@ class VideoSection(MiniDatabaseSection):
         updated = self._apply_overrides_to_table(frame)
         self.data.table = updated
         self.model.set_frame(updated)
+
+    def _ensure_core_columns(self, frame: pd.DataFrame) -> pd.DataFrame:
+        updated = frame.copy()
+        if "Composition" not in updated.columns:
+            updated["Composition"] = ""
+        if "Draw" not in updated.columns:
+            updated["Draw"] = None
+        if "Piece" not in updated.columns:
+            updated["Piece"] = None
+
+        draw_values = list(updated["Draw"]) if "Draw" in updated.columns else [None] * len(updated.index)
+        piece_values = list(updated["Piece"]) if "Piece" in updated.columns else [None] * len(updated.index)
+        microwire_values = (
+            list(updated["Microwire"])
+            if "Microwire" in updated.columns
+            else [None] * len(updated.index)
+        )
+        for row_idx, value in enumerate(microwire_values):
+            try:
+                has_draw = not self._is_missing(draw_values[row_idx])
+                has_piece = not self._is_missing(piece_values[row_idx])
+            except IndexError:
+                continue
+            if has_draw and has_piece:
+                continue
+            parts = _microwire_parts_from_label(str(value or ""))
+            if not parts:
+                continue
+            draw, piece, _suffix = parts
+            if not has_draw:
+                draw_values[row_idx] = draw
+            if not has_piece:
+                piece_values[row_idx] = piece
+        updated["Draw"] = draw_values
+        updated["Piece"] = piece_values
+
+        if "Microwire" not in updated.columns:
+            labels: List[str] = []
+            for draw, piece in zip(draw_values, piece_values):
+                try:
+                    draw_int = int(draw)
+                except (TypeError, ValueError):
+                    labels.append("")
+                    continue
+                try:
+                    piece_int = int(piece)
+                except (TypeError, ValueError):
+                    labels.append(f"{draw_int}/?")
+                    continue
+                labels.append(_microwire_label(draw_int, piece_int, None))
+            updated["Microwire"] = labels
+        return updated
 
     def _normalize_temperature_columns(self) -> None:
         frame = self.data.table if isinstance(self.data.table, pd.DataFrame) else None
@@ -21475,6 +21604,12 @@ class BuilderWindow(QtWidgets.QMainWindow):
                 if self._dirty:
                     event.ignore()
                     return
+        for section in self.sections.values():
+            if isinstance(section, MiniDatabaseSection):
+                try:
+                    section._shutdown_background_threads()
+                except Exception:
+                    pass
         super().closeEvent(event)
 
     def _clamp_to_available_geometry(self) -> None:

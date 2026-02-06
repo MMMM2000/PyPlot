@@ -2,27 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import importlib.util
-import sys
-
 import pandas as pd
-import pytest
-
-MODULE_PATH = (
-    Path(__file__).resolve().parent.parent
-    / "experiments"
-    / "simple_scripts"
-    / "vsm_temperature_scan.py"
-)
-
-spec = importlib.util.spec_from_file_location("vsm_temperature_scan", MODULE_PATH)
-assert spec and spec.loader
-module = importlib.util.module_from_spec(spec)
-sys.modules["vsm_temperature_scan"] = module
-try:
-    spec.loader.exec_module(module)  # type: ignore[call-arg]
-except ImportError as exc:  # pragma: no cover - environment guard
-    pytest.skip(f"VSM temperature scan dependencies missing: {exc}", allow_module_level=True)
+from plotting.plugins.vsm_temperature_scan import core as module
 
 
 def test_build_series_orders_sections_and_fields() -> None:

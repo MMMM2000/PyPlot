@@ -422,3 +422,111 @@ Traceback (most recent call last):
     ^^^^^^^^^^^^^^^^
 AttributeError: 'AssemblySection' object has no attribute '_mark_dirty'
 
+2026-02-05 22:34:31 [EXCEPTION] KeyError: 'Composition'
+Traceback (most recent call last):
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3812, in get_loc
+    return self._engine.get_loc(casted_key)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "pandas/_libs/index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item
+KeyError: 'Composition'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12005, in sync_with_fabrication
+    self._apply_overrides_to_model()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12187, in _apply_overrides_to_model
+    updated = self._apply_overrides_to_table(frame)
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12138, in _apply_overrides_to_table
+    composition = str(updated.at[idx, "Composition"]).strip()
+                      ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexing.py", line 2576, in __getitem__
+    return super().__getitem__(key)
+           ~~~~~~~~~~~~~~~~~~~^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexing.py", line 2528, in __getitem__
+    return self.obj._get_value(*key, takeable=self._takeable)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/frame.py", line 4225, in _get_value
+    series = self._get_item_cache(col)
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/frame.py", line 4649, in _get_item_cache
+    loc = self.columns.get_loc(item)
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3819, in get_loc
+    raise KeyError(key) from err
+KeyError: 'Composition'
+
+2026-02-05 22:34:31 [EXCEPTION] KeyError: 'Composition'
+Traceback (most recent call last):
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3812, in get_loc
+    return self._engine.get_loc(casted_key)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "pandas/_libs/index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item
+KeyError: 'Composition'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12005, in sync_with_fabrication
+    self._apply_overrides_to_model()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12187, in _apply_overrides_to_model
+    updated = self._apply_overrides_to_table(frame)
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12138, in _apply_overrides_to_table
+    composition = str(updated.at[idx, "Composition"]).strip()
+                      ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexing.py", line 2576, in __getitem__
+    return super().__getitem__(key)
+           ~~~~~~~~~~~~~~~~~~~^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexing.py", line 2528, in __getitem__
+    return self.obj._get_value(*key, takeable=self._takeable)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/frame.py", line 4225, in _get_value
+    series = self._get_item_cache(col)
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/frame.py", line 4649, in _get_item_cache
+    loc = self.columns.get_loc(item)
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3819, in get_loc
+    raise KeyError(key) from err
+KeyError: 'Composition'
+
+2026-02-05 22:34:31 [EXCEPTION] KeyError: 'Composition'
+Traceback (most recent call last):
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3812, in get_loc
+    return self._engine.get_loc(casted_key)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "pandas/_libs/index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7088, in pandas._libs.hashtable.PyObjectHashTable.get_item
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7096, in pandas._libs.hashtable.PyObjectHashTable.get_item
+KeyError: 'Composition'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12005, in sync_with_fabrication
+    self._apply_overrides_to_model()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12187, in _apply_overrides_to_model
+    updated = self._apply_overrides_to_table(frame)
+  File "/Users/martin/PyPlot/microwire_data_builder/ui.py", line 12138, in _apply_overrides_to_table
+    composition = str(updated.at[idx, "Composition"]).strip()
+                      ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexing.py", line 2576, in __getitem__
+    return super().__getitem__(key)
+           ~~~~~~~~~~~~~~~~~~~^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexing.py", line 2528, in __getitem__
+    return self.obj._get_value(*key, takeable=self._takeable)
+           ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/frame.py", line 4225, in _get_value
+    series = self._get_item_cache(col)
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/frame.py", line 4649, in _get_item_cache
+    loc = self.columns.get_loc(item)
+  File "/Users/martin/PyPlot/.venv/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3819, in get_loc
+    raise KeyError(key) from err
+KeyError: 'Composition'
+

@@ -5,6 +5,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 import weakref
 import numpy as np
 from dataclasses import dataclass, field
@@ -77,6 +78,9 @@ from plotting.shared.readability import (
 OBJECT_TREE_STATE_ROLE = int(QtCore.Qt.ItemDataRole.UserRole) + 1
 PRIMARY_DOCK_DEFAULT_WIDTH = 320
 PRIMARY_DOCK_MIN_WIDTH = 160
+PRIMARY_DOCK_EXPAND_THRESHOLD = 1300
+PRIMARY_DOCK_EXPANDED_FRACTION = 0.18
+PRIMARY_DOCK_EXPANDED_MAX = 520
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -192,6 +196,82 @@ def _sync_legend_text_colors(legend: Legend) -> None:
         legend.figure.canvas.draw_idle()
     except Exception:
         pass
+
+
+def _legend_handles(legend: Legend) -> list[Any]:
+    """Return legend handles across Matplotlib versions."""
+
+    handles: list[Any] = []
+    for attr in ("legendHandles", "legend_handles"):
+        value = getattr(legend, attr, None)
+        if value:
+            try:
+                handles = list(value)
+            except Exception:
+                handles = []
+            if handles:
+                return handles
+    try:
+        handles = list(legend.legendHandles)
+    except Exception:
+        handles = []
+    return handles
+
+
+def _set_legend_symbol_visibility(legend: Legend, show_symbols: bool) -> None:
+    """Show or hide symbol glyphs while preserving the original alpha."""
+
+    handles = _legend_handles(legend)
+    legend._mw_show_symbols = bool(show_symbols)
+    for handle in handles:
+        original_alpha = getattr(handle, "_mw_original_alpha", None)
+        if original_alpha is None:
+            try:
+                original_alpha = handle.get_alpha()
+            except Exception:
+                original_alpha = None
+            if original_alpha is None:
+                original_alpha = 1.0
+            setattr(handle, "_mw_original_alpha", float(original_alpha))
+        target_alpha = float(original_alpha) if show_symbols else 0.0
+        alpha_set = False
+        if hasattr(handle, "set_alpha"):
+            try:
+                handle.set_alpha(target_alpha)
+                alpha_set = True
+            except Exception:
+                alpha_set = False
+        if not alpha_set and hasattr(handle, "set_visible"):
+            setter = getattr(handle, "set_visible", None)
+            if callable(setter):
+                try:
+                    setter(show_symbols)
+                except Exception:
+                    pass
+
+
+def _set_legend_text_follow_handles(legend: Legend, follow_colors: bool) -> None:
+    """Toggle whether legend text color follows legend handle color."""
+
+    legend._mw_text_follows_handles = bool(follow_colors)
+    try:
+        texts = list(legend.get_texts())
+    except Exception:
+        texts = []
+    originals = getattr(legend, "_mw_text_original_colors", [])
+    if not originals and texts:
+        try:
+            originals = [text.get_color() for text in texts]
+        except Exception:
+            originals = []
+        setattr(legend, "_mw_text_original_colors", originals)
+    if not follow_colors:
+        for text, color in zip(texts, originals):
+            try:
+                text.set_color(color)
+            except Exception:
+                continue
+    _sync_legend_text_colors(legend)
 
 
 class _MessageLogHandler(logging.Handler):
@@ -544,7 +624,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 pass
         if not dock.isFloating():
             self._ensure_tabbed(dock)
-            width = self._dock_widths.get(dock, 0)
+            width = self._target_width_for_dock(dock)
             if width > 0:
                 self._apply_dock_width(dock, width)
         self._expanded_index = index
@@ -633,7 +713,7 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             dock.show()
             if not dock.isFloating():
                 self._ensure_tabbed(dock)
-                width = self._dock_widths.get(dock, 0)
+                width = self._target_width_for_dock(dock)
                 if width > 0:
                     self._apply_dock_width(dock, width)
         self._expanded_index = valid[0]
@@ -746,9 +826,27 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
             if self._pinned_index == index:
                 self._pinned_index = None
             self._ensure_tabbed(dock)
-            width = self._dock_widths.get(dock, 0)
+            width = self._target_width_for_dock(dock)
             if width > 0:
                 self._apply_dock_width(dock, width)
+
+    def _target_width_for_dock(self, dock: QtWidgets.QDockWidget) -> int:
+        width = self._dock_widths.get(dock, 0)
+        main = self._main_window()
+        if isinstance(main, QtWidgets.QMainWindow):
+            target_getter = getattr(main, "_primary_dock_target_width", None)
+            if callable(target_getter):
+                fallback = max(dock.sizeHint().width(), width, 220)
+                try:
+                    computed = int(target_getter(dock, fallback))
+                except Exception:
+                    computed = fallback
+                if computed > 0:
+                    width = max(width, computed)
+        if width <= 0:
+            width = max(dock.sizeHint().width(), 220)
+        self._dock_widths[dock] = width
+        return width
 
     def _main_window(self) -> QtWidgets.QMainWindow | None:
         if self._panel_dock is not None:
@@ -1760,21 +1858,7 @@ class LegendSettingsDialog(QtWidgets.QDialog):
         except Exception:
             pass
 
-        handles: list[Any] = []
-        for attr in ("legendHandles", "legend_handles"):
-            value = getattr(legend, attr, None)
-            if value:
-                try:
-                    handles = list(value)
-                except Exception:
-                    handles = []
-                if handles:
-                    break
-        if not handles:
-            try:
-                handles = list(legend.legendHandles)
-            except Exception:
-                handles = []
+        handles = _legend_handles(legend)
         try:
             texts = list(legend.get_texts())
         except Exception:
@@ -1829,68 +1913,11 @@ class LegendSettingsDialog(QtWidgets.QDialog):
                 except Exception:
                     pass
 
-        show_symbols = self.symbol_checkbox.isChecked()
-        legend._mw_show_symbols = show_symbols
-        for handle in handles:
-            original_alpha = getattr(handle, "_mw_original_alpha", None)
-            if original_alpha is None:
-                try:
-                    original_alpha = handle.get_alpha()
-                except Exception:
-                    original_alpha = None
-                if original_alpha is None:
-                    original_alpha = 1.0
-                setattr(handle, "_mw_original_alpha", float(original_alpha))
-            target_alpha = float(original_alpha) if show_symbols else 0.0
-            alpha_set = False
-            if hasattr(handle, "set_alpha"):
-                try:
-                    handle.set_alpha(target_alpha)
-                    alpha_set = True
-                except Exception:
-                    alpha_set = False
-            if not alpha_set and hasattr(handle, "set_visible"):
-                setter = getattr(handle, "set_visible", None)
-                if callable(setter):
-                    try:
-                        setter(show_symbols)
-                    except Exception:
-                        pass
-
-        follow_colors = self.text_color_follow_checkbox.isChecked()
-        legend._mw_text_follows_handles = follow_colors
-        originals = getattr(legend, "_mw_text_original_colors", [])
-        if follow_colors and handles and texts:
-            for text, handle in zip(texts, handles):
-                color = None
-                getter = getattr(handle, "get_color", None)
-                if callable(getter):
-                    try:
-                        color = getter()
-                    except Exception:
-                        color = None
-                if color is None:
-                    getter = getattr(handle, "get_facecolor", None)
-                    if callable(getter):
-                        try:
-                            color = getter()
-                        except Exception:
-                            color = None
-                        if isinstance(color, (list, tuple)) and color:
-                            color = color[0]
-                if isinstance(color, (list, tuple)) and len(color) >= 3:
-                    color = color[:3]
-                if color is not None:
-                    try:
-                        text.set_color(color)
-                    except Exception:
-                        pass
-        else:
-            for text, color in zip(texts, originals):
-                try:
-                    text.set_color(color)
-                except Exception:
-                    pass
+        _set_legend_symbol_visibility(legend, self.symbol_checkbox.isChecked())
+        _set_legend_text_follow_handles(
+            legend,
+            self.text_color_follow_checkbox.isChecked(),
+        )
 
         draggable = self.draggable_checkbox.isChecked()
         legend._mw_draggable = draggable
@@ -1996,6 +2023,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         ] = {}
         self._navigation_helpers: Dict[FigureCanvas, NavigationToolbar2QT] = {}
         self._cursor_connections: Dict[FigureCanvas, int] = {}
+        self._edit_connections: Dict[FigureCanvas, int] = {}
         self._cursor_label: QtWidgets.QLabel | None = None
         self._cursor_axes: Any | None = None
         self._nav_mode: Optional[str] = None
@@ -2040,6 +2068,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._project_tree_update_depth = 0
         self._project_tree_updates_prev = True
         self._primary_dock_widths: Dict[QtWidgets.QDockWidget, int] = {}
+        self._primary_dock_layout_refreshing = False
+        self._dock_resize_refresh_pending = False
         self._log_alert_enabled: bool = False
         self._left_dock_switcher_widget: _DockSwitcherWidget | None = None
         self._log_view_watcher: _LogViewWatcher | None = None
@@ -2163,8 +2193,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         raise NotImplementedError
 
     def _open_matplotlib_window(self) -> None:
-        tab_widget = getattr(self, "tab_widget", None)
-        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+        tab_widget = self._tab_widget_like()
+        if tab_widget is None:
             QtWidgets.QMessageBox.information(
                 self,
                 "Open in Matplotlib",
@@ -2549,12 +2579,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self,
         *,
         parent: QtWidgets.QWidget | None = None,
+        preferred_suffix: str | None = None,
     ) -> bool:
         """Persist the currently visible graph to an image file."""
 
         target = parent or self
-        tab_widget = getattr(self, "tab_widget", None)
-        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+        tab_widget = self._tab_widget_like()
+        if tab_widget is None:
             QtWidgets.QMessageBox.information(
                 target,
                 "Save Graph",
@@ -2607,7 +2638,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 default_name = descriptor.root_label
         if not default_name:
             default_name = "Graph"
-        suggested_filename = _clean_stem(default_name) + ".png"
+        preferred = (preferred_suffix or ".png").strip().lower()
+        if preferred not in {".png", ".pdf", ".svg"}:
+            preferred = ".png"
+        suggested_filename = _clean_stem(default_name) + preferred
 
         project_path = getattr(self, "_project_path", None)
         project_parent = project_path.parent if isinstance(project_path, Path) and project_path.exists() else None
@@ -2618,12 +2652,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         )
         suggested_path = Path(start_dir) / suggested_filename
 
-        filters = "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;All files (*)"
+        if preferred == ".pdf":
+            filters = "PDF Document (*.pdf);;PNG Image (*.png);;SVG Image (*.svg);;All files (*)"
+            initial_filter = "PDF Document (*.pdf)"
+        elif preferred == ".svg":
+            filters = "SVG Image (*.svg);;PNG Image (*.png);;PDF Document (*.pdf);;All files (*)"
+            initial_filter = "SVG Image (*.svg)"
+        else:
+            filters = "PNG Image (*.png);;PDF Document (*.pdf);;SVG Image (*.svg);;All files (*)"
+            initial_filter = "PNG Image (*.png)"
         path_str, selected_filter = QtWidgets.QFileDialog.getSaveFileName(
             target,
             "Save Graph",
             str(suggested_path),
             filters,
+            initial_filter,
         )
         if not path_str:
             return False
@@ -2681,8 +2724,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         raise NotImplementedError
 
     def _export_txt(self) -> None:
-        tab_widget = getattr(self, "tab_widget", None)
-        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+        tab_widget = self._tab_widget_like()
+        if tab_widget is None:
             QtWidgets.QMessageBox.information(
                 self,
                 "Export TXT",
@@ -3239,8 +3282,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self.project_tree.setAnimated(False)
         self.project_tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.project_tree.customContextMenuRequested.connect(self._handle_project_context_menu)
-        self.project_tree.itemDoubleClicked.connect(self._handle_project_item_double_click)
-        self.project_tree.itemActivated.connect(self._handle_project_item_double_click)
+        self.project_tree.itemDoubleClicked.connect(self._dispatch_project_item_activation)
+        self.project_tree.itemActivated.connect(self._dispatch_project_item_activation)
         self._ensure_data_root()
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
@@ -3272,8 +3315,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         selection_model = self.object_tree.selectionModel()
         if selection_model is not None:
             selection_model.selectionChanged.connect(self._handle_object_selection_changed)
-        self.object_tree.itemDoubleClicked.connect(self._handle_object_item_double_click)
-        self.object_tree.itemActivated.connect(self._handle_object_item_double_click)
+        self.object_tree.itemDoubleClicked.connect(self._dispatch_object_item_activation)
+        self.object_tree.itemActivated.connect(self._dispatch_object_item_activation)
         object_dock = self._create_dock_widget("Object Manager", "objectManagerDock")
         object_dock.setWidget(self.object_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.RightDockWidgetArea, object_dock)
@@ -4389,9 +4432,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _handle_rescale_y(self) -> None:
         self._rescale_current_axes("y")
 
-    def _current_canvas(self) -> FigureCanvas | None:
+    def _tab_widget_like(self) -> Any | None:
         tab_widget = getattr(self, "tab_widget", None)
-        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+        if tab_widget is None:
+            return None
+        required = ("currentWidget", "currentIndex", "count", "indexOf")
+        for name in required:
+            if not callable(getattr(tab_widget, name, None)):
+                return None
+        return tab_widget
+
+    def _current_canvas(self) -> FigureCanvas | None:
+        tab_widget = self._tab_widget_like()
+        if tab_widget is None:
             return None
         tab = tab_widget.currentWidget()
         if tab is None:
@@ -4399,8 +4452,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return self._canvas_by_tab.get(tab)
 
     def _current_axes(self) -> Any | None:
-        tab_widget = getattr(self, "tab_widget", None)
-        if not isinstance(tab_widget, QtWidgets.QTabWidget):
+        tab_widget = self._tab_widget_like()
+        if tab_widget is None:
             return None
         tab = tab_widget.currentWidget()
         if tab is None:
@@ -5277,8 +5330,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             lines={},
             metadata={"blank": True},
         )
-        self.tab_widget.addTab(tab, "Graph")
-        self.tab_widget.setCurrentWidget(tab)
+        index = self.tab_widget.addTab(tab, "Graph")
+        self.tab_widget.setCurrentIndex(index)
         self._register_plot_tab(tab, canvas, ax, descriptor)
 
     def _register_plot_tab(
@@ -5306,6 +5359,13 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 self._cursor_connections[canvas] = cid
             except Exception:
                 pass
+        try:
+            edit_cid = canvas.mpl_connect(
+                "button_press_event", self._handle_canvas_button_press
+            )
+            self._edit_connections[canvas] = edit_cid
+        except Exception:
+            pass
         if descriptor is not None:
             self._tab_descriptors[tab] = descriptor
             plugin_name = self._tab_plugin_name(descriptor)
@@ -6650,24 +6710,31 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _refresh_primary_dock_layout(self) -> None:
         """Force dock sizes/visibility to refresh after import or restore."""
 
+        if self._primary_dock_layout_refreshing:
+            return
         docks = [dock for dock in (getattr(self, "project_dock", None), getattr(self, "object_dock", None)) if isinstance(dock, QtWidgets.QDockWidget)]
         if not docks:
             return
-        widths: list[int] = []
-        for dock in docks:
-            try:
-                dock.show()
-            except Exception:
-                pass
-            widths.append(max(self._load_primary_dock_width(dock) or dock.sizeHint().width(), PRIMARY_DOCK_MIN_WIDTH))
+        self._primary_dock_layout_refreshing = True
         try:
-            self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
-        except Exception:
-            for dock, width in zip(docks, widths):
+            widths: list[int] = []
+            for dock in docks:
                 try:
-                    dock.resize(width, dock.height())
+                    dock.show()
                 except Exception:
-                    continue
+                    pass
+                base_width = max(dock.sizeHint().width(), PRIMARY_DOCK_DEFAULT_WIDTH)
+                widths.append(self._primary_dock_target_width(dock, base_width))
+            try:
+                self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
+            except Exception:
+                for dock, width in zip(docks, widths):
+                    try:
+                        dock.resize(width, dock.height())
+                    except Exception:
+                        continue
+        finally:
+            self._primary_dock_layout_refreshing = False
 
     def _apply_initial_primary_dock_size(
         self, dock: QtWidgets.QDockWidget | None, default_width: int
@@ -6718,7 +6785,20 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             width = self._primary_dock_widths.get(dock, 0)
         if width <= 0:
             width = default_width
-        return max(width, PRIMARY_DOCK_MIN_WIDTH)
+        width = max(width, PRIMARY_DOCK_MIN_WIDTH)
+
+        if (
+            isinstance(dock, QtWidgets.QDockWidget)
+            and dock.objectName() in {"projectExplorerDock", "objectManagerDock"}
+        ):
+            window_width = max(self.width(), self.size().width())
+            if window_width >= PRIMARY_DOCK_EXPAND_THRESHOLD:
+                scaled_min = int(window_width * PRIMARY_DOCK_EXPANDED_FRACTION)
+                if PRIMARY_DOCK_EXPANDED_MAX > 0:
+                    scaled_min = min(scaled_min, PRIMARY_DOCK_EXPANDED_MAX)
+                width = max(width, scaled_min, PRIMARY_DOCK_MIN_WIDTH)
+
+        return width
 
     def _primary_dock_visibility_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
         if not isinstance(dock, QtWidgets.QDockWidget):
@@ -7068,6 +7148,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     return
             item.setExpanded(not item.isExpanded())
 
+    def _dispatch_project_item_activation(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        column: int,
+    ) -> None:
+        try:
+            self._handle_project_item_double_click(item, column)
+        except Exception as exc:
+            try:
+                self._append_log(
+                    f"ERROR: Project Explorer activation failed: {exc}",
+                    level="error",
+                )
+                self._append_log(traceback.format_exc().rstrip(), level="error")
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Project Explorer activation failed"
+                )
+
     def _assign_project_payload(
         self,
         item: QtWidgets.QTreeWidgetItem,
@@ -7168,6 +7267,275 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         else:
             item.setData(0, OBJECT_TREE_STATE_ROLE, QtCore.Qt.CheckState.Checked)
 
+    def _legend_state_snapshot(
+        self,
+        legend: Legend | None,
+        *,
+        plugin_name: str | None = None,
+    ) -> Dict[str, Any]:
+        defaults = self._legend_settings_for(plugin_name)
+        state: Dict[str, Any] = {
+            "visible": True,
+            "title": "",
+            "font_size": 14.0,
+            "loc": "best",
+            "ncol": 1,
+            "frame_on": True,
+            "frame_alpha": 1.0,
+            "borderpad": 0.4,
+            "labelspacing": 0.5,
+            "handlelength": 2.0,
+            "handletextpad": 0.8,
+            "columnspacing": 2.0,
+            "markerscale": 1.0,
+            "show_symbols": bool(defaults.get("show_symbols", True)),
+            "text_follows_handles": bool(defaults.get("text_follows_handles", True)),
+            "orientation": defaults.get("orientation", "auto"),
+            "placement": defaults.get("placement", "inside"),
+            "draggable": bool(defaults.get("draggable", True)),
+        }
+        if legend is None:
+            return state
+
+        try:
+            state["visible"] = bool(legend.get_visible())
+        except Exception:
+            pass
+        try:
+            state["title"] = legend.get_title().get_text()
+        except Exception:
+            pass
+        try:
+            sample_size = next(
+                (text.get_fontsize() for text in legend.get_texts()),
+                legend.get_title().get_fontsize(),
+            )
+            state["font_size"] = float(sample_size)
+        except Exception:
+            pass
+        try:
+            loc_value = legend._get_loc()
+        except Exception:
+            loc_value = getattr(legend, "_loc", None)
+        if isinstance(loc_value, int):
+            for key, code in Legend.codes.items():
+                if code == loc_value:
+                    loc_value = key
+                    break
+        if isinstance(loc_value, str) and loc_value.strip():
+            state["loc"] = loc_value
+        try:
+            ncol = getattr(legend, "_ncol", None)
+            if isinstance(ncol, int) and ncol > 0:
+                state["ncol"] = ncol
+            else:
+                state["ncol"] = max(1, len(_legend_handles(legend)))
+        except Exception:
+            pass
+        try:
+            frame = legend.get_frame()
+            state["frame_on"] = bool(frame.get_visible())
+            state["frame_alpha"] = float(frame.get_alpha() or 1.0)
+        except Exception:
+            pass
+        for key, getter_name in (
+            ("borderpad", "get_borderpad"),
+            ("labelspacing", "get_labelspacing"),
+            ("handlelength", "get_handlelength"),
+            ("handletextpad", "get_handletextpad"),
+            ("columnspacing", "get_columnspacing"),
+            ("markerscale", "get_markerscale"),
+        ):
+            getter = getattr(legend, getter_name, None)
+            if callable(getter):
+                try:
+                    state[key] = float(getter())
+                except Exception:
+                    continue
+        state["show_symbols"] = bool(getattr(legend, "_mw_show_symbols", state["show_symbols"]))
+        state["text_follows_handles"] = bool(
+            getattr(legend, "_mw_text_follows_handles", state["text_follows_handles"])
+        )
+        state["orientation"] = getattr(legend, "_mw_orientation", state["orientation"])
+        state["placement"] = getattr(
+            legend,
+            "_mw_placement",
+            "outside" if getattr(legend, "_bbox_to_anchor", None) else state["placement"],
+        )
+        state["draggable"] = bool(
+            getattr(legend, "_mw_draggable", getattr(legend, "get_draggable", lambda: True)())
+        )
+        return state
+
+    def _apply_legend_snapshot(self, legend: Legend, state: Dict[str, Any]) -> None:
+        try:
+            legend.set_visible(bool(state.get("visible", True)))
+        except Exception:
+            pass
+        try:
+            legend.set_title(str(state.get("title", "")))
+        except Exception:
+            pass
+        font_size = state.get("font_size")
+        if isinstance(font_size, (int, float)):
+            try:
+                legend.set_fontsize(float(font_size))
+            except Exception:
+                for text in legend.get_texts():
+                    try:
+                        text.set_fontsize(float(font_size))
+                    except Exception:
+                        continue
+                try:
+                    legend.get_title().set_fontsize(float(font_size))
+                except Exception:
+                    pass
+        ncol = state.get("ncol")
+        if isinstance(ncol, int) and ncol > 0:
+            try:
+                legend.set_ncol(ncol)
+            except Exception:
+                try:
+                    legend._ncol = ncol
+                except Exception:
+                    pass
+        try:
+            legend.set_frame_on(bool(state.get("frame_on", True)))
+        except Exception:
+            pass
+        frame = legend.get_frame()
+        alpha = state.get("frame_alpha")
+        if isinstance(alpha, (int, float)):
+            try:
+                frame.set_alpha(float(alpha))
+            except Exception:
+                pass
+        for key, setter_name in (
+            ("borderpad", "set_borderpad"),
+            ("labelspacing", "set_labelspacing"),
+            ("handlelength", "set_handlelength"),
+            ("handletextpad", "set_handletextpad"),
+            ("columnspacing", "set_columnspacing"),
+            ("markerscale", "set_markerscale"),
+        ):
+            setter = getattr(legend, setter_name, None)
+            value = state.get(key)
+            if callable(setter) and isinstance(value, (int, float)):
+                try:
+                    setter(float(value))
+                except Exception:
+                    continue
+
+        loc_value = state.get("loc", "best")
+        placement = state.get("placement", "inside")
+        axes = getattr(legend, "axes", None)
+        legend._mw_placement = placement
+        if placement == "outside" and axes is not None:
+            try:
+                legend.set_bbox_to_anchor((1.02, 1.0), transform=axes.transAxes)
+            except Exception:
+                pass
+            try:
+                legend.set_loc(loc_value or "upper left")
+            except Exception:
+                pass
+        else:
+            try:
+                legend.set_bbox_to_anchor(None)
+            except Exception:
+                legend._bbox_to_anchor = None
+            try:
+                legend.set_loc(loc_value)
+            except Exception:
+                pass
+
+        legend._mw_orientation = state.get("orientation", "auto")
+        _set_legend_symbol_visibility(legend, bool(state.get("show_symbols", True)))
+        _set_legend_text_follow_handles(
+            legend,
+            bool(state.get("text_follows_handles", True)),
+        )
+
+        draggable = bool(state.get("draggable", True))
+        legend._mw_draggable = draggable
+        try:
+            legend.set_draggable(draggable)
+        except Exception:
+            pass
+
+    def _sync_axes_legend_with_visible_lines(
+        self,
+        axes: Any,
+        *,
+        plugin_name: str | None = None,
+    ) -> Legend | None:
+        if axes is None:
+            return None
+        old_legend: Legend | None = None
+        try:
+            candidate = axes.get_legend()
+            if isinstance(candidate, Legend):
+                old_legend = candidate
+        except Exception:
+            old_legend = None
+
+        if plugin_name is None:
+            current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+            descriptor = self._tab_descriptors.get(current_tab)
+            plugin_name = self._tab_plugin_name(descriptor)
+        state = self._legend_state_snapshot(old_legend, plugin_name=plugin_name)
+
+        visible_lines: list[Line2D] = []
+        visible_labels: list[str] = []
+        try:
+            lines = list(axes.get_lines())
+        except Exception:
+            lines = []
+        for line in lines:
+            if not isinstance(line, Line2D):
+                continue
+            try:
+                label = line.get_label()
+            except Exception:
+                label = ""
+            if not label or label.startswith("_") or label == "_nolegend_":
+                continue
+            try:
+                is_visible = bool(line.get_visible())
+            except Exception:
+                is_visible = True
+            if not is_visible:
+                continue
+            visible_lines.append(line)
+            visible_labels.append(label)
+
+        if old_legend is not None:
+            try:
+                old_legend.remove()
+            except Exception:
+                pass
+        if not visible_lines:
+            return None
+
+        loc_value = state.get("loc", "best")
+        ncol = state.get("ncol", 1)
+        try:
+            legend = axes.legend(
+                visible_lines,
+                visible_labels,
+                loc=loc_value,
+                ncol=ncol if isinstance(ncol, int) and ncol > 0 else 1,
+            )
+        except Exception:
+            try:
+                legend = axes.legend(visible_lines, visible_labels)
+            except Exception:
+                return None
+        if not isinstance(legend, Legend):
+            return None
+        self._apply_legend_snapshot(legend, state)
+        return legend
+
     def _handle_object_item_changed(
         self, item: QtWidgets.QTreeWidgetItem, column: int
     ) -> None:
@@ -7197,12 +7565,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             changed = False
         if changed:
             item.setData(0, OBJECT_TREE_STATE_ROLE, new_state)
+            current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+            if kind == "line" and isinstance(target, Line2D):
+                axes = getattr(target, "axes", None)
+                descriptor = self._tab_descriptors.get(current_tab)
+                plugin_name = self._tab_plugin_name(descriptor)
+                if axes is not None:
+                    self._sync_axes_legend_with_visible_lines(
+                        axes,
+                        plugin_name=plugin_name,
+                    )
             canvas = self._canvas_by_tab.get(self.tab_widget.currentWidget())
             if canvas is not None:
                 try:
                     canvas.draw_idle()
                 except Exception:
                     pass
+            if kind == "line" and current_tab is not None:
+                self._rebuild_object_manager_for_tab(current_tab)
             return
         self._object_tree_updating = True
         fallback = (
@@ -7249,6 +7629,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             title = "Legend"
         item.setText(0, title or "Legend")
+
+    def _dispatch_object_item_activation(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        column: int,
+    ) -> None:
+        try:
+            self._handle_object_item_double_click(item, column)
+        except Exception as exc:
+            try:
+                self._append_log(
+                    f"ERROR: Object Manager activation failed: {exc}",
+                    level="error",
+                )
+                self._append_log(traceback.format_exc().rstrip(), level="error")
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Object Manager activation failed"
+                )
 
     def _rebuild_object_manager_for_tab(self, tab: QtWidgets.QWidget | None, *_: Any) -> None:
         """Rebuild the object manager tree for ``tab`` with all axes, legends, and lines."""
@@ -7339,6 +7738,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     self._apply_object_item_visibility(item, visible)
             return item
 
+        legends: list[Any] = []
         for axis_index, axis in enumerate(axes_list, start=1):
             axis_title = ""
             try:
@@ -7378,41 +7778,39 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     {"kind": "text", "object": y_artist},
                 )
             axis_item.addChild(y_label_item)
-        # collect legends separately so multi-axis legends are siblings under root
-        legends: list[Any] = []
-        try:
-            legend = axis.get_legend()
-            if legend is not None:
-                legends.append(legend)
-        except Exception:
-            pass
-        try:
-            lines = list(axis.get_lines())
-        except Exception:
-            lines = []
-        for line_index, line in enumerate(lines, start=1):
             try:
-                line_label = line.get_label()
+                legend = axis.get_legend()
+                if legend is not None:
+                    legends.append(legend)
             except Exception:
-                line_label = ""
-            if not line_label or line_label.startswith("_line") or line_label == "_nolegend_":
-                line_label = f"Line {line_index}"
-            line_item = _make_item(line_label)
-            if isinstance(line, Line2D):
-                line_item.setData(
-                    0,
-                    QtCore.Qt.ItemDataRole.UserRole,
-                    {"kind": "line", "object": line},
-                )
-            visible = True
-            getter = getattr(line, "get_visible", None)
-            if callable(getter):
+                pass
+            try:
+                lines = list(axis.get_lines())
+            except Exception:
+                lines = []
+            for line_index, line in enumerate(lines, start=1):
                 try:
-                    visible = bool(getter())
+                    line_label = line.get_label()
                 except Exception:
-                    visible = True
-            self._apply_object_item_visibility(line_item, visible)
-            axis_item.addChild(line_item)
+                    line_label = ""
+                if not line_label or line_label.startswith("_line") or line_label == "_nolegend_":
+                    line_label = f"Line {line_index}"
+                line_item = _make_item(line_label)
+                if isinstance(line, Line2D):
+                    line_item.setData(
+                        0,
+                        QtCore.Qt.ItemDataRole.UserRole,
+                        {"kind": "line", "object": line},
+                    )
+                visible = True
+                getter = getattr(line, "get_visible", None)
+                if callable(getter):
+                    try:
+                        visible = bool(getter())
+                    except Exception:
+                        visible = True
+                self._apply_object_item_visibility(line_item, visible)
+                axis_item.addChild(line_item)
         # add legends as top-level children under the figure root
         legend_seen: set[int] = set()
         for legend in legends + figure_legends:
@@ -7519,7 +7917,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         {"kind": "text", "object": entry},
                     )
                 legend_item.addChild(entry_item)
-            self._apply_object_item_visibility(legend_item, True)
+            legend_visible = True
+            try:
+                legend_visible = bool(legend.get_visible())
+            except Exception:
+                legend_visible = True
+            self._apply_object_item_visibility(legend_item, legend_visible)
             root_item.addChild(legend_item)
 
 
@@ -7964,6 +8367,376 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self.tab_widget.setCurrentIndex(index)
         self._update_tab_buttons()
 
+    def _tab_for_axes(self, axes: Any) -> QtWidgets.QWidget | None:
+        if axes is None:
+            return None
+        target_figure = getattr(axes, "figure", None)
+        for tab, candidate in self._axes_by_tab.items():
+            if candidate is axes:
+                return tab
+            candidate_figure = getattr(candidate, "figure", None)
+            if target_figure is not None and candidate_figure is target_figure:
+                return tab
+        return None
+
+    def _apply_axes_text_value(
+        self,
+        axes: Any,
+        *,
+        field: Literal["title", "x_label", "y_label"],
+        value: str,
+    ) -> bool:
+        if axes is None:
+            return False
+        text_value = str(value)
+        try:
+            if field == "title":
+                axes.set_title(text_value)
+            elif field == "x_label":
+                axes.set_xlabel(text_value)
+            else:
+                axes.set_ylabel(text_value)
+        except Exception:
+            return False
+
+        tab = self._tab_for_axes(axes)
+        if tab is not None:
+            descriptor = self._tab_descriptors.get(tab)
+            if descriptor is not None:
+                if field == "title":
+                    descriptor.title = str(
+                        getattr(axes, "get_title", lambda: text_value)() or text_value
+                    )
+                    item = self._graph_tree_items.get(tab)
+                    if isinstance(item, QtWidgets.QTreeWidgetItem):
+                        item.setText(1, descriptor.title or "")
+                elif field == "x_label":
+                    descriptor.x_label = str(
+                        getattr(axes, "get_xlabel", lambda: text_value)() or text_value
+                    )
+                else:
+                    descriptor.y_label = str(
+                        getattr(axes, "get_ylabel", lambda: text_value)() or text_value
+                    )
+
+        self._redraw_artist(axes)
+        current_tab = self.tab_widget.currentWidget()
+        if tab is not None and tab is current_tab:
+            self._rebuild_object_manager_for_tab(tab)
+            sync = getattr(self, "_sync_graph_format_controls_from_current_axes", None)
+            if callable(sync):
+                try:
+                    sync()
+                except Exception:
+                    pass
+        return True
+
+    def _apply_axis_scale_settings(
+        self,
+        axes: Any,
+        axis: Literal["x", "y"],
+        *,
+        scale: str,
+        auto_limits: bool,
+        lower: float | None,
+        upper: float | None,
+        show_dialog_errors: bool = True,
+    ) -> bool:
+        if axes is None:
+            return False
+        target_scale = str(scale or "linear").strip().lower()
+        if target_scale not in {"linear", "log"}:
+            target_scale = "linear"
+
+        if not auto_limits:
+            if lower is None or upper is None:
+                if show_dialog_errors:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Axis scale",
+                        "Set both min and max limits, or enable Auto limits.",
+                    )
+                return False
+            if lower >= upper:
+                if show_dialog_errors:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Axis scale",
+                        "Axis min must be less than axis max.",
+                    )
+                return False
+            if target_scale == "log" and (lower <= 0.0 or upper <= 0.0):
+                if show_dialog_errors:
+                    QtWidgets.QMessageBox.warning(
+                        self,
+                        "Axis scale",
+                        "Log scale requires positive limits.",
+                    )
+                return False
+
+        try:
+            if axis == "x":
+                axes.set_xscale(target_scale)
+            else:
+                axes.set_yscale(target_scale)
+        except Exception:
+            return False
+
+        try:
+            if auto_limits:
+                axes.relim()
+                axes.autoscale(enable=True, axis=axis, tight=False)
+            else:
+                if axis == "x":
+                    axes.set_xlim(cast(float, lower), cast(float, upper))
+                else:
+                    axes.set_ylim(cast(float, lower), cast(float, upper))
+        except Exception:
+            return False
+
+        self._redraw_artist(axes)
+        tab = self._tab_for_axes(axes)
+        if tab is not None and tab is self.tab_widget.currentWidget():
+            sync = getattr(self, "_sync_graph_format_controls_from_current_axes", None)
+            if callable(sync):
+                try:
+                    sync()
+                except Exception:
+                    pass
+        return True
+
+    def _axis_from_event_hit(self, event: Any, axes: Any) -> Literal["x", "y"] | None:
+        if axes is None:
+            return None
+        x = getattr(event, "x", None)
+        y = getattr(event, "y", None)
+        if x is None or y is None:
+            return None
+        try:
+            bbox = axes.get_window_extent()
+        except Exception:
+            return None
+        margin = 14.0
+        try:
+            x_val = float(x)
+            y_val = float(y)
+        except Exception:
+            return None
+        if bbox.x0 - margin <= x_val <= bbox.x1 + margin:
+            if min(abs(y_val - bbox.y0), abs(y_val - bbox.y1)) <= margin:
+                return "x"
+        if bbox.y0 - margin <= y_val <= bbox.y1 + margin:
+            if min(abs(x_val - bbox.x0), abs(x_val - bbox.x1)) <= margin:
+                return "y"
+        return None
+
+    @staticmethod
+    def _artist_hit(artist: Any, event: Any) -> bool:
+        if artist is None:
+            return False
+        contains = getattr(artist, "contains", None)
+        if not callable(contains):
+            result = False
+        else:
+            try:
+                result = contains(event)
+            except Exception:
+                result = False
+            if isinstance(result, tuple):
+                if result and bool(result[0]):
+                    return True
+            elif bool(result):
+                return True
+
+        # Text objects frequently miss contains() hits when clicked just outside
+        # the glyph outline (or when the click lands outside axes bounds), so
+        # use a small bbox tolerance fallback.
+        x = getattr(event, "x", None)
+        y = getattr(event, "y", None)
+        if x is None or y is None:
+            return False
+        figure = getattr(artist, "figure", None)
+        canvas = getattr(figure, "canvas", None) if figure is not None else None
+        if canvas is None:
+            return False
+        renderer_getter = getattr(canvas, "get_renderer", None)
+        renderer = None
+        if callable(renderer_getter):
+            try:
+                renderer = renderer_getter()
+            except Exception:
+                renderer = None
+        bbox_getter = getattr(artist, "get_window_extent", None)
+        if not callable(bbox_getter):
+            return False
+        try:
+            bbox = bbox_getter(renderer=renderer)
+        except Exception:
+            return False
+        if bbox is None:
+            return False
+        try:
+            padded = bbox.expanded(1.18, 1.4)
+            return bool(padded.contains(float(x), float(y)))
+        except Exception:
+            return False
+
+    def _edit_axes_text_from_double_click(
+        self,
+        axes: Any,
+        field: Literal["title", "x_label", "y_label"],
+    ) -> None:
+        if field == "title":
+            current = str(getattr(axes, "get_title", lambda: "")() or "")
+            dialog_title = "Edit graph title"
+            prompt = "Title:"
+        elif field == "x_label":
+            current = str(getattr(axes, "get_xlabel", lambda: "")() or "")
+            dialog_title = "Edit X axis label"
+            prompt = "X label:"
+        else:
+            current = str(getattr(axes, "get_ylabel", lambda: "")() or "")
+            dialog_title = "Edit Y axis label"
+            prompt = "Y label:"
+
+        text, ok = QtWidgets.QInputDialog.getText(
+            self,
+            dialog_title,
+            prompt,
+            text=current,
+        )
+        if not ok:
+            return
+        self._apply_axes_text_value(axes, field=field, value=text)
+
+    def _edit_axis_scale_from_double_click(
+        self, axes: Any, axis: Literal["x", "y"]
+    ) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Edit axis scale")
+        dialog.resize(360, 220)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
+
+        axis_name = "X" if axis == "x" else "Y"
+        info = QtWidgets.QLabel(
+            f"Adjust {axis_name} axis scale and limits.", dialog
+        )
+        info.setWordWrap(True)
+        layout.addWidget(info)
+
+        form = QtWidgets.QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setSpacing(6)
+        layout.addLayout(form)
+
+        scale_combo = QtWidgets.QComboBox(dialog)
+        scale_combo.addItem("Linear", "linear")
+        scale_combo.addItem("Log", "log")
+        try:
+            current_scale = axes.get_xscale() if axis == "x" else axes.get_yscale()
+        except Exception:
+            current_scale = "linear"
+        index = scale_combo.findData(str(current_scale).lower())
+        if index >= 0:
+            scale_combo.setCurrentIndex(index)
+        form.addRow("Scale:", scale_combo)
+
+        auto_checkbox = QtWidgets.QCheckBox("Auto limits", dialog)
+        auto_checkbox.setChecked(True)
+        form.addRow("", auto_checkbox)
+
+        limit_row = QtWidgets.QWidget(dialog)
+        limit_layout = QtWidgets.QHBoxLayout(limit_row)
+        limit_layout.setContentsMargins(0, 0, 0, 0)
+        limit_layout.setSpacing(6)
+        min_spin = QtWidgets.QDoubleSpinBox(limit_row)
+        max_spin = QtWidgets.QDoubleSpinBox(limit_row)
+        for spin in (min_spin, max_spin):
+            spin.setRange(-1_000_000_000.0, 1_000_000_000.0)
+            spin.setDecimals(6)
+            spin.setSingleStep(0.1)
+        try:
+            lower, upper = axes.get_xlim() if axis == "x" else axes.get_ylim()
+            min_spin.setValue(float(lower))
+            max_spin.setValue(float(upper))
+        except Exception:
+            pass
+        limit_layout.addWidget(QtWidgets.QLabel("Min:", limit_row))
+        limit_layout.addWidget(min_spin, 1)
+        limit_layout.addWidget(QtWidgets.QLabel("Max:", limit_row))
+        limit_layout.addWidget(max_spin, 1)
+        form.addRow("", limit_row)
+
+        def _sync_limit_enabled(checked: bool) -> None:
+            enabled = not checked
+            min_spin.setEnabled(enabled)
+            max_spin.setEnabled(enabled)
+
+        auto_checkbox.toggled.connect(_sync_limit_enabled)
+        _sync_limit_enabled(auto_checkbox.isChecked())
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+        target_scale = str(scale_combo.currentData() or "linear")
+        auto_limits = bool(auto_checkbox.isChecked())
+        lower_value = float(min_spin.value()) if not auto_limits else None
+        upper_value = float(max_spin.value()) if not auto_limits else None
+        self._apply_axis_scale_settings(
+            axes,
+            axis,
+            scale=target_scale,
+            auto_limits=auto_limits,
+            lower=lower_value,
+            upper=upper_value,
+            show_dialog_errors=True,
+        )
+
+    def _handle_canvas_button_press(self, event: Any) -> None:
+        if not bool(getattr(event, "dblclick", False)):
+            return
+        if self._nav_mode in {"zoom", "pan"}:
+            return
+        event_axes = getattr(event, "inaxes", None)
+        candidates: list[Any] = []
+        if event_axes is not None:
+            candidates.append(event_axes)
+        else:
+            canvas = getattr(event, "canvas", None)
+            figure = getattr(canvas, "figure", None) if canvas is not None else None
+            for axes in getattr(figure, "axes", []) if figure is not None else []:
+                if axes is not None and axes not in candidates:
+                    candidates.append(axes)
+        if not candidates:
+            return
+
+        for axes in candidates:
+            text_targets: list[tuple[Literal["title", "x_label", "y_label"], Any]] = [
+                ("title", getattr(axes, "title", None)),
+                ("x_label", getattr(getattr(axes, "xaxis", None), "label", None)),
+                ("y_label", getattr(getattr(axes, "yaxis", None), "label", None)),
+            ]
+            for field, artist in text_targets:
+                if self._artist_hit(artist, event):
+                    self._edit_axes_text_from_double_click(axes, field)
+                    return
+
+        for axes in candidates:
+            axis = self._axis_from_event_hit(event, axes)
+            if axis is not None:
+                self._edit_axis_scale_from_double_click(axes, axis)
+                return
+
     def _is_tab_visible(self, tab: QtWidgets.QWidget) -> bool:
         index = self.tab_widget.indexOf(tab)
         if index < 0:
@@ -8142,6 +8915,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     canvas.mpl_disconnect(cid)
                 except Exception:
                     pass
+            edit_cid = self._edit_connections.pop(canvas, None)
+            if edit_cid is not None:
+                try:
+                    canvas.mpl_disconnect(edit_cid)
+                except Exception:
+                    pass
         item = self._graph_tree_items.pop(tab, None)
         if item is not None:
             parent = item.parent()
@@ -8239,6 +9018,25 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             pass
         finally:
             self._normalizing_docks = False
+
+    def resizeEvent(self, event: QtGui.QResizeEvent) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        if self._primary_dock_layout_refreshing:
+            return
+        if self._dock_resize_refresh_pending:
+            return
+        self._dock_resize_refresh_pending = True
+
+        def _refresh_after_resize() -> None:
+            self._dock_resize_refresh_pending = False
+            if self._primary_dock_layout_refreshing:
+                return
+            try:
+                self._refresh_primary_dock_layout()
+            except Exception:
+                pass
+
+        QtCore.QTimer.singleShot(0, _refresh_after_resize)
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:  # type: ignore[override]
         super().showEvent(event)
@@ -8775,6 +9573,14 @@ class _MdiTabProxy(QtWidgets.QWidget):
         offset = 28
         max_w = max(320, viewport.width() - margin * 2)
         max_h = max(220, viewport.height() - margin * 2)
+        if len(visible_widgets) == 1:
+            sub = self._subwindow_for(visible_widgets[0])
+            if sub is None or sub in self._hidden_subwindows:
+                return
+            sub.showNormal()
+            sub.resize(max_w, max_h)
+            sub.move(viewport.left() + margin, viewport.top() + margin)
+            return
         for idx, widget in enumerate(visible_widgets):
             sub = self._subwindow_for(widget)
             if sub is None or sub in self._hidden_subwindows:

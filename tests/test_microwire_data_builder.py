@@ -58,6 +58,26 @@ def test_assembly_exposes_compare_hook() -> None:
     assert callable(hook)
 
 
+def test_get_paddle_ocr_disabled_on_py313_without_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if sys.version_info < (3, 13):
+        pytest.skip("runtime guard only applies on Python 3.13+")
+    ocr_module._create_default_ocr.cache_clear()
+    monkeypatch.delenv("MICROWIRE_DISABLE_PADDLE_OCR", raising=False)
+    monkeypatch.delenv("MICROWIRE_ENABLE_PADDLE_OCR_UNSAFE", raising=False)
+    called = {"value": False}
+
+    def _stub():
+        called["value"] = True
+        return object()
+
+    monkeypatch.setattr(ocr_module, "_create_default_ocr", _stub)
+    monkeypatch.setattr(ocr_module, "_UNSAFE_RUNTIME_WARNED", False, raising=False)
+    assert ocr_module.get_paddle_ocr(logging.getLogger("test")) is None
+    assert called["value"] is False
+
+
 def test_paddle_candidate_kwargs_include_ascii_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from microwire_data_builder import ocr
 
@@ -485,9 +505,9 @@ def test_microscope_images_populate_diameters(tmp_path: Path, monkeypatch: pytes
 
     result = build_database(config)
     row = result.dataframe.iloc[0]
-    d_col = core.OUTPUT_COLUMNS[2]
-    D_col = core.OUTPUT_COLUMNS[3]
-    ratio_col = core.OUTPUT_COLUMNS[4]
+    d_col = "d (µm)"
+    D_col = "D (µm)"
+    ratio_col = "d/D"
     assert float(row[d_col]) == pytest.approx(16.7)
     assert float(row[D_col]) == pytest.approx(212.4)
     expected_ratio = round(16.7 / 212.4, 3)
@@ -813,6 +833,39 @@ def test_builder_recent_projects_menu_updates(tmp_path: Path) -> None:
         assert refreshed_actions and refreshed_actions[0].text() == "No recent projects"
     finally:
         window.close()
+
+
+def test_builder_close_stops_pending_scan_threads(tmp_path: Path) -> None:
+    _ensure_qapp()
+    window = BuilderWindow()
+    try:
+        scan_root = tmp_path / "scan"
+        scan_root.mkdir(parents=True, exist_ok=True)
+        for idx in range(300):
+            (scan_root / f"sample_{idx:04d}.txt").write_text("1 2 3\n", encoding="utf-8")
+
+        scanned_sections = []
+        for section in window.sections.values():
+            if not hasattr(section, "set_sources") or not hasattr(section, "_request_pending_scan"):
+                continue
+            section.set_sources([str(scan_root)])
+            section._request_pending_scan()
+            scanned_sections.append(section)
+        QtWidgets.QApplication.processEvents()
+
+        window._dirty = False
+        window.close()
+        QtWidgets.QApplication.processEvents()
+
+        for section in scanned_sections:
+            pending_thread = getattr(section, "_pending_scan_thread", None)
+            worker_thread = getattr(section, "_worker_thread", None)
+            assert pending_thread is None
+            assert worker_thread is None
+    finally:
+        if window.isVisible():
+            window._dirty = False
+            window.close()
 
 
 def test_split_sample_variant_parses_suffix() -> None:

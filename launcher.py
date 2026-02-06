@@ -293,6 +293,13 @@ class MasterLauncher(QtWidgets.QWidget):
             if not isinstance(stored, str) or stored not in {"last_used", "name_asc", "name_desc"}:
                 stored = "last_used"
             self._sort_modes[category] = stored
+        # Keep plotting tools in "last opened" order regardless of prior sort
+        # settings so recent workflows stay at the top.
+        self._sort_modes["plotters"] = "last_used"
+        try:
+            self._settings.setValue("sort/plotters", "last_used")
+        except Exception:
+            pass
         self._sort_groups: dict[str, QtGui.QActionGroup] = {}
 
         self.main_layout.addWidget(self.search_bar)
@@ -387,6 +394,8 @@ class MasterLauncher(QtWidgets.QWidget):
     def _restore_launcher(self) -> None:
         if self._closing:
             return
+        if self._registry_loaded:
+            self._refresh_all_lists()
         if not self.isVisible():
             self.show()
             try:
@@ -394,6 +403,12 @@ class MasterLauncher(QtWidgets.QWidget):
                 self.activateWindow()
             except Exception:
                 pass
+
+    def changeEvent(self, event: QtCore.QEvent) -> None:  # type: ignore[override]
+        super().changeEvent(event)
+        if event.type() == QtCore.QEvent.Type.ActivationChange:
+            if self.isActiveWindow() and self._registry_loaded:
+                self._refresh_all_lists()
 
     def _register_window(self, widget: QtWidgets.QWidget) -> None:
         """Track ``widget`` so closing the launcher can warn appropriately."""
