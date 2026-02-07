@@ -10,8 +10,9 @@
 - If Windows-only dependencies change, also sync `requirements-win.txt`.
 
 ## Changelog
-- Any user-facing change or dependency update must have a dated entry in `CHANGELOG.md`.
-- Use UTC timestamps: `YYYY-MM-DD HH:MM`.
+- Keep `CHANGELOG.md` as the canonical release history on `main`.
+- In feature branches/worktrees, add a changelog fragment under `changelog.d/` instead of editing `CHANGELOG.md` directly.
+- Fragment format: start with a UTC timestamp `YYYY-MM-DD HH:MM`, then a concise bullet list of user-facing changes.
 - Call out migrations or runtime requirement changes explicitly.
 
 ## Testing
@@ -21,10 +22,6 @@
 
 ## Diagnostics
 - When investigating crashes or errors, check `logs/message_log.txt` (and other files under `logs/`) first and summarize relevant traces.
-
-## Task Tracking
-- Keep `TODO.md` updated based on the conversation.
-- Ask before moving items to "Done."
 
 ## Origin Integration
 - Consult the OriginLab Python docs when implementing Origin-related behavior:

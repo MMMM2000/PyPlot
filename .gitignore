@@ -44,3 +44,10 @@ OriginC/OC??Tmp*/
 # Virtual environments
 .venv/
 .venv-wsl/
+
+# Local runtime logs
+logs/*.txt
+!logs/.gitkeep
+
+# Local per-worktree scratch notes
+.worktree-notes/
