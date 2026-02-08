@@ -1,0 +1,11 @@
+@Samplename: Fixture Sample A
+@@End of Header.
+New Section 1
+Time_since_start Sample_Temperature_For_Plot_ Applied_Field Signal_X_direction
+0 10 100 1.0
+1 20 100 1.5
+
+New Section 2
+Time_since_start Sample_Temperature_For_Plot_ Applied_Field Signal_X_direction
+2 30 -100 2.0
+3 40 -100 2.5

@@ -1,0 +1,9 @@
+{
+  "sample": "Fixture Sample A",
+  "rows": [
+    {"temperature": 10.0, "field": 100.0, "signal": 1.0, "section": 1, "section_index": 0},
+    {"temperature": 20.0, "field": 100.0, "signal": 1.5, "section": 1, "section_index": 0},
+    {"temperature": 30.0, "field": -100.0, "signal": 2.0, "section": 2, "section_index": 1},
+    {"temperature": 40.0, "field": -100.0, "signal": 2.5, "section": 2, "section_index": 1}
+  ]
+}

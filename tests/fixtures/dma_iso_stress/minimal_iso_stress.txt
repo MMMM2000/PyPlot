@@ -1,0 +1,12 @@
+Fixture header text
+IsoStress
+Step time	Temperature	Strain	Stress
+s	°C	%	MPa
+0	25	0.50	39.8
+1	35	0.60	40.2
+
+IsoStress
+Step time	Temperature	Strain	Stress
+s	°C	%	MPa
+2	45	0.70	39.9
+3	55	0.80	40.1
