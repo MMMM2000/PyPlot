@@ -22,6 +22,7 @@
 - Current Annealing: add supply profiles for HMP4030 vs Owon SPE6102 (min start current, voltage-first init, reset/channel defaults) and confirm Owon ramp/voltage behavior.
 - Investigate PyPlot macOS UI unresponsiveness and zoom/maximize freezes.
 - Verify PyPlot MDI save/export + graph-format toolbar flow on macOS (especially `Save graph…` false “No plot area” and fullscreen bottom cropping). (Offscreen automation, full test suite, and launcher smoke startup passed on 2026-02-06; waiting for manual desktop confirmation.)
+- Verify plugin menu section flow on macOS after shared graph-format dedupe (single shared `Graph formatting` section visible across plugins) and confirm `Save graph…` remains enabled after `.pypj` reopen + graph edits.
 - Investigate/monitor PyPlot macOS hard aborts from Project Explorer/Object Manager double-click activation paths.
 - Fabrication section: add estimated transition temperature + glass pull-off columns (with notes entry).
 - Videos section: show fabrication rows even without videos, keep editable fabrication fields + video end-length columns, and add open-video warnings; apply overrides in assemble/exports.
@@ -37,8 +38,9 @@
 - Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).
 - DMA iso-stress: remove Tkinter coupling in the PyPlot parser path so the plugin launches on macOS Python builds without `_tkinter`.
 - DMA iso-stress: verify legend-only-visible-series behavior and new graph formatting controls (title/labels with visibility toggles, editable legend-entry labels, line style, limits, selective copy to chosen graphs) on macOS. (Automated offscreen checks passed on 2026-02-06; pending manual visual verification.)
+- DMA iso-stress: verify project round-trip persistence restores plotted tabs and custom formatting (including tick mode/count/increment) on macOS desktop. (Automated offscreen checks passed on 2026-02-09; pending manual visual verification.)
 - Migrate remaining Data Builder/VSM temp scan parser imports off `experiments/simple_scripts` and keep only plugin-local plotting modules.
-- Validate new shared PyPlot graph-formatting controls (title/axes/ticks/scale/limits/PDF export + tick increment/count controls + figure dimensions/aspect + direct double-click title/axis editing) across plugins, including dual-axis edge cases. (Automated offscreen checks passed on 2026-02-06; pending manual visual verification.)
+- Validate new shared PyPlot graph-formatting controls (title/axes/ticks/scale/limits/PDF export + tick increment/count controls + figure dimensions/aspect + direct double-click routing into dedicated movable Graph formatting dialog) across plugins, including dual-axis edge cases. (Automated offscreen checks passed on 2026-02-09; pending manual visual verification.)
 - VSM Data Builder: validate sweep/no-glass angle parsing + temperature labeling against PyPlot, confirm Open-in-PyPlot axes defaults, verify VSM temp scan + DMA multi-graph previews, and confirm Origin export stability.
 - Optimize VSM/DMA/FMR preview rendering performance (downsample plot points for faster section load).
 - Compare matrix: improve initial render performance (lazy graph previews) and ensure row-level selection highlighting.

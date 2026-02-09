@@ -1,5 +1,27 @@
 # Changelog
 
+## 2026-02-09 10:05 UTC
+
+- Switched shared `Graph formatting` access from a constrained toolbar popover to a separate movable dialog window (Origin-style workflow) so full formatting controls are visible and can stay open while editing graphs.
+- Routed toolbar `Graph formatting` section access and on-canvas double-click (title/labels/axes) into that shared dialog, with focus jumping to relevant label or axis-scale controls.
+
+## 2026-02-09 09:52 UTC
+
+- Changed on-canvas double-click routing to use the shared `Graph formatting` controls first: double-clicking title/X/Y labels now opens the shared formatter focused on label fields, and double-clicking axes opens the same shared formatter focused on axis scale controls.
+- Kept the old axis/text edit dialogs as a fallback only when shared formatting controls are unavailable (host/plugin compatibility path).
+
+## 2026-02-09 09:33 UTC
+
+- Graph formatting sections in PyPlot now resolve to a single shared `Graph formatting` panel across plugins (plugin menu section discovery now includes shared settings and de-duplicates duplicate section titles).
+- Fixed `Save graph…`/`Normalize Y` action state after plugin/project updates so graph actions re-enable whenever plot tabs are present, including after reopening `.pypj` files.
+- Normalized default axis-unit label style to square brackets (for example `Temperature [°C]`, `Strain [%]`) during graph registration.
+- Shared graph-format apply now runs a layout-fit pass (`tight_layout`) so large font settings keep labels/titles inside the graph canvas area.
+
+## 2026-02-09 08:37 UTC
+
+- DMA Iso-Stress `Graph formatting` now includes explicit tick placement controls for both axes (`Auto`, `By increment`, `By count`) so major tick spacing/count can be set from the plugin panel.
+- PyPlot project save/load now persists active-plugin state; DMA Iso-Stress restores plotted graph tabs (not just imported data) along with legend-entry overrides and per-graph formatting when reopening `.pypj` projects.
+
 ## 2026-02-06 15:05 UTC
 
 - Shared Graph formatting now supports tick-placement control per axis with selectable mode (`Auto`, `By increment`, `By count`) so you can set explicit major-tick spacing or target tick count.

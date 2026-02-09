@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from PyQt6 import QtWidgets
+from matplotlib import ticker as mticker
 
 from plotting.plugins.dma_iso_stress.parser import parse_dma_txt
 from plotting.plugins.dma_iso_stress.dma_iso_stress_plugin import DmaIsoStressEntry
@@ -218,6 +219,132 @@ def test_dma_selected_copy_can_propagate_legend_labels() -> None:
         assert target_legend is not None
         target_labels = [text.get_text() for text in target_legend.get_texts()]
         assert target_labels == ["Source Label"]
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_dma_tick_controls_apply_increment_and_count_modes() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        plugin = _activate_dma_plugin(window)
+        descriptors = _seed_dma_graphs(plugin)
+        assert descriptors
+
+        assert plugin._x_tick_mode_combo is not None  # noqa: SLF001
+        assert plugin._x_tick_count_spin is not None  # noqa: SLF001
+        assert plugin._y_tick_mode_combo is not None  # noqa: SLF001
+        assert plugin._y_tick_step_edit is not None  # noqa: SLF001
+
+        plugin._x_tick_mode_combo.setCurrentIndex(plugin._x_tick_mode_combo.findData("count"))  # noqa: SLF001
+        plugin._x_tick_count_spin.setValue(4)  # noqa: SLF001
+        plugin._y_tick_mode_combo.setCurrentIndex(plugin._y_tick_mode_combo.findData("step"))  # noqa: SLF001
+        plugin._y_tick_step_edit.setText("0.5")  # noqa: SLF001
+        plugin._apply_formatting_to_current_plot()  # noqa: SLF001
+
+        tab = window.tab_widget.currentWidget()
+        assert tab is not None
+        descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001
+        assert descriptor is not None
+        axes = descriptor.axes
+        assert axes is not None
+
+        assert isinstance(axes.xaxis.get_major_locator(), mticker.MaxNLocator)
+        assert isinstance(axes.yaxis.get_major_locator(), mticker.MultipleLocator)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_dma_project_payload_restores_plotted_graph_and_formatting(tmp_path: Path) -> None:
+    app = _ensure_app()
+    data_path = tmp_path / "dma_restore_sample.txt"
+    data_path.write_text(
+        "\n".join(
+            [
+                "IsoStress section",
+                "Step time\tTemperature\tStrain\tStress",
+                "s\t°C\t%\tMPa",
+                "0\t20\t1.0\t40",
+                "1\t30\t1.4\t40",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    window = PyPlotWorkbench()
+    restored_window: PyPlotWorkbench | None = None
+    try:
+        plugin = _activate_dma_plugin(window)
+        window._commit_selected_paths([data_path])  # noqa: SLF001 - test setup
+        plugin.load_data()
+        plugin.generate()
+        assert window.save_graph_button.isEnabled()
+
+        tab = window.tab_widget.currentWidget()
+        assert tab is not None
+        descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001 - test hook
+        assert descriptor is not None
+
+        assert plugin._title_edit is not None  # noqa: SLF001
+        assert plugin._x_tick_mode_combo is not None  # noqa: SLF001
+        assert plugin._x_tick_count_spin is not None  # noqa: SLF001
+        plugin._title_edit.setText("Saved {sample}")  # noqa: SLF001
+        plugin._x_tick_mode_combo.setCurrentIndex(plugin._x_tick_mode_combo.findData("count"))  # noqa: SLF001
+        plugin._x_tick_count_spin.setValue(4)  # noqa: SLF001
+        plugin._set_legend_overrides_for_descriptor(  # noqa: SLF001
+            descriptor,
+            {"40 MPa": "Saved 40 MPa"},
+        )
+        plugin._apply_formatting_to_current_plot()  # noqa: SLF001
+
+        payload = window._build_project_payload(base_path=tmp_path)  # noqa: SLF001
+
+        restored_window = PyPlotWorkbench()
+        assert restored_window._apply_project_payload(payload, project_dir=tmp_path)  # noqa: SLF001
+
+        restored_plugin = restored_window._current_plugin
+        assert restored_plugin is not None
+        assert restored_window._current_plotter_name == "DMA Iso-Stress"  # noqa: SLF001
+        assert restored_window.save_graph_button.isEnabled()
+
+        dma_tabs = [
+            (tab_item, desc)
+            for tab_item, desc in restored_window._tab_descriptors.items()  # noqa: SLF001
+            if getattr(desc, "kind", "") == "dma_iso_stress"
+        ]
+        assert dma_tabs, "expected at least one restored DMA graph tab"
+        restored_tab, restored_descriptor = dma_tabs[0]
+        restored_axes = restored_descriptor.axes
+        assert restored_axes is not None
+
+        assert restored_axes.get_title().startswith("Saved ")
+        assert isinstance(restored_axes.xaxis.get_major_locator(), mticker.MaxNLocator)
+        legend = restored_axes.get_legend()
+        assert legend is not None
+        labels = [text.get_text() for text in legend.get_texts()]
+        assert "Saved 40 MPa" in labels
+
+        restored_index = restored_window.tab_widget.indexOf(restored_tab)
+        assert restored_index >= 0
+    finally:
+        if restored_window is not None:
+            restored_window.close()
+        window.close()
+        app.processEvents()
+
+
+def test_dma_uses_single_shared_graph_formatting_section() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        _activate_dma_plugin(window)
+        sections = list(getattr(window, "_graph_settings_sections", []))  # noqa: SLF001
+        titles = [str(title) for title, _anchor in sections]
+        assert any(title == "Plot options" for title in titles)
+        assert titles.count("Graph formatting") == 1
     finally:
         window.close()
         app.processEvents()

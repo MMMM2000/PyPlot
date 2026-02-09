@@ -313,7 +313,9 @@ def test_apply_graph_format_sets_figure_dimensions_and_axes_aspect() -> None:
         app.processEvents()
 
 
-def test_double_click_title_works_when_click_is_outside_axes(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_double_click_title_routes_to_shared_graph_format_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
     try:
@@ -333,11 +335,13 @@ def test_double_click_title_works_when_click_is_outside_axes(monkeypatch: pytest
         bbox = axes.title.get_window_extent(renderer=renderer)
         called: dict[str, object] = {}
 
-        def _capture(target_axes, field):
-            called["axes"] = target_axes
-            called["field"] = field
+        def _capture(*, axes, text_field=None, axis=None):
+            called["axes"] = axes
+            called["text_field"] = text_field
+            called["axis"] = axis
+            return True
 
-        monkeypatch.setattr(window, "_edit_axes_text_from_double_click", _capture)
+        monkeypatch.setattr(window, "_open_shared_graph_format_from_double_click", _capture)
         event = SimpleNamespace(
             dblclick=True,
             inaxes=None,
@@ -347,7 +351,156 @@ def test_double_click_title_works_when_click_is_outside_axes(monkeypatch: pytest
         )
         window._handle_canvas_button_press(event)  # noqa: SLF001 - event hook
         assert called.get("axes") is axes
-        assert called.get("field") == "title"
+        assert called.get("text_field") == "title"
+        assert called.get("axis") is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_double_click_axis_falls_back_to_axis_dialog_when_shared_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001 - test hook
+        assert descriptor is not None
+        axes = descriptor.axes
+        canvas = descriptor.canvas
+        assert axes is not None
+        assert canvas is not None
+
+        monkeypatch.setattr(
+            window,
+            "_open_shared_graph_format_from_double_click",
+            lambda **_: False,
+        )
+        called: dict[str, object] = {}
+
+        def _capture(target_axes, axis):
+            called["axes"] = target_axes
+            called["axis"] = axis
+
+        monkeypatch.setattr(window, "_edit_axis_scale_from_double_click", _capture)
+        monkeypatch.setattr(window, "_artist_hit", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(window, "_axis_from_event_hit", lambda *_args, **_kwargs: "x")
+        event = SimpleNamespace(
+            dblclick=True,
+            inaxes=axes,
+            x=0.0,
+            y=0.0,
+            canvas=canvas,
+        )
+        window._handle_canvas_button_press(event)  # noqa: SLF001 - event hook
+        assert called.get("axes") is axes
+        assert called.get("axis") == "x"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_double_click_axis_routes_to_shared_graph_format_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001 - test hook
+        assert descriptor is not None
+        axes = descriptor.axes
+        canvas = descriptor.canvas
+        assert axes is not None
+        assert canvas is not None
+
+        called: dict[str, object] = {}
+
+        def _capture(*, axes, text_field=None, axis=None):
+            called["axes"] = axes
+            called["text_field"] = text_field
+            called["axis"] = axis
+            return True
+
+        monkeypatch.setattr(window, "_open_shared_graph_format_from_double_click", _capture)
+        monkeypatch.setattr(window, "_artist_hit", lambda *_args, **_kwargs: False)
+        monkeypatch.setattr(window, "_axis_from_event_hit", lambda *_args, **_kwargs: "y")
+        event = SimpleNamespace(
+            dblclick=True,
+            inaxes=axes,
+            x=0.0,
+            y=0.0,
+            canvas=canvas,
+        )
+        window._handle_canvas_button_press(event)  # noqa: SLF001 - event hook
+        assert called.get("axes") is axes
+        assert called.get("text_field") is None
+        assert called.get("axis") == "y"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_graph_formatting_section_opens_movable_dialog() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        anchor = window._graph_format_anchor_section  # noqa: SLF001 - test hook
+        assert isinstance(anchor, QtWidgets.QWidget)
+        window._set_graph_settings_anchor(anchor)  # noqa: SLF001 - test hook
+
+        dialog = window._graph_format_dialog  # noqa: SLF001 - test hook
+        assert isinstance(dialog, QtWidgets.QDialog)
+        assert dialog.isVisible()
+        assert bool(dialog.windowFlags() & QtCore.Qt.WindowType.Window)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_graph_formatting_section_button_uses_dialog_not_popup_menu() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        button = next(
+            (
+                candidate
+                for candidate in window._graph_section_buttons  # noqa: SLF001 - test hook
+                if candidate.text().strip().lower() == "graph formatting"
+            ),
+            None,
+        )
+        assert isinstance(button, QtWidgets.QToolButton)
+        assert button.menu() is None
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_unit_labels_normalize_parentheses_to_brackets_on_register() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        descriptor = window._tab_descriptors.get(tab)  # noqa: SLF001 - test hook
+        assert descriptor is not None
+        axes = descriptor.axes
+        assert axes is not None
+        axes.set_xlabel("Temperature (°C)")
+        axes.set_ylabel("Strain (%)")
+
+        # Re-run the shared normalizer to mirror plugin-registration behavior.
+        window._normalize_axes_unit_labels(axes, descriptor=descriptor)  # noqa: SLF001
+
+        assert axes.get_xlabel() == "Temperature [°C]"
+        assert axes.get_ylabel() == "Strain [%]"
     finally:
         window.close()
         app.processEvents()

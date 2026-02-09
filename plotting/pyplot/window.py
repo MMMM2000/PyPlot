@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import re
 import sys
 import time
 import traceback
@@ -81,6 +82,7 @@ PRIMARY_DOCK_MIN_WIDTH = 160
 PRIMARY_DOCK_EXPAND_THRESHOLD = 1300
 PRIMARY_DOCK_EXPANDED_FRACTION = 0.18
 PRIMARY_DOCK_EXPANDED_MAX = 520
+UNIT_SUFFIX_PAREN_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\((?P<unit>[^()]{1,24})\)\s*$")
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -3747,15 +3749,34 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
         buttons: list[QtWidgets.QToolButton] = []
         for title, anchor in sections:
-            if anchor is None:
-                section_menu = menu
+            uses_popup_menu = self._graph_section_uses_popup_menu(title, anchor)
+            if uses_popup_menu:
+                if anchor is None:
+                    section_menu = menu
+                else:
+                    section_menu = self._build_graph_section_menu(title, anchor)
             else:
-                section_menu = self._build_graph_section_menu(title, anchor)
+                section_menu = None
             button = self._create_graph_section_button(title, anchor, section_menu)
             layout.addWidget(button)
             buttons.append(button)
         layout.addStretch(1)
         self._graph_section_buttons = buttons
+
+    def _graph_section_uses_popup_menu(
+        self,
+        title: str,
+        anchor: QtWidgets.QWidget | None,
+    ) -> bool:
+        pref_handler = getattr(self, "_graph_section_prefers_window", None)
+        if callable(pref_handler):
+            try:
+                prefers_window = bool(pref_handler(title=title, anchor=anchor))
+            except Exception:
+                prefers_window = False
+            if prefers_window:
+                return False
+        return True
 
     def _discover_settings_sections(
         self,
@@ -3827,21 +3848,31 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not sections:
             return [("Settings", widget)]
 
-        return sections
+        deduped: list[tuple[str, QtWidgets.QWidget | None]] = []
+        seen_titles: set[str] = set()
+        for title, anchor in sections:
+            key = title.strip().lower()
+            if key in seen_titles:
+                continue
+            seen_titles.add(key)
+            deduped.append((title, anchor))
+        return deduped
 
     def _create_graph_section_button(
         self,
         title: str,
         anchor: QtWidgets.QWidget | None,
-        menu: QtWidgets.QMenu,
+        menu: QtWidgets.QMenu | None,
     ) -> QtWidgets.QToolButton:
         button = _GraphSectionButton(anchor, self._set_graph_settings_anchor, self)
         button.setObjectName(f"mw_graph_section_{title.lower().replace(' ', '_')}")
         button.setText(title)
         button.setToolButtonStyle(QtCore.Qt.ToolButtonStyle.ToolButtonTextOnly)
-        button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
         if isinstance(menu, QtWidgets.QMenu):
+            button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.InstantPopup)
             button.setMenu(menu)
+        else:
+            button.setPopupMode(QtWidgets.QToolButton.ToolButtonPopupMode.DelayedPopup)
         button.setIconSize(self._toolbar_icon_size)
         button.setMinimumHeight(self._toolbar_icon_size.height() + 6)
         button.pressed.connect(lambda anchor=anchor: self._set_graph_settings_anchor(anchor))
@@ -4252,6 +4283,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         placeholder = self._plugin_settings_placeholder
         if layout is None or container is None:
             return
+        section_root = self._graph_settings_content
 
         self._restore_graph_section_filter()
         self._reset_graph_section_states()
@@ -4271,7 +4303,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if isinstance(placeholder, QtWidgets.QLabel):
                 placeholder.setText(message)
                 placeholder.setVisible(True)
-            self._refresh_graph_section_buttons(None)
+            self._refresh_graph_section_buttons(
+                section_root if isinstance(section_root, QtWidgets.QWidget) else None
+            )
             return
 
         if widget.parent() is not container:
@@ -4281,7 +4315,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._active_settings_widget = widget
         if isinstance(placeholder, QtWidgets.QWidget):
             placeholder.setVisible(False)
-        self._refresh_graph_section_buttons(widget)
+        self._refresh_graph_section_buttons(
+            section_root if isinstance(section_root, QtWidgets.QWidget) else widget
+        )
 
     def _setup_script_toolbar(self) -> None:
         """Install the default toolbar for plugin-specific controls."""
@@ -5343,6 +5379,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> None:
         self._canvas_by_tab[tab] = canvas
         self._axes_by_tab[tab] = axes
+        self._normalize_axes_unit_labels(axes, descriptor=descriptor)
         try:
             tab.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
         except Exception:
@@ -8311,6 +8348,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             axes = getattr(artist, "axes", None)
             if axes is not None:
                 figure = getattr(axes, "figure", None)
+        tight_layout = getattr(figure, "tight_layout", None) if figure is not None else None
+        if callable(tight_layout):
+            try:
+                tight_layout(pad=1.0)
+            except Exception:
+                pass
         canvas = getattr(figure, "canvas", None) if figure is not None else None
         if canvas is None:
             return
@@ -8378,6 +8421,57 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if target_figure is not None and candidate_figure is target_figure:
                 return tab
         return None
+
+    @staticmethod
+    def _label_units_to_brackets(text: str) -> str:
+        if not isinstance(text, str):
+            return text
+        stripped = text.strip()
+        if not stripped or "[" in stripped or "]" in stripped:
+            return text
+        match = UNIT_SUFFIX_PAREN_RE.match(stripped)
+        if not match:
+            return text
+        unit = (match.group("unit") or "").strip()
+        prefix = (match.group("prefix") or "").rstrip()
+        if not unit:
+            return text
+        return f"{prefix} [{unit}]".strip() if prefix else f"[{unit}]"
+
+    def _normalize_axes_unit_labels(
+        self,
+        axes: Any,
+        *,
+        descriptor: TabDescriptor | None = None,
+    ) -> None:
+        if axes is None:
+            return
+        try:
+            x_label = str(axes.get_xlabel() or "")
+        except Exception:
+            x_label = ""
+        try:
+            y_label = str(axes.get_ylabel() or "")
+        except Exception:
+            y_label = ""
+
+        new_x = self._label_units_to_brackets(x_label)
+        new_y = self._label_units_to_brackets(y_label)
+        if new_x != x_label:
+            try:
+                axes.set_xlabel(new_x)
+            except Exception:
+                pass
+        if new_y != y_label:
+            try:
+                axes.set_ylabel(new_y)
+            except Exception:
+                pass
+        if descriptor is not None:
+            if new_x:
+                descriptor.x_label = new_x
+            if new_y:
+                descriptor.y_label = new_y
 
     def _apply_axes_text_value(
         self,
@@ -8702,6 +8796,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             show_dialog_errors=True,
         )
 
+    def _open_shared_graph_format_from_canvas_target(
+        self,
+        axes: Any,
+        *,
+        text_field: Literal["title", "x_label", "y_label"] | None = None,
+        axis: Literal["x", "y"] | None = None,
+    ) -> bool:
+        """Allow concrete hosts to route double-clicks into shared formatting UI."""
+
+        opener = getattr(self, "_open_shared_graph_format_from_double_click", None)
+        if not callable(opener):
+            return False
+        try:
+            result = opener(axes=axes, text_field=text_field, axis=axis)
+        except Exception:
+            return False
+        return bool(result)
+
     def _handle_canvas_button_press(self, event: Any) -> None:
         if not bool(getattr(event, "dblclick", False)):
             return
@@ -8728,13 +8840,23 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             ]
             for field, artist in text_targets:
                 if self._artist_hit(artist, event):
-                    self._edit_axes_text_from_double_click(axes, field)
+                    opened = self._open_shared_graph_format_from_canvas_target(
+                        axes,
+                        text_field=field,
+                    )
+                    if not opened:
+                        self._edit_axes_text_from_double_click(axes, field)
                     return
 
         for axes in candidates:
             axis = self._axis_from_event_hit(event, axes)
             if axis is not None:
-                self._edit_axis_scale_from_double_click(axes, axis)
+                opened = self._open_shared_graph_format_from_canvas_target(
+                    axes,
+                    axis=axis,
+                )
+                if not opened:
+                    self._edit_axis_scale_from_double_click(axes, axis)
                 return
 
     def _is_tab_visible(self, tab: QtWidgets.QWidget) -> bool:

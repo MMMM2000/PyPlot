@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Callable, Dict, Iterable
+from typing import Any, Callable, Dict, Iterable
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -128,6 +128,19 @@ class PyPlotPlugin:
         """Optional hook for plugins to refresh toolbar/button state."""
         # Default implementation keeps legacy plugins working even if PyPlot
         # asks them to refresh before they override the method.
+        return
+
+    # Project persistence ------------------------------------------------
+    def serialize_project_state(self, *, base_path: Path | None) -> Dict[str, Any] | None:
+        """Return plugin-specific project state to persist, or ``None``."""
+
+        _ = base_path
+        return None
+
+    def restore_project_state(self, state: Dict[str, Any], *, project_dir: Path) -> None:
+        """Restore plugin-specific state from a previously saved project."""
+
+        _ = (state, project_dir)
         return
 
     def plot_action_label(self) -> str:

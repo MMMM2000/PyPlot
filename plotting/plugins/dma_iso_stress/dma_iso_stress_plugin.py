@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
+from matplotlib import ticker as mticker
 from PyQt6 import QtCore, QtWidgets
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
@@ -24,8 +26,8 @@ class DmaIsoStressPlugin(PyPlotPlugin):
     """PyPlot integration for DMA iso-stress TXT files."""
 
     requires_imported_data = True
-    _DEFAULT_X_LABEL = "Temperature (°C)"
-    _DEFAULT_Y_LABEL = "Strain (%)"
+    _DEFAULT_X_LABEL = "Temperature [°C]"
+    _DEFAULT_Y_LABEL = "Strain [%]"
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
@@ -51,6 +53,12 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         self._x_max_spin: QtWidgets.QDoubleSpinBox | None = None
         self._y_min_spin: QtWidgets.QDoubleSpinBox | None = None
         self._y_max_spin: QtWidgets.QDoubleSpinBox | None = None
+        self._x_tick_mode_combo: QtWidgets.QComboBox | None = None
+        self._y_tick_mode_combo: QtWidgets.QComboBox | None = None
+        self._x_tick_step_edit: QtWidgets.QLineEdit | None = None
+        self._y_tick_step_edit: QtWidgets.QLineEdit | None = None
+        self._x_tick_count_spin: QtWidgets.QSpinBox | None = None
+        self._y_tick_count_spin: QtWidgets.QSpinBox | None = None
         self._loaded_paths: List[Path] = []
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -160,6 +168,32 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         legend_labels_row.addWidget(reset_legend_labels_button)
         formatting_form.addRow("Legend labels", legend_labels_row)
 
+        self._x_tick_mode_combo = QtWidgets.QComboBox(formatting_section)
+        self._x_tick_mode_combo.addItem("Auto", "auto")
+        self._x_tick_mode_combo.addItem("By increment", "step")
+        self._x_tick_mode_combo.addItem("By count", "count")
+        self._x_tick_step_edit = QtWidgets.QLineEdit(formatting_section)
+        self._x_tick_step_edit.setPlaceholderText("auto")
+        self._x_tick_count_spin = QtWidgets.QSpinBox(formatting_section)
+        self._x_tick_count_spin.setRange(2, 20)
+        self._x_tick_count_spin.setValue(5)
+        formatting_form.addRow("X ticks", self._x_tick_mode_combo)
+        formatting_form.addRow("X increment", self._x_tick_step_edit)
+        formatting_form.addRow("X count", self._x_tick_count_spin)
+
+        self._y_tick_mode_combo = QtWidgets.QComboBox(formatting_section)
+        self._y_tick_mode_combo.addItem("Auto", "auto")
+        self._y_tick_mode_combo.addItem("By increment", "step")
+        self._y_tick_mode_combo.addItem("By count", "count")
+        self._y_tick_step_edit = QtWidgets.QLineEdit(formatting_section)
+        self._y_tick_step_edit.setPlaceholderText("auto")
+        self._y_tick_count_spin = QtWidgets.QSpinBox(formatting_section)
+        self._y_tick_count_spin.setRange(2, 20)
+        self._y_tick_count_spin.setValue(5)
+        formatting_form.addRow("Y ticks", self._y_tick_mode_combo)
+        formatting_form.addRow("Y increment", self._y_tick_step_edit)
+        formatting_form.addRow("Y count", self._y_tick_count_spin)
+
         self._auto_x_limits_checkbox = QtWidgets.QCheckBox("Auto X limits", formatting_section)
         self._auto_x_limits_checkbox.setChecked(True)
         formatting_form.addRow("", self._auto_x_limits_checkbox)
@@ -212,6 +246,11 @@ class DmaIsoStressPlugin(PyPlotPlugin):
             self._auto_y_limits_checkbox.toggled.connect(
                 lambda checked: self._set_limit_controls_enabled("y", not checked)
             )
+        if self._x_tick_mode_combo is not None:
+            self._x_tick_mode_combo.currentIndexChanged.connect(self._sync_tick_mode_inputs)
+        if self._y_tick_mode_combo is not None:
+            self._y_tick_mode_combo.currentIndexChanged.connect(self._sync_tick_mode_inputs)
+        self._sync_tick_mode_inputs()
         self._set_limit_controls_enabled("x", False)
         self._set_limit_controls_enabled("y", False)
 
@@ -266,10 +305,6 @@ class DmaIsoStressPlugin(PyPlotPlugin):
             return
 
         self._clear_tabs()
-        window_module = window_api()
-        from matplotlib.figure import Figure
-        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
-
         show_markers = bool(
             self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
         )
@@ -279,55 +314,76 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         line_width = self._line_width_value()
 
         for entry in self._dataset:
-            fig = Figure(figsize=(8.5, 5))
-            ax = fig.add_subplot(111)
-            stresses = list(entry.datasets.keys())
-            if sort_stress:
-                stresses.sort()
-            for stress in stresses:
-                temps, strains = entry.datasets[stress]
-                label = f"{stress} MPa"
-                marker = "o" if show_markers else None
-                line = ax.plot(temps, strains, linewidth=line_width, marker=marker, label=label)[0]
-                setattr(line, "_mw_dma_base_label", label)
-            self._apply_axes_formatting(ax, sample=entry.sample)
-            tab = QtWidgets.QWidget()
-            layout = QtWidgets.QVBoxLayout(tab)
-            layout.setContentsMargins(0, 0, 0, 0)
-            canvas = FigureCanvas(fig)
-            canvas.setSizePolicy(
-                QtWidgets.QSizePolicy.Policy.Expanding,
-                QtWidgets.QSizePolicy.Policy.Expanding,
+            self._create_plot_tab_for_entry(
+                entry,
+                show_markers=show_markers,
+                sort_stress=sort_stress,
+                line_width=line_width,
             )
-            layout.addWidget(canvas)
-            title_text = self._title_for_sample(entry.sample)
-            x_label = self._x_label_text()
-            y_label = self._y_label_text()
-            descriptor = window_module.TabDescriptor(
-                kind="dma_iso_stress",
-                title=title_text,
-                root_label=f"{entry.sample} - IsoStress",
-                x_label=x_label,
-                y_label=y_label,
-                canvas=canvas,
-                axes=ax,
-                lines={},
-                metadata={
-                    "sample": entry.sample,
-                    "path": str(entry.path),
-                    "legend_label_overrides": {},
-                },
-            )
-            index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Plot")
-            setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
-            if callable(setter):
-                setter(index)
-            self.host._register_plot_tab(tab, canvas, ax, descriptor)
-            self._plot_tabs.append(tab)
         self._set_tab_bar_visible(False)
+
+    def _create_plot_tab_for_entry(
+        self,
+        entry: DmaIsoStressEntry,
+        *,
+        show_markers: bool,
+        sort_stress: bool,
+        line_width: float,
+    ) -> tuple[QtWidgets.QWidget, Any]:
+        window_module = window_api()
+        from matplotlib.figure import Figure
+        from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
+        fig = Figure(figsize=(8.5, 5))
+        ax = fig.add_subplot(111)
+        stresses = list(entry.datasets.keys())
+        if sort_stress:
+            stresses.sort()
+        for stress in stresses:
+            temps, strains = entry.datasets[stress]
+            label = f"{stress} MPa"
+            marker = "o" if show_markers else None
+            line = ax.plot(temps, strains, linewidth=line_width, marker=marker, label=label)[0]
+            setattr(line, "_mw_dma_base_label", label)
+        self._apply_axes_formatting(ax, sample=entry.sample)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        canvas = FigureCanvas(fig)
+        canvas.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Expanding,
+        )
+        layout.addWidget(canvas)
+        title_text = self._title_for_sample(entry.sample)
+        x_label = self._x_label_text()
+        y_label = self._y_label_text()
+        descriptor = window_module.TabDescriptor(
+            kind="dma_iso_stress",
+            title=title_text,
+            root_label=f"{entry.sample} - IsoStress",
+            x_label=x_label,
+            y_label=y_label,
+            canvas=canvas,
+            axes=ax,
+            lines={},
+            metadata={
+                "sample": entry.sample,
+                "path": str(entry.path),
+                "legend_label_overrides": {},
+            },
+        )
+        index = self.host.tab_widget.addTab(tab, descriptor.root_label or "Plot")
+        setter = getattr(self.host.tab_widget, "setCurrentIndex", None)
+        if callable(setter):
+            setter(index)
+        self.host._register_plot_tab(tab, canvas, ax, descriptor)
+        self._plot_tabs.append(tab)
+        return tab, descriptor
 
     def update_ui(self) -> None:  # type: ignore[override]
         has_data = bool(self._dataset)
+        has_plots = any(True for _ in self._iter_dma_descriptors())
         if hasattr(self.host, "plot_button"):
             self.host.plot_button.setEnabled(has_data or self._host_has_data_selection())
         if hasattr(self.host, "export_button"):
@@ -337,9 +393,9 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         if hasattr(self.host, "export_origin_button"):
             self.host.export_origin_button.setEnabled(False)
         if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(False)
+            self.host.save_graph_button.setEnabled(has_plots)
         if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
+            self.host.normalize_button.setEnabled(has_plots)
         if self._summary_label is not None:
             if not has_data:
                 self._summary_label.setText(
@@ -358,6 +414,96 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         for widget in widgets:
             if widget is not None:
                 widget.setEnabled(enabled)
+
+    def _sync_tick_mode_inputs(self) -> None:
+        mode_combo: QtWidgets.QComboBox | None
+        step_edit: QtWidgets.QLineEdit | None
+        count_spin: QtWidgets.QSpinBox | None
+        for axis in ("x", "y"):
+            if axis == "x":
+                mode_combo = self._x_tick_mode_combo
+                step_edit = self._x_tick_step_edit
+                count_spin = self._x_tick_count_spin
+            else:
+                mode_combo = self._y_tick_mode_combo
+                step_edit = self._y_tick_step_edit
+                count_spin = self._y_tick_count_spin
+            mode = str(mode_combo.currentData() if mode_combo is not None else "auto")
+            if step_edit is not None:
+                step_edit.setEnabled(mode == "step")
+            if count_spin is not None:
+                count_spin.setEnabled(mode == "count")
+
+    @staticmethod
+    def _multiple_locator_step(locator: Any) -> float | None:
+        for attr in ("_base", "base"):
+            value = getattr(locator, attr, None)
+            try:
+                value_f = float(value)
+            except Exception:
+                continue
+            if math.isfinite(value_f) and value_f > 0:
+                return value_f
+        try:
+            values = locator.tick_values(0.0, 1.0)
+            if len(values) >= 2:
+                step = float(values[1] - values[0])
+                if math.isfinite(step) and step > 0:
+                    return step
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _tick_mode_from_axis(axis_obj: Any) -> tuple[str, float | None, int]:
+        locator = None
+        getter = getattr(axis_obj, "get_major_locator", None)
+        if callable(getter):
+            try:
+                locator = getter()
+            except Exception:
+                locator = None
+        if isinstance(locator, mticker.MultipleLocator):
+            return "step", DmaIsoStressPlugin._multiple_locator_step(locator), 5
+        if isinstance(locator, mticker.AutoLocator):
+            return "auto", None, 5
+        if isinstance(locator, mticker.MaxNLocator):
+            nbins = int(getattr(locator, "_nbins", 5) or 5)
+            return "count", None, max(2, nbins + 1)
+        return "auto", None, 5
+
+    @staticmethod
+    def _apply_tick_locator(
+        axis_obj: Any,
+        mode: str,
+        *,
+        step: float | None = None,
+        count: int = 5,
+    ) -> None:
+        if mode == "step" and step is not None and math.isfinite(step) and step > 0:
+            axis_obj.set_major_locator(mticker.MultipleLocator(step))
+            return
+        if mode == "count":
+            axis_obj.set_major_locator(
+                mticker.MaxNLocator(nbins=max(1, count - 1), min_n_ticks=max(2, count))
+            )
+            return
+        axis_obj.set_major_locator(mticker.AutoLocator())
+
+    @staticmethod
+    def _tick_grid_visible(axes: Any) -> bool:
+        try:
+            x_lines = list(axes.get_xgridlines())
+            y_lines = list(axes.get_ygridlines())
+        except Exception:
+            return False
+        for line in x_lines + y_lines:
+            try:
+                if bool(line.get_visible()):
+                    return True
+            except Exception:
+                continue
+        return False
 
     def _line_width_value(self) -> float:
         if self._line_width_spin is None:
@@ -421,6 +567,62 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         if low > high:
             low, high = high, low
         return (low, high)
+
+    @staticmethod
+    def _parse_positive_float(text: str) -> float | None:
+        cleaned = text.strip().replace(",", ".")
+        if not cleaned:
+            return None
+        try:
+            value = float(cleaned)
+        except Exception:
+            return None
+        if not math.isfinite(value) or value <= 0:
+            return None
+        return value
+
+    def _tick_settings(self, axis: str) -> tuple[str, float | None, int]:
+        if axis == "x":
+            mode_combo = self._x_tick_mode_combo
+            step_edit = self._x_tick_step_edit
+            count_spin = self._x_tick_count_spin
+        else:
+            mode_combo = self._y_tick_mode_combo
+            step_edit = self._y_tick_step_edit
+            count_spin = self._y_tick_count_spin
+        mode = str(mode_combo.currentData() if mode_combo is not None else "auto")
+        step = self._parse_positive_float(step_edit.text()) if step_edit is not None else None
+        count = int(count_spin.value()) if count_spin is not None else 5
+        return mode, step, max(2, count)
+
+    def _set_tick_settings(
+        self,
+        axis: str,
+        *,
+        mode: str,
+        step: float | None,
+        count: int,
+    ) -> None:
+        if axis == "x":
+            mode_combo = self._x_tick_mode_combo
+            step_edit = self._x_tick_step_edit
+            count_spin = self._x_tick_count_spin
+        else:
+            mode_combo = self._y_tick_mode_combo
+            step_edit = self._y_tick_step_edit
+            count_spin = self._y_tick_count_spin
+        if mode_combo is not None:
+            index = mode_combo.findData(mode)
+            if index < 0:
+                index = mode_combo.findData("auto")
+            if index >= 0:
+                mode_combo.setCurrentIndex(index)
+        if step_edit is not None:
+            step_edit.setText(
+                f"{step:.6g}" if step is not None and math.isfinite(step) and step > 0 else ""
+            )
+        if count_spin is not None:
+            count_spin.setValue(max(2, min(int(count), 20)))
 
     def _legend_location(self) -> str:
         if self._legend_location_combo is None:
@@ -738,6 +940,8 @@ class DmaIsoStressPlugin(PyPlotPlugin):
 
         x_limits = self._axis_limits("x")
         y_limits = self._axis_limits("y")
+        x_tick_mode, x_tick_step, x_tick_count = self._tick_settings("x")
+        y_tick_mode, y_tick_step, y_tick_count = self._tick_settings("y")
         if "x_limits" in active_groups:
             if x_limits is None:
                 try:
@@ -754,6 +958,19 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                     pass
             else:
                 axes.set_ylim(*y_limits)
+        if "ticks" in active_groups:
+            self._apply_tick_locator(
+                axes.xaxis,
+                x_tick_mode,
+                step=x_tick_step,
+                count=x_tick_count,
+            )
+            self._apply_tick_locator(
+                axes.yaxis,
+                y_tick_mode,
+                step=y_tick_step,
+                count=y_tick_count,
+            )
 
         show_legend = bool(self._legend_checkbox.isChecked() if self._legend_checkbox is not None else True)
         if "legend" in active_groups:
@@ -1009,6 +1226,495 @@ class DmaIsoStressPlugin(PyPlotPlugin):
             return None
         return targets, groups
 
+    def _portable_path(self, path: Path | None, base_path: Path | None) -> str | None:
+        helper = getattr(self.host, "_portable_path", None)
+        if callable(helper):
+            try:
+                return helper(path, base_path)
+            except Exception:
+                pass
+        if path is None:
+            return None
+        return str(path)
+
+    def _resolve_portable_path(self, value: str | None, project_dir: Path) -> Path | None:
+        helper = getattr(self.host, "_resolve_portable_path", None)
+        if callable(helper):
+            try:
+                return helper(value, project_dir)
+            except Exception:
+                pass
+        if not value:
+            return None
+        candidate = Path(value)
+        if not candidate.is_absolute():
+            candidate = (project_dir / candidate).resolve()
+        return candidate
+
+    def _collect_loaded_paths(self) -> list[Path]:
+        if self._loaded_paths:
+            return list(self._loaded_paths)
+        selected_paths = []
+        getter = getattr(self.host, "_selected_paths", None)
+        if callable(getter):
+            try:
+                selected_paths = [Path(path) for path in getter() if isinstance(path, Path)]
+            except Exception:
+                selected_paths = []
+        return selected_paths
+
+    def _serialize_formatting_state(self) -> Dict[str, Any]:
+        x_tick_mode, x_tick_step, x_tick_count = self._tick_settings("x")
+        y_tick_mode, y_tick_step, y_tick_count = self._tick_settings("y")
+        return {
+            "show_markers": bool(self._markers_checkbox.isChecked()) if self._markers_checkbox else False,
+            "sort_stress": bool(self._sort_checkbox.isChecked()) if self._sort_checkbox else True,
+            "title_template": self._title_edit.text() if self._title_edit is not None else "",
+            "x_label": self._x_label_text(),
+            "y_label": self._y_label_text(),
+            "show_title": self._show_title(),
+            "show_x_label": self._show_x_label(),
+            "show_y_label": self._show_y_label(),
+            "line_width": self._line_width_value(),
+            "font_size": self._font_size_value(),
+            "show_grid": bool(self._grid_checkbox.isChecked()) if self._grid_checkbox else False,
+            "show_legend": bool(self._legend_checkbox.isChecked()) if self._legend_checkbox else True,
+            "legend_location": self._legend_location(),
+            "auto_x_limits": bool(self._auto_x_limits_checkbox.isChecked()) if self._auto_x_limits_checkbox else True,
+            "auto_y_limits": bool(self._auto_y_limits_checkbox.isChecked()) if self._auto_y_limits_checkbox else True,
+            "x_min": float(self._x_min_spin.value()) if self._x_min_spin is not None else None,
+            "x_max": float(self._x_max_spin.value()) if self._x_max_spin is not None else None,
+            "y_min": float(self._y_min_spin.value()) if self._y_min_spin is not None else None,
+            "y_max": float(self._y_max_spin.value()) if self._y_max_spin is not None else None,
+            "x_tick_mode": x_tick_mode,
+            "x_tick_step": x_tick_step,
+            "x_tick_count": x_tick_count,
+            "y_tick_mode": y_tick_mode,
+            "y_tick_step": y_tick_step,
+            "y_tick_count": y_tick_count,
+        }
+
+    def _apply_formatting_state(self, state: Dict[str, Any]) -> None:
+        if self._markers_checkbox is not None:
+            self._markers_checkbox.setChecked(bool(state.get("show_markers", False)))
+        if self._sort_checkbox is not None:
+            self._sort_checkbox.setChecked(bool(state.get("sort_stress", True)))
+        if self._title_edit is not None:
+            self._title_edit.setText(str(state.get("title_template", "")))
+        if self._xlabel_edit is not None:
+            self._xlabel_edit.setText(str(state.get("x_label", self._DEFAULT_X_LABEL)))
+        if self._ylabel_edit is not None:
+            self._ylabel_edit.setText(str(state.get("y_label", self._DEFAULT_Y_LABEL)))
+        if self._show_title_checkbox is not None:
+            self._show_title_checkbox.setChecked(bool(state.get("show_title", True)))
+        if self._show_xlabel_checkbox is not None:
+            self._show_xlabel_checkbox.setChecked(bool(state.get("show_x_label", True)))
+        if self._show_ylabel_checkbox is not None:
+            self._show_ylabel_checkbox.setChecked(bool(state.get("show_y_label", True)))
+        if self._line_width_spin is not None:
+            try:
+                self._line_width_spin.setValue(float(state.get("line_width", 1.4)))
+            except Exception:
+                pass
+        if self._font_size_spin is not None:
+            try:
+                self._font_size_spin.setValue(int(state.get("font_size", 12)))
+            except Exception:
+                pass
+        if self._grid_checkbox is not None:
+            self._grid_checkbox.setChecked(bool(state.get("show_grid", False)))
+        if self._legend_checkbox is not None:
+            self._legend_checkbox.setChecked(bool(state.get("show_legend", True)))
+        if self._legend_location_combo is not None:
+            legend_loc = str(state.get("legend_location", "best"))
+            idx = self._legend_location_combo.findData(legend_loc)
+            if idx >= 0:
+                self._legend_location_combo.setCurrentIndex(idx)
+        if self._auto_x_limits_checkbox is not None:
+            self._auto_x_limits_checkbox.setChecked(bool(state.get("auto_x_limits", True)))
+        if self._auto_y_limits_checkbox is not None:
+            self._auto_y_limits_checkbox.setChecked(bool(state.get("auto_y_limits", True)))
+        for key, widget in (
+            ("x_min", self._x_min_spin),
+            ("x_max", self._x_max_spin),
+            ("y_min", self._y_min_spin),
+            ("y_max", self._y_max_spin),
+        ):
+            if widget is None:
+                continue
+            try:
+                value = state.get(key)
+                if isinstance(value, (int, float)):
+                    widget.setValue(float(value))
+            except Exception:
+                continue
+        self._set_tick_settings(
+            "x",
+            mode=str(state.get("x_tick_mode", "auto")),
+            step=state.get("x_tick_step") if isinstance(state.get("x_tick_step"), (int, float)) else None,
+            count=int(state.get("x_tick_count", 5)) if isinstance(state.get("x_tick_count"), int) else 5,
+        )
+        self._set_tick_settings(
+            "y",
+            mode=str(state.get("y_tick_mode", "auto")),
+            step=state.get("y_tick_step") if isinstance(state.get("y_tick_step"), (int, float)) else None,
+            count=int(state.get("y_tick_count", 5)) if isinstance(state.get("y_tick_count"), int) else 5,
+        )
+        self._sync_tick_mode_inputs()
+        self._set_limit_controls_enabled(
+            "x",
+            not bool(self._auto_x_limits_checkbox.isChecked()) if self._auto_x_limits_checkbox else False,
+        )
+        self._set_limit_controls_enabled(
+            "y",
+            not bool(self._auto_y_limits_checkbox.isChecked()) if self._auto_y_limits_checkbox else False,
+        )
+
+    def _serialize_plot_state(
+        self,
+        descriptor: Any,
+        *,
+        base_path: Path | None,
+    ) -> Dict[str, Any]:
+        axes = getattr(descriptor, "axes", None)
+        metadata = getattr(descriptor, "metadata", None)
+        sample = metadata.get("sample") if isinstance(metadata, dict) else ""
+        path_value = metadata.get("path") if isinstance(metadata, dict) else None
+        source_path = Path(path_value) if isinstance(path_value, str) and path_value else None
+        x_tick_mode, x_tick_step, x_tick_count = self._tick_mode_from_axis(axes.xaxis) if axes is not None else ("auto", None, 5)
+        y_tick_mode, y_tick_step, y_tick_count = self._tick_mode_from_axis(axes.yaxis) if axes is not None else ("auto", None, 5)
+        lines_payload: List[Dict[str, Any]] = []
+        if axes is not None:
+            for line in list(axes.get_lines()):
+                try:
+                    label = str(line.get_label() or "")
+                except Exception:
+                    label = ""
+                base_label = str(getattr(line, "_mw_dma_base_label", "") or "").strip() or label
+                lines_payload.append(
+                    {
+                        "base_label": base_label,
+                        "label": label,
+                        "visible": bool(line.get_visible()),
+                        "linewidth": float(line.get_linewidth()),
+                        "markersize": float(line.get_markersize()),
+                        "marker": str(line.get_marker()),
+                        "linestyle": str(line.get_linestyle()),
+                        "color": str(line.get_color()),
+                    }
+                )
+        x_limits = None
+        y_limits = None
+        if axes is not None:
+            try:
+                x_limits = [float(v) for v in axes.get_xlim()]
+            except Exception:
+                x_limits = None
+            try:
+                y_limits = [float(v) for v in axes.get_ylim()]
+            except Exception:
+                y_limits = None
+        return {
+            "sample": str(sample or ""),
+            "source": self._portable_path(source_path, base_path),
+            "title": str(axes.get_title()) if axes is not None else "",
+            "x_label": str(axes.get_xlabel()) if axes is not None else "",
+            "y_label": str(axes.get_ylabel()) if axes is not None else "",
+            "show_title": bool(axes.title.get_visible()) if axes is not None else True,
+            "show_x_label": bool(axes.xaxis.label.get_visible()) if axes is not None else True,
+            "show_y_label": bool(axes.yaxis.label.get_visible()) if axes is not None else True,
+            "show_grid": self._tick_grid_visible(axes) if axes is not None else False,
+            "x_limits": x_limits,
+            "y_limits": y_limits,
+            "legend_visible": bool(axes.get_legend().get_visible()) if axes is not None and axes.get_legend() is not None else False,
+            "legend_loc": self._legend_location(),
+            "legend_overrides": self._legend_overrides_for_descriptor(descriptor),
+            "x_tick_mode": x_tick_mode,
+            "x_tick_step": x_tick_step,
+            "x_tick_count": x_tick_count,
+            "y_tick_mode": y_tick_mode,
+            "y_tick_step": y_tick_step,
+            "y_tick_count": y_tick_count,
+            "lines": lines_payload,
+        }
+
+    def serialize_project_state(self, *, base_path: Path | None) -> Dict[str, Any] | None:  # type: ignore[override]
+        plot_states: List[Dict[str, Any]] = []
+        current_source: str | None = None
+        current_tab = self.host.tab_widget.currentWidget()
+        for tab, descriptor in self._iter_dma_descriptors():
+            state = self._serialize_plot_state(descriptor, base_path=base_path)
+            plot_states.append(state)
+            if tab is current_tab:
+                current_source = state.get("source")
+
+        loaded_paths = [
+            self._portable_path(path, base_path)
+            for path in self._collect_loaded_paths()
+            if isinstance(path, Path)
+        ]
+        loaded_paths = [path for path in loaded_paths if isinstance(path, str) and path]
+        return {
+            "loaded_paths": loaded_paths,
+            "formatting": self._serialize_formatting_state(),
+            "plots": plot_states,
+            "current_plot_source": current_source,
+        }
+
+    def _load_dataset_from_paths(self, paths: Iterable[Path]) -> list[DmaIsoStressEntry]:
+        entries: list[DmaIsoStressEntry] = []
+        for path in paths:
+            if not isinstance(path, Path) or not path.exists() or not path.is_file():
+                continue
+            try:
+                datasets = parse_dma_txt(path)
+            except Exception as exc:
+                self._log(f"Failed to parse {path.name}: {exc}", level="error")
+                continue
+            if not datasets:
+                continue
+            entries.append(
+                DmaIsoStressEntry(
+                    path=path,
+                    sample=path.stem,
+                    datasets=datasets,
+                )
+            )
+        return entries
+
+    def _apply_restored_plot_state(self, tab: QtWidgets.QWidget, descriptor: Any, state: Dict[str, Any]) -> None:
+        axes = getattr(descriptor, "axes", None)
+        if axes is None:
+            return
+
+        title = state.get("title")
+        if isinstance(title, str):
+            axes.set_title(title)
+        x_label = state.get("x_label")
+        if isinstance(x_label, str):
+            axes.set_xlabel(x_label)
+        y_label = state.get("y_label")
+        if isinstance(y_label, str):
+            axes.set_ylabel(y_label)
+
+        axes.title.set_visible(bool(state.get("show_title", True)))
+        axes.xaxis.label.set_visible(bool(state.get("show_x_label", True)))
+        axes.yaxis.label.set_visible(bool(state.get("show_y_label", True)))
+        axes.grid(bool(state.get("show_grid", False)), which="major", axis="both")
+
+        x_limits = state.get("x_limits")
+        if isinstance(x_limits, list) and len(x_limits) == 2:
+            try:
+                axes.set_xlim(float(x_limits[0]), float(x_limits[1]))
+            except Exception:
+                pass
+        y_limits = state.get("y_limits")
+        if isinstance(y_limits, list) and len(y_limits) == 2:
+            try:
+                axes.set_ylim(float(y_limits[0]), float(y_limits[1]))
+            except Exception:
+                pass
+
+        self._apply_tick_locator(
+            axes.xaxis,
+            str(state.get("x_tick_mode", "auto")),
+            step=float(state.get("x_tick_step")) if isinstance(state.get("x_tick_step"), (int, float)) else None,
+            count=int(state.get("x_tick_count", 5)) if isinstance(state.get("x_tick_count"), int) else 5,
+        )
+        self._apply_tick_locator(
+            axes.yaxis,
+            str(state.get("y_tick_mode", "auto")),
+            step=float(state.get("y_tick_step")) if isinstance(state.get("y_tick_step"), (int, float)) else None,
+            count=int(state.get("y_tick_count", 5)) if isinstance(state.get("y_tick_count"), int) else 5,
+        )
+
+        lines_state = state.get("lines")
+        line_map: dict[str, Any] = {}
+        for line in list(axes.get_lines()):
+            try:
+                label = str(line.get_label() or "")
+            except Exception:
+                label = ""
+            base_label = str(getattr(line, "_mw_dma_base_label", "") or "").strip() or label
+            if base_label:
+                line_map[base_label] = line
+            if label and label not in line_map:
+                line_map[label] = line
+        if isinstance(lines_state, list):
+            for item in lines_state:
+                if not isinstance(item, dict):
+                    continue
+                key = item.get("base_label")
+                if not isinstance(key, str) or not key:
+                    continue
+                line = line_map.get(key)
+                if line is None:
+                    continue
+                if isinstance(item.get("label"), str):
+                    try:
+                        line.set_label(str(item.get("label")))
+                    except Exception:
+                        pass
+                if "visible" in item:
+                    try:
+                        line.set_visible(bool(item.get("visible")))
+                    except Exception:
+                        pass
+                if isinstance(item.get("linewidth"), (int, float)):
+                    try:
+                        line.set_linewidth(float(item.get("linewidth")))
+                    except Exception:
+                        pass
+                if isinstance(item.get("markersize"), (int, float)):
+                    try:
+                        line.set_markersize(float(item.get("markersize")))
+                    except Exception:
+                        pass
+                if isinstance(item.get("marker"), str):
+                    try:
+                        line.set_marker(str(item.get("marker")))
+                    except Exception:
+                        pass
+                if isinstance(item.get("linestyle"), str):
+                    try:
+                        line.set_linestyle(str(item.get("linestyle")))
+                    except Exception:
+                        pass
+                if isinstance(item.get("color"), str):
+                    try:
+                        line.set_color(str(item.get("color")))
+                    except Exception:
+                        pass
+
+        overrides = state.get("legend_overrides")
+        if isinstance(overrides, dict):
+            clean_overrides = {
+                str(key): str(value)
+                for key, value in overrides.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            self._set_legend_overrides_for_descriptor(descriptor, clean_overrides)
+            self._apply_legend_overrides_to_axes(axes, clean_overrides)
+        legend_visible = bool(state.get("legend_visible", True))
+        if legend_visible:
+            self._refresh_legend_after_label_change(axes)
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    legend.set_visible(True)
+                except Exception:
+                    pass
+        else:
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is not None:
+                try:
+                    legend.remove()
+                except Exception:
+                    pass
+
+        descriptor.title = axes.get_title()
+        descriptor.x_label = axes.get_xlabel()
+        descriptor.y_label = axes.get_ylabel()
+        canvas = getattr(descriptor, "canvas", None)
+        if canvas is not None:
+            try:
+                canvas.draw_idle()
+            except Exception:
+                pass
+        self.host._rebuild_object_manager_for_tab(tab)
+
+    def restore_project_state(self, state: Dict[str, Any], *, project_dir: Path) -> None:  # type: ignore[override]
+        formatting = state.get("formatting")
+        if isinstance(formatting, dict):
+            self._apply_formatting_state(formatting)
+
+        loaded_paths_payload = state.get("loaded_paths")
+        loaded_paths: list[Path] = []
+        if isinstance(loaded_paths_payload, list):
+            for entry in loaded_paths_payload:
+                if not isinstance(entry, str) or not entry.strip():
+                    continue
+                resolved = self._resolve_portable_path(entry, project_dir)
+                if isinstance(resolved, Path):
+                    loaded_paths.append(resolved)
+        if loaded_paths:
+            commit_paths = getattr(self.host, "_commit_selected_paths", None)
+            if callable(commit_paths):
+                try:
+                    commit_paths(loaded_paths)
+                except Exception:
+                    pass
+
+        self._loaded_paths = list(loaded_paths)
+        self._dataset = self._load_dataset_from_paths(loaded_paths)
+        self._data = self._dataset
+
+        plots_payload = state.get("plots")
+        current_source = state.get("current_plot_source")
+        if isinstance(plots_payload, list) and plots_payload and self._dataset:
+            self._clear_tabs()
+            show_markers = bool(self._markers_checkbox.isChecked()) if self._markers_checkbox else False
+            sort_stress = bool(self._sort_checkbox.isChecked()) if self._sort_checkbox else True
+            line_width = self._line_width_value()
+            remaining = list(self._dataset)
+            restored_tabs: list[tuple[QtWidgets.QWidget, Any, Dict[str, Any]]] = []
+            for plot_state in plots_payload:
+                if not isinstance(plot_state, dict):
+                    continue
+                source = plot_state.get("source")
+                sample = plot_state.get("sample")
+                match: DmaIsoStressEntry | None = None
+                if isinstance(source, str) and source.strip():
+                    resolved = self._resolve_portable_path(source, project_dir)
+                    if isinstance(resolved, Path):
+                        for idx, entry in enumerate(remaining):
+                            if entry.path == resolved:
+                                match = remaining.pop(idx)
+                                break
+                if match is None and isinstance(sample, str) and sample:
+                    for idx, entry in enumerate(remaining):
+                        if entry.sample == sample:
+                            match = remaining.pop(idx)
+                            break
+                if match is None:
+                    continue
+                tab, descriptor = self._create_plot_tab_for_entry(
+                    match,
+                    show_markers=show_markers,
+                    sort_stress=sort_stress,
+                    line_width=line_width,
+                )
+                self._apply_restored_plot_state(tab, descriptor, plot_state)
+                restored_tabs.append((tab, descriptor, plot_state))
+            if restored_tabs:
+                if isinstance(current_source, str) and current_source.strip():
+                    resolved_current = self._resolve_portable_path(current_source, project_dir)
+                    for tab, _descriptor, plot_state in restored_tabs:
+                        source_value = plot_state.get("source")
+                        resolved_source = (
+                            self._resolve_portable_path(source_value, project_dir)
+                            if isinstance(source_value, str)
+                            else None
+                        )
+                        if (
+                            isinstance(resolved_current, Path)
+                            and isinstance(resolved_source, Path)
+                            and resolved_current == resolved_source
+                        ):
+                            index = self.host.tab_widget.indexOf(tab)
+                            if index >= 0:
+                                self.host.tab_widget.setCurrentIndex(index)
+                            break
+                self._set_tab_bar_visible(False)
+
+        self.update_ui()
+
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._dataset:
             self.load_data()
@@ -1211,6 +1917,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         "grid": "Grid visibility",
         "legend": "Legend visibility/location",
         "legend_labels": "Legend entry text",
+        "ticks": "Tick spacing/count",
         "x_limits": "X limits (auto/manual)",
         "y_limits": "Y limits (auto/manual)",
     }

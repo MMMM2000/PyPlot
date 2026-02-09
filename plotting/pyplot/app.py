@@ -102,6 +102,10 @@ class PyPlotWorkbench(PyPlotWindow):
         self._last_graph_dir: Path | None = None
         self._graph_format_controls: Dict[str, QtWidgets.QWidget] = {}
         self._graph_format_updating = False
+        self._graph_format_anchor_section: QtWidgets.QWidget | None = None
+        self._graph_format_dialog: QtWidgets.QDialog | None = None
+        self._graph_format_dialog_container: QtWidgets.QWidget | None = None
+        self._graph_format_dialog_layout: QtWidgets.QVBoxLayout | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         if not sys.platform.startswith("win") and sys.platform != "darwin":
@@ -492,6 +496,18 @@ class PyPlotWorkbench(PyPlotWindow):
             if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
                 button.setEnabled(self._plugin_ready_to_plot(self._current_plugin))
             self._sync_shared_action_states()
+            save_sync = getattr(self, "_update_save_graph_enabled", None)
+            if callable(save_sync):
+                try:
+                    save_sync()
+                except Exception:
+                    pass
+            norm_sync = getattr(self, "_update_normalize_enabled", None)
+            if callable(norm_sync):
+                try:
+                    norm_sync()
+                except Exception:
+                    pass
             return
         button = getattr(self, "plot_button", None)
         if isinstance(button, (QtGui.QAction, QtWidgets.QWidget)):
@@ -508,6 +524,18 @@ class PyPlotWorkbench(PyPlotWindow):
         if hasattr(self, "open_origin_button"):
             self.open_origin_button.setEnabled(False)
         self._sync_shared_action_states()
+        save_sync = getattr(self, "_update_save_graph_enabled", None)
+        if callable(save_sync):
+            try:
+                save_sync()
+            except Exception:
+                pass
+        norm_sync = getattr(self, "_update_normalize_enabled", None)
+        if callable(norm_sync):
+            try:
+                norm_sync()
+            except Exception:
+                pass
 
     def _has_imported_data(self) -> bool:
         if getattr(self, "_session_has_imports", False):
@@ -592,6 +620,19 @@ class PyPlotWorkbench(PyPlotWindow):
         selected_payload = [
             self._portable_path(path, base_path) for path in self._selected_path_entries
         ]
+        active_plugin_state: Dict[str, Any] | None = None
+        if self._current_plugin is not None:
+            try:
+                state = self._current_plugin.serialize_project_state(base_path=base_path)
+            except Exception:
+                LOGGER.warning(
+                    "Failed to serialize project state for plugin %s",
+                    self._current_plotter_name,
+                    exc_info=True,
+                )
+                state = None
+            if isinstance(state, dict):
+                active_plugin_state = state
         workbooks_payload: List[Dict[str, Any]] = []
         for workbook in self._workbooks.values():
             worksheets_payload: List[Dict[str, Any]] = []
@@ -634,6 +675,8 @@ class PyPlotWorkbench(PyPlotWindow):
         return {
             "selected_paths": selected_payload,
             "workbooks": workbooks_payload,
+            "active_plugin": self._current_plotter_name,
+            "active_plugin_state": active_plugin_state,
         }
 
     def _apply_project_payload(self, payload: Dict[str, Any], *, project_dir: Path) -> bool:
@@ -713,10 +756,57 @@ class PyPlotWorkbench(PyPlotWindow):
                     imported = True
         if imported:
             self._refresh_imported_data_summary()
+
+        active_plugin = payload.get("active_plugin")
+        if isinstance(active_plugin, str) and active_plugin:
+            self._activate_plotter_for_project_load(active_plugin)
+        plugin_state = payload.get("active_plugin_state")
+        if isinstance(plugin_state, dict) and self._current_plugin is not None:
+            try:
+                self._current_plugin.restore_project_state(
+                    plugin_state,
+                    project_dir=project_dir,
+                )
+            except Exception:
+                LOGGER.warning(
+                    "Failed to restore project state for plugin %s",
+                    self._current_plotter_name,
+                    exc_info=True,
+                )
+
         self._sync_selected_paths_with_imports()
         self._update_action_states()
         self._update_project_actions()
         return True
+
+    def _activate_plotter_for_project_load(self, name: str) -> bool:
+        if not isinstance(name, str) or not name:
+            return False
+        if self._current_plotter_name == name and self._current_plugin is not None:
+            return True
+        combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
+        if combo is None:
+            return False
+        index = combo.findData(name)
+        if index < 0:
+            index = combo.findText(name)
+        if index < 0:
+            return False
+
+        if self._current_plugin is not None and self._current_plotter_name != name:
+            try:
+                self._current_plugin.deactivate()
+            except Exception:
+                pass
+            self._current_plugin = None
+            self._current_plotter_name = None
+            self._active_plugin_updater = None
+
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+        self._apply_selected_plotter()
+        return self._current_plotter_name == name and self._current_plugin is not None
 
     def _clear_imported_data(self) -> None:
         for key in list(self._worksheet_tabs_open.keys()):
@@ -1006,7 +1096,25 @@ class PyPlotWorkbench(PyPlotWindow):
         button_row.addWidget(refresh_btn)
         button_row.addWidget(export_pdf_btn)
         graph_section_layout.addLayout(button_row)
-        layout.addWidget(graph_section)
+
+        graph_anchor_section, graph_anchor_layout = create_toolbar_section(
+            "Graph formatting",
+            parent=panel or self,
+        )
+        graph_anchor_note = QtWidgets.QLabel(
+            "Opens in a separate movable window (Origin-style).",
+            graph_anchor_section,
+        )
+        graph_anchor_note.setWordWrap(True)
+        graph_anchor_layout.addWidget(graph_anchor_note)
+        open_graph_format_btn = QtWidgets.QPushButton(
+            "Open graph formatting…",
+            graph_anchor_section,
+        )
+        open_graph_format_btn.clicked.connect(self._open_graph_format_dialog)
+        graph_anchor_layout.addWidget(open_graph_format_btn)
+        layout.addWidget(graph_anchor_section)
+        self._graph_format_anchor_section = graph_anchor_section
 
         self._graph_format_controls = {
             "section": graph_section,
@@ -1042,7 +1150,9 @@ class PyPlotWorkbench(PyPlotWindow):
             "apply_all_btn": apply_all_btn,
             "refresh_btn": refresh_btn,
             "export_pdf_btn": export_pdf_btn,
+            "open_graph_format_btn": open_graph_format_btn,
         }
+        self._set_graph_format_dialog_section(graph_section)
         self._sync_tick_mode_inputs()
         self._sync_aspect_controls()
 
@@ -1059,6 +1169,105 @@ class PyPlotWorkbench(PyPlotWindow):
     def _control_widget(self, key: str) -> QtWidgets.QWidget | None:
         widget = self._graph_format_controls.get(key)
         return widget if isinstance(widget, QtWidgets.QWidget) else None
+
+    def _graph_section_prefers_window(
+        self,
+        *,
+        title: str,
+        anchor: QtWidgets.QWidget | None,
+    ) -> bool:
+        if anchor is None:
+            return False
+        return title.strip().lower() == "graph formatting"
+
+    def _is_graph_format_anchor(self, anchor: QtWidgets.QWidget | None) -> bool:
+        expected = self._graph_format_anchor_section
+        return bool(anchor is not None and expected is not None and anchor is expected)
+
+    def _set_graph_settings_anchor(self, anchor: QtWidgets.QWidget | None) -> None:
+        if self._is_graph_format_anchor(anchor):
+            self._open_graph_format_dialog()
+            return
+        super()._set_graph_settings_anchor(anchor)
+
+    def _ensure_graph_format_dialog(self) -> QtWidgets.QDialog:
+        dialog = self._graph_format_dialog
+        if isinstance(dialog, QtWidgets.QDialog):
+            return dialog
+
+        dialog = QtWidgets.QDialog(self, QtCore.Qt.WindowType.Window)
+        dialog.setObjectName("mw_graph_format_dialog")
+        dialog.setWindowTitle("Graph formatting")
+        dialog.setModal(False)
+        dialog.resize(760, 680)
+
+        root_layout = QtWidgets.QVBoxLayout(dialog)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
+
+        scroll = QtWidgets.QScrollArea(dialog)
+        scroll.setObjectName("mw_graph_format_dialog_scroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QtWidgets.QFrame.Shape.NoFrame)
+        root_layout.addWidget(scroll, 1)
+
+        container = QtWidgets.QWidget(scroll)
+        container_layout = QtWidgets.QVBoxLayout(container)
+        container_layout.setContentsMargins(0, 0, 0, 0)
+        container_layout.setSpacing(8)
+        container_layout.addStretch(1)
+        scroll.setWidget(container)
+
+        self._graph_format_dialog = dialog
+        self._graph_format_dialog_container = container
+        self._graph_format_dialog_layout = container_layout
+        return dialog
+
+    def _set_graph_format_dialog_section(self, section: QtWidgets.QWidget) -> None:
+        dialog = self._ensure_graph_format_dialog()
+        container = self._graph_format_dialog_container
+        layout = self._graph_format_dialog_layout
+        if container is None or layout is None:
+            return
+
+        parent = section.parentWidget()
+        if isinstance(parent, QtWidgets.QWidget):
+            parent_layout = parent.layout()
+            if isinstance(parent_layout, QtWidgets.QLayout):
+                parent_layout.removeWidget(section)
+
+        if section.parentWidget() is not container:
+            section.setParent(container)
+        section.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
+
+        section_index = layout.indexOf(section)
+        if section_index < 0:
+            insert_index = max(0, layout.count() - 1)
+            layout.insertWidget(insert_index, section)
+        section.show()
+        dialog.adjustSize()
+
+    def _open_graph_format_dialog(
+        self,
+        checked: bool = False,
+        *,
+        focus_key: str | None = None,
+        select_all: bool = False,
+    ) -> bool:
+        del checked
+        dialog = self._ensure_graph_format_dialog()
+        self._sync_graph_format_controls_from_current_axes()
+        if dialog.isMinimized():
+            dialog.showNormal()
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        if focus_key:
+            self._focus_graph_format_control(focus_key, select_all=select_all)
+        return True
 
     def _set_graph_format_controls_enabled(self, enabled: bool) -> None:
         for key, widget in self._graph_format_controls.items():
@@ -1418,6 +1627,61 @@ class PyPlotWorkbench(PyPlotWindow):
         self._sync_tick_mode_inputs()
         self._sync_aspect_controls()
 
+    def _tab_for_axes(self, axes: Any) -> QtWidgets.QWidget | None:
+        for tab, candidate in self._axes_by_tab.items():
+            if candidate is axes and isinstance(tab, QtWidgets.QWidget):
+                return tab
+        return None
+
+    def _focus_graph_format_control(self, key: str, *, select_all: bool = False) -> None:
+        widget = self._control_widget(key)
+        if not isinstance(widget, QtWidgets.QWidget):
+            return
+
+        def _apply_focus() -> None:
+            if not isinstance(widget, QtWidgets.QWidget):
+                return
+            widget.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+            if select_all and isinstance(widget, QtWidgets.QLineEdit):
+                widget.selectAll()
+
+        QtCore.QTimer.singleShot(0, _apply_focus)
+
+    def _open_shared_graph_format_from_double_click(
+        self,
+        *,
+        axes: Any,
+        text_field: str | None = None,
+        axis: str | None = None,
+    ) -> bool:
+        tab = self._tab_for_axes(axes)
+        if isinstance(tab, QtWidgets.QWidget):
+            index = self.tab_widget.indexOf(tab)
+            if index >= 0 and self.tab_widget.currentIndex() != index:
+                self.tab_widget.setCurrentIndex(index)
+
+        focus_key: str | None = None
+        select_all = False
+        field_token = str(text_field or "").strip().lower()
+        axis_token = str(axis or "").strip().lower()
+        if field_token == "title":
+            focus_key = "title_edit"
+            select_all = True
+        elif field_token == "x_label":
+            focus_key = "x_label_edit"
+            select_all = True
+        elif field_token == "y_label":
+            focus_key = "y_label_edit"
+            select_all = True
+        elif axis_token == "x":
+            focus_key = "x_scale_combo"
+        elif axis_token == "y":
+            focus_key = "y_scale_combo"
+        return self._open_graph_format_dialog(
+            focus_key=focus_key,
+            select_all=select_all,
+        )
+
     def _target_axes(self, apply_all: bool) -> List[Any]:
         if not apply_all:
             axes = self._current_axes()
@@ -1716,12 +1980,7 @@ class PyPlotWorkbench(PyPlotWindow):
                             legend = None
                         if legend is not None:
                             legend.set_visible(False)
-                canvas = getattr(figure, "canvas", None) if figure is not None else None
-                if canvas is not None:
-                    try:
-                        canvas.draw_idle()
-                    except Exception:
-                        canvas.draw()
+                self._fit_figure_to_content(figure)
 
                 tab = self._tab_for_axes(axes)  # noqa: SLF001 - shared helper
                 if tab is not None:
@@ -1754,6 +2013,26 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _export_current_graph_pdf(self) -> None:
         self._save_graph_for_current_tab(preferred_suffix=".pdf")
+
+    def _fit_figure_to_content(self, figure: Any) -> None:
+        if figure is None:
+            return
+        tight_layout = getattr(figure, "tight_layout", None)
+        if callable(tight_layout):
+            try:
+                tight_layout(pad=1.0)
+            except Exception:
+                pass
+        canvas = getattr(figure, "canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.draw_idle()
+        except Exception:
+            try:
+                canvas.draw()
+            except Exception:
+                pass
 
     def _apply_selected_plotter(self) -> None:
         combo = self._plotter_combo if isinstance(self._plotter_combo, QtWidgets.QComboBox) else None
