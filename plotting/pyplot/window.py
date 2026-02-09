@@ -2640,7 +2640,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 default_name = descriptor.root_label
         if not default_name:
             default_name = "Graph"
-        preferred = (preferred_suffix or ".png").strip().lower()
+        last_saved_format = getattr(self, "_last_graph_format", ".png")
+        if not isinstance(last_saved_format, str):
+            last_saved_format = ".png"
+        preferred = (preferred_suffix or last_saved_format or ".png").strip().lower()
         if preferred not in {".png", ".pdf", ".svg"}:
             preferred = ".png"
         suggested_filename = _clean_stem(default_name) + preferred
@@ -2684,6 +2687,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if suffix not in valid_exts:
             chosen_ext = filter_map.get(selected_filter, ".png")
             path = path.with_suffix(chosen_ext)
+        final_suffix = path.suffix.lower()
+        if final_suffix not in valid_exts:
+            final_suffix = ".png"
 
         try:
             figure.savefig(str(path))
@@ -2714,11 +2720,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             self._last_graph_dir = None
         settings = getattr(self, "settings", None)
+        self._last_graph_format = final_suffix
         if isinstance(settings, QtCore.QSettings):
             if getattr(self, "_last_graph_dir", None):
                 settings.setValue("last_graph_dir", str(self._last_graph_dir))
             else:
                 settings.remove("last_graph_dir")
+            settings.setValue("last_graph_format", final_suffix)
             settings.sync()
         return True
 
@@ -3279,14 +3287,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         self.project_tree = QtWidgets.QTreeWidget()
         self.project_tree.setHeaderLabels(["Project Explorer", "Details"])
-        self.project_tree.header().setStretchLastSection(True)
+        project_header = self.project_tree.header()
+        project_header.setStretchLastSection(False)
+        project_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Interactive)
+        project_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.project_tree.setColumnWidth(0, 240)
+        self.project_tree.setColumnWidth(1, 320)
+        self.project_tree.setTextElideMode(QtCore.Qt.TextElideMode.ElideMiddle)
         self.project_tree.setUniformRowHeights(True)
         self.project_tree.setAnimated(False)
+        self.project_tree.setAlternatingRowColors(True)
+        self.project_tree.setWordWrap(False)
         self.project_tree.setContextMenuPolicy(QtCore.Qt.ContextMenuPolicy.CustomContextMenu)
         self.project_tree.customContextMenuRequested.connect(self._handle_project_context_menu)
         self.project_tree.itemDoubleClicked.connect(self._dispatch_project_item_activation)
         self.project_tree.itemActivated.connect(self._dispatch_project_item_activation)
-        self._ensure_data_root()
         project_dock = self._create_dock_widget("Project Explorer", "projectExplorerDock")
         project_dock.setWidget(self.project_tree)
         self.addDockWidget(QtCore.Qt.DockWidgetArea.LeftDockWidgetArea, project_dock)
@@ -5385,7 +5400,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         except Exception:
             pass
         try:
+            tab.setMinimumSize(0, 0)
+        except Exception:
+            pass
+        try:
             canvas.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Expanding)
+        except Exception:
+            pass
+        try:
+            canvas.setMinimumSize(0, 0)
         except Exception:
             pass
         # Hook cursor tracking for this canvas
@@ -5450,6 +5473,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         with self._suspend_project_tree_updates():
             label = descriptor.root_label or descriptor.title or "Plot"
             item = QtWidgets.QTreeWidgetItem([label, descriptor.title or ""])
+            self._set_tree_item_text(
+                item,
+                name=label,
+                details=descriptor.title or "",
+            )
             root.addChild(item)
             item.setExpanded(True)
             self._assign_project_payload(item, ("graph", tab))
@@ -5463,6 +5491,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if root is None:
             with self._suspend_project_tree_updates():
                 root = QtWidgets.QTreeWidgetItem(["Plots"])
+                self._set_tree_item_text(root, name="Plots", details="")
                 root.setFirstColumnSpanned(True)
                 root.setExpanded(True)
                 tree.insertTopLevelItem(0, root)
@@ -6209,7 +6238,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             else:
                 parent_item = self._ensure_folder_item(workbook.folder)
 
-            workbook_item = QtWidgets.QTreeWidgetItem([workbook.name, str(workbook.source or "")])
+            workbook_source_text = str(workbook.source) if workbook.source is not None else ""
+            workbook_detail = (
+                self._compact_path_text(workbook.source, max_parts=2)
+                if workbook.source is not None
+                else ""
+            )
+            workbook_item = QtWidgets.QTreeWidgetItem([workbook.name, workbook_detail])
+            self._set_tree_item_text(
+                workbook_item,
+                name=workbook.name,
+                details=workbook_detail,
+                details_tooltip=workbook_source_text,
+            )
             self._assign_project_payload(workbook_item, ("worksheet_group", workbook.key))
             parent_item.addChild(workbook_item)
             workbook_item.setExpanded(True)
@@ -6219,6 +6260,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 worksheet.workbook_key = workbook.key
                 self._worksheets[worksheet.key] = worksheet
                 sheet_item = QtWidgets.QTreeWidgetItem([worksheet.name, ""])
+                self._set_tree_item_text(sheet_item, name=worksheet.name, details="")
                 self._assign_project_payload(sheet_item, ("worksheet", worksheet.key))
                 workbook_item.addChild(sheet_item)
                 self._worksheet_tree_items[worksheet.key] = sheet_item
@@ -6256,11 +6298,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     if resolved is not None:
                         self._data_folder_items.pop(resolved, None)
         self._workbooks.pop(key, None)
+        self._remove_data_root_if_empty()
         self._sync_shared_action_states()
         self._mark_project_dirty()
-        if worksheets:
-            self._mark_project_dirty()
-            self._session_has_imports = True
 
     def _append_log(self, message: str, *, level: Literal["info", "error"] = "info") -> None:
         view = getattr(self, "log_view", None)
@@ -6358,17 +6398,62 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 pass
 
+    @staticmethod
+    def _compact_path_text(path: Path | str | None, *, max_parts: int = 2) -> str:
+        if path is None:
+            return ""
+        try:
+            candidate = Path(path)
+        except Exception:
+            return str(path)
+        try:
+            parts = list(candidate.parts)
+        except Exception:
+            return str(candidate)
+        if len(parts) <= max_parts:
+            return str(candidate)
+        tail = "/".join(parts[-max_parts:])
+        return f".../{tail}"
+
+    @staticmethod
+    def _set_tree_item_text(
+        item: QtWidgets.QTreeWidgetItem,
+        *,
+        name: str,
+        details: str = "",
+        name_tooltip: str | None = None,
+        details_tooltip: str | None = None,
+    ) -> None:
+        item.setText(0, str(name))
+        item.setText(1, str(details))
+        item.setToolTip(0, name_tooltip if name_tooltip is not None else str(name))
+        item.setToolTip(1, details_tooltip if details_tooltip is not None else str(details))
+
     def _ensure_data_root(self) -> QtWidgets.QTreeWidgetItem:
         if self._data_tree_root is None:
             root = QtWidgets.QTreeWidgetItem(["Imported Data", ""])
+            self._set_tree_item_text(root, name="Imported Data", details="")
             root.setExpanded(True)
             self.project_tree.addTopLevelItem(root)
             self._data_tree_root = root
         return self._data_tree_root
 
+    def _remove_data_root_if_empty(self) -> None:
+        root = self._data_tree_root
+        if root is None or root.childCount() > 0:
+            return
+        tree = self.project_tree
+        if isinstance(tree, QtWidgets.QTreeWidget):
+            with self._suspend_project_tree_updates():
+                index = tree.indexOfTopLevelItem(root)
+                if index >= 0:
+                    tree.takeTopLevelItem(index)
+        self._data_tree_root = None
+
     def _ensure_workbook_root(self) -> QtWidgets.QTreeWidgetItem:
         if self._workbook_tree_root is None:
             root = QtWidgets.QTreeWidgetItem(["Workbooks", ""])
+            self._set_tree_item_text(root, name="Workbooks", details="")
             root.setExpanded(True)
             tree = self.project_tree
             if isinstance(tree, QtWidgets.QTreeWidget):
@@ -6406,7 +6491,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         item = self._data_folder_items.get(resolved)
         if item is None:
             label = resolved.name or str(resolved)
-            item = QtWidgets.QTreeWidgetItem([label, str(resolved)])
+            detail = self._compact_path_text(resolved, max_parts=3)
+            item = QtWidgets.QTreeWidgetItem([label, detail])
+            self._set_tree_item_text(
+                item,
+                name=label,
+                details=detail,
+                details_tooltip=str(resolved),
+            )
             self._assign_project_payload(item, ("worksheet_group", resolved))
             root.addChild(item)
             item.setExpanded(True)
@@ -6439,16 +6531,33 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if worksheet is None:
                 continue
             rows, columns = worksheet.dataframe.shape
-            item.setText(1, f"{rows} × {columns}")
+            detail = f"{rows} × {columns}"
+            source_tooltip = str(worksheet.source) if worksheet.source is not None else detail
+            self._set_tree_item_text(
+                item,
+                name=worksheet.name,
+                details=detail,
+                details_tooltip=source_tooltip,
+            )
         for key, item in self._data_workbook_items.items():
             workbook = self._workbooks.get(key)
             if workbook is None:
                 continue
             count = len(workbook.worksheets)
             if workbook.source is not None:
-                item.setText(1, f"{workbook.source} ({count} sheet{'s' if count != 1 else ''})")
+                compact_source = self._compact_path_text(workbook.source, max_parts=2)
+                detail = f"{compact_source} ({count} sheet{'s' if count != 1 else ''})"
+                tooltip = f"{workbook.source} ({count} sheet{'s' if count != 1 else ''})"
             else:
-                item.setText(1, f"{count} sheet{'s' if count != 1 else ''}")
+                detail = f"{count} sheet{'s' if count != 1 else ''}"
+                tooltip = detail
+            self._set_tree_item_text(
+                item,
+                name=workbook.name,
+                details=detail,
+                details_tooltip=tooltip,
+            )
+        self._remove_data_root_if_empty()
 
     def _create_worksheet_tab(
         self,
@@ -8503,7 +8612,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     )
                     item = self._graph_tree_items.get(tab)
                     if isinstance(item, QtWidgets.QTreeWidgetItem):
-                        item.setText(1, descriptor.title or "")
+                        self._set_tree_item_text(
+                            item,
+                            name=item.text(0),
+                            details=descriptor.title or "",
+                        )
                 elif field == "x_label":
                     descriptor.x_label = str(
                         getattr(axes, "get_xlabel", lambda: text_value)() or text_value
@@ -9461,7 +9574,19 @@ class _MdiTabProxy(QtWidgets.QWidget):
         rect = viewport.rect()
         if not rect.isValid() or rect.width() < 40 or rect.height() < 40:
             return False
-        sub.setGeometry(rect)
+        frame = sub.frameGeometry()
+        inner = sub.geometry()
+        left_pad = max(0, inner.left() - frame.left())
+        top_pad = max(0, inner.top() - frame.top())
+        right_pad = max(0, frame.right() - inner.right())
+        bottom_pad = max(0, frame.bottom() - inner.bottom())
+        target = QtCore.QRect(
+            rect.left() - left_pad,
+            rect.top() - top_pad,
+            rect.width() + left_pad + right_pad,
+            rect.height() + top_pad + bottom_pad,
+        )
+        sub.setGeometry(target)
         return True
 
     def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:

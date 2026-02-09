@@ -13,6 +13,7 @@ from plotting.shared.origin import origin_session
 
 from .core import (
     FmrParseResult,
+    align_bidirectional_field_sweeps,
     estimate_phase_rotation_angle,
     parse_fmr_csv,
     rotate_lockin_phase,
@@ -45,6 +46,7 @@ class FmrPlugin(PyPlotPlugin):
         self._phase_rotate_checkbox: QtWidgets.QCheckBox | None = None
         self._phase_auto_checkbox: QtWidgets.QCheckBox | None = None
         self._phase_angle_spin: QtWidgets.QDoubleSpinBox | None = None
+        self._sweep_align_checkbox: QtWidgets.QCheckBox | None = None
         self._loaded_paths: List[Path] = []
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -87,6 +89,12 @@ class FmrPlugin(PyPlotPlugin):
         self._phase_auto_checkbox = QtWidgets.QCheckBox("Auto phase (flatten Y)", options_section)
         self._phase_auto_checkbox.setChecked(True)
         options_layout.addWidget(self._phase_auto_checkbox)
+        self._sweep_align_checkbox = QtWidgets.QCheckBox(
+            "Auto align forward/back sweep (field shift)",
+            options_section,
+        )
+        self._sweep_align_checkbox.setChecked(True)
+        options_layout.addWidget(self._sweep_align_checkbox)
         angle_row = QtWidgets.QHBoxLayout()
         angle_label = QtWidgets.QLabel("Manual phase angle (deg):", options_section)
         self._phase_angle_spin = QtWidgets.QDoubleSpinBox(options_section)
@@ -179,6 +187,12 @@ class FmrPlugin(PyPlotPlugin):
                 field_col=field_col,
                 x_col=x_col,
                 y_col=y_col,
+            )
+            data, _, _ = self._apply_sweep_alignment(
+                entry=entry,
+                data=data,
+                field_col=field_col,
+                signal_col=x_col,
             )
             marker = "o" if show_markers else None
             ax.plot(
@@ -285,6 +299,12 @@ class FmrPlugin(PyPlotPlugin):
                         if rotated:
                             data = expanded[[field_col, x_col]]
                             plot_label = f"{entry.sample} ({angle:.2f}°)"
+            data, _, _ = self._apply_sweep_alignment(
+                entry=entry,
+                data=data,
+                field_col=field_col,
+                signal_col=x_col,
+            )
             if base_labels is None:
                 x_unit = entry.units.get(field_col, "Oe")
                 y_unit = entry.units.get(x_col, "V")
@@ -381,6 +401,12 @@ class FmrPlugin(PyPlotPlugin):
                         field_col=field_col,
                         x_col=x_col,
                         y_col=y_col,
+                    )
+                    data, _, _ = self._apply_sweep_alignment(
+                        entry=entry,
+                        data=data,
+                        field_col=field_col,
+                        signal_col=x_col,
                     )
                     try:
                         book = op.new_book("w")
@@ -556,6 +582,38 @@ class FmrPlugin(PyPlotPlugin):
             f"{entry.sample}: phase rotated by {angle:.2f}° ({'auto' if auto_enabled else 'manual'})."
         )
         return rotated, float(angle), True
+
+    def _apply_sweep_alignment(
+        self,
+        *,
+        entry: FmrEntry,
+        data: pd.DataFrame,
+        field_col: str,
+        signal_col: str,
+    ) -> tuple[pd.DataFrame, float, bool]:
+        align_enabled = bool(
+            self._sweep_align_checkbox.isChecked()
+            if self._sweep_align_checkbox is not None
+            else True
+        )
+        if not align_enabled:
+            return data, 0.0, False
+
+        adjusted_field, delta, applied = align_bidirectional_field_sweeps(
+            data[field_col].to_numpy(),
+            data[signal_col].to_numpy(),
+        )
+        if not applied:
+            return data, float(delta), False
+
+        aligned = data.copy()
+        aligned.loc[:, field_col] = adjusted_field
+        unit = str(entry.units.get(field_col, "Oe") or "Oe").strip()
+        half = 0.5 * float(delta)
+        self._log(
+            f"{entry.sample}: aligned forward/back sweep by ±{abs(half):.3g} {unit} (total {abs(delta):.3g} {unit})."
+        )
+        return aligned, float(delta), True
 
     @staticmethod
     def _origin_graph_name(label: str) -> str:

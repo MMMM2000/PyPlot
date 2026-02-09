@@ -179,7 +179,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
             tab = QtWidgets.QWidget()
             tab_layout = QtWidgets.QVBoxLayout(tab)
             tab_layout.setContentsMargins(0, 0, 0, 0)
-            canvas.setMinimumSize(900, 560)
+            canvas.setMinimumSize(640, 420)
             tab_layout.addWidget(canvas)
             ax = fig.axes[0] if fig.axes else None
             lines: dict[tuple[str, float | str], GraphLineState] = {}
@@ -198,8 +198,8 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
                 kind="current_annealing",
                 title=ax.get_title() if ax else title,
                 root_label=Path(path_str).name,
-                x_label=ax.get_xlabel() if ax else "Current (mA)",
-                y_label=ax.get_ylabel() if ax else "Resistance",
+                x_label=ax.get_xlabel() if ax else "Current [mA]",
+                y_label=ax.get_ylabel() if ax else "Resistance [Ω]",
                 canvas=canvas,
                 axes=ax,
                 lines=lines,

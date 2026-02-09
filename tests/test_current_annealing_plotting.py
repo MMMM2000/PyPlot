@@ -70,3 +70,20 @@ def test_plot_one_bridges_increasing_to_decreasing_segment() -> None:
     assert width == pytest.approx(4.0)
     assert height == pytest.approx(2.25)
     plt.close(fig)
+
+
+def test_plot_one_uses_shared_default_label_style_and_size() -> None:
+    df = pd.DataFrame(
+        {
+            "I_mA": [0.0, 10.0, 20.0, 10.0, 0.0],
+            "R_Ohm": [100.0, 120.0, 140.0, 130.0, 110.0],
+        }
+    )
+    fig, _ = anneal_core.plot_one(df, "Anneal")
+    ax = fig.axes[0]
+    assert ax.get_xlabel() == "Current [mA]"
+    assert ax.get_ylabel() == "Resistance [Ω]"
+    width, height = fig.get_size_inches()
+    assert width == pytest.approx(6.0)
+    assert height == pytest.approx(4.0)
+    plt.close(fig)

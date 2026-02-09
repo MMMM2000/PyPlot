@@ -293,6 +293,7 @@ class MasterLauncher(QtWidgets.QWidget):
             if not isinstance(stored, str) or stored not in {"last_used", "name_asc", "name_desc"}:
                 stored = "last_used"
             self._sort_modes[category] = stored
+        self._last_order_counter = self._load_last_order_counter()
         # Keep plotting tools in "last opened" order regardless of prior sort
         # settings so recent workflows stay at the top.
         self._sort_modes["plotters"] = "last_used"
@@ -555,18 +556,47 @@ class MasterLauncher(QtWidgets.QWidget):
         elif mode == "name_desc":
             names.sort(key=str.casefold, reverse=True)
         else:
-            names.sort(key=lambda name: (-self._last_used(category, name), name.casefold()))
+            names.sort(
+                key=lambda name: (
+                    -self._last_order(category, name),
+                    -self._launcher_last_used(category, name),
+                    name.casefold(),
+                )
+            )
         return names
 
-    def _last_used(self, category: str, name: str) -> float:
-        value = self._settings.value(f"last_used/{category}/{name}")
+    def _launcher_last_used(self, category: str, name: str) -> float:
+        value = self._settings.value(f"launcher_last_used/{category}/{name}")
         try:
             return float(value)
         except (TypeError, ValueError):
             return 0.0
 
+    def _load_last_order_counter(self) -> int:
+        raw = self._settings.value("launcher_last_order/seq", 0)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    def _last_order(self, category: str, name: str) -> int:
+        value = self._settings.value(f"launcher_last_order/{category}/{name}", 0)
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
     def _update_last_used(self, category: str, name: str) -> None:
-        self._settings.setValue(f"last_used/{category}/{name}", time.time())
+        now = time.time()
+        self._settings.setValue(f"launcher_last_used/{category}/{name}", now)
+        # Keep legacy key in sync for backward compatibility with older builds.
+        self._settings.setValue(f"last_used/{category}/{name}", now)
+        self._last_order_counter = max(0, int(getattr(self, "_last_order_counter", 0))) + 1
+        self._settings.setValue("launcher_last_order/seq", self._last_order_counter)
+        self._settings.setValue(
+            f"launcher_last_order/{category}/{name}",
+            self._last_order_counter,
+        )
 
     def _set_sort_mode(self, category: str, mode: str) -> None:
         if category not in self._list_widgets:

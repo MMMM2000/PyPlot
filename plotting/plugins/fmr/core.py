@@ -181,3 +181,111 @@ def estimate_phase_rotation_angle(
     fine_stop = min(90.0, coarse + 2.0)
     fine = _search_best_phase(field, x_vals, y_vals, fine_start, fine_stop, 0.05)
     return float(fine)
+
+
+def _candidate_turning_index(field: np.ndarray) -> Optional[int]:
+    if field.size < 6:
+        return None
+    try:
+        idx_max = int(np.nanargmax(field))
+        idx_min = int(np.nanargmin(field))
+    except Exception:
+        return None
+    candidates = [idx for idx in (idx_max, idx_min) if 2 <= idx <= field.size - 3]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda idx: min(idx, field.size - 1 - idx))
+
+
+def _resonance_field(field: np.ndarray, signal: np.ndarray) -> Optional[float]:
+    if field.size == 0 or signal.size == 0:
+        return None
+    try:
+        baseline = float(np.nanmedian(signal))
+    except Exception:
+        baseline = 0.0
+    try:
+        idx_min = int(np.nanargmin(signal))
+        idx_max = int(np.nanargmax(signal))
+    except Exception:
+        return None
+    try:
+        min_dev = abs(float(signal[idx_min]) - baseline)
+    except Exception:
+        min_dev = 0.0
+    try:
+        max_dev = abs(float(signal[idx_max]) - baseline)
+    except Exception:
+        max_dev = 0.0
+    idx = idx_min if min_dev >= max_dev else idx_max
+    try:
+        value = float(field[idx])
+    except Exception:
+        return None
+    if not np.isfinite(value):
+        return None
+    return value
+
+
+def align_bidirectional_field_sweeps(
+    field_values: Iterable[float],
+    signal_values: Iterable[float],
+    *,
+    max_fraction_of_span: float = 0.25,
+) -> Tuple[np.ndarray, float, bool]:
+    """Align forward/backward sweep branches by horizontal field offset.
+
+    Returns:
+        (adjusted_field, total_branch_offset, applied)
+    """
+
+    field_arr = np.asarray(list(field_values), dtype=float)
+    signal_arr = np.asarray(list(signal_values), dtype=float)
+    if field_arr.size != signal_arr.size or field_arr.size < 20:
+        return field_arr, 0.0, False
+
+    valid = np.isfinite(field_arr) & np.isfinite(signal_arr)
+    valid_count = int(np.count_nonzero(valid))
+    if valid_count < 20:
+        return field_arr, 0.0, False
+
+    valid_indices = np.flatnonzero(valid)
+    field = field_arr[valid]
+    signal = signal_arr[valid]
+    turn = _candidate_turning_index(field)
+    if turn is None:
+        return field_arr, 0.0, False
+
+    first_field = field[: turn + 1]
+    first_signal = signal[: turn + 1]
+    second_field = field[turn + 1 :]
+    second_signal = signal[turn + 1 :]
+    if first_field.size < 8 or second_field.size < 8:
+        return field_arr, 0.0, False
+
+    first_res = _resonance_field(first_field, first_signal)
+    second_res = _resonance_field(second_field, second_signal)
+    if first_res is None or second_res is None:
+        return field_arr, 0.0, False
+
+    delta = float(second_res - first_res)
+    if not np.isfinite(delta) or abs(delta) <= 0.0:
+        return field_arr, 0.0, False
+
+    span = float(np.nanmax(field) - np.nanmin(field))
+    if not np.isfinite(span) or span <= 0.0:
+        return field_arr, 0.0, False
+
+    max_fraction = float(max_fraction_of_span)
+    if max_fraction <= 0.0:
+        max_fraction = 0.25
+    if abs(delta) > max_fraction * span:
+        return field_arr, delta, False
+
+    half_delta = 0.5 * delta
+    adjusted = field_arr.copy()
+    first_idx = valid_indices[: turn + 1]
+    second_idx = valid_indices[turn + 1 :]
+    adjusted[first_idx] = adjusted[first_idx] + half_delta
+    adjusted[second_idx] = adjusted[second_idx] - half_delta
+    return adjusted, delta, True

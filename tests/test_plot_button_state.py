@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 from PyQt6 import QtCore, QtWidgets
+from matplotlib import ticker as mticker
 
 from plotting.pyplot.app import PyPlotWorkbench
 from plotting.pyplot.window import (
@@ -244,6 +245,33 @@ def test_primary_dock_target_width_scales_on_large_window() -> None:
         app.processEvents()
 
 
+def test_project_explorer_defaults_to_elided_readable_columns() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        tree = window.project_tree  # noqa: SLF001 - UI fixture
+        header = tree.header()
+        assert tree.textElideMode() == QtCore.Qt.TextElideMode.ElideMiddle
+        assert tree.alternatingRowColors()
+        assert header.sectionResizeMode(0) == QtWidgets.QHeaderView.ResizeMode.Interactive
+        assert header.sectionResizeMode(1) == QtWidgets.QHeaderView.ResizeMode.Stretch
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_project_explorer_hides_imported_data_root_until_data_is_loaded() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        tree = window.project_tree  # noqa: SLF001 - UI fixture
+        names = [tree.topLevelItem(index).text(0) for index in range(tree.topLevelItemCount())]
+        assert "Imported Data" not in names
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_apply_graph_format_supports_tick_increment_and_count() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -279,6 +307,67 @@ def test_apply_graph_format_supports_tick_increment_and_count() -> None:
         app.processEvents()
 
 
+def test_graph_format_can_toggle_title_and_axis_label_visibility() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = next(iter(window._axes_by_tab.values()))  # noqa: SLF001 - test hook
+        assert axes is not None
+
+        controls = window._graph_format_controls
+        assert isinstance(controls.get("title_visible_cb"), QtWidgets.QCheckBox)
+        assert isinstance(controls.get("x_label_visible_cb"), QtWidgets.QCheckBox)
+        assert isinstance(controls.get("y_label_visible_cb"), QtWidgets.QCheckBox)
+        assert isinstance(controls.get("title_edit"), QtWidgets.QLineEdit)
+        assert isinstance(controls.get("x_label_edit"), QtWidgets.QLineEdit)
+        assert isinstance(controls.get("y_label_edit"), QtWidgets.QLineEdit)
+
+        controls["title_edit"].setText("Hidden Title")
+        controls["x_label_edit"].setText("Hidden X")
+        controls["y_label_edit"].setText("Hidden Y")
+        controls["title_visible_cb"].setChecked(False)
+        controls["x_label_visible_cb"].setChecked(False)
+        controls["y_label_visible_cb"].setChecked(False)
+        window._apply_graph_format(apply_all=False)
+
+        assert axes.get_title() == "Hidden Title"
+        assert axes.get_xlabel() == "Hidden X"
+        assert axes.get_ylabel() == "Hidden Y"
+        assert not axes.title.get_visible()
+        assert not axes.xaxis.label.get_visible()
+        assert not axes.yaxis.label.get_visible()
+
+        controls["title_visible_cb"].setChecked(True)
+        controls["x_label_visible_cb"].setChecked(True)
+        controls["y_label_visible_cb"].setChecked(True)
+        window._apply_graph_format(apply_all=False)
+        assert axes.title.get_visible()
+        assert axes.xaxis.label.get_visible()
+        assert axes.yaxis.label.get_visible()
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_registered_plot_tab_allows_canvas_to_shrink_without_scrollbars() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        tab = window.tab_widget.currentWidget()
+        assert isinstance(tab, QtWidgets.QWidget)
+        canvas = window._current_canvas()
+        assert canvas is not None
+        assert tab.minimumWidth() == 0
+        assert tab.minimumHeight() == 0
+        assert canvas.minimumWidth() == 0
+        assert canvas.minimumHeight() == 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_apply_graph_format_sets_figure_dimensions_and_axes_aspect() -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
@@ -308,6 +397,103 @@ def test_apply_graph_format_sets_figure_dimensions_and_axes_aspect() -> None:
         assert width == pytest.approx(8.0, rel=1e-2)
         assert height == pytest.approx(5.0, rel=1e-2)
         assert float(axes.get_aspect()) == pytest.approx(1.5)
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_apply_graph_format_supports_axis_value_factor_and_unit_reflection() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        axes = next(iter(window._axes_by_tab.values()))  # noqa: SLF001 - test hook
+        assert axes is not None
+        axes.plot([0.0, 500.0, 1000.0], [0.0, 2.0, 4.0], label="Series")
+
+        controls = window._graph_format_controls
+        assert isinstance(controls.get("x_label_edit"), QtWidgets.QLineEdit)
+        assert isinstance(controls.get("y_label_edit"), QtWidgets.QLineEdit)
+        assert isinstance(controls.get("x_value_factor_edit"), QtWidgets.QLineEdit)
+        assert isinstance(controls.get("y_value_factor_edit"), QtWidgets.QLineEdit)
+        assert isinstance(controls.get("reflect_x_scale_units_cb"), QtWidgets.QCheckBox)
+        assert isinstance(controls.get("reflect_y_scale_units_cb"), QtWidgets.QCheckBox)
+
+        controls["x_label_edit"].setText("Field [Oe]")
+        controls["y_label_edit"].setText("Signal [V]")
+        controls["x_value_factor_edit"].setText("10^-3")
+        controls["y_value_factor_edit"].setText("2")
+        controls["reflect_x_scale_units_cb"].setChecked(True)
+        controls["reflect_y_scale_units_cb"].setChecked(True)
+        window._apply_graph_format(apply_all=False)
+
+        assert axes.get_xlabel() == "Field [Oe * 10^-3]"
+        assert axes.get_ylabel() == "Signal [V * 2]"
+        x_formatter = axes.xaxis.get_major_formatter()
+        y_formatter = axes.yaxis.get_major_formatter()
+        assert isinstance(x_formatter, mticker.FuncFormatter)
+        assert isinstance(y_formatter, mticker.FuncFormatter)
+        assert x_formatter(1000.0, 0) == "1"
+        assert y_formatter(2.5, 0) == "5"
+
+        controls["x_value_factor_edit"].setText("1")
+        controls["y_value_factor_edit"].setText("1")
+        controls["reflect_x_scale_units_cb"].setChecked(False)
+        controls["reflect_y_scale_units_cb"].setChecked(False)
+        window._apply_graph_format(apply_all=False)
+        assert axes.get_xlabel() == "Field [Oe]"
+        assert axes.get_ylabel() == "Signal [V]"
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_graph_format_dialog_footer_buttons_stay_outside_scroll_area() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._open_graph_format_dialog()  # noqa: SLF001 - test hook
+        dialog = window._graph_format_dialog  # noqa: SLF001 - test hook
+        assert isinstance(dialog, QtWidgets.QDialog)
+        panel = window._graph_format_controls.get("button_panel")  # noqa: SLF001 - test hook
+        assert isinstance(panel, QtWidgets.QWidget)
+        assert panel.parentWidget() is dialog
+        layout = dialog.layout()
+        assert isinstance(layout, QtWidgets.QVBoxLayout)
+        assert layout.indexOf(panel) >= 0
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_save_graph_remembers_last_selected_export_format(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window._create_blank_graph()
+        first_out = tmp_path / "graph_first"
+        monkeypatch.setattr(
+            QtWidgets.QFileDialog,
+            "getSaveFileName",
+            lambda *args, **kwargs: (str(first_out), "PDF Document (*.pdf)"),
+        )
+        assert window._save_graph_for_current_tab()  # noqa: SLF001 - exercised public flow
+        assert (tmp_path / "graph_first.pdf").exists()
+
+        captured: dict[str, str] = {}
+
+        def _capture_dialog(*args, **kwargs):
+            captured["suggested_path"] = str(args[2]) if len(args) > 2 else ""
+            captured["selected_filter"] = str(args[4]) if len(args) > 4 else ""
+            return "", ""
+
+        monkeypatch.setattr(QtWidgets.QFileDialog, "getSaveFileName", _capture_dialog)
+        assert not window._save_graph_for_current_tab()  # noqa: SLF001
+        assert captured.get("suggested_path", "").endswith(".pdf")
+        assert captured.get("selected_filter") == "PDF Document (*.pdf)"
+        assert window._last_graph_format == ".pdf"  # noqa: SLF001 - persisted state
     finally:
         window.close()
         app.processEvents()

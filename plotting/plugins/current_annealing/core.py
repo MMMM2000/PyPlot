@@ -33,9 +33,9 @@ LEGEND_SIZE = 12
 LEGEND_ORIENTATION = "auto"
 LEGEND_SHOW_SYMBOLS = False
 LEGEND_SYMBOL_SIZE = 8.0
-TICK_SIZE = 12
-AXIS_LABEL_SIZE = 14
-TITLE_SIZE = 18
+TICK_SIZE = 10
+AXIS_LABEL_SIZE = 12
+TITLE_SIZE = 16
 SHOW_TICK_LABELS = True
 SHOW_AXIS_LABELS = True
 SHOW_TITLE = True
@@ -735,15 +735,15 @@ def plot_one(
 ) -> Tuple[Figure, str]:
     if target_px is not None:
         target_width, target_height = target_px
-        dpi = 180.0
+        dpi = 140.0
         width = max(float(target_width) / dpi, 0.5)
         height = max(float(target_height) / dpi, 0.5)
     else:
         if not figsize:
-            figsize = (8.5, 4.8)
+            figsize = (6.0, 4.0)
         width = max(float(figsize[0]), 0.5)
         height = max(float(figsize[1]), 0.5)
-        dpi = 144.0
+        dpi = 120.0
     fig, ax = plt.subplots(figsize=(width, height), dpi=dpi)
 
     currents = df["I_mA"].to_numpy(dtype=float)
@@ -829,9 +829,9 @@ def plot_one(
                 legend_kinds.add(legend_key)
             previous_direction = direction
 
-    ax.set_xlabel("Current (mA)", fontsize=AXIS_LABEL_SIZE, fontweight="bold")
-    ax.set_ylabel("Resistance (Ω)", fontsize=AXIS_LABEL_SIZE, fontweight="bold")
-    ax.set_title(title, fontsize=TITLE_SIZE, fontweight="bold", pad=12)
+    ax.set_xlabel("Current [mA]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_ylabel("Resistance [Ω]", fontsize=AXIS_LABEL_SIZE)
+    ax.set_title(title, fontsize=TITLE_SIZE, pad=10)
     ax.grid(True, ls="--", alpha=0.3)
     if legend_handles:
         legend = ax.legend(

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-02-09 12:17 UTC
+
+- Launcher `Plotting` recency ordering now uses launcher-only monotonic open-order + timestamp keys, so stale/background recency writes no longer pin unrelated tools at the top.
+- Project Explorer no longer shows an empty `Imported Data` root before any workbook is imported; the root appears on first import and is removed again when it becomes empty.
+- Shared Graph formatting now includes explicit show/hide checkboxes beside Title, X label, and Y label so labels can be toggled without deleting text.
+- Maximized graph subwindow geometry on macOS now compensates MDI frame/title-bar extents, and registered plot tabs now allow canvas shrink-to-fit, reducing bottom clipping/scrollbar artifacts in fullscreen/maximized views.
+
+## 2026-02-09 11:27 UTC
+
+- Shared Graph formatting now supports per-axis value-factor expressions (for example `10^-3`) with optional unit-label reflection, and keeps the action buttons (`Apply current graph`, `Apply all graphs`, `Read from current`) pinned in a fixed footer so they stay visible while scrolling.
+- Save Graph now remembers the last selected export format (`PNG`/`PDF`/`SVG`) and reuses it as the default in the next save dialog.
+- Project Explorer readability was improved with middle-elided long text, tuned column sizing, alternating rows, and full-text tooltips for truncated entries.
+- Current Annealing default graph presentation now matches the shared PyPlot baseline more closely (smaller default canvas/figure profile and standard label styling).
+- Crash diagnostics update: macOS hard-abort repros are now confirmed in native crash reports (`~/Library/Logs/DiagnosticReports/Python-*.ips`) as `SIGABRT` via `pyqt6_err_print`/Qt slot exception handling; no corresponding fresh traceback appears in `logs/message_log.txt`.
+
+## 2026-02-09 10:26 UTC
+
+- Removed the redundant `Export PDF…` control from the shared Graph formatting dialog; PDF export remains available via `Save graph…`.
+- FMR plotting now supports automatic forward/back sweep field alignment by shifting branches symmetrically toward overlap based on resonance-field offset (applied consistently in PyPlot and Origin export).
+
 ## 2026-02-09 10:05 UTC
 
 - Switched shared `Graph formatting` access from a constrained toolbar popover to a separate movable dialog window (Origin-style workflow) so full formatting controls are visible and can stay open while editing graphs.

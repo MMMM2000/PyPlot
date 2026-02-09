@@ -45,16 +45,22 @@ def test_launcher_plotting_list_refreshes_using_last_opened_order(
         assert window._sort_modes.get("plotters") == "last_used"  # noqa: SLF001 - test hook
 
         now = time.time()
-        window._settings.setValue("last_used/plotters/ZZ Plot A", now - 100.0)  # noqa: SLF001 - test hook
-        window._settings.setValue("last_used/plotters/ZZ Plot B", now)  # noqa: SLF001 - test hook
+        window._settings.setValue("launcher_last_order/seq", 200)
+        window._settings.setValue("launcher_last_order/plotters/ZZ Plot A", 100)
+        window._settings.setValue("launcher_last_order/plotters/ZZ Plot B", 200)
+        window._settings.setValue("launcher_last_used/plotters/ZZ Plot A", now - 100.0)  # noqa: SLF001 - test hook
+        window._settings.setValue("launcher_last_used/plotters/ZZ Plot B", now)  # noqa: SLF001 - test hook
         window._refresh_list("plotters")  # noqa: SLF001 - test hook
         app.processEvents()
         assert window.plot_list.item(0).text() == "ZZ Plot B"
 
         # Simulate tool usage while the launcher is hidden, then restore it:
         # _restore_launcher should refresh the visible order from settings.
-        window._settings.setValue("last_used/plotters/ZZ Plot A", now + 200.0)  # noqa: SLF001 - test hook
-        window._settings.setValue("last_used/plotters/ZZ Plot B", now)  # noqa: SLF001 - test hook
+        window._settings.setValue("launcher_last_order/seq", 250)
+        window._settings.setValue("launcher_last_order/plotters/ZZ Plot A", 250)
+        window._settings.setValue("launcher_last_order/plotters/ZZ Plot B", 200)
+        window._settings.setValue("launcher_last_used/plotters/ZZ Plot A", now + 200.0)  # noqa: SLF001 - test hook
+        window._settings.setValue("launcher_last_used/plotters/ZZ Plot B", now)  # noqa: SLF001 - test hook
         window.hide()
         window._restore_launcher()  # noqa: SLF001 - test hook
         app.processEvents()

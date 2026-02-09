@@ -19,60 +19,14 @@
 - Origin exports: verify line/symbol styles and graph titles mirror PyPlot across plugins (VSM hysteresis, VSM temp scan, DMA iso-stress, FMR).
 
 ## In Progress
-- Current Annealing: add supply profiles for HMP4030 vs Owon SPE6102 (min start current, voltage-first init, reset/channel defaults) and confirm Owon ramp/voltage behavior.
-- Investigate PyPlot macOS UI unresponsiveness and zoom/maximize freezes.
-- Verify PyPlot MDI save/export + graph-format toolbar flow on macOS (especially `Save graph…` false “No plot area” and fullscreen bottom cropping). (Offscreen automation, full test suite, and launcher smoke startup passed on 2026-02-06; waiting for manual desktop confirmation.)
-- Verify plugin menu section flow on macOS after shared graph-format dedupe (single shared `Graph formatting` section visible across plugins) and confirm `Save graph…` remains enabled after `.pypj` reopen + graph edits.
-- Investigate/monitor PyPlot macOS hard aborts from Project Explorer/Object Manager double-click activation paths.
-- Fabrication section: add estimated transition temperature + glass pull-off columns (with notes entry).
-- Videos section: show fabrication rows even without videos, keep editable fabrication fields + video end-length columns, and add open-video warnings; apply overrides in assemble/exports.
-- Add Data Builder sections for VSM hysteresis loops, VSM temperature scan, and DMA iso-stress (reuse PyPlot plotting scripts; handle multiple graphs per microwire).
-- Add FMR PyPlot plugin + Data Builder section and validate sample CSV plotting/Origin export.
-- Add a Compare section to filter/select microwires and compare their data/graphs side-by-side.
-- Compare: add default samples-as-columns view with selectable field rows and inline graph previews.
-- Data Builder: treat microwire suffix tokens (e.g., 10-5oe) as distinct samples and propagate across sections.
-- Microscope OCR: resolve PaddleOCR import failure in `.venv-wsl` (Python 3.13) so OCR runs in the Data Builder.
-- Microwire Data Builder: harden Videos legacy table migration (`Composition`/`Draw`/`Piece`/`Microwire`) and pending-scan thread shutdown paths; keep verifying close/start stability. (Automated tests passed on 2026-02-05; OCR integration remains gated to Python 3.12 unless unsafe override is enabled.)
-- Current annealing: support "other mA" graphs column + visibility and include in assemble/compare/HTML export.
-- HTML export: add compare mode alongside the preview panel.
-- Add DMA iso-stress PyPlot plugin (settings panel + plot tabs from TA DMA TXT files).
-- DMA iso-stress: remove Tkinter coupling in the PyPlot parser path so the plugin launches on macOS Python builds without `_tkinter`.
-- DMA iso-stress: verify legend-only-visible-series behavior and new graph formatting controls (title/labels with visibility toggles, editable legend-entry labels, line style, limits, selective copy to chosen graphs) on macOS. (Automated offscreen checks passed on 2026-02-06; pending manual visual verification.)
-- DMA iso-stress: verify project round-trip persistence restores plotted tabs and custom formatting (including tick mode/count/increment) on macOS desktop. (Automated offscreen checks passed on 2026-02-09; pending manual visual verification.)
-- Migrate remaining Data Builder/VSM temp scan parser imports off `experiments/simple_scripts` and keep only plugin-local plotting modules.
-- Validate new shared PyPlot graph-formatting controls (title/axes/ticks/scale/limits/PDF export + tick increment/count controls + figure dimensions/aspect + direct double-click routing into dedicated movable Graph formatting dialog) across plugins, including dual-axis edge cases. (Automated offscreen checks passed on 2026-02-09; pending manual visual verification.)
-- VSM Data Builder: validate sweep/no-glass angle parsing + temperature labeling against PyPlot, confirm Open-in-PyPlot axes defaults, verify VSM temp scan + DMA multi-graph previews, and confirm Origin export stability.
-- Optimize VSM/DMA/FMR preview rendering performance (downsample plot points for faster section load).
-- Compare matrix: improve initial render performance (lazy graph previews) and ensure row-level selection highlighting.
-- Current Annealing: enable Plot after data import and fix directional Origin exports.
-- Assemble: validate merged Export dialog flow, column-driven section selection, .pydpj persistence for preview columns/order/sort, and confirm row-selection crashes are resolved.
-- Confirm Assemble preview no longer crashes (VSM/DMA group helpers + log review).
-- DMA iso-stress: verify new Origin export behavior from PyPlot/Data Builder.
-- VSM hysteresis grouping: merge stray single-angle temperature buckets and reduce log noise for empty files.
-- Compare matrix view: keep stacked graph rows tall enough for full-size previews.
-- Assemble column selector: show all section columns (including duplicates) and remove lingering Sample columns on load.
-- Document Database Builder and Origin output requirements (docs/database_builder.md, docs/origin_output.md).
-- Investigate PyPlot Current Annealing crash; capture message log output for repro.
-- Investigate Microwire Data Builder closing after Origin export / Assemble row selection (no error message).
-- Stabilizing VSM Temperature Scan exports (Origin/TXT) and plot embeddings.
-- Stress/Temp plugins: fix Origin export parity (titles on top axis, manual sample labels, delta labels, units/comments in workbooks, no invalid LT errors); stop PyPlot stress sens cropping.
-- Monitor Microwire Data Builder project-load responsiveness after the new progress/pumping change.
-- Verify Data Builder launch responsiveness with background pending scans and confirm fullscreen shows bottom controls.
-- Fix Data Builder fullscreen/maximized geometry handling.
-- Ensure microscope manual entry advances to the next cell on Enter.
-- Fix current density phase picking so Af1/Af2/etc. columns are respected.
-- Assemble preview: confirm column picker (including graph columns + current density columns), inline graph previews in-table, VSM/DMA previews, multi-column sorting, and HTML export.
-- Verify Assemble includes current density + strain detail columns in preview/export, and confirm Add to compare works with multi-row selections.
-- Assemble: allow manual microscope table data to satisfy microscope inputs without OCR payloads.
-- Strain section: auto-fill d from microscope, editable weight/stress sync, and export stress + mode details.
-- Strain entry form: keep Add entry after saving a new row and let Enter submit the form.
-- Microscope refresh: preserve reviewed d/D values, keep review colours in sync, and make Tab advance between d/D cells.
-- Strain selector dropdown: use taller popup when space allows and auto-focus it after saving a row.
-- Remove remaining Qt warnings on Data Builder refresh (geometry, QBasicTimer, commitData).
-- Verify Microwire microscope overrides: auto-review on override, d-field focus, comma normalization, arrow navigation, and preview sizing.
-- Check Microwire microscope UI colours (reviewed green/red, error log highlighting) and preview/table splitter spacing on varied screens.
-- Confirm Microwire microscope stacked previews, column auto-fit, and bottom control visibility after resizing/fullscreen.
-- Validate microscope inline editing/review workflow: Enter navigation (`d`→`D`→next row), project-persisted per-cell review flags, row highlighting for missing images, core/glass preview swapping without zoom, and no `QWindowsWindow::setGeometry` warnings when maximizing.
+- Verify launcher `Plotting` recency sort after the new open-order fallback (especially stale settings migration where old timestamps/order values exist).
+- Re-check macOS maximized graph rendering for bottom-edge clipping/scrollbars after MDI frame-compensation + canvas shrink-to-fit changes.
+- Verify shared Graph formatting dialog flow on macOS after replacing popovers (toolbar button + double-click should always open the movable window and focus the right section).
+- Investigate intermittent PyPlot macOS hard aborts where no fresh traceback appears in `logs/message_log.txt`/`logs/crash_log.txt`; capture native macOS crash report for the latest repro.
+- Validate FMR automatic forward/back sweep alignment on representative measurement sets and tune default behavior if over/under-correcting.
+- Shared graph formatting follow-ups: axis value-factor formulas (for example `10^-3`) with optional unit-label reflection, sticky apply buttons, and per-session remembered Save Graph format.
+- Improve Project Explorer readability (elide/column sizing/tooltips/path compaction) so large imported sets stay scan-friendly.
+- Align Current Annealing default graph sizing/label style with the shared PyPlot formatting baseline.
 
 ## Done
 - Current Annealing Logger: add configurable start current (default 10 mA) for supplies with higher minimum output.

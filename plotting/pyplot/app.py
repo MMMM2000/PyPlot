@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import math
 import sys
 import uuid
@@ -106,6 +107,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._graph_format_dialog: QtWidgets.QDialog | None = None
         self._graph_format_dialog_container: QtWidgets.QWidget | None = None
         self._graph_format_dialog_layout: QtWidgets.QVBoxLayout | None = None
+        self._graph_format_dialog_root_layout: QtWidgets.QVBoxLayout | None = None
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         if not sys.platform.startswith("win") and sys.platform != "darwin":
@@ -136,6 +138,14 @@ class PyPlotWorkbench(PyPlotWindow):
             candidate = Path(stored_graph_dir)
             if candidate.exists():
                 self._last_graph_dir = candidate
+        stored_graph_format = self.settings.value("last_graph_format", ".png")
+        if isinstance(stored_graph_format, str):
+            token = stored_graph_format.strip().lower()
+        else:
+            token = ".png"
+        if token not in {".png", ".pdf", ".svg"}:
+            token = ".png"
+        self._last_graph_format = token
 
         self._update_action_states()
         self._set_data_sources_visible(False)
@@ -273,11 +283,6 @@ class PyPlotWorkbench(PyPlotWindow):
         history.extend(entry for entry in self._plotter_history if entry != name)
         self._plotter_history = history[:20]
         self._save_plotter_history()
-        try:
-            launcher_settings = QtCore.QSettings("MicrowireData", "Launcher")
-            launcher_settings.setValue(f"last_used/plotters/{name}", time.time())
-        except Exception:
-            pass
         self._refresh_plotter_combo()
 
     def _select_initial_plotter(self) -> None:
@@ -350,6 +355,11 @@ class PyPlotWorkbench(PyPlotWindow):
             self.settings.setValue("last_graph_dir", str(self._last_graph_dir))
         else:
             self.settings.remove("last_graph_dir")
+        graph_format = getattr(self, "_last_graph_format", ".png")
+        if isinstance(graph_format, str) and graph_format in {".png", ".pdf", ".svg"}:
+            self.settings.setValue("last_graph_format", graph_format)
+        else:
+            self.settings.setValue("last_graph_format", ".png")
         try:
             legend_settings = getattr(self, "_legend_settings_by_plugin", {})
             self.settings.setValue("legend_settings_by_plugin", json.dumps(legend_settings))
@@ -959,9 +969,28 @@ class PyPlotWorkbench(PyPlotWindow):
         title_edit = QtWidgets.QLineEdit(graph_section)
         x_label_edit = QtWidgets.QLineEdit(graph_section)
         y_label_edit = QtWidgets.QLineEdit(graph_section)
-        form.addRow("Title:", title_edit)
-        form.addRow("X label:", x_label_edit)
-        form.addRow("Y label:", y_label_edit)
+        title_visible_cb = QtWidgets.QCheckBox("Show", graph_section)
+        title_visible_cb.setChecked(True)
+        x_label_visible_cb = QtWidgets.QCheckBox("Show", graph_section)
+        x_label_visible_cb.setChecked(True)
+        y_label_visible_cb = QtWidgets.QCheckBox("Show", graph_section)
+        y_label_visible_cb.setChecked(True)
+
+        def _label_row(
+            edit: QtWidgets.QLineEdit,
+            visible_cb: QtWidgets.QCheckBox,
+        ) -> QtWidgets.QWidget:
+            row = QtWidgets.QWidget(graph_section)
+            row_layout = QtWidgets.QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            row_layout.addWidget(visible_cb, 0)
+            row_layout.addWidget(edit, 1)
+            return row
+
+        form.addRow("Title:", _label_row(title_edit, title_visible_cb))
+        form.addRow("X label:", _label_row(x_label_edit, x_label_visible_cb))
+        form.addRow("Y label:", _label_row(y_label_edit, y_label_visible_cb))
 
         title_font_spin = QtWidgets.QSpinBox(graph_section)
         title_font_spin.setRange(6, 96)
@@ -1031,6 +1060,25 @@ class PyPlotWorkbench(PyPlotWindow):
         form.addRow("X scale:", x_scale_combo)
         form.addRow("Y scale:", y_scale_combo)
 
+        x_value_factor_edit = QtWidgets.QLineEdit(graph_section)
+        x_value_factor_edit.setPlaceholderText("1 (for example: 10^-3)")
+        x_value_factor_edit.setText("1")
+        y_value_factor_edit = QtWidgets.QLineEdit(graph_section)
+        y_value_factor_edit.setPlaceholderText("1 (for example: 10^-3)")
+        y_value_factor_edit.setText("1")
+        reflect_x_scale_units_cb = QtWidgets.QCheckBox(
+            "Reflect X factor in X label unit",
+            graph_section,
+        )
+        reflect_y_scale_units_cb = QtWidgets.QCheckBox(
+            "Reflect Y factor in Y label unit",
+            graph_section,
+        )
+        form.addRow("X value factor:", x_value_factor_edit)
+        form.addRow("Y value factor:", y_value_factor_edit)
+        form.addRow(reflect_x_scale_units_cb)
+        form.addRow(reflect_y_scale_units_cb)
+
         x_tick_mode_combo = QtWidgets.QComboBox(graph_section)
         x_tick_mode_combo.addItem("Auto", "auto")
         x_tick_mode_combo.addItem("By increment", "step")
@@ -1080,22 +1128,20 @@ class PyPlotWorkbench(PyPlotWindow):
 
         graph_section_layout.addLayout(form)
 
-        button_row = QtWidgets.QHBoxLayout()
+        button_panel = QtWidgets.QWidget(panel or self)
+        button_row = QtWidgets.QHBoxLayout(button_panel)
         button_row.setContentsMargins(0, 2, 0, 0)
         button_row.setSpacing(6)
-        apply_current_btn = QtWidgets.QPushButton("Apply current graph", graph_section)
+        apply_current_btn = QtWidgets.QPushButton("Apply current graph", button_panel)
         apply_current_btn.clicked.connect(lambda: self._apply_graph_format(apply_all=False))
-        apply_all_btn = QtWidgets.QPushButton("Apply all graphs", graph_section)
+        apply_all_btn = QtWidgets.QPushButton("Apply all graphs", button_panel)
         apply_all_btn.clicked.connect(lambda: self._apply_graph_format(apply_all=True))
-        refresh_btn = QtWidgets.QPushButton("Read from current", graph_section)
+        refresh_btn = QtWidgets.QPushButton("Read from current", button_panel)
         refresh_btn.clicked.connect(self._sync_graph_format_controls_from_current_axes)
-        export_pdf_btn = QtWidgets.QPushButton("Export PDF…", graph_section)
-        export_pdf_btn.clicked.connect(self._export_current_graph_pdf)
         button_row.addWidget(apply_current_btn)
         button_row.addWidget(apply_all_btn)
         button_row.addWidget(refresh_btn)
-        button_row.addWidget(export_pdf_btn)
-        graph_section_layout.addLayout(button_row)
+        button_row.addStretch(1)
 
         graph_anchor_section, graph_anchor_layout = create_toolbar_section(
             "Graph formatting",
@@ -1121,6 +1167,9 @@ class PyPlotWorkbench(PyPlotWindow):
             "title_edit": title_edit,
             "x_label_edit": x_label_edit,
             "y_label_edit": y_label_edit,
+            "title_visible_cb": title_visible_cb,
+            "x_label_visible_cb": x_label_visible_cb,
+            "y_label_visible_cb": y_label_visible_cb,
             "title_font_spin": title_font_spin,
             "label_font_spin": label_font_spin,
             "tick_font_spin": tick_font_spin,
@@ -1134,6 +1183,10 @@ class PyPlotWorkbench(PyPlotWindow):
             "axes_aspect_ratio_spin": axes_aspect_ratio_spin,
             "x_scale_combo": x_scale_combo,
             "y_scale_combo": y_scale_combo,
+            "x_value_factor_edit": x_value_factor_edit,
+            "y_value_factor_edit": y_value_factor_edit,
+            "reflect_x_scale_units_cb": reflect_x_scale_units_cb,
+            "reflect_y_scale_units_cb": reflect_y_scale_units_cb,
             "x_tick_mode_combo": x_tick_mode_combo,
             "y_tick_mode_combo": y_tick_mode_combo,
             "x_tick_step_edit": x_tick_step_edit,
@@ -1146,10 +1199,10 @@ class PyPlotWorkbench(PyPlotWindow):
             "y_max_edit": y_max_edit,
             "show_grid_cb": show_grid_cb,
             "show_legend_cb": show_legend_cb,
+            "button_panel": button_panel,
             "apply_current_btn": apply_current_btn,
             "apply_all_btn": apply_all_btn,
             "refresh_btn": refresh_btn,
-            "export_pdf_btn": export_pdf_btn,
             "open_graph_format_btn": open_graph_format_btn,
         }
         self._set_graph_format_dialog_section(graph_section)
@@ -1221,6 +1274,7 @@ class PyPlotWorkbench(PyPlotWindow):
         self._graph_format_dialog = dialog
         self._graph_format_dialog_container = container
         self._graph_format_dialog_layout = container_layout
+        self._graph_format_dialog_root_layout = root_layout
         return dialog
 
     def _set_graph_format_dialog_section(self, section: QtWidgets.QWidget) -> None:
@@ -1229,6 +1283,7 @@ class PyPlotWorkbench(PyPlotWindow):
         layout = self._graph_format_dialog_layout
         if container is None or layout is None:
             return
+        root_layout = self._graph_format_dialog_root_layout
 
         parent = section.parentWidget()
         if isinstance(parent, QtWidgets.QWidget):
@@ -1248,6 +1303,19 @@ class PyPlotWorkbench(PyPlotWindow):
             insert_index = max(0, layout.count() - 1)
             layout.insertWidget(insert_index, section)
         section.show()
+
+        button_panel = self._control_widget("button_panel")
+        if isinstance(button_panel, QtWidgets.QWidget) and isinstance(root_layout, QtWidgets.QVBoxLayout):
+            panel_parent = button_panel.parentWidget()
+            if isinstance(panel_parent, QtWidgets.QWidget):
+                panel_parent_layout = panel_parent.layout()
+                if isinstance(panel_parent_layout, QtWidgets.QLayout):
+                    panel_parent_layout.removeWidget(button_panel)
+            if button_panel.parentWidget() is not dialog:
+                button_panel.setParent(dialog)
+            if root_layout.indexOf(button_panel) < 0:
+                root_layout.addWidget(button_panel, 0)
+            button_panel.show()
         dialog.adjustSize()
 
     def _open_graph_format_dialog(
@@ -1290,6 +1358,143 @@ class PyPlotWorkbench(PyPlotWindow):
             return float(text)
         except ValueError:
             return None
+
+    @staticmethod
+    def _safe_numeric_expression(expression: str) -> float | None:
+        text = str(expression or "").strip()
+        if not text:
+            return 1.0
+        normalized = text.replace("^", "**").replace("×", "*")
+        try:
+            tree = ast.parse(normalized, mode="eval")
+        except SyntaxError:
+            return None
+
+        def _eval(node: ast.AST) -> float:
+            if isinstance(node, ast.Expression):
+                return _eval(node.body)
+            if isinstance(node, ast.Constant):
+                if isinstance(node.value, (int, float)):
+                    return float(node.value)
+                raise ValueError
+            if isinstance(node, ast.UnaryOp):
+                value = _eval(node.operand)
+                if isinstance(node.op, ast.UAdd):
+                    return value
+                if isinstance(node.op, ast.USub):
+                    return -value
+                raise ValueError
+            if isinstance(node, ast.BinOp):
+                left = _eval(node.left)
+                right = _eval(node.right)
+                if isinstance(node.op, ast.Add):
+                    return left + right
+                if isinstance(node.op, ast.Sub):
+                    return left - right
+                if isinstance(node.op, ast.Mult):
+                    return left * right
+                if isinstance(node.op, ast.Div):
+                    return left / right
+                if isinstance(node.op, ast.Pow):
+                    return left ** right
+                raise ValueError
+            raise ValueError
+
+        try:
+            value = float(_eval(tree))
+        except Exception:
+            return None
+        if not math.isfinite(value):
+            return None
+        return value
+
+    @staticmethod
+    def _factor_label_text(factor: float) -> str:
+        if not math.isfinite(factor):
+            return "1"
+        if math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            return "1"
+        sign = "-" if factor < 0 else ""
+        abs_factor = abs(factor)
+        if abs_factor > 0:
+            exponent = math.log10(abs_factor)
+            rounded_exponent = int(round(exponent))
+            if math.isclose(exponent, rounded_exponent, rel_tol=1e-10, abs_tol=1e-10):
+                return f"{sign}10^{rounded_exponent}"
+        return f"{factor:.6g}"
+
+    @staticmethod
+    def _factor_edit_text(factor: float) -> str:
+        return PyPlotWorkbench._factor_label_text(factor)
+
+    @staticmethod
+    def _format_scaled_tick(value: float, factor: float) -> str:
+        scaled = value * factor
+        if not math.isfinite(scaled):
+            return ""
+        if math.isclose(scaled, 0.0, abs_tol=1e-15):
+            return "0"
+        return f"{scaled:.6g}"
+
+    def _axis_base_label(self, axes: Any, axis: str) -> str:
+        key = f"_mw_{axis}_base_label"
+        candidate = getattr(axes, key, None)
+        if isinstance(candidate, str):
+            return candidate
+        try:
+            if axis == "x":
+                label = str(axes.get_xlabel() or "")
+            else:
+                label = str(axes.get_ylabel() or "")
+        except Exception:
+            label = ""
+        return label
+
+    def _scaled_axis_label(self, base_label: str, factor: float, reflect_in_unit: bool) -> str:
+        label = str(base_label or "")
+        normalize_units = getattr(self, "_label_units_to_brackets", None)
+        if callable(normalize_units):
+            try:
+                label = normalize_units(label)
+            except Exception:
+                pass
+        if not reflect_in_unit or math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            return label
+        factor_text = self._factor_label_text(factor)
+        left = label.rfind("[")
+        right = label.rfind("]")
+        if left >= 0 and right > left:
+            unit = label[left + 1 : right].strip()
+            prefix = label[:left].rstrip()
+            if unit:
+                return f"{prefix} [{unit} * {factor_text}]".strip()
+            return f"{prefix} [{factor_text}]".strip()
+        stripped = label.strip()
+        if not stripped:
+            return factor_text
+        return f"{stripped} [{factor_text}]"
+
+    def _apply_axis_factor_formatter(self, axis_obj: Any, factor: float, *, axis_name: str) -> None:
+        if math.isclose(factor, 1.0, rel_tol=1e-12, abs_tol=1e-12):
+            owner = getattr(axis_obj, "axes", None)
+            scale = "linear"
+            try:
+                if axis_name == "x":
+                    scale = str(owner.get_xscale() if owner is not None else "linear").lower()
+                else:
+                    scale = str(owner.get_yscale() if owner is not None else "linear").lower()
+            except Exception:
+                scale = "linear"
+            if scale == "log":
+                axis_obj.set_major_formatter(mticker.LogFormatterSciNotation())
+            else:
+                axis_obj.set_major_formatter(mticker.ScalarFormatter())
+            return
+        axis_obj.set_major_formatter(
+            mticker.FuncFormatter(
+                lambda value, _pos, _factor=factor: self._format_scaled_tick(value, _factor)
+            )
+        )
 
     def _sync_tick_mode_inputs(self) -> None:
         if self._graph_format_updating:
@@ -1450,6 +1655,9 @@ class PyPlotWorkbench(PyPlotWindow):
         title_edit = self._control_widget("title_edit")
         x_label_edit = self._control_widget("x_label_edit")
         y_label_edit = self._control_widget("y_label_edit")
+        title_visible_cb = self._control_widget("title_visible_cb")
+        x_label_visible_cb = self._control_widget("x_label_visible_cb")
+        y_label_visible_cb = self._control_widget("y_label_visible_cb")
         title_font_spin = self._control_widget("title_font_spin")
         label_font_spin = self._control_widget("label_font_spin")
         tick_font_spin = self._control_widget("tick_font_spin")
@@ -1463,6 +1671,10 @@ class PyPlotWorkbench(PyPlotWindow):
         axes_aspect_ratio_spin = self._control_widget("axes_aspect_ratio_spin")
         x_scale_combo = self._control_widget("x_scale_combo")
         y_scale_combo = self._control_widget("y_scale_combo")
+        x_value_factor_edit = self._control_widget("x_value_factor_edit")
+        y_value_factor_edit = self._control_widget("y_value_factor_edit")
+        reflect_x_scale_units_cb = self._control_widget("reflect_x_scale_units_cb")
+        reflect_y_scale_units_cb = self._control_widget("reflect_y_scale_units_cb")
         x_tick_mode_combo = self._control_widget("x_tick_mode_combo")
         y_tick_mode_combo = self._control_widget("y_tick_mode_combo")
         x_tick_step_edit = self._control_widget("x_tick_step_edit")
@@ -1481,9 +1693,24 @@ class PyPlotWorkbench(PyPlotWindow):
             if isinstance(title_edit, QtWidgets.QLineEdit):
                 title_edit.setText(str(getattr(axes, "get_title", lambda: "")() or ""))
             if isinstance(x_label_edit, QtWidgets.QLineEdit):
-                x_label_edit.setText(str(getattr(axes, "get_xlabel", lambda: "")() or ""))
+                x_label_edit.setText(self._axis_base_label(axes, "x"))
             if isinstance(y_label_edit, QtWidgets.QLineEdit):
-                y_label_edit.setText(str(getattr(axes, "get_ylabel", lambda: "")() or ""))
+                y_label_edit.setText(self._axis_base_label(axes, "y"))
+            if isinstance(title_visible_cb, QtWidgets.QCheckBox):
+                try:
+                    title_visible_cb.setChecked(bool(axes.title.get_visible()))
+                except Exception:
+                    title_visible_cb.setChecked(True)
+            if isinstance(x_label_visible_cb, QtWidgets.QCheckBox):
+                try:
+                    x_label_visible_cb.setChecked(bool(axes.xaxis.label.get_visible()))
+                except Exception:
+                    x_label_visible_cb.setChecked(True)
+            if isinstance(y_label_visible_cb, QtWidgets.QCheckBox):
+                try:
+                    y_label_visible_cb.setChecked(bool(axes.yaxis.label.get_visible()))
+                except Exception:
+                    y_label_visible_cb.setChecked(True)
 
             if isinstance(title_font_spin, QtWidgets.QSpinBox):
                 try:
@@ -1571,6 +1798,28 @@ class PyPlotWorkbench(PyPlotWindow):
                 index = y_scale_combo.findData(y_scale)
                 if index >= 0:
                     y_scale_combo.setCurrentIndex(index)
+            x_factor = getattr(axes, "_mw_x_value_factor", 1.0)
+            y_factor = getattr(axes, "_mw_y_value_factor", 1.0)
+            try:
+                x_factor_value = float(x_factor)
+            except Exception:
+                x_factor_value = 1.0
+            try:
+                y_factor_value = float(y_factor)
+            except Exception:
+                y_factor_value = 1.0
+            if not math.isfinite(x_factor_value) or math.isclose(x_factor_value, 0.0, abs_tol=1e-15):
+                x_factor_value = 1.0
+            if not math.isfinite(y_factor_value) or math.isclose(y_factor_value, 0.0, abs_tol=1e-15):
+                y_factor_value = 1.0
+            if isinstance(x_value_factor_edit, QtWidgets.QLineEdit):
+                x_value_factor_edit.setText(self._factor_edit_text(x_factor_value))
+            if isinstance(y_value_factor_edit, QtWidgets.QLineEdit):
+                y_value_factor_edit.setText(self._factor_edit_text(y_factor_value))
+            if isinstance(reflect_x_scale_units_cb, QtWidgets.QCheckBox):
+                reflect_x_scale_units_cb.setChecked(bool(getattr(axes, "_mw_x_reflect_scale_in_unit", False)))
+            if isinstance(reflect_y_scale_units_cb, QtWidgets.QCheckBox):
+                reflect_y_scale_units_cb.setChecked(bool(getattr(axes, "_mw_y_reflect_scale_in_unit", False)))
 
             x_tick_mode, x_tick_step, x_tick_count = self._tick_mode_from_axis(axes.xaxis)
             y_tick_mode, y_tick_step, y_tick_count = self._tick_mode_from_axis(axes.yaxis)
@@ -1639,11 +1888,14 @@ class PyPlotWorkbench(PyPlotWindow):
             return
 
         def _apply_focus() -> None:
-            if not isinstance(widget, QtWidgets.QWidget):
+            try:
+                if not isinstance(widget, QtWidgets.QWidget):
+                    return
+                widget.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
+                if select_all and isinstance(widget, QtWidgets.QLineEdit):
+                    widget.selectAll()
+            except Exception:
                 return
-            widget.setFocus(QtCore.Qt.FocusReason.OtherFocusReason)
-            if select_all and isinstance(widget, QtWidgets.QLineEdit):
-                widget.selectAll()
 
         QtCore.QTimer.singleShot(0, _apply_focus)
 
@@ -1723,6 +1975,9 @@ class PyPlotWorkbench(PyPlotWindow):
         title_edit = self._control_widget("title_edit")
         x_label_edit = self._control_widget("x_label_edit")
         y_label_edit = self._control_widget("y_label_edit")
+        title_visible_cb = self._control_widget("title_visible_cb")
+        x_label_visible_cb = self._control_widget("x_label_visible_cb")
+        y_label_visible_cb = self._control_widget("y_label_visible_cb")
         title_font_spin = self._control_widget("title_font_spin")
         label_font_spin = self._control_widget("label_font_spin")
         tick_font_spin = self._control_widget("tick_font_spin")
@@ -1736,6 +1991,10 @@ class PyPlotWorkbench(PyPlotWindow):
         axes_aspect_ratio_spin = self._control_widget("axes_aspect_ratio_spin")
         x_scale_combo = self._control_widget("x_scale_combo")
         y_scale_combo = self._control_widget("y_scale_combo")
+        x_value_factor_edit = self._control_widget("x_value_factor_edit")
+        y_value_factor_edit = self._control_widget("y_value_factor_edit")
+        reflect_x_scale_units_cb = self._control_widget("reflect_x_scale_units_cb")
+        reflect_y_scale_units_cb = self._control_widget("reflect_y_scale_units_cb")
         x_tick_mode_combo = self._control_widget("x_tick_mode_combo")
         y_tick_mode_combo = self._control_widget("y_tick_mode_combo")
         x_tick_count_spin = self._control_widget("x_tick_count_spin")
@@ -1746,6 +2005,21 @@ class PyPlotWorkbench(PyPlotWindow):
         title = title_edit.text() if isinstance(title_edit, QtWidgets.QLineEdit) else ""
         x_label = x_label_edit.text() if isinstance(x_label_edit, QtWidgets.QLineEdit) else ""
         y_label = y_label_edit.text() if isinstance(y_label_edit, QtWidgets.QLineEdit) else ""
+        show_title = (
+            bool(title_visible_cb.isChecked())
+            if isinstance(title_visible_cb, QtWidgets.QCheckBox)
+            else True
+        )
+        show_x_label = (
+            bool(x_label_visible_cb.isChecked())
+            if isinstance(x_label_visible_cb, QtWidgets.QCheckBox)
+            else True
+        )
+        show_y_label = (
+            bool(y_label_visible_cb.isChecked())
+            if isinstance(y_label_visible_cb, QtWidgets.QCheckBox)
+            else True
+        )
         title_font = float(title_font_spin.value()) if isinstance(title_font_spin, QtWidgets.QSpinBox) else 16.0
         label_font = float(label_font_spin.value()) if isinstance(label_font_spin, QtWidgets.QSpinBox) else 12.0
         tick_font = float(tick_font_spin.value()) if isinstance(tick_font_spin, QtWidgets.QSpinBox) else 10.0
@@ -1799,6 +2073,28 @@ class PyPlotWorkbench(PyPlotWindow):
             if isinstance(y_scale_combo, QtWidgets.QComboBox)
             else "linear"
         )
+        x_factor_text = (
+            x_value_factor_edit.text().strip()
+            if isinstance(x_value_factor_edit, QtWidgets.QLineEdit)
+            else "1"
+        )
+        y_factor_text = (
+            y_value_factor_edit.text().strip()
+            if isinstance(y_value_factor_edit, QtWidgets.QLineEdit)
+            else "1"
+        )
+        x_factor = self._safe_numeric_expression(x_factor_text)
+        y_factor = self._safe_numeric_expression(y_factor_text)
+        reflect_x_scale_units = (
+            bool(reflect_x_scale_units_cb.isChecked())
+            if isinstance(reflect_x_scale_units_cb, QtWidgets.QCheckBox)
+            else False
+        )
+        reflect_y_scale_units = (
+            bool(reflect_y_scale_units_cb.isChecked())
+            if isinstance(reflect_y_scale_units_cb, QtWidgets.QCheckBox)
+            else False
+        )
         x_tick_mode = (
             str(x_tick_mode_combo.currentData())
             if isinstance(x_tick_mode_combo, QtWidgets.QComboBox)
@@ -1841,6 +2137,20 @@ class PyPlotWorkbench(PyPlotWindow):
             return
         if y_scale == "log" and ((y_min is not None and y_min <= 0) or (y_max is not None and y_max <= 0)):
             QtWidgets.QMessageBox.warning(self, "Graph formatting", "Log Y scale requires positive Y limits.")
+            return
+        if x_factor is None or math.isclose(x_factor, 0.0, abs_tol=1e-15):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "X value factor must be a valid non-zero number/expression (for example: 10^-3).",
+            )
+            return
+        if y_factor is None or math.isclose(y_factor, 0.0, abs_tol=1e-15):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Graph formatting",
+                "Y value factor must be a valid non-zero number/expression (for example: 10^-3).",
+            )
             return
         if x_tick_mode == "step" and (x_tick_step is None or x_tick_step <= 0):
             QtWidgets.QMessageBox.warning(
@@ -1896,14 +2206,45 @@ class PyPlotWorkbench(PyPlotWindow):
                     except Exception:
                         pass
 
+                x_label_base = self._label_units_to_brackets(str(x_label))
+                y_label_base = self._label_units_to_brackets(str(y_label))
                 axes.set_title(title)
-                axes.set_xlabel(x_label)
-                axes.set_ylabel(y_label)
+                axes.set_xlabel(self._scaled_axis_label(x_label_base, x_factor, reflect_x_scale_units))
+                axes.set_ylabel(self._scaled_axis_label(y_label_base, y_factor, reflect_y_scale_units))
                 axes.title.set_fontsize(title_font)
+                axes.title.set_visible(show_title)
                 axes.xaxis.label.set_fontsize(label_font)
+                axes.xaxis.label.set_visible(show_x_label)
                 axes.yaxis.label.set_fontsize(label_font)
+                axes.yaxis.label.set_visible(show_y_label)
+                setattr(axes, "_mw_x_base_label", x_label_base)
+                setattr(axes, "_mw_y_base_label", y_label_base)
+                setattr(axes, "_mw_x_value_factor", float(x_factor))
+                setattr(axes, "_mw_y_value_factor", float(y_factor))
+                setattr(axes, "_mw_x_reflect_scale_in_unit", bool(reflect_x_scale_units))
+                setattr(axes, "_mw_y_reflect_scale_in_unit", bool(reflect_y_scale_units))
                 plugin_name = self._plugin_name_for_axes(axes)
                 for axis in sibling_axes:
+                    setattr(axis, "_mw_x_base_label", x_label_base)
+                    setattr(axis, "_mw_y_base_label", y_label_base)
+                    setattr(axis, "_mw_x_value_factor", float(x_factor))
+                    setattr(axis, "_mw_y_value_factor", float(y_factor))
+                    setattr(axis, "_mw_x_reflect_scale_in_unit", bool(reflect_x_scale_units))
+                    setattr(axis, "_mw_y_reflect_scale_in_unit", bool(reflect_y_scale_units))
+                    axis.set_xlabel(self._scaled_axis_label(x_label_base, x_factor, reflect_x_scale_units))
+                    axis.set_ylabel(self._scaled_axis_label(y_label_base, y_factor, reflect_y_scale_units))
+                    try:
+                        axis.title.set_visible(show_title)
+                    except Exception:
+                        pass
+                    try:
+                        axis.xaxis.label.set_visible(show_x_label)
+                    except Exception:
+                        pass
+                    try:
+                        axis.yaxis.label.set_visible(show_y_label)
+                    except Exception:
+                        pass
                     axis.tick_params(
                         axis="both",
                         which="both",
@@ -1913,6 +2254,8 @@ class PyPlotWorkbench(PyPlotWindow):
                     )
                     axis.set_xscale(x_scale)
                     axis.set_yscale(y_scale)
+                    self._apply_axis_factor_formatter(axis.xaxis, x_factor, axis_name="x")
+                    self._apply_axis_factor_formatter(axis.yaxis, y_factor, axis_name="y")
                     if x_min is not None and x_max is not None:
                         axis.set_xlim(x_min, x_max)
                     if y_min is not None and y_max is not None:
