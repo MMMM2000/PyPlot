@@ -17464,6 +17464,7 @@ class AssemblySection(QtWidgets.QWidget):
         self._imported_rows: Dict[str, Dict[str, Any]] = {}
         self._imported_sources: List[str] = []
         self._show_imported = True
+        self._preview_search_text: str = ""
 
         self._output_dir = str(Path.cwd())
         self._output_name = DEFAULT_OUTPUT_NAME
@@ -17566,6 +17567,22 @@ class AssemblySection(QtWidgets.QWidget):
         tools_row.addWidget(self.add_to_compare_button)
         tools_row.addStretch(1)
         layout.addLayout(tools_row)
+
+        search_row = QtWidgets.QHBoxLayout()
+        search_label = QtWidgets.QLabel("Search:")
+        search_row.addWidget(search_label)
+        self.search_edit = QtWidgets.QLineEdit()
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setPlaceholderText(
+            "Filter rows across visible columns"
+        )
+        self.search_edit.textChanged.connect(self._handle_preview_search_changed)
+        search_row.addWidget(self.search_edit, 1)
+        self.search_clear_button = QtWidgets.QPushButton("Clear")
+        self.search_clear_button.setEnabled(False)
+        self.search_clear_button.clicked.connect(self._clear_preview_search)
+        search_row.addWidget(self.search_clear_button)
+        layout.addLayout(search_row)
 
         self.preview_model = DataFrameModel()
         self.preview_model.set_decoration_provider(self._preview_decoration)
@@ -17701,6 +17718,7 @@ class AssemblySection(QtWidgets.QWidget):
             "selected_columns": list(self._selected_columns or []),
             "column_order": list(self._column_order),
             "sort_spec": list(self._sort_spec),
+            "search_query": self._preview_search_text,
             "export_settings": self._export_settings_payload(),
             "graph_preview": bool(self.graph_panel_checkbox.isChecked()),
             "imported_rows": [
@@ -17766,6 +17784,17 @@ class AssemblySection(QtWidgets.QWidget):
                         column = CORE_TEMPERATURE_COLUMN
                     restored_sort.append((column, bool(ascending)))
         self._sort_spec = restored_sort
+        search_query = payload.get("search_query")
+        if isinstance(search_query, str):
+            self._preview_search_text = self._normalise_search_text(search_query)
+        else:
+            self._preview_search_text = ""
+        if hasattr(self, "search_edit"):
+            self.search_edit.blockSignals(True)
+            self.search_edit.setText(self._preview_search_text)
+            self.search_edit.blockSignals(False)
+        if hasattr(self, "search_clear_button"):
+            self.search_clear_button.setEnabled(bool(self._preview_search_text))
 
         columns_payload = payload.get("columns")
         if isinstance(columns_payload, (list, tuple)):
@@ -18607,6 +18636,7 @@ class AssemblySection(QtWidgets.QWidget):
 
     def _refresh_preview_frame(self) -> None:
         raw_frame = self._raw_preview_frame
+        total_rows = 0
         if not isinstance(raw_frame, pd.DataFrame) or raw_frame.empty:
             display_frame = pd.DataFrame()
             self._preview_row_index_map = []
@@ -18614,6 +18644,8 @@ class AssemblySection(QtWidgets.QWidget):
             sorted_frame, row_map = self._apply_sort_spec(raw_frame)
             selected_columns = self._resolve_selected_columns(sorted_frame.columns)
             display_frame = sorted_frame.loc[:, selected_columns] if selected_columns else sorted_frame.loc[:, []]
+            total_rows = len(display_frame.index)
+            display_frame, row_map = self._apply_search_filter(display_frame, row_map)
             self._preview_row_index_map = row_map
         self.preview_model.set_frame(display_frame)
         if self._column_order:
@@ -18657,13 +18689,67 @@ class AssemblySection(QtWidgets.QWidget):
         self._update_preview_graph_buttons()
         self._update_graph_preview_panel()
         row_count = len(display_frame.index) if isinstance(display_frame, pd.DataFrame) else 0
-        self.status_label.setText(
-            f"Preview ready - {row_count} row(s)." if row_count else "Preview is empty."
-        )
+        if row_count:
+            if self._preview_search_text and total_rows != row_count:
+                self.status_label.setText(
+                    f"Preview ready - {row_count} of {total_rows} row(s) shown."
+                )
+            else:
+                self.status_label.setText(f"Preview ready - {row_count} row(s).")
+        else:
+            if self._preview_search_text and total_rows:
+                self.status_label.setText("No preview rows match the current search.")
+            else:
+                self.status_label.setText("Preview is empty.")
         if hasattr(self, "export_preview_button"):
             self.export_preview_button.setEnabled(row_count > 0)
         if hasattr(self, "clear_sort_button"):
             self.clear_sort_button.setEnabled(bool(self._sort_spec))
+
+    @staticmethod
+    def _normalise_search_text(value: object) -> str:
+        if value is None:
+            return ""
+        return str(value).strip()
+
+    def _handle_preview_search_changed(self, text: str) -> None:
+        query = self._normalise_search_text(text)
+        self._preview_search_text = query
+        if hasattr(self, "search_clear_button"):
+            self.search_clear_button.setEnabled(bool(query))
+        self._refresh_preview_frame()
+
+    def _clear_preview_search(self) -> None:
+        if hasattr(self, "search_edit"):
+            self.search_edit.clear()
+
+    def _apply_search_filter(
+        self,
+        frame: pd.DataFrame,
+        row_map: Sequence[int],
+    ) -> Tuple[pd.DataFrame, List[int]]:
+        query = self._preview_search_text
+        if not query:
+            return frame, list(row_map)
+        lowered = query.casefold()
+        keep_rows: List[int] = []
+        for idx, row in frame.iterrows():
+            for value in row.values:
+                if value is None:
+                    continue
+                if isinstance(value, float) and math.isnan(value):
+                    continue
+                text = self._serialise_preview_value(value)
+                if text is None:
+                    continue
+                if lowered in str(text).casefold():
+                    keep_rows.append(int(idx))
+                    break
+        if not keep_rows:
+            return frame.iloc[0:0].copy(), []
+        filtered = frame.iloc[keep_rows].reset_index(drop=True)
+        mapped_rows = [int(row_map[idx]) for idx in keep_rows if idx < len(row_map)]
+        return filtered, mapped_rows
 
     def _preview_graph_max_count(self, columns: Sequence[str]) -> int:
         max_count = 1
@@ -20165,6 +20251,20 @@ class AssemblySection(QtWidgets.QWidget):
       display: flex;
       align-items: center;
       gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }}
+    .toolbar-actions input[type="search"] {{
+      min-width: 220px;
+      background: #0f0f0f;
+      color: #f5f5f5;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 6px 10px;
+      font-size: 12px;
+    }}
+    .toolbar-actions input[type="search"]::placeholder {{
+      color: #8f8f8f;
     }}
     .toolbar button {{
       background: #222;
@@ -20328,9 +20428,11 @@ class AssemblySection(QtWidgets.QWidget):
   <div class="toolbar">
     <div>
       <div class="title">{title_text}</div>
-      <div class="meta">{len(frame)} row(s)</div>
+      <div id="row-meta" class="meta">{len(frame)} row(s)</div>
     </div>
     <div class="toolbar-actions">
+      <input id="table-search" type="search" placeholder="Search rows..." />
+      <button id="search-clear" type="button">Clear search</button>
       <button id="compare-clear" type="button">Clear compare</button>
       <div id="compare-count" class="meta">0 selected</div>
     </div>
@@ -20389,6 +20491,24 @@ class AssemblySection(QtWidgets.QWidget):
     const compareTable = document.getElementById('compare-table');
     const compareCount = document.getElementById('compare-count');
     const compareClear = document.getElementById('compare-clear');
+    const rowMeta = document.getElementById('row-meta');
+    const searchInput = document.getElementById('table-search');
+    const searchClear = document.getElementById('search-clear');
+
+    function isRowVisible(row) {{
+      return row.style.display !== 'none';
+    }}
+
+    function updateRowMeta(visibleCount, totalCount, hasFilter) {{
+      if (!rowMeta) {{
+        return;
+      }}
+      if (hasFilter) {{
+        rowMeta.textContent = `${{visibleCount}} of ${{totalCount}} row(s)`;
+      }} else {{
+        rowMeta.textContent = `${{totalCount}} row(s)`;
+      }}
+    }}
 
     function setImage(imgEl, emptyEl, data) {{
       if (!imgEl || !emptyEl) {{
@@ -20429,18 +20549,15 @@ class AssemblySection(QtWidgets.QWidget):
     }}
 
     function updatePreview(row) {{
-      if (!row) {{
-        return;
-      }}
-      setImage(preview.high, preview.highEmpty, row.dataset.high);
-      setImage(preview.low, preview.lowEmpty, row.dataset.low);
-      setImageList(preview.other, preview.otherEmpty, row.dataset.other);
-      setImage(preview.core, preview.coreEmpty, row.dataset.core);
-      setImage(preview.glass, preview.glassEmpty, row.dataset.glass);
-      setImageList(preview.vsmHyst, preview.vsmHystEmpty, row.dataset.vsmHyst);
-      setImageList(preview.vsmTemp, preview.vsmTempEmpty, row.dataset.vsmTemp);
-      setImageList(preview.dma, preview.dmaEmpty, row.dataset.dma);
-      setImageList(preview.fmr, preview.fmrEmpty, row.dataset.fmr);
+      setImage(preview.high, preview.highEmpty, row ? row.dataset.high : '');
+      setImage(preview.low, preview.lowEmpty, row ? row.dataset.low : '');
+      setImageList(preview.other, preview.otherEmpty, row ? row.dataset.other : '');
+      setImage(preview.core, preview.coreEmpty, row ? row.dataset.core : '');
+      setImage(preview.glass, preview.glassEmpty, row ? row.dataset.glass : '');
+      setImageList(preview.vsmHyst, preview.vsmHystEmpty, row ? row.dataset.vsmHyst : '');
+      setImageList(preview.vsmTemp, preview.vsmTempEmpty, row ? row.dataset.vsmTemp : '');
+      setImageList(preview.dma, preview.dmaEmpty, row ? row.dataset.dma : '');
+      setImageList(preview.fmr, preview.fmrEmpty, row ? row.dataset.fmr : '');
     }}
 
     function rowLabel(row, headers) {{
@@ -20505,7 +20622,9 @@ class AssemblySection(QtWidgets.QWidget):
       if (!comparePanel || !compareTable) {{
         return;
       }}
-      const selected = rows.filter((row) => row.classList.contains('compare'));
+      const selected = rows.filter(
+        (row) => row.classList.contains('compare') && isRowVisible(row)
+      );
       if (compareCount) {{
         compareCount.textContent = `${{selected.length}} selected`;
       }}
@@ -20568,6 +20687,42 @@ class AssemblySection(QtWidgets.QWidget):
       comparePanel.classList.remove('hidden');
     }}
 
+    function ensureActiveVisibleRow() {{
+      const active = rows.find(
+        (row) => row.classList.contains('active') && isRowVisible(row)
+      );
+      if (active) {{
+        updatePreview(active);
+        return;
+      }}
+      rows.forEach((row) => row.classList.remove('active'));
+      const firstVisible = rows.find((row) => isRowVisible(row));
+      if (firstVisible) {{
+        firstVisible.classList.add('active');
+        updatePreview(firstVisible);
+        return;
+      }}
+      updatePreview(null);
+    }}
+
+    function applySearchFilter() {{
+      const query = searchInput ? searchInput.value.trim().toLowerCase() : '';
+      let visibleCount = 0;
+      rows.forEach((row) => {{
+        const text = row.innerText.toLowerCase();
+        const visible = !query || text.includes(query);
+        row.style.display = visible ? '' : 'none';
+        if (!visible) {{
+          row.classList.remove('compare');
+        }} else {{
+          visibleCount += 1;
+        }}
+      }});
+      ensureActiveVisibleRow();
+      updateRowMeta(visibleCount, rows.length, Boolean(query));
+      updateCompare();
+    }}
+
     rows.forEach((row) => {{
       row.addEventListener('click', (event) => {{
         rows.forEach((item) => item.classList.remove('active'));
@@ -20583,13 +20738,30 @@ class AssemblySection(QtWidgets.QWidget):
     if (rows.length > 0) {{
       rows[0].classList.add('active');
       updatePreview(rows[0]);
+    }} else {{
+      updatePreview(null);
     }}
     updateCompare();
+    applySearchFilter();
 
     if (compareClear) {{
       compareClear.addEventListener('click', () => {{
         rows.forEach((row) => row.classList.remove('compare'));
         updateCompare();
+      }});
+    }}
+    if (searchInput) {{
+      searchInput.addEventListener('input', () => {{
+        applySearchFilter();
+      }});
+    }}
+    if (searchClear) {{
+      searchClear.addEventListener('click', () => {{
+        if (searchInput) {{
+          searchInput.value = '';
+          searchInput.focus();
+        }}
+        applySearchFilter();
       }});
     }}
 
@@ -20613,6 +20785,7 @@ class AssemblySection(QtWidgets.QWidget):
             : bText.localeCompare(aText);
         }});
         sorted.forEach((row) => body.appendChild(row));
+        applySearchFilter();
       }});
     }});
   </script>

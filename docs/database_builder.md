@@ -54,6 +54,7 @@ Microwire Data Builder aggregates per-section measurements (fabrication, anneali
 - "Preview database" shows the combined view using current column selection and sorting; "Combine database" is the full merge for export outputs.
 - Column selector must include every column from every section, including graph columns; graph columns are off by default.
 - Column order, visibility, and multi-column sort are persisted in the `.pydpj` project.
+- Assemble preview includes a quick search box that filters rows across currently visible columns; saved projects keep the active search text.
 - Microwire sorting is numeric (10/5 comes after 5/4).
 - Graph preview panel is optional. When enabled, selecting a row shows current annealing, VSM, and DMA previews for that row.
 - "Add to compare" uses the current row selection and populates the Compare tab.

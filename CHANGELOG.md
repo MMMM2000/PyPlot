@@ -1,5 +1,10 @@
 # Changelog
 
+## 2026-02-11 16:23 UTC
+
+- Microwire Data Builder `Assemble` tab now includes a quick row search filter (case-insensitive across currently visible columns), with matching-count status text and search state persisted in `.pydpj` projects.
+- HTML exports from `Assemble` now include a row search box with live row-count updates while preserving compare/preview behavior.
+
 ## 2026-02-09 12:17 UTC
 
 - Launcher `Plotting` recency ordering now uses launcher-only monotonic open-order + timestamp keys, so stale/background recency writes no longer pin unrelated tools at the top.
