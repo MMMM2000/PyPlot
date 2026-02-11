@@ -1,0 +1,17 @@
+2026-02-10 16:30 UTC
+
+- Added a new Manual Stress/Strain Logger with manual displacement/load input, live load-displacement plotting, and live stress-strain plotting.
+- Added geometry-driven conversion (`L0`, diameter) so logged points are saved with derived strain (%) and stress (MPa).
+- Added TXT export format for the manual logger with first-row long names and second-row units, plus stress-style file naming via the shared name builder.
+- Launcher update: registered the new logger in the Loggers tab.
+- Updated manual logger naming workflow: only `Stress` and `Custom` modes, renamed `Annealing` to `Current`, removed stress-load naming fields, added optional sample number and notes.
+- Added displacement display mode toggle (`mm` vs `10^-3 mm` points), keyboard entry workflow (Enter-to-focus/load-log), and a scale re-zero offset action for continuity after balance auto-reset.
+- Removed the `Sample end` naming field from the manual logger builder and simplified stress naming to optional sample-number tokens (`s1`, `s2`, etc.).
+- Improved directory defaults and file-dialog start paths to avoid `microwire_paddle_cache` redirect paths when selecting log folders.
+- Added a live 60-second idle indicator (time since last logged load change) and a continuously updating table view of logged points.
+- Added micrometer-dial mapping controls in points mode: configurable `Micrometer at d=0` offset plus a live wrapped 0..45 dial readout next to displacement input.
+- Updated logger plotting to segment repeated loops automatically into `Loading n` / `Unloading n` traces based on strain direction changes.
+- Added a new PyPlot plugin: `Shape Memory Stress/Strain` for manual logger TXT files with segmented load-displacement and stress-strain loop plotting.
+- Refined manual logger layout: moved the logged-data table below the plot area and added a persistent plot-view selector (`both graphs` vs `Load vs Displacement only`).
+- UI polish: moved the 60-second idle timer into the load-input row as a high-visibility badge and limited numeric input/display fields to at most 3 decimal places.
+- Locked manual displacement entry to stepper control (read-only text field): value changes now happen via spinbox arrows only.

@@ -19,6 +19,7 @@ from .pdf_plotter import PdfPlotterPlugin
 from .hysteresis_loops import HysteresisLoopsPlugin
 from .hsw_distribution import HswDistributionPlugin
 from .strain_3d_plot import Strain3DPlotPlugin
+from .shape_memory_stress_strain import ShapeMemoryStressStrainPlugin
 from .vsm_hysteresis import VSMHysteresisPlugin
 from .vsm_temperature_scan import VSMTemperatureScanPlugin
 from .dma_iso_stress import DmaIsoStressPlugin
@@ -29,6 +30,7 @@ def builtin_plugin_registry() -> dict[str, type[PyPlotPlugin]]:
     """Return the registry of built-in PyPlot plugins."""
 
     return get_plugin_registry()
+
 
 __all__ = [
     "PyPlotPlugin",
@@ -45,6 +47,7 @@ __all__ = [
     "HysteresisLoopsPlugin",
     "HswDistributionPlugin",
     "Strain3DPlotPlugin",
+    "ShapeMemoryStressStrainPlugin",
     "VSMHysteresisPlugin",
     "VSMTemperatureScanPlugin",
     "DmaIsoStressPlugin",

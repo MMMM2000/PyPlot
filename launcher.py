@@ -174,6 +174,9 @@ LOGGERS: Dict[str, LauncherFactory] = {
     "Current Annealing Logger": _lazy(
         "data_logging.current_annealing_logger", "main"
     ),
+    "Manual Stress/Strain Logger": _lazy(
+        "data_logging.manual_stress_strain_logger", "main"
+    ),
 }
 
 EMULATORS: Dict[str, LauncherFactory] = {

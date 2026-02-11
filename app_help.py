@@ -451,6 +451,44 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             """
         ).strip(),
     },
+    "logger_manual_stress_strain": {
+        "title": "Manual stress/strain logger",
+        "body": dedent(
+            """
+            ### Workflow
+            1. Set the output directory and file name. The built-in name builder mirrors the
+               stress logger naming pattern.
+            2. Enter sample geometry (initial length `L0` and wire diameter). Stress is
+               calculated from load and cross-section area; strain is calculated relative to the
+               last zero-load displacement point before loading starts.
+            3. Click **Start**, then manually enter displacement and load values point-by-point.
+               Use **Add Point** to append each measurement.
+
+            ### Live plots
+            * Plot 1 shows the raw input curve: load vs displacement.
+            * Plot 2 shows the converted curve: stress (MPa) vs strain (%).
+            * Every new point updates both plots immediately and is written to the TXT log.
+            * Both plots are split automatically into `Loading n` / `Unloading n` segments
+              using strain direction changes, so repeated loops stay separated.
+            * You can switch displacement display between millimeters and micrometer points
+              (`10^-3 mm`) for direct comparison with the linear stage. In points mode, a live
+              micrometer-display box shows the wrapped 0..45 dial value and a `Micrometer at d=0`
+              field lets you set the dial offset for displacement zero.
+            * A live idle timer shows seconds since the last logged load change and warns as it
+              approaches the 60-second balance timeout.
+            * The **Logged Data** table updates row-by-row during measurement and is shown under
+              the graph area for easier monitoring while logging.
+            * Use **Plot view** to switch between both graphs and `Load vs Displacement` only.
+
+            ### Output format
+            * Logs are saved as `.txt`.
+            * The first row contains long names and the second row contains units.
+            * Use **Stop** to finish the session cleanly.
+            * Use **Scale Re-zero** when the balance resets to zero; the logger keeps continuity
+              by offsetting subsequent load input values.
+            """
+        ).strip(),
+    },
     "emulator_serial": {
         "title": "Universal serial emulator",
         "body": dedent(

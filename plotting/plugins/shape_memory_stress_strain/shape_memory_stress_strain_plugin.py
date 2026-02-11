@@ -1,0 +1,245 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+
+import pandas as pd
+from PyQt6 import QtCore, QtGui, QtWidgets
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+
+from plotting.plugins.base import PyPlotPlugin, register_plugin
+from plotting.plugins._window import window_api
+
+from . import core
+
+
+@dataclass
+class ShapeMemoryEntry:
+    path: Path
+    frame: pd.DataFrame
+
+
+@register_plugin("Shape Memory Stress/Strain")
+class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
+    """Plot segmented loading/unloading loops from manual stress/strain logs."""
+
+    requires_imported_data = True
+    auto_load_on_import = True
+
+    def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
+        super().__init__(host, name)
+        self._dataset: list[ShapeMemoryEntry] = []
+        self._plot_tabs: list[QtWidgets.QWidget] = []
+        self._summary_label: QtWidgets.QLabel | None = None
+        self._seg_tolerance_spin: QtWidgets.QDoubleSpinBox | None = None
+
+    def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+
+        summary = QtWidgets.QLabel(
+            "Import manual stress/strain logger TXT files and plot segmented loading/unloading loops."
+        )
+        summary.setWordWrap(True)
+        layout.addWidget(summary)
+        layout.addStretch(1)
+        self._summary_label = summary
+        return container
+
+    def settings_widget(self) -> QtWidgets.QWidget:  # type: ignore[override]
+        if self._settings_widget is not None:
+            return self._settings_widget
+
+        container = QtWidgets.QWidget(self.host)
+        layout = QtWidgets.QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        window_module = window_api()
+
+        def _form_layout(parent: QtWidgets.QWidget) -> QtWidgets.QFormLayout:
+            form = QtWidgets.QFormLayout(parent)
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(8)
+            form.setVerticalSpacing(4)
+            form.setFieldGrowthPolicy(
+                QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+            )
+            return form
+
+        section, form = window_module.create_toolbar_section(
+            "Loop segmentation",
+            parent=container,
+            layout_factory=_form_layout,
+        )
+        tolerance_spin = QtWidgets.QDoubleSpinBox(section)
+        tolerance_spin.setDecimals(8)
+        tolerance_spin.setRange(0.0, 1.0)
+        tolerance_spin.setSingleStep(0.0001)
+        tolerance_spin.setValue(core.STRAIN_DIRECTION_TOLERANCE)
+        tolerance_spin.setToolTip(
+            "Minimum |delta strain| required to mark a loading/unloading direction change."
+        )
+        self._seg_tolerance_spin = tolerance_spin
+        form.addRow("Direction tolerance:", tolerance_spin)
+
+        hint = QtWidgets.QLabel(
+            "Segments are labeled automatically as Loading 1, Unloading 1, Loading 2, ..."
+        )
+        hint.setWordWrap(True)
+        form.addRow(hint)
+
+        layout.addWidget(section)
+        layout.addStretch(1)
+        self._settings_widget = container
+        return container
+
+    def plot_action_label(self) -> str:  # type: ignore[override]
+        return "Plot Shape Memory Stress/Strain"
+
+    def load_data(self) -> None:  # type: ignore[override]
+        paths = self.host.ensure_data_selection(self)
+        if not paths:
+            return
+
+        entries: list[ShapeMemoryEntry] = []
+        failures: list[str] = []
+        for path in paths:
+            try:
+                frame = core.load_manual_stress_strain_file(Path(path))
+            except Exception as exc:
+                failures.append(f"{Path(path).name}: {exc}")
+                continue
+            if frame.empty:
+                failures.append(f"{Path(path).name}: file has no usable rows.")
+                continue
+            entries.append(ShapeMemoryEntry(path=Path(path), frame=frame))
+
+        self._dataset = entries
+        self._data = entries
+
+        if paths:
+            self.host._plugin_last_directories[self.name] = paths[0].parent
+
+        if self._summary_label is not None:
+            if entries:
+                self._summary_label.setText(
+                    f"Loaded {len(entries)} shape-memory file(s). Click Plot to build segmented curves."
+                )
+            else:
+                self._summary_label.setText(
+                    "No compatible files loaded. Use manual stress/strain logger TXT exports."
+                )
+
+        if failures:
+            short = "\n".join(failures[:8])
+            suffix = "\n..." if len(failures) > 8 else ""
+            self._log(f"Some files were skipped:\n{short}{suffix}", level="error")
+        self._log(f"Loaded {len(entries)} shape-memory file(s).")
+        self.update_ui()
+
+    def _segmentation_tolerance(self) -> float:
+        if isinstance(self._seg_tolerance_spin, QtWidgets.QDoubleSpinBox):
+            return float(self._seg_tolerance_spin.value())
+        return core.STRAIN_DIRECTION_TOLERANCE
+
+    def _clear_tabs(self) -> None:
+        if not self._plot_tabs:
+            return
+        clear = getattr(self.host, "_clear_tab_list", None)
+        if callable(clear):
+            clear(self._plot_tabs)
+        else:
+            for tab in self._plot_tabs:
+                index = self.host.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.host.tab_widget.removeTab(index)
+        self._plot_tabs.clear()
+
+    def _set_tab_bar_visible(self, visible: bool) -> None:
+        tab_bar = self.host.tab_widget.tabBar()
+        if tab_bar is not None:
+            tab_bar.setVisible(visible)
+
+    def generate(self) -> None:  # type: ignore[override]
+        if not self._dataset:
+            self.load_data()
+        if not self._dataset:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                "Load one or more manual stress/strain TXT files before plotting.",
+            )
+            return
+
+        self._clear_tabs()
+        tolerance = self._segmentation_tolerance()
+        window_module = window_api()
+        plots_created = 0
+
+        for entry in self._dataset:
+            try:
+                figure = core.make_shape_memory_figure(
+                    entry.frame,
+                    title=entry.path.stem,
+                    tolerance=tolerance,
+                )
+            except Exception as exc:
+                self._log(f"Failed to plot {entry.path.name}: {exc}", level="error")
+                continue
+
+            canvas = FigureCanvas(figure)
+            canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+
+            tab = QtWidgets.QWidget()
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            tab_layout.setContentsMargins(0, 0, 0, 0)
+            tab_layout.addWidget(canvas)
+
+            axes = figure.axes[-1] if figure.axes else None
+            descriptor = window_module.TabDescriptor(
+                kind="shape_memory_stress_strain",
+                title=f"{entry.path.stem} - Shape Memory",
+                root_label=entry.path.stem,
+                x_label=axes.get_xlabel() if axes is not None else "Strain (%)",
+                y_label=axes.get_ylabel() if axes is not None else "Stress (MPa)",
+                canvas=canvas,
+                axes=axes,
+                lines={},
+                metadata={
+                    "path": str(entry.path),
+                    "tolerance": tolerance,
+                    "segments": len(
+                        core.split_segments_by_strain_direction(
+                            entry.frame["strain_pct"].tolist(),
+                            tolerance=tolerance,
+                        )
+                    ),
+                },
+            )
+
+            index = self.host.tab_widget.addTab(tab, entry.path.stem)
+            self.host.tab_widget.setCurrentIndex(index)
+            self.host._register_plot_tab(tab, canvas, axes, descriptor)
+            self._plot_tabs.append(tab)
+            plots_created += 1
+
+        self._set_tab_bar_visible(len(self._plot_tabs) > 1)
+        self._log(f"Generated {plots_created} shape-memory plot(s).")
+        self.update_ui()
+
+    def update_ui(self) -> None:  # type: ignore[override]
+        count = len(self._dataset)
+        if self._summary_label is not None and count == 0:
+            self._summary_label.setText(
+                "Import manual stress/strain logger TXT files and plot segmented loading/unloading loops."
+            )
+        plot_button = getattr(self.host, "plot_button", None)
+        if isinstance(plot_button, QtGui.QAction):
+            plot_button.setEnabled(count > 0)
+        save_sync = getattr(self.host, "_update_save_graph_enabled", None)
+        if callable(save_sync):
+            save_sync()
+
