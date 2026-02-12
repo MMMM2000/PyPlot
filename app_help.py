@@ -471,7 +471,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * Both plots are split automatically into `Loading n` / `Unloading n` segments
               using strain direction changes, so repeated loops stay separated.
             * You can switch displacement display between millimeters and micrometer points
-              (`10^-3 mm`) for direct comparison with the linear stage. In points mode, a live
+              (`10^-2 mm`) for direct comparison with the linear stage. In points mode, a live
               micrometer-display box shows the wrapped 0..45 dial value and a `Micrometer at d=0`
               field lets you set the dial offset for displacement zero.
             * A live idle timer shows seconds since the last logged load change and warns as it

@@ -89,7 +89,7 @@ GRAVITY_MS2 = 9.80665
 LONG_NAMES = ("Displacement", "Load", "Strain", "Stress")
 UNITS = ("mm", "g", "%", "MPa")
 ZERO_TOLERANCE_G = 1e-9
-MM_PER_POINT = 0.001
+MM_PER_POINT = 0.01
 DISPLACEMENT_MODE_MM = "mm"
 DISPLACEMENT_MODE_POINTS = "points"
 PLOT_VIEW_BOTH = "both"
@@ -561,7 +561,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.combo_displacement_mode = QtWidgets.QComboBox(self)
         self.combo_displacement_mode.addItem("Millimeters", DISPLACEMENT_MODE_MM)
-        self.combo_displacement_mode.addItem("Micrometer points (10^-3 mm)", DISPLACEMENT_MODE_POINTS)
+        self.combo_displacement_mode.addItem("Micrometer points (10^-2 mm)", DISPLACEMENT_MODE_POINTS)
         input_form.addRow("Displacement mode:", self.combo_displacement_mode)
 
         displacement_row = QtWidgets.QWidget(self.group_input)
@@ -902,7 +902,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_displacement.setDecimals(0)
             self.spin_displacement.setSingleStep(10.0)
             self.spin_displacement.setValue(0.0)
-            self.spin_displacement.setSuffix(" x10^-3 mm")
+            self.spin_displacement.setSuffix(" x10₋₂ mm")
         else:
             self.spin_displacement.setDecimals(UI_MAX_DECIMALS)
             self.spin_displacement.setSingleStep(0.01)
@@ -933,7 +933,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _displacement_display_values(self) -> tuple[list[float], str]:
         if self._current_displacement_mode() == DISPLACEMENT_MODE_POINTS:
             values = [value_mm / MM_PER_POINT for value_mm in self.displacements]
-            return values, "Displacement (10^-3 mm)"
+            return values, r"Displacement (x10$_{-2}$ mm)"
         return list(self.displacements), "Displacement (mm)"
 
     def _handle_displacement_mode_changed(self, _index: int) -> None:

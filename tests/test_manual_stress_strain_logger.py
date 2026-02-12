@@ -87,6 +87,10 @@ def test_cache_redirect_detection() -> None:
     assert logger_mod._looks_cache_redirect("C:/microwire_paddle_cache/home/Downloads")
 
 
+def test_points_mode_uses_10e_minus_2_mm_scale() -> None:
+    assert logger_mod.MM_PER_POINT == pytest.approx(0.01)
+
+
 def test_micrometer_display_wraps_across_cycle() -> None:
     value = logger_mod.MainWindow.micrometer_display_from_points(20.0, 30)
     assert value == 0

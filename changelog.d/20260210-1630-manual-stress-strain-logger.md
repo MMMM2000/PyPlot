@@ -18,3 +18,5 @@
 - Added a dedicated `Reset d=0` action in Manual Input to zero displacement quickly without clearing logged points.
 - Updated the PyPlot `Shape Memory Stress/Strain` plugin to generate separate tabs/graphs for `Load vs Displacement` and `Stress vs Strain` instead of combining both into one figure.
 - Added a quick-start option in the `Session not started` popup so users can start logging directly when trying to add a point.
+- Corrected micrometer-points scaling in the manual logger from `10^-3 mm` to `10^-2 mm`, including updated axis/input labels (`x10$_{-2}$`).
+- Data migration: corrected sample measurements in `sample_data/manual_stress-strain` by multiplying displacement and strain values by 10 to match the updated `10^-2 mm` points scale.
