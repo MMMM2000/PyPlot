@@ -160,30 +160,91 @@ def make_shape_memory_figure(
     ax_stress.set_xlabel("Strain (%)")
     ax_stress.set_ylabel("Stress (MPa)")
 
+    plotted_raw = _plot_segmented_curve(
+        ax_raw,
+        x_raw,
+        y_raw,
+        segments,
+    )
+    plotted_stress = _plot_segmented_curve(
+        ax_stress,
+        x_stress,
+        y_stress,
+        segments,
+    )
+    if plotted_raw:
+        ax_raw.legend(loc="best", fontsize=8)
+    if plotted_stress:
+        ax_stress.legend(loc="best", fontsize=8)
+
+    ax_raw.grid(True, alpha=0.3)
+    ax_stress.grid(True, alpha=0.3)
+    return fig
+
+
+def make_load_displacement_figure(
+    frame: pd.DataFrame,
+    *,
+    title: str,
+    tolerance: float = STRAIN_DIRECTION_TOLERANCE,
+) -> Figure:
+    fig = Figure(figsize=(7.5, 5), tight_layout=True)
+    ax = fig.add_subplot(111)
+    x_raw = frame["displacement_mm"].tolist()
+    y_raw = frame["load_g"].tolist()
+    segments = build_segment_styles(frame["strain_pct"].tolist(), tolerance=tolerance)
+
+    ax.set_title(f"{title}\nLoad vs Displacement")
+    ax.set_xlabel("Displacement (mm)")
+    ax.set_ylabel("Load (g)")
+
+    if _plot_segmented_curve(ax, x_raw, y_raw, segments):
+        ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    return fig
+
+
+def make_stress_strain_figure(
+    frame: pd.DataFrame,
+    *,
+    title: str,
+    tolerance: float = STRAIN_DIRECTION_TOLERANCE,
+) -> Figure:
+    fig = Figure(figsize=(7.5, 5), tight_layout=True)
+    ax = fig.add_subplot(111)
+    x_stress = frame["strain_pct"].tolist()
+    y_stress = frame["stress_mpa"].tolist()
+    segments = build_segment_styles(x_stress, tolerance=tolerance)
+
+    ax.set_title(f"{title}\nStress vs Strain")
+    ax.set_xlabel("Strain (%)")
+    ax.set_ylabel("Stress (MPa)")
+
+    if _plot_segmented_curve(ax, x_stress, y_stress, segments):
+        ax.legend(loc="best", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    return fig
+
+
+def _plot_segmented_curve(
+    axis: object,
+    x_values: Sequence[float],
+    y_values: Sequence[float],
+    segments: Sequence[DirectionSegment],
+) -> bool:
     plotted = False
     for segment in segments:
         start_index = segment.start_index
         end_index = min(
             segment.end_index,
-            len(x_raw) - 1,
-            len(y_raw) - 1,
-            len(x_stress) - 1,
-            len(y_stress) - 1,
+            len(x_values) - 1,
+            len(y_values) - 1,
         )
         if end_index < start_index:
             continue
-        ax_raw.plot(
-            x_raw[start_index : end_index + 1],
-            y_raw[start_index : end_index + 1],
-            color=segment.color,
-            marker="o",
-            linewidth=1.6,
-            markersize=4,
-            label=segment.label,
-        )
-        ax_stress.plot(
-            x_stress[start_index : end_index + 1],
-            y_stress[start_index : end_index + 1],
+        axis.plot(
+            x_values[start_index : end_index + 1],
+            y_values[start_index : end_index + 1],
             color=segment.color,
             marker="o",
             linewidth=1.6,
@@ -191,12 +252,4 @@ def make_shape_memory_figure(
             label=segment.label,
         )
         plotted = True
-
-    if plotted:
-        ax_raw.legend(loc="best", fontsize=8)
-        ax_stress.legend(loc="best", fontsize=8)
-
-    ax_raw.grid(True, alpha=0.3)
-    ax_stress.grid(True, alpha=0.3)
-    return fig
-
+    return plotted

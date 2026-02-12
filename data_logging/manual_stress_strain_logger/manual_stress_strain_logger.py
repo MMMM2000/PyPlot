@@ -571,10 +571,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self.spin_displacement = QtWidgets.QDoubleSpinBox()
         self.spin_displacement.setRange(-1_000_000_000.0, 1_000_000_000.0)
-        self.spin_displacement.setReadOnly(True)
+        self.spin_displacement.setReadOnly(False)
         self.spin_displacement.setButtonSymbols(
             QtWidgets.QAbstractSpinBox.ButtonSymbols.UpDownArrows
         )
+        self.spin_displacement.lineEdit().setReadOnly(True)
         displacement_layout.addWidget(self.spin_displacement, stretch=1)
 
         self.line_micrometer_display = QtWidgets.QLineEdit(self.group_input)
@@ -624,6 +625,8 @@ class MainWindow(QtWidgets.QMainWindow):
         input_form.addRow("Load:", load_row)
 
         scale_row = QtWidgets.QHBoxLayout()
+        self.pushButton_reset_displacement = QtWidgets.QPushButton("Reset d=0")
+        scale_row.addWidget(self.pushButton_reset_displacement)
         self.pushButton_scale_rezero = QtWidgets.QPushButton("Scale Re-zero")
         scale_row.addWidget(self.pushButton_scale_rezero)
         scale_row.addStretch(1)
@@ -753,6 +756,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_add_point.clicked.connect(self.add_point)
         self.pushButton_undo_point.clicked.connect(self.undo_last_point)
         self.pushButton_clear_points.clicked.connect(self.clear_points)
+        self.pushButton_reset_displacement.clicked.connect(self.handle_reset_displacement)
         self.pushButton_scale_rezero.clicked.connect(self.handle_scale_rezero)
 
         self.lineEdit_log_file.returnPressed.connect(self.start_session)
@@ -1496,13 +1500,35 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_load_g.lineEdit().selectAll()
         self._update_status_labels()
 
+    def _ensure_session_started(self) -> bool:
+        if self.logging_on:
+            return True
+
+        dialog = QtWidgets.QMessageBox(self)
+        dialog.setWindowTitle("Session not started")
+        dialog.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        dialog.setText("Start a session before adding points.")
+        dialog.setInformativeText("Start a session now?")
+
+        start_button = dialog.addButton(
+            "Start session",
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        cancel_button = dialog.addButton(
+            "Cancel",
+            QtWidgets.QMessageBox.ButtonRole.RejectRole,
+        )
+        dialog.setDefaultButton(start_button)
+        dialog.exec()
+
+        if dialog.clickedButton() is not start_button:
+            return False
+
+        self.start_session()
+        return self.logging_on
+
     def _handle_load_enter(self) -> None:
-        if not self.logging_on:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Session not started",
-                "Start a session before adding points.",
-            )
+        if not self._ensure_session_started():
             return
         displacement = (
             self._pending_displacement_mm
@@ -1525,12 +1551,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._recalculate_derived(persist=True)
 
     def add_point(self) -> None:
-        if not self.logging_on:
-            QtWidgets.QMessageBox.information(
-                self,
-                "Session not started",
-                "Start a session before adding points.",
-            )
+        if not self._ensure_session_started():
             return
 
         displacement = self._displacement_mm_from_input()
@@ -1547,6 +1568,12 @@ class MainWindow(QtWidgets.QMainWindow):
         anchor = self.loads[-1] if self.loads else self._effective_load_now()
         self._load_offset_g = anchor
         self.spin_load_g.setValue(0.0)
+        self._update_status_labels()
+
+    def handle_reset_displacement(self) -> None:
+        self.spin_displacement.setValue(0.0)
+        self._pending_displacement_mm = None
+        self._update_micrometer_display()
         self._update_status_labels()
 
     def undo_last_point(self) -> None:

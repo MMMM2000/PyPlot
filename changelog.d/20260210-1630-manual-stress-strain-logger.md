@@ -15,3 +15,6 @@
 - Refined manual logger layout: moved the logged-data table below the plot area and added a persistent plot-view selector (`both graphs` vs `Load vs Displacement only`).
 - UI polish: moved the 60-second idle timer into the load-input row as a high-visibility badge and limited numeric input/display fields to at most 3 decimal places.
 - Locked manual displacement entry to stepper control (read-only text field): value changes now happen via spinbox arrows only.
+- Added a dedicated `Reset d=0` action in Manual Input to zero displacement quickly without clearing logged points.
+- Updated the PyPlot `Shape Memory Stress/Strain` plugin to generate separate tabs/graphs for `Load vs Displacement` and `Stress vs Strain` instead of combining both into one figure.
+- Added a quick-start option in the `Session not started` popup so users can start logging directly when trying to add a point.

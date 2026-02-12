@@ -46,3 +46,18 @@ def test_make_shape_memory_figure_creates_two_axes() -> None:
     )
     figure = core.make_shape_memory_figure(frame, title="Example")
     assert len(figure.axes) == 2
+
+
+def test_make_separate_shape_memory_figures_each_have_one_axis() -> None:
+    frame = pd.DataFrame(
+        {
+            "displacement_mm": [0.0, 0.01, 0.02, 0.01],
+            "load_g": [0.0, 0.1, 0.2, 0.05],
+            "strain_pct": [0.0, 0.05, 0.1, 0.02],
+            "stress_mpa": [0.0, 1.0, 2.0, 0.5],
+        }
+    )
+    load_figure = core.make_load_displacement_figure(frame, title="Example")
+    stress_figure = core.make_stress_strain_figure(frame, title="Example")
+    assert len(load_figure.axes) == 1
+    assert len(stress_figure.axes) == 1

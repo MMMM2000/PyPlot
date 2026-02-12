@@ -479,6 +479,7 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * The **Logged Data** table updates row-by-row during measurement and is shown under
               the graph area for easier monitoring while logging.
             * Use **Plot view** to switch between both graphs and `Load vs Displacement` only.
+            * Use **Reset d=0** to quickly return displacement input to zero without clearing data.
 
             ### Output format
             * Logs are saved as `.txt`.

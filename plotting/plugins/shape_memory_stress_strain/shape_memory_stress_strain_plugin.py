@@ -180,54 +180,72 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         plots_created = 0
 
         for entry in self._dataset:
-            try:
-                figure = core.make_shape_memory_figure(
-                    entry.frame,
-                    title=entry.path.stem,
-                    tolerance=tolerance,
-                )
-            except Exception as exc:
-                self._log(f"Failed to plot {entry.path.name}: {exc}", level="error")
-                continue
-
-            canvas = FigureCanvas(figure)
-            canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
-
-            tab = QtWidgets.QWidget()
-            tab_layout = QtWidgets.QVBoxLayout(tab)
-            tab_layout.setContentsMargins(0, 0, 0, 0)
-            tab_layout.addWidget(canvas)
-
-            axes = figure.axes[-1] if figure.axes else None
-            descriptor = window_module.TabDescriptor(
-                kind="shape_memory_stress_strain",
-                title=f"{entry.path.stem} - Shape Memory",
-                root_label=entry.path.stem,
-                x_label=axes.get_xlabel() if axes is not None else "Strain (%)",
-                y_label=axes.get_ylabel() if axes is not None else "Stress (MPa)",
-                canvas=canvas,
-                axes=axes,
-                lines={},
-                metadata={
-                    "path": str(entry.path),
-                    "tolerance": tolerance,
-                    "segments": len(
-                        core.split_segments_by_strain_direction(
-                            entry.frame["strain_pct"].tolist(),
-                            tolerance=tolerance,
-                        )
-                    ),
-                },
+            plot_builders = (
+                (
+                    "shape_memory_load_displacement",
+                    "Load vs Displacement",
+                    core.make_load_displacement_figure,
+                ),
+                (
+                    "shape_memory_stress_strain",
+                    "Stress vs Strain",
+                    core.make_stress_strain_figure,
+                ),
             )
+            for plot_kind, label, builder in plot_builders:
+                try:
+                    figure = builder(
+                        entry.frame,
+                        title=entry.path.stem,
+                        tolerance=tolerance,
+                    )
+                except Exception as exc:
+                    self._log(
+                        f"Failed to plot {label} for {entry.path.name}: {exc}",
+                        level="error",
+                    )
+                    continue
 
-            index = self.host.tab_widget.addTab(tab, entry.path.stem)
-            self.host.tab_widget.setCurrentIndex(index)
-            self.host._register_plot_tab(tab, canvas, axes, descriptor)
-            self._plot_tabs.append(tab)
-            plots_created += 1
+                canvas = FigureCanvas(figure)
+                canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+
+                tab = QtWidgets.QWidget()
+                tab_layout = QtWidgets.QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.addWidget(canvas)
+
+                axes = figure.axes[0] if figure.axes else None
+                descriptor = window_module.TabDescriptor(
+                    kind=plot_kind,
+                    title=f"{entry.path.stem} - {label}",
+                    root_label=f"{entry.path.stem} {label}",
+                    x_label=axes.get_xlabel() if axes is not None else "",
+                    y_label=axes.get_ylabel() if axes is not None else "",
+                    canvas=canvas,
+                    axes=axes,
+                    lines={},
+                    metadata={
+                        "path": str(entry.path),
+                        "plot_kind": plot_kind,
+                        "tolerance": tolerance,
+                        "segments": len(
+                            core.split_segments_by_strain_direction(
+                                entry.frame["strain_pct"].tolist(),
+                                tolerance=tolerance,
+                            )
+                        ),
+                    },
+                )
+
+                tab_label = f"{entry.path.stem} - {label}"
+                index = self.host.tab_widget.addTab(tab, tab_label)
+                self.host.tab_widget.setCurrentIndex(index)
+                self.host._register_plot_tab(tab, canvas, axes, descriptor)
+                self._plot_tabs.append(tab)
+                plots_created += 1
 
         self._set_tab_bar_visible(len(self._plot_tabs) > 1)
-        self._log(f"Generated {plots_created} shape-memory plot(s).")
+        self._log(f"Generated {plots_created} shape-memory graph(s).")
         self.update_ui()
 
     def update_ui(self) -> None:  # type: ignore[override]
@@ -242,4 +260,3 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         save_sync = getattr(self.host, "_update_save_graph_enabled", None)
         if callable(save_sync):
             save_sync()
-
