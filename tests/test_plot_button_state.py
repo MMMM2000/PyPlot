@@ -14,6 +14,7 @@ from plotting.pyplot.window import (
     PRIMARY_DOCK_EXPAND_THRESHOLD,
     PRIMARY_DOCK_EXPANDED_FRACTION,
     PRIMARY_DOCK_EXPANDED_MAX,
+    PRIMARY_DOCK_MAX_FRACTION,
     PRIMARY_DOCK_DEFAULT_WIDTH,
 )
 
@@ -240,6 +241,28 @@ def test_primary_dock_target_width_scales_on_large_window() -> None:
         if PRIMARY_DOCK_EXPANDED_MAX > 0:
             expected_min = min(expected_min, PRIMARY_DOCK_EXPANDED_MAX)
         assert target >= expected_min
+    finally:
+        window.close()
+        app.processEvents()
+
+
+def test_primary_dock_target_width_caps_large_persisted_values() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        window.resize(PRIMARY_DOCK_EXPAND_THRESHOLD + 1200, 950)
+        app.processEvents()
+        dock = getattr(window, "project_dock", None)
+        assert isinstance(dock, QtWidgets.QDockWidget)
+        window._primary_dock_widths[dock] = 5000  # noqa: SLF001 - internal sizing helper
+        target = window._primary_dock_target_width(  # noqa: SLF001 - internal sizing helper
+            dock,
+            PRIMARY_DOCK_DEFAULT_WIDTH,
+        )
+        expected_max = int(window.width() * PRIMARY_DOCK_MAX_FRACTION)
+        if PRIMARY_DOCK_EXPANDED_MAX > 0:
+            expected_max = min(expected_max, PRIMARY_DOCK_EXPANDED_MAX)
+        assert target <= expected_max
     finally:
         window.close()
         app.processEvents()

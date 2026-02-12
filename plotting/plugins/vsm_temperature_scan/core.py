@@ -1058,6 +1058,70 @@ class VSMTemperatureScanProcessor:
                 "originpro is not available. Install OriginLab's Python package on this machine."
             )
         plotted = 0
+        x_axis_label = "Temperature [°C]"
+        derivative_axis_label = "d(Signal X)/dT [emu/°C]"
+
+        def _escape_origin_text(text: str) -> str:
+            return str(text).replace("\\", "\\\\").replace('"', "'")
+
+        def _set_origin_axis_title(layer: Any, axis_name: str, title: str) -> None:
+            axis_obj = None
+            axis_method = getattr(layer, "axis", None)
+            if callable(axis_method):
+                try:
+                    axis_obj = axis_method(axis_name)
+                except Exception:
+                    axis_obj = None
+            if axis_obj is not None:
+                label_obj = getattr(axis_obj, "label", None)
+                if label_obj is not None and hasattr(label_obj, "text"):
+                    try:
+                        label_obj.text = title
+                        return
+                    except Exception:
+                        pass
+                for attr in ("title", "text"):
+                    if not hasattr(axis_obj, attr):
+                        continue
+                    try:
+                        setattr(axis_obj, attr, title)
+                        return
+                    except Exception:
+                        continue
+            safe_title = _escape_origin_text(title)
+            key = str(axis_name).lower()
+            lt_axis = key if key in {"x", "y", "x2", "y2"} else "x"
+            try:
+                layer.lt_exec(f'layer.{lt_axis}.title$="{safe_title}";')
+            except Exception:
+                pass
+
+        def _set_origin_graph_title(origin_any: Any, graph: Any, title: str) -> None:
+            safe_title = _escape_origin_text(title)
+            try:
+                graph.set_str("title", title)
+            except Exception:
+                pass
+            try:
+                graph.name = self._origin_graph_name(title)
+            except Exception:
+                pass
+            try:
+                graph.lname = title
+            except Exception:
+                pass
+            graph_lt_exec = getattr(graph, "lt_exec", None)
+            if callable(graph_lt_exec):
+                try:
+                    graph_lt_exec(f'title -s "{safe_title}";')
+                    return
+                except Exception:
+                    pass
+            try:
+                graph.activate()
+                origin_any.lt_exec(f'title -s "{safe_title}";')
+            except Exception:
+                pass
 
         def _style_origin_layer(layer: Any, title: str) -> None:
             """Apply consistent axes, disable speed mode, and mirror the title to the top X axis."""
@@ -1076,15 +1140,17 @@ class VSMTemperatureScanProcessor:
                 layer.lt_exec("layer -s 0;")
             except Exception:
                 pass
+            _set_origin_axis_title(layer, "x2", title)
             try:
-                axis_top = layer.axis(2)
-                axis_top.title = title
+                axis_top = layer.axis("x2")
                 # Hide top tick labels while keeping the title visible.
                 setattr(axis_top, "show_labels", False)
                 setattr(axis_top, "showLabels", False)
+                setattr(axis_top, "showlabels", False)
             except Exception:
                 try:
-                    layer.lt_exec(f"layer.x2.title$=\"{title}\"; layer.x2.showlabels=0;")
+                    safe_title = _escape_origin_text(title)
+                    layer.lt_exec(f'layer.x2.title$="{safe_title}"; layer.x2.showlabels=0;')
                 except Exception:
                     pass
 
@@ -1159,12 +1225,7 @@ class VSMTemperatureScanProcessor:
                 graphs.append(graph)
                 fields = [item.series.field for item in prepared]
                 graph_title = self._plot_title(entry.sample, "VSM Temperature Scan", fields)
-                try:
-                    graph.set_str("title", graph_title)
-                    graph.name = self._origin_graph_name(graph_title)
-                    graph.lname = graph_title
-                except Exception:
-                    pass
+                _set_origin_graph_title(origin, graph, graph_title)
                 unique_fields: list[float] = self.field_axis_order([field for field, _, _, _ in column_pairs])
                 layer_map: Dict[float, Any] = {}
                 existing_layers = len(graph)
@@ -1181,11 +1242,12 @@ class VSMTemperatureScanProcessor:
                 for field_value, layer in layer_map.items():
                     layer_fields.setdefault(layer, []).append(field_value)
                 for layer, layer_values in layer_fields.items():
-                    try:
-                        layer.axis(0).title = "Temperature (°C)"
-                        layer.axis(1).title = self._axis_label_for_fields(layer_values, base=axis_base)
-                    except Exception:
-                        pass
+                    _set_origin_axis_title(layer, "x", x_axis_label)
+                    _set_origin_axis_title(
+                        layer,
+                        "y",
+                        self._axis_label_for_fields(layer_values, base=axis_base),
+                    )
                 legend_entries: dict[Any, list[tuple[int, str]]] = {}
                 for field_value, base_col, legend_text, color in column_pairs:
                     layer = layer_map.get(field_value, graph[0])
@@ -1273,12 +1335,7 @@ class VSMTemperatureScanProcessor:
                     smooth_graph = origin.new_graph(template="doubley")
                     graphs.append(smooth_graph)
                     smooth_title = self._plot_title(entry.sample, "Smoothed Signal X", fields)
-                    try:
-                        smooth_graph.set_str("title", smooth_title)
-                        smooth_graph.name = self._origin_graph_name(smooth_title)
-                        smooth_graph.lname = smooth_title
-                    except Exception:
-                        pass
+                    _set_origin_graph_title(origin, smooth_graph, smooth_title)
                     s_unique: list[float] = self.field_axis_order([field for field, _, _, _ in smooth_pairs])
                     s_layer_map: Dict[float, Any] = {}
                     s_existing = len(smooth_graph)
@@ -1295,11 +1352,12 @@ class VSMTemperatureScanProcessor:
                     for field_value, layer in s_layer_map.items():
                         s_layer_fields.setdefault(layer, []).append(field_value)
                     for layer, layer_values in s_layer_fields.items():
-                        try:
-                            layer.axis(0).title = "Temperature (°C)"
-                            layer.axis(1).title = self._axis_label_for_fields(layer_values, base=axis_base)
-                        except Exception:
-                            pass
+                        _set_origin_axis_title(layer, "x", x_axis_label)
+                        _set_origin_axis_title(
+                            layer,
+                            "y",
+                            self._axis_label_for_fields(layer_values, base=axis_base),
+                        )
                     legend_entries = {}
                     for field_value, base_col, legend_text, color in smooth_pairs:
                         layer = s_layer_map.get(field_value, smooth_graph[0])
@@ -1387,18 +1445,10 @@ class VSMTemperatureScanProcessor:
                     deriv_graph = origin.new_graph()
                     graphs.append(deriv_graph)
                     deriv_title = self._plot_title(entry.sample, "d(Signal X)/dT", fields)
-                    try:
-                        deriv_graph.set_str("title", deriv_title)
-                        deriv_graph.name = self._origin_graph_name(deriv_title)
-                        deriv_graph.lname = deriv_title
-                    except Exception:
-                        pass
+                    _set_origin_graph_title(origin, deriv_graph, deriv_title)
                     layer = deriv_graph[0]
-                    try:
-                        layer.axis(0).title = "Temperature (°C)"
-                        layer.axis(1).title = "d(Signal X)/dT (emu/°C)"
-                    except Exception:
-                        pass
+                    _set_origin_axis_title(layer, "x", x_axis_label)
+                    _set_origin_axis_title(layer, "y", derivative_axis_label)
                     legend_entries = {}
                     for field_value, base_col, legend_text, color in derivative_column_pairs:
                         plot_obj = cast(Any, layer.add_plot(deriv_sheet, coly=base_col + 1, colx=base_col))
@@ -1486,18 +1536,10 @@ class VSMTemperatureScanProcessor:
                         deriv_sm_graph = origin.new_graph()
                         graphs.append(deriv_sm_graph)
                         deriv_sm_title = self._plot_title(entry.sample, "Smoothed d(Signal X)/dT", fields)
-                        try:
-                            deriv_sm_graph.set_str("title", deriv_sm_title)
-                            deriv_sm_graph.name = self._origin_graph_name(deriv_sm_title)
-                            deriv_sm_graph.lname = deriv_sm_title
-                        except Exception:
-                            pass
+                        _set_origin_graph_title(origin, deriv_sm_graph, deriv_sm_title)
                         layer = deriv_sm_graph[0]
-                        try:
-                            layer.axis(0).title = "Temperature (°C)"
-                            layer.axis(1).title = "d(Signal X)/dT (emu/°C)"
-                        except Exception:
-                            pass
+                        _set_origin_axis_title(layer, "x", x_axis_label)
+                        _set_origin_axis_title(layer, "y", derivative_axis_label)
                         legend_entries = {}
                         for field_value, base_col, legend_text, color in derivative_sm_pairs:
                             plot_obj = cast(Any, layer.add_plot(deriv_sm_sheet, coly=base_col + 1, colx=base_col))

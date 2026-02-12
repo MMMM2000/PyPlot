@@ -40,7 +40,7 @@ from matplotlib.lines import Line2D
 from matplotlib.text import Text
 from matplotlib import colors as mcolors
 import pandas as pd
-from pandas.api.types import is_numeric_dtype
+from pandas.api.types import is_bool_dtype, is_numeric_dtype
 
 from ..plugins.base import PyPlotPlugin
 from plotting.shared.utils import (
@@ -82,7 +82,11 @@ PRIMARY_DOCK_MIN_WIDTH = 160
 PRIMARY_DOCK_EXPAND_THRESHOLD = 1300
 PRIMARY_DOCK_EXPANDED_FRACTION = 0.18
 PRIMARY_DOCK_EXPANDED_MAX = 520
+PRIMARY_DOCK_MAX_FRACTION = 0.35
 UNIT_SUFFIX_PAREN_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\((?P<unit>[^()]{1,24})\)\s*$")
+OUTLIER_IQR_FACTOR = 1.5
+OUTLIER_MIN_POINTS = 8
+OUTLIER_ZSCORE_THRESHOLD = 3.5
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -1030,6 +1034,23 @@ class WorkbookData:
     folder: Path | None = None
 
 
+@dataclass
+class WorksheetOutlierFinding:
+    """Describe statistical outliers detected in a worksheet."""
+
+    worksheet_key: Hashable
+    worksheet_name: str
+    workbook_name: str
+    total_rows: int
+    row_indices: List[int]
+    row_mask: pd.Series
+    column_hits: Dict[str, int]
+
+    @property
+    def outlier_count(self) -> int:
+        return len(self.row_indices)
+
+
 class WorksheetTableModel(QtCore.QAbstractTableModel):
     """Expose worksheet data with Origin-style metadata rows."""
 
@@ -1964,6 +1985,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         ".json",
         ".vsm-hys-data",
         ".vsm-tscn-data",
+        ".vsm-vir-data",
     )
 
     def __init__(self, *, title: str) -> None:
@@ -3150,12 +3172,195 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if isinstance(outlier_button, QtGui.QAction):
             outlier_button.setEnabled(has_worksheets)
 
-    def _show_check_outliers_placeholder(self) -> None:
-        QtWidgets.QMessageBox.information(
-            self,
-            "Check outliers",
-            "Outlier detection will be available in a future update.",
+    @staticmethod
+    def _detect_outlier_rows(
+        frame: pd.DataFrame,
+        *,
+        iqr_factor: float = OUTLIER_IQR_FACTOR,
+        min_points: int = OUTLIER_MIN_POINTS,
+        zscore_threshold: float = OUTLIER_ZSCORE_THRESHOLD,
+    ) -> tuple[pd.Series, Dict[str, int]]:
+        """Return a row mask and per-column hit counts for outliers in ``frame``."""
+
+        if frame.empty:
+            return pd.Series(False, index=frame.index, dtype=bool), {}
+
+        combined_mask = pd.Series(False, index=frame.index, dtype=bool)
+        column_hits: Dict[str, int] = {}
+        for column in frame.columns:
+            series = frame[column]
+            if is_bool_dtype(series):
+                continue
+            if not is_numeric_dtype(series):
+                continue
+            values = pd.to_numeric(series, errors="coerce")
+            valid = values.dropna()
+            if len(valid) < max(2, int(min_points)):
+                continue
+
+            q1 = float(valid.quantile(0.25))
+            q3 = float(valid.quantile(0.75))
+            iqr = q3 - q1
+            col_mask = pd.Series(False, index=frame.index, dtype=bool)
+            if np.isfinite(iqr) and iqr > 0:
+                lower = q1 - float(iqr_factor) * iqr
+                upper = q3 + float(iqr_factor) * iqr
+                col_mask = values.lt(lower) | values.gt(upper)
+            else:
+                mean = float(valid.mean())
+                std = float(valid.std(ddof=0))
+                if np.isfinite(std) and std > 0:
+                    z = (values - mean).abs() / std
+                    col_mask = z > float(zscore_threshold)
+                else:
+                    continue
+            col_mask = col_mask.fillna(False).astype(bool)
+            count = int(col_mask.sum())
+            if count <= 0:
+                continue
+            column_hits[str(column)] = count
+            combined_mask = combined_mask | col_mask
+        return combined_mask.astype(bool), column_hits
+
+    def _collect_outlier_findings(self) -> List[WorksheetOutlierFinding]:
+        findings: List[WorksheetOutlierFinding] = []
+        for key, worksheet in self._worksheets.items():
+            frame = worksheet.dataframe
+            if frame is None or frame.empty:
+                continue
+            row_mask, column_hits = self._detect_outlier_rows(frame)
+            if not column_hits:
+                continue
+            row_indices = np.flatnonzero(row_mask.to_numpy(dtype=bool)).astype(int).tolist()
+            if not row_indices:
+                continue
+            workbook = self._workbooks.get(worksheet.workbook_key)
+            workbook_name = workbook.name if workbook is not None else "Workbook"
+            findings.append(
+                WorksheetOutlierFinding(
+                    worksheet_key=key,
+                    worksheet_name=worksheet.name,
+                    workbook_name=workbook_name,
+                    total_rows=len(frame.index),
+                    row_indices=row_indices,
+                    row_mask=row_mask,
+                    column_hits=column_hits,
+                )
+            )
+        findings.sort(key=lambda item: (item.workbook_name.lower(), item.worksheet_name.lower()))
+        return findings
+
+    @staticmethod
+    def _format_outlier_findings(findings: Sequence[WorksheetOutlierFinding]) -> str:
+        lines: List[str] = []
+        for finding in findings:
+            lines.append(
+                f"{finding.workbook_name} / {finding.worksheet_name}: "
+                f"{finding.outlier_count}/{finding.total_rows} row(s)"
+            )
+            preview_rows = finding.row_indices[:12]
+            if preview_rows:
+                row_text = ", ".join(str(row + 1) for row in preview_rows)
+                if finding.outlier_count > len(preview_rows):
+                    row_text += ", ..."
+                lines.append(f"Rows: {row_text}")
+            if finding.column_hits:
+                column_parts = [
+                    f"{name} ({count})"
+                    for name, count in sorted(
+                        finding.column_hits.items(), key=lambda entry: (-entry[1], entry[0])
+                    )
+                ]
+                lines.append("Columns: " + ", ".join(column_parts))
+            lines.append("")
+        return "\n".join(lines).strip()
+
+    def _apply_outlier_findings(self, findings: Sequence[WorksheetOutlierFinding]) -> int:
+        removed_rows = 0
+        changed = 0
+        for finding in findings:
+            worksheet = self._worksheets.get(finding.worksheet_key)
+            if worksheet is None:
+                continue
+            frame = worksheet.dataframe
+            if frame is None or frame.empty:
+                continue
+            mask = finding.row_mask.reindex(frame.index, fill_value=False).astype(bool)
+            count = int(mask.sum())
+            if count <= 0:
+                continue
+            filtered = frame.loc[~mask].reset_index(drop=True)
+            worksheet.dataframe = filtered
+            model = self._worksheet_models.get(finding.worksheet_key)
+            if model is not None:
+                model.beginResetModel()
+                model._frame = filtered
+                model._worksheet.dataframe = filtered
+                model._columns = [str(column) for column in filtered.columns]
+                model.endResetModel()
+            removed_rows += count
+            changed += 1
+
+        if changed:
+            self._refresh_imported_data_summary()
+            self._sync_shared_action_states()
+            self._update_worksheet_actions()
+            self._mark_project_dirty()
+        return removed_rows
+
+    def _show_check_outliers_dialog(self) -> None:
+        worksheet_count = len(self._worksheets)
+        if worksheet_count <= 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Check outliers",
+                "No worksheets are available. Import data first.",
+            )
+            return
+
+        findings = self._collect_outlier_findings()
+        if not findings:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Check outliers",
+                f"No outliers detected across {worksheet_count} worksheet(s).",
+            )
+            self._append_log(f"Outlier check: no outliers found in {worksheet_count} worksheet(s).")
+            return
+
+        total_rows = sum(finding.outlier_count for finding in findings)
+        detail_text = self._format_outlier_findings(findings)
+        message = QtWidgets.QMessageBox(self)
+        message.setIcon(QtWidgets.QMessageBox.Icon.Warning)
+        message.setWindowTitle("Check outliers")
+        message.setText(
+            f"Detected {total_rows} potential outlier row(s) in "
+            f"{len(findings)} of {worksheet_count} worksheet(s)."
         )
+        message.setInformativeText("Remove detected rows from the affected worksheets?")
+        if detail_text:
+            message.setDetailedText(detail_text)
+        message.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Yes
+            | QtWidgets.QMessageBox.StandardButton.No
+        )
+        message.setDefaultButton(QtWidgets.QMessageBox.StandardButton.No)
+        response = message.exec()
+        if response != int(QtWidgets.QMessageBox.StandardButton.Yes):
+            self._append_log(
+                f"Outlier check complete: {total_rows} row(s) flagged across {len(findings)} worksheet(s)."
+            )
+            return
+
+        removed = self._apply_outlier_findings(findings)
+        self._append_log(
+            f"Outlier cleanup removed {removed} row(s) across {len(findings)} worksheet(s)."
+        )
+
+    def _show_check_outliers_placeholder(self) -> None:
+        """Backward-compatible alias for older action wiring."""
+
+        self._show_check_outliers_dialog()
 
     def _populate_graph_settings(self, layout: QtWidgets.QVBoxLayout) -> None:
         raise NotImplementedError
@@ -4396,7 +4601,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
         check_outliers_action = toolbar.addAction("Check outliers…")
         check_outliers_action.setEnabled(False)
-        check_outliers_action.triggered.connect(self._show_check_outliers_placeholder)
+        check_outliers_action.triggered.connect(self._show_check_outliers_dialog)
         self.check_outliers_button = check_outliers_action
         self._style_toolbar_button(toolbar, check_outliers_action)
 
@@ -5882,23 +6087,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _import_data_from_folder(self) -> None:
         start_dir = self._project_dialog_start_directory()
-        dialog = QtWidgets.QFileDialog(self, "Import Data Folders", str(start_dir))
-        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
-        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
-        dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
-        selection_mode = QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection
-        view = dialog.findChild(QtWidgets.QListView)
-        if view is not None:
-            view.setSelectionMode(selection_mode)
-        tree = dialog.findChild(QtWidgets.QTreeView)
-        if tree is not None:
-            tree.setSelectionMode(selection_mode)
-        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+        directory = QtWidgets.QFileDialog.getExistingDirectory(
+            self,
+            "Import Data Folder",
+            str(start_dir),
+            QtWidgets.QFileDialog.Option.ShowDirsOnly,
+        )
+        if not directory:
             return
-        directories = dialog.selectedFiles()
-        if not directories:
-            return
-        self._import_paths(Path(path) for path in directories)
+        self._import_paths([Path(directory)])
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         provided_paths: List[Path] = []
@@ -6121,6 +6318,16 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 workbook.worksheets = [worksheet.key]
                 return workbook, [worksheet]
             if suffix == ".vsm-tscn-data":
+                try:
+                    text = path.read_text(errors="ignore").splitlines()
+                except Exception:
+                    text = []
+                frame = pd.DataFrame({"value": text})
+                workbook = self._build_workbook_shell(path)
+                worksheet = self._create_worksheet_from_frame(workbook, path.stem, frame)
+                workbook.worksheets = [worksheet.key]
+                return workbook, [worksheet]
+            if suffix == ".vsm-vir-data":
                 try:
                     text = path.read_text(errors="ignore").splitlines()
                 except Exception:
@@ -6770,8 +6977,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return dock
 
     def _dock_switcher_supported(self) -> bool:
+        enable_override = os.environ.get("MW_ENABLE_DOCK_SWITCHER", "")
+        if enable_override.strip().lower() in {"1", "true", "yes", "on"}:
+            return True
         env_override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
         if env_override.strip().lower() in {"1", "true", "yes", "on"}:
+            return False
+        # Native dock widgets are more predictable on Windows laptops
+        # (DPI scaling + window-manager interactions).
+        if sys.platform.startswith("win"):
             return False
         return True
 
@@ -6892,6 +7106,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if width is None or width <= 0:
             width = max(dock.sizeHint().width(), default_width)
         width = max(width, min_width)
+        width = self._clamp_primary_dock_width(dock, width)
         self._primary_dock_widths[dock] = width
         try:
             self.resizeDocks([dock], [width], QtCore.Qt.Orientation.Horizontal)
@@ -6916,8 +7131,31 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             return None
         if width <= 0:
             return None
+        width = self._clamp_primary_dock_width(dock, width)
         self._primary_dock_widths[dock] = width
         return width
+
+    def _clamp_primary_dock_width(
+        self,
+        dock: QtWidgets.QDockWidget | None,
+        width: int,
+    ) -> int:
+        if not isinstance(dock, QtWidgets.QDockWidget):
+            return max(int(width), PRIMARY_DOCK_MIN_WIDTH)
+        min_width = max(PRIMARY_DOCK_MIN_WIDTH, dock.minimumWidth())
+        clamped = max(int(width), min_width)
+        if dock.objectName() not in {"projectExplorerDock", "objectManagerDock"}:
+            return clamped
+        window_width = max(
+            self.width(),
+            self.size().width(),
+            PRIMARY_DOCK_DEFAULT_WIDTH * 4,
+        )
+        max_width = int(window_width * PRIMARY_DOCK_MAX_FRACTION)
+        if PRIMARY_DOCK_EXPANDED_MAX > 0:
+            max_width = min(max_width, PRIMARY_DOCK_EXPANDED_MAX)
+        max_width = max(max_width, min_width)
+        return min(clamped, max_width)
 
     def _primary_dock_target_width(
         self,
@@ -6944,7 +7182,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     scaled_min = min(scaled_min, PRIMARY_DOCK_EXPANDED_MAX)
                 width = max(width, scaled_min, PRIMARY_DOCK_MIN_WIDTH)
 
-        return width
+        return self._clamp_primary_dock_width(dock, width)
 
     def _primary_dock_visibility_key(self, dock: QtWidgets.QDockWidget | None) -> str | None:
         if not isinstance(dock, QtWidgets.QDockWidget):
@@ -7000,6 +7238,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             width = self._primary_dock_widths.get(dock, 0)
         if width <= 0:
             return
+        width = self._clamp_primary_dock_width(dock, width)
         self._primary_dock_widths[dock] = width
         try:
             self.settings.setValue(key, width)
@@ -7205,6 +7444,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     panel.mark_tabbed(object_dock)
 
             for dock, width in tracked_widths.items():
+                width = self._clamp_primary_dock_width(dock, width)
                 self._primary_dock_widths[dock] = width
                 self._apply_dock_width(dock, width)
         finally:
@@ -7213,6 +7453,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     def _apply_dock_width(self, dock: QtWidgets.QDockWidget, width: int) -> None:
         if not isinstance(dock, QtWidgets.QDockWidget) or dock.isFloating() or width <= 0:
             return
+        width = self._clamp_primary_dock_width(dock, width)
         try:
             screen = QtGui.QGuiApplication.screenAt(dock.mapToGlobal(dock.rect().center()))
             if screen is None:

@@ -22,6 +22,7 @@ from .strain_3d_plot import Strain3DPlotPlugin
 from .shape_memory_stress_strain import ShapeMemoryStressStrainPlugin
 from .vsm_hysteresis import VSMHysteresisPlugin
 from .vsm_temperature_scan import VSMTemperatureScanPlugin
+from .vsm_isotherms import VSMIsothermsPlugin
 from .dma_iso_stress import DmaIsoStressPlugin
 from .fmr import FmrPlugin
 
@@ -50,6 +51,7 @@ __all__ = [
     "ShapeMemoryStressStrainPlugin",
     "VSMHysteresisPlugin",
     "VSMTemperatureScanPlugin",
+    "VSMIsothermsPlugin",
     "DmaIsoStressPlugin",
     "FmrPlugin",
     "register_plugin",

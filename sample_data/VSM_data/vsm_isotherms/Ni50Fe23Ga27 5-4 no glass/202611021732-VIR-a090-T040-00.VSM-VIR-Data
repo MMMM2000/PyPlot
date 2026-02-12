@@ -1,0 +1,735 @@
+@Filename: C:\vsm-lv\Rasto\data\Ni50Fe27Ga23 5-4 no glass 2\202611021732-VIR-a090-T040-00.VSM-VIR-Data
+@Filename: C:\vsm-lv\Rasto\data\Ni50Fe27Ga23 5-4 no glass 2\202611021732-VIR-a090-T040-00.VSM-VIR-Data
+@Measurement Controlfilename: C:\vsm-lv\Rasto\Recipes\VIR-a090-T040-00.VVC
+@Calibration filename: c:\vsm-lv\Rasto\settings\default.cal
+@Manipulation File: C:\vsm-lv\Rasto\settings\Manip.df1
+@Parameter File: c:\vsm-lv\Rasto\settings\last-params.par
+@Calibration Steps: 
+@Operator: Rasto
+@Samplename: Ni50Fe27Ga23 5-4 no glass 2
+@Date: 11 February 2026    (2026-11-02)
+@Time: 20:18:32
+@Test ID: 
+@Sample Orientation and Shape: line parallel with field
+Sample Holder and Orientation: Custom/Other
+@@Sample Dimensions
+Shape = Cylindrical;  Length = 5.00 [mm] Width = 6.60 [mm] Thickness = 1.000E+69 [nm] Diameter = 0.02 [mm] Volume : 1.4176E-12 [m^3] Area = 2.8353E-4 [mm^2] Mass = 1.00000E+0 [g] Nd = 0.000 Sample Angle Offset = 0.000 Density = 8.00000 [g/cm^3]
+Ms (for Hys loss calculation) = 0.000 [memu]
+@@End Sample Dimensions
+@Measurement type: Virgin Curve
+@Product of: MicroSense EasyVSM Software version MicroSense EasyVSM™ 20231204-B01
+@@Comments: Ni52Fe15Ga27Co6 rucne 16
+@@END Comments
+@@Parameters
+@@Measurement Preparation Actions
+Action 0:      Set AC demagnetization factor to 0.9000 [ ] and wait 0.0000 s ; Set Mode = Set and wait till there
+Action 1:      Set Field Angle to 90.0000 [deg] and wait 0.0000 s ; Set Mode = Set and wait till there
+Action 2:      Set Sample Temperature to 39.9569 [degC] and wait 60.0000 s ; Set Mode = Set and wait till there
+@@END Measurement Preparation Actions
+@@Measurement Parameters
+@Loop Averaging = 1
+@Repeat all sections = No
+@Number of sections= 1
+@Section 0: Virgin; New Plot
+@Preparation Actions:
+Action 0:      Set Gauss Range to 7.0000 [ ] and wait 0.0000 s ; Set Mode = Set and wait till there
+@Repeated Actions:
+Action 0:      Set Applied Field to 0.0000 [Oe] and wait 1.0000 s ; Set Mode = Set and wait till there; Measure 
+@Main Parameter = 0 : Applied Field [Oe].
+@Main Parameter Setup:
+     From:  0.0000 [Oe] To: 10000.0000 [Oe] Min Stepsize/Sweeprate = 100.0000 [Oe] Max Stepsize/Sweeprate = 100.0000 [Oe]
+     Signal change min step =  0.00 [%] Signal change max step =  0.00 [%] ;  Wait time =    1.00 [sec] Up & Down = No
+@Measured Signal(s) = X
+@Section 0 END
+@@Plot Settings
+Number of plots: 1
+Plot 0: Virgin = On; Section: 0; Signal: X; Label: Vir X; Point style: 14; Interpolation: On; Color: 16728646; Mirror: Off
+@@ENDPlot Settings
+@@END Measurement Parameters
+@Apparatus: EZ7; LabVSM; Customer:  Prague S0 501502  SN2021119  Lab first started on: Novmber 19, 2021
+
+[Installed Options]
+VSM Model = "EZ7, EZ9 or EZ11"
+VSM = TRUE    
+Torque = FALSE    
+Signal Processor = "SR810"
+Torque Signal Processor = "NI-6210"
+Unipolar = FALSE
+Automation = FALSE
+MR = FALSE
+Torque Signal Inversion = TRUE    
+VSM DAQ Card = TRUE    
+Time Constant = "0.1 s"
+DAQ Output = FALSE    
+Link Sensitivities = TRUE    
+Signal Processor 2 = "SRS SR 830"
+Signal Processor 3 = "SRS SR 830"
+Programmable Amplitude Vibrator Control = TRUE    
+Vibrator Amplitude Level Voltages = "1.00 2.00 5.00 10.00 "
+Vibrator Control Channel = ""
+
+[Signal and Coils]
+Signal Connection = "A-B"
+Vector Coils = FALSE    
+Stationary Coils = FALSE    
+Z Coils = FALSE    
+Sensor Angle = "0 deg"
+Time Between Averages = 0.100000    
+Y Averages Multiplier = 1    
+Reference Source = "Internal"
+SR830 Frequency = 80.000000    
+Default Amplitude = "100%"
+Frequency = 80.000000    
+
+[Rotation]
+Automatic Rotation = TRUE    
+Rotate Option = "Mdrive"
+Rotation Display = FALSE    
+Max Angle = 400.000000    
+Min Angle = -400.000000    
+Rotation Serial Port = 8    
+Rotation Display Serial Port = 1    
+Torque Rotation Serial Port = 3    
+Use Friction Compensation = FALSE    
+Friction Compensation Angle = 0.500000    
+Default Speed = 6.000000    
+Max Speed = 12.000000    
+Positive Rotation is CCW = TRUE    
+MR Max Angle = 90.000000    
+MR Min Angle = 0.000000    
+Torque Max Angle = 400.000000    
+Torque Min Angle = -400.000000    
+MR Default Speed = 6.000000    
+MR Max Speed = 6.000000    
+Torque Default Speed = 6.000000    
+Torque Max Speed = 6.000000    
+Acceleration Time = 1.000000    
+Hold Current = 75.000000    
+
+[Field]
+Gaussmeter = "FCM-10"
+Gauss Probe = "1 x"
+Maximum Field = 21500.000000    
+Wait Time = 0.000000    
+Sweeprate Array = "20.000, 50.000, 100.000, 200.000, 400.000, 250.000, 250.000, 2000.000, 2000.000, 2000.000, "
+Averaging Array = "10.000, 5.000, 5.000, 2.000, 1.000, 1.000, 1.000, 1.000, 1.000, 1.000, "
+Precision Array = "0.010, 0.020, 0.050, 0.100, 0.100, 0.500, 3.000, 3.000, 3.000, 5.000, "
+Stability Array = "0.010, 0.020, 0.050, 0.100, 0.100, 0.200, 1.000, 3.000, 3.000, 5.000, "
+FCM-10 Address = "COM5"
+Minimum Sweep Time = 0.500000    
+Minimum Sweep Rate Divider = 40.000000
+Stability Time Between Readings = 0.100000    
+Number of Readings for Stability Check = 2.000000    
+Slow Approach = FALSE    
+Slow Start % = 99.000000    
+Slow Approach Max Sweep Rate Divider = 10.000000    
+Max Slow Sweep Time = 4.000000    
+DAQ Field Source = "Direct"
+Field DAQ Channel = "Dev1/ai0"
+Always Set Gauss Range = TRUE    
+Additional Sweep Measure Time = 5000    
+Average Time Per Point = 5.000000    
+Feedback Parameter Switching = "Always"
+FB Par Switching Threshold = 0.050000    
+Set Field to zero between measurements = TRUE    
+Set to 0 Sweep Rate = 2000.000000    
+
+[MR]
+MR Signal Processor = Manual VSM
+Punch Through = "Variable 0-10V"
+Automation Comm Port = 0
+Max Current = 20.000000    
+Min AD Voltage = 4.600000    
+Max AD Voltage = 7.000000    
+MR Option = FALSE    
+MS MR Signal Processor = FALSE    
+AC&DC Current Source = FALSE    
+Nanovoltmeter = FALSE    
+
+[Temperature Control]
+Temperature Control = TRUE    
+Boil Off Nitrogen = FALSE    
+Liquid Helium = FALSE    
+Leave Temperature On = TRUE    
+Temperature Control Type = "Cryo-con 24C"
+Sensor A = "E-type"
+Sensor B = "K-Type"
+Control Sensor = "A"
+Sensor A Table = "/C/vsm-lv/Sensor Curves/0611192548.crv"
+Sensor B Table = ""
+ITC Serial Port = 2
+TC GPIB Address = 15    
+Temperature Log File = "/c/vsm-lv/temperature.log"
+Default Temperature = 298.150000    
+Gas Switching Temperature = 333.150000
+Default Soak Time = 60.000000    
+Set Temperature Sample Time = 25.000000    
+Temperature Accuracy = 2.000000    
+Temperature Accuracy % = 1.000000
+Automatic Gas Switching = FALSE    
+1000 C Option = FALSE    
+Number of points for accuracy wait = 90
+Time between points for accuracy wait = 1.000000
+Wait for Heat Exchanger Removal = FALSE    
+Removal Temperature = 303.150000    
+Wait Time for Heat Exchanger Removal = 60.000000    
+Max Temperature = 999.150000    
+Min Temperature = 77.000000    
+Max Error = 20.000000    
+Max T Sweep Speed = 50.000000    
+Min T Sweep Speed = 1.000000    
+Control Loop Output = "3"
+Ambient Sensor = "C"
+User Interface Buttons = "Unlocked"
+Gas Switch Model = "Legacy"
+N2 in Address = ""
+Ar in Address = ""
+Heat Exchanger Gass Out  Address = ""
+Direct Gass Out  Address = ""
+N2 in On Below Temperature = 0.000000    
+Ar in On Above Temperature = 0.000000    
+Heat Exchanger Output On Below Temperature = 0.000000    
+Direct Gas Output On Above Temperature = 0.000000    
+Loop 1 Output Range = "Hi"
+Loop 3 Output Range = "10V"
+Reaction Time = 60.000000    
+
+[SI 9700]
+P = 1
+I = 20
+D = 0
+HE-P = 1
+HE-I = 20
+HE-D = 0
+Max T Sweep Seed = 1.000000
+Min T Sweep Seed = 0.200000
+Max Heater Power = 20.000000    
+Max T Sweep Speed = 60.000000
+Min T Sweep Speed = 12.000000
+Communication = 0
+
+[Other]
+Transverse Direction = "Absolute"
+Default Transverse Direction = 90.000000    
+Time Dependence Start Field Distance = 10.000000    
+Minimum Remanence Wait Time = 2.000000    
+Default AC Demag Max Field = 1.000000    
+AC Demag Minimum Field = 1.000000    
+Max Lockin Phase Error = 90    
+Mains Frequency = 50.000000    
+Samples Per Cycle = 100
+DAQ Averaging Method = "All at once (default)"
+AC Demag Data Saving = FALSE    
+Samples Per Second = 5000    
+Data Manipulation While Sweeping = FALSE    
+Auto Range-Changing = "Up Ranging Only"
+Auto Ranging = "Assume Worst Case Slope"
+Worst Case Slope = 8.000000E-8    
+DAQ Pts/Sec = "100 Pts/sec"
+Buffer Size = 1000000    
+
+[Interlock]
+Door Lock = FALSE    
+Interlock = FALSE    
+Light Tower = FALSE    
+Interlock Interface Name = "Dev4"
+
+[Torque Interface]
+Torque Interface Name = "Dev3"
+
+[Exit Gas Heater Settings]
+EGH PC Control = FALSE    
+EGH Serial Port = 0    
+EGH Voltages = ""
+
+[VSM Interface]
+VSM Interface Name = "Dev1"
+VSM X Channel = "Dev1/ai1"
+VSM Y Channel = "Dev1/ai2"
+VSM Z Channel = ""
+
+[MR Interface]
+MR Interface Name = "Dev2"
+
+[DAQ Communication]
+Protocol = "Mx"
+Remove Spikes = FALSE    
+
+[Sensor Table]
+1st Column = 0    
+Temperature Unit = 1    
+
+[Communication]
+LIA 1 Address = ""
+LIA 2 Address = ""
+VSM Rotation Address = "COM8"
+Torque Rotation Address = ""
+Rotation Display Address = ""
+SI9700 Address = "tcpip0::192.168.1.5::5000::SOCKET"
+EGH Address = ""
+Communication Mode = "Original"
+LIA Baud Rate = "19200"
+LIA Serial Read Delay = 50    
+Communication = 0    
+LIA 3 Address = "COM1"
+Local = 0    
+Phase from cal file = FALSE    
+
+[LIA]
+Local = 2
+Minimum Sensitivity = "5 uV"
+Filter Order = "24 dB/Oct"
+Sync Filter = "On"
+Line Filter = "Both"
+Sweep Lag = 3.880000    
+Phase from cal file = TRUE
+Time Constant = "10 ms"
+Signal Connection = "A-B"
+
+[MR External Current Source]
+Ext I Src Adddress = ""
+AC MR Channel = "Dev1/ai3"
+DC MR Channel = "Dev1/ai6"
+Read Termination Character = "CR"
+CS Baud Rate = "19200"
+Flow Control = "Off"
+Which LIA = "1"
+Input = "A-B"
+Ref Slope = "Positive Slope TTL"
+Nanovoltmeter Channel = ""
+
+[MOKE Option]
+MOKE Option Installed = FALSE    
+MOKE DAQ Channel = ""
+MOKE Samples per Second = 50000    
+Center MOKE Curve = FALSE    
+Invert MOKE Signal = FALSE    
+
+[Automation]
+Automation Option = FALSE    
+Which DAQ = "DT"
+Robot Comm Port = 1    
+Vacuum Address = "Dev1/port0/line0:7"
+Coils Up Address = "Dev1/port0/line0:7"
+Coils Down Address = "Dev1/port0/line0:7"
+Vacuum Sensor Address = "Dev1/port0/line0:7"
+MR Signal Processor = "Manual"
+Unique Tool ID = ""
+Installed Pedestals = "ABCDEF"
+Samples Per Cartridge = 16    
+Kerr Rotation = FALSE    
+Auto Initialize Hardware = FALSE    
+Log Off after Committing a Lot = FALSE    
+MR Probe Safe Motion = FALSE    
+Punch Speed = 16.000000    
+Sample Orientation = "Horizontal"
+Robot Commands = "Original"
+Use Status Globals = FALSE    
+Show Robot Motion Display = FALSE    
+File Naming = "Ignore Location"
+Folder Naming = "Ignore Location"
+MR Up-Down Address = "Dev1/port0/line0:7"
+Robot File = "/C/VSM-LV/Milara.ini"
+
+[Power Amplifier]
+Power Amp Type = "Default"
+Power Amp Address = "COM9"
+AC Frequency = 16.000000    
+Max AC Current = 3.000000    
+Max DC Current = 4.000000    
+Show I&V Display = TRUE    
+Time between I and V readings = 50    
+
+[PID Control]
+PID Control Type = "Single PID"
+P = 1.000000    
+I = 20.000000    
+D = 0.000000    
+HE-P = 1.000000    
+HE-I = 20.000000    
+HE-D = 0.000000    
+Zone Settings = "50.000,1.000,45.000,0.000, 10V;100.000,1.000,20.000,0.000, 10V;300.000,1.000,20.000,0.000, 10V;1500.000,1.000,20.000,0.000, 10V;"
+
+[Temperature Control Defrost Option]
+Defrost Option = FALSE    
+Defrost Sensor = "B"
+Defrost Output = "1"
+Defrost PID = "1.000000, 50.000000, 0.000000"
+Defrost Temperature = 373.150000    
+
+[ME Option]
+ME Option Installed = FALSE    
+ME Address = "COM1"
+
+[Electronic Z Stage]
+Electronic Z Stage Installed = FALSE    
+Motor = "MDrive"
+Motor Address = "COM1"
+Steps per Inch = "102400"
+Measurement Position = "0.000000"
+Up Position = "225.000000"
+Speed = "0.200000"
+Acceleration Time = "1.000000"
+Brake = FALSE    
+Brake Channel = ""
+[FCM-10 Feedback Parameter Switching]
+Switching = TRUE; Wait Before = 500; Wait After = 200; Progressive = TRUE; Progressive time =0.015000;
+100 Oe: Field Setting Pars: FTCR = 100000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 100000; DR = 10000; DC = 10000; MDAC = 10000;
+200 Oe: Field Setting Pars: FTCR = 50000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 50000; DR = 10000; DC = 10000; MDAC = 10000;
+400 Oe: Field Setting Pars: FTCR = 5000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 10000;
+1k Oe: Field Setting Pars: FTCR = 5000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 10000;
+2 kOe: Field Setting Pars: FTCR = 2000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 10000;
+4 kOe: Field Setting Pars: FTCR = 2000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 10000;
+10 kOe: Field Setting Pars: FTCR = 2000; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 10000;
+20 kOe: Field Setting Pars: FTCR = 200; DR = 20000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 30000;
+40 kOe: Field Setting Pars: FTCR = 200; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 65000;
+100 kOe: Field Setting Pars: FTCR = 200; DR = 10000; DC = 10000; MDAC = 30000; Measurement Pars: FTCR = 20000; DR = 10000; DC = 10000; MDAC = 65000;
+@System Status = Online
+
+@@Instrument Parameters
+@Gauss Range: 20 kOe
+@Emu Range: 500 uV
+@Emu Range:_2: 2 nV
+@Torque Range: 4000 dyne cm
+@Auto-range emu: No
+@Time Constant: 0.1 s
+@Filter Order: 24 dB/Oct
+@Line Filter: Line
+@Synchronous Filter: On
+@Dynamic Reserve: Low Noise
+@Number of averages: 1.000
+@Averaging Time: 0.100
+@Emu/V: 26.614
+@Dyn cm/V: 447.072
+@Y Coils Correction Factor: 1.479
+
+[Data Manipulation]
+v20160315
+Sample Holder & Orientation = 
+
+Point By Point Correction = No   Scale Factor = 1.000000
+Point By Point number of fields = 11
+-500.047300   3.263298E-5   0.000000E+0   0.000000E+0
+-399.968741   2.611407E-5   0.000000E+0   0.000000E+0
+-299.797193   1.926816E-5   0.000000E+0   0.000000E+0
+-200.047675   1.291204E-5   0.000000E+0   0.000000E+0
+-99.818902   6.292320E-6   0.000000E+0   0.000000E+0
+0.087983   1.462370E-7   0.000000E+0   0.000000E+0
+99.909031   -6.243575E-6   0.000000E+0   0.000000E+0
+200.066273   -1.284965E-5   0.000000E+0   0.000000E+0
+300.202056   -1.952283E-5   0.000000E+0   0.000000E+0
+400.180472   -2.606514E-5   0.000000E+0   0.000000E+0
+500.187500   -3.249724E-5   0.000000E+0   0.000000E+0
+
+Subtract Files = No   Scale Factor = 1.000000
+File Data array length = 0
+
+[Image Effect Corrections]
+Image Effect Correction = Yes
+Image Correction Array Length = 25
+15000.112661   1.000000
+15250.176448   0.999846
+15499.925501   0.999646
+15749.724625   0.999493
+15999.795566   0.999239
+16249.887965   0.999086
+16499.951753   0.998880
+16750.215826   0.998726
+17000.057868   0.998573
+17250.050125   0.998427
+17500.271280   0.998220
+17750.113322   0.998067
+18000.177110   0.997868
+18249.554203   0.997662
+18500.047174   0.997509
+18749.595942   0.997310
+18999.638270   0.997157
+19249.852271   0.997004
+19499.744385   0.996799
+19749.915469   0.996752
+19999.542919   0.996646
+20249.685391   0.996646
+20499.928005   0.996905
+20749.204955   0.997815
+20736.601266   0.997662
+Sample image effect correction factor = 1.000000, Sample holder image effect correction factor = 0.000000
+Angular Im. E. Corr. = No
+
+[Slope and Offset Corrections]
+Manual Slope and Offset Correction = No
+Angular Background Subtraction = No
+Automatically Remove Slope = No    Slope Correction Start Field = 0.000 [Oe], Use Max Field = No, Slope Correction Max Field = 40000.000 [Oe]
+Use Percentage = No, Percentage used = 0.000 [%]
+Remove Signal Offset = No
+Remove Sweep Offset = No; Swp Corr Method = Automatic Using AVG; Swp Offset x,y,z [emu] = 0.000000E+0   0.000000E+0   0.000000E+0
+
+[Field Corrections]
+Field Linearity Correction = No
+Remove Field Offset = No
+Field Offset Method = Automatic
+Field Offset = 0.0000
+Remove Field Lag = No
+Field Lag Method = Automatic
+Field Lag = 0.0000
+
+[Demagnetizing Field Correction]
+Demagnetizing Field Correction = No; Nd = 1.000   (x 4 Pi)
+Get Nd From = Sample Dimensions
+
+
+[Sensitivity Corrections]
+Sensitivity Correction = No; X correction factor = 1.000; Y correction factor = 1.000; Z correction factor = 1.000
+Crosstalk Correction = No; X correction factor = 1.000; Y correction factor = 1.000; Z correction factor = 1.000
+Temperature Dependent Sens. Corr. = No; Temp_Corr Factors (X,Y,Z) = 1.000000   1.000000   1.000000
+Angular Sensitivity Correction = No
+
+Date and time of last calibration = 16 March 2022  10:38
+
+@@END Instrument Parameters
+@@END Parameters
+@@Columns
+@Column Separator:    
+@Column Contents: 
+@Number of sections: 1
+@Section 0
+Column 0: Time since start, Time [s]
+Column 1: Raw Temperature, Sample Temperature [degC]
+Column 2: Temperature, Sample Temperature [degC]
+Column 3: Temperature 2, Sample Temperature [degC]
+Column 4: Raw Applied Field, Applied Field [Oe]
+Column 5: Applied Field, Applied Field [Oe]
+Column 6: Field Angle, Field Angle [deg]
+Column 7: Raw Applied Field For Plot , Applied Field [Oe]
+Column 8: Applied Field For Plot , Applied Field [Oe]
+Column 9: Raw Signal Mx, Moment as measured [memu]
+Column 10: Signal X direction, Moment [emu]
+@@END Columns
+@@End of Header.
+Time_since_start   Raw_Temperature   Temperature   Temperature_2   Raw_Applied_Field   Applied_Field   Field_Angle   Raw_Applied_Field_For_Plot_   Applied_Field_For_Plot_   Raw_Signal_Mx   Signal_X_direction      
+@Time at start of measurement: 20:18:32
+@@Data
+New Section: Section 0: 
+4.863000E+0   3.999384E+1   3.999384E+1   1.773349E+1   4.971400E-2   4.971400E-2   9.000000E+1   4.971400E-2   4.971400E-2   1.427670E-2   1.427670E-5   
+9.544000E+0   3.996582E+1   3.996582E+1   1.772870E+1   9.996405E+1   9.996405E+1   9.000000E+1   9.996405E+1   9.996405E+1   6.186584E-2   6.186584E-5   
+1.424300E+1   3.995941E+1   3.995941E+1   1.772473E+1   2.000822E+2   2.000822E+2   9.000000E+1   2.000822E+2   2.000822E+2   8.883254E-2   8.883254E-5   
+1.897000E+1   4.000812E+1   4.000812E+1   1.772079E+1   3.000645E+2   3.000645E+2   9.000000E+1   3.000645E+2   3.000645E+2   1.102479E-1   1.102479E-4   
+2.368500E+1   3.996133E+1   3.996133E+1   1.772070E+1   3.999717E+2   3.999717E+2   9.000000E+1   3.999717E+2   3.999717E+2   1.292835E-1   1.292835E-4   
+2.850800E+1   3.997986E+1   3.997986E+1   1.772046E+1   4.999933E+2   4.999933E+2   9.000000E+1   4.999933E+2   4.999933E+2   1.475258E-1   1.475258E-4   
+3.323800E+1   3.999084E+1   3.999084E+1   1.771960E+1   6.000078E+2   6.000078E+2   9.000000E+1   6.000078E+2   6.000078E+2   1.633888E-1   1.633888E-4   
+3.785500E+1   3.996890E+1   3.996890E+1   1.772202E+1   7.000795E+2   7.000795E+2   9.000000E+1   7.000795E+2   7.000795E+2   1.800449E-1   1.800449E-4   
+4.263100E+1   3.995737E+1   3.995737E+1   1.772351E+1   7.999831E+2   7.999831E+2   9.000000E+1   7.999831E+2   7.999831E+2   1.943214E-1   1.943214E-4   
+4.737700E+1   4.000009E+1   4.000009E+1   1.772394E+1   9.000799E+2   9.000799E+2   9.000000E+1   9.000799E+2   9.000799E+2   2.078057E-1   2.078057E-4   
+5.199400E+1   3.997787E+1   3.997787E+1   1.772165E+1   9.999656E+2   9.999656E+2   9.000000E+1   9.999656E+2   9.999656E+2   2.212892E-1   2.212892E-4   
+5.685100E+1   3.998129E+1   3.998129E+1   1.772217E+1   1.100002E+3   1.100002E+3   9.000000E+1   1.100002E+3   1.100002E+3   2.363588E-1   2.363588E-4   
+6.153200E+1   3.998596E+1   3.998596E+1   1.772293E+1   1.200037E+3   1.200037E+3   9.000000E+1   1.200037E+3   1.200037E+3   2.490492E-1   2.490492E-4   
+6.617900E+1   3.999185E+1   3.999185E+1   1.772372E+1   1.300030E+3   1.300030E+3   9.000000E+1   1.300030E+3   1.300030E+3   2.609463E-1   2.609463E-4   
+7.090700E+1   3.998413E+1   3.998413E+1   1.771906E+1   1.399988E+3   1.399988E+3   9.000000E+1   1.399988E+3   1.399988E+3   2.736378E-1   2.736378E-4   
+7.574900E+1   4.001849E+1   4.001849E+1   1.771738E+1   1.499959E+3   1.499959E+3   9.000000E+1   1.499959E+3   1.499959E+3   2.863271E-1   2.863271E-4   
+8.038300E+1   3.997501E+1   3.997501E+1   1.771616E+1   1.600077E+3   1.600077E+3   9.000000E+1   1.600077E+3   1.600077E+3   2.974303E-1   2.974303E-4   
+8.511100E+1   4.000549E+1   4.000549E+1   1.771280E+1   1.699974E+3   1.699974E+3   9.000000E+1   1.699974E+3   1.699974E+3   3.093292E-1   3.093292E-4   
+8.993700E+1   3.997232E+1   3.997232E+1   1.770963E+1   1.799996E+3   1.799996E+3   9.000000E+1   1.799996E+3   1.799996E+3   3.212254E-1   3.212254E-4   
+9.468300E+1   3.997412E+1   3.997412E+1   1.770981E+1   1.900049E+3   1.900049E+3   9.000000E+1   1.900049E+3   1.900049E+3   3.323286E-1   3.323286E-4   
+9.944400E+1   4.000183E+1   4.000183E+1   1.771249E+1   2.000039E+3   2.000039E+3   9.000000E+1   2.000039E+3   2.000039E+3   3.426413E-1   3.426413E-4   
+1.041400E+2   4.001831E+1   4.001831E+1   1.771585E+1   2.100143E+3   2.100143E+3   9.000000E+1   2.100143E+3   2.100143E+3   3.537445E-1   3.537445E-4   
+1.087920E+2   3.998212E+1   3.998212E+1   1.771957E+1   2.200089E+3   2.200089E+3   9.000000E+1   2.200089E+3   2.200089E+3   3.632615E-1   3.632615E-4   
+1.136170E+2   3.998300E+1   3.998300E+1   1.771906E+1   2.300125E+3   2.300125E+3   9.000000E+1   2.300125E+3   2.300125E+3   3.751604E-1   3.751604E-4   
+1.182690E+2   4.000558E+1   4.000558E+1   1.771561E+1   2.400075E+3   2.400075E+3   9.000000E+1   2.400075E+3   2.400075E+3   3.846774E-1   3.846774E-4   
+1.230600E+2   3.999432E+1   3.999432E+1   1.771494E+1   2.500029E+3   2.500029E+3   9.000000E+1   2.500029E+3   2.500029E+3   3.934013E-1   3.934013E-4   
+1.278050E+2   3.999506E+1   3.999506E+1   1.771530E+1   2.599993E+3   2.599993E+3   9.000000E+1   2.599993E+3   2.599993E+3   4.045045E-1   4.045045E-4   
+1.325490E+2   4.000415E+1   4.000415E+1   1.771667E+1   2.700036E+3   2.700036E+3   9.000000E+1   2.700036E+3   2.700036E+3   4.124380E-1   4.124380E-4   
+1.372800E+2   3.999356E+1   3.999356E+1   1.771652E+1   2.800087E+3   2.800087E+3   9.000000E+1   2.800087E+3   2.800087E+3   4.219577E-1   4.219577E-4   
+1.419930E+2   3.999771E+1   3.999771E+1   1.771863E+1   2.900015E+3   2.900015E+3   9.000000E+1   2.900015E+3   2.900015E+3   4.306816E-1   4.306816E-4   
+1.467550E+2   3.999725E+1   3.999725E+1   1.772009E+1   3.000058E+3   3.000058E+3   9.000000E+1   3.000058E+3   3.000058E+3   4.394055E-1   4.394055E-4   
+1.514040E+2   3.998029E+1   3.998029E+1   1.772177E+1   3.100055E+3   3.100055E+3   9.000000E+1   3.100055E+3   3.100055E+3   4.473363E-1   4.473363E-4   
+1.561970E+2   4.000104E+1   4.000104E+1   1.772168E+1   3.200127E+3   3.200127E+3   9.000000E+1   3.200127E+3   3.200127E+3   4.520948E-1   4.520948E-4   
+1.609580E+2   3.999500E+1   3.999500E+1   1.771832E+1   3.300120E+3   3.300120E+3   9.000000E+1   3.300120E+3   3.300120E+3   4.600283E-1   4.600283E-4   
+1.656700E+2   4.000101E+1   4.000101E+1   1.771597E+1   3.400013E+3   3.400013E+3   9.000000E+1   3.400013E+3   3.400013E+3   4.655799E-1   4.655799E-4   
+1.703240E+2   4.000732E+1   4.000732E+1   1.771896E+1   3.500041E+3   3.500041E+3   9.000000E+1   3.500041E+3   3.500041E+3   4.695453E-1   4.695453E-4   
+1.751450E+2   3.999683E+1   3.999683E+1   1.772052E+1   3.599977E+3   3.599977E+3   9.000000E+1   3.599977E+3   3.599977E+3   4.735108E-1   4.735108E-4   
+1.798570E+2   4.000265E+1   4.000265E+1   1.772211E+1   3.700074E+3   3.700074E+3   9.000000E+1   3.700074E+3   3.700074E+3   4.766831E-1   4.766831E-4   
+1.846190E+2   3.999777E+1   3.999777E+1   1.772058E+1   3.800038E+3   3.800038E+3   9.000000E+1   3.800038E+3   3.800038E+3   4.830278E-1   4.830278E-4   
+1.893480E+2   3.999475E+1   3.999475E+1   1.772089E+1   3.900074E+3   3.900074E+3   9.000000E+1   3.900074E+3   3.900074E+3   4.846139E-1   4.846139E-4   
+1.940140E+2   3.999039E+1   3.999039E+1   1.771963E+1   3.999971E+3   3.999971E+3   9.000000E+1   3.999971E+3   3.999971E+3   4.877863E-1   4.877863E-4   
+1.987420E+2   4.000107E+1   4.000107E+1   1.772205E+1   4.100071E+3   4.100071E+3   9.000000E+1   4.100071E+3   4.100071E+3   4.885794E-1   4.885794E-4   
+2.035690E+2   4.000488E+1   4.000488E+1   1.772379E+1   4.200114E+3   4.200114E+3   9.000000E+1   4.200114E+3   4.200114E+3   4.909613E-1   4.909613E-4   
+2.082820E+2   3.999326E+1   3.999326E+1   1.772263E+1   4.300061E+3   4.300061E+3   9.000000E+1   4.300061E+3   4.300061E+3   4.933405E-1   4.933405E-4   
+2.129930E+2   3.999847E+1   3.999847E+1   1.772150E+1   4.400122E+3   4.400122E+3   9.000000E+1   4.400122E+3   4.400122E+3   4.933405E-1   4.933405E-4   
+2.177390E+2   4.000607E+1   4.000607E+1   1.771997E+1   4.500054E+3   4.500054E+3   9.000000E+1   4.500054E+3   4.500054E+3   4.965128E-1   4.965128E-4   
+2.224670E+2   3.999261E+1   3.999261E+1   1.772098E+1   4.599975E+3   4.599975E+3   9.000000E+1   4.599975E+3   4.599975E+3   4.973059E-1   4.973059E-4   
+2.272310E+2   3.999857E+1   3.999857E+1   1.771826E+1   4.700058E+3   4.700058E+3   9.000000E+1   4.700058E+3   4.700058E+3   4.980990E-1   4.980990E-4   
+2.319590E+2   3.999826E+1   3.999826E+1   1.771603E+1   4.800033E+3   4.800033E+3   9.000000E+1   4.800033E+3   4.800033E+3   4.973059E-1   4.973059E-4   
+2.366750E+2   3.999478E+1   3.999478E+1   1.771616E+1   4.900105E+3   4.900105E+3   9.000000E+1   4.900105E+3   4.900105E+3   5.020644E-1   5.020644E-4   
+2.413250E+2   4.000125E+1   4.000125E+1   1.771429E+1   5.000105E+3   5.000105E+3   9.000000E+1   5.000105E+3   5.000105E+3   5.012713E-1   5.012713E-4   
+2.460870E+2   3.998593E+1   3.998593E+1   1.771207E+1   5.100155E+3   5.100155E+3   9.000000E+1   5.100155E+3   5.100155E+3   5.028575E-1   5.028575E-4   
+2.509140E+2   4.000848E+1   4.000848E+1   1.771069E+1   5.200001E+3   5.200001E+3   9.000000E+1   5.200001E+3   5.200001E+3   5.028575E-1   5.028575E-4   
+2.555310E+2   3.999527E+1   3.999527E+1   1.771283E+1   5.300091E+3   5.300091E+3   9.000000E+1   5.300091E+3   5.300091E+3   5.036506E-1   5.036506E-4   
+2.602630E+2   4.002200E+1   4.002200E+1   1.771271E+1   5.400027E+3   5.400027E+3   9.000000E+1   5.400027E+3   5.400027E+3   5.036506E-1   5.036506E-4   
+2.651040E+2   3.998883E+1   3.998883E+1   1.771219E+1   5.500002E+3   5.500002E+3   9.000000E+1   5.500002E+3   5.500002E+3   5.044437E-1   5.044437E-4   
+2.698160E+2   4.000131E+1   4.000131E+1   1.771460E+1   5.600041E+3   5.600041E+3   9.000000E+1   5.600041E+3   5.600041E+3   5.060298E-1   5.060298E-4   
+2.744780E+2   3.999759E+1   3.999759E+1   1.771622E+1   5.700049E+3   5.700049E+3   9.000000E+1   5.700049E+3   5.700049E+3   5.068229E-1   5.068229E-4   
+2.790500E+2   3.999649E+1   3.999649E+1   1.771393E+1   5.800106E+3   5.800106E+3   9.000000E+1   5.800106E+3   5.800106E+3   5.060298E-1   5.060298E-4   
+2.837790E+2   4.000619E+1   4.000619E+1   1.770914E+1   5.899974E+3   5.899974E+3   9.000000E+1   5.899974E+3   5.899974E+3   5.060298E-1   5.060298E-4   
+2.885070E+2   3.999408E+1   3.999408E+1   1.770892E+1   6.000146E+3   6.000146E+3   9.000000E+1   6.000146E+3   6.000146E+3   5.068229E-1   5.068229E-4   
+2.932400E+2   4.000827E+1   4.000827E+1   1.770892E+1   6.100007E+3   6.100007E+3   9.000000E+1   6.100007E+3   6.100007E+3   5.084091E-1   5.084091E-4   
+2.979510E+2   3.999081E+1   3.999081E+1   1.770914E+1   6.200114E+3   6.200114E+3   9.000000E+1   6.200114E+3   6.200114E+3   5.076160E-1   5.076160E-4   
+3.027100E+2   4.000055E+1   4.000055E+1   1.771225E+1   6.300103E+3   6.300103E+3   9.000000E+1   6.300103E+3   6.300103E+3   5.084091E-1   5.084091E-4   
+3.074420E+2   3.999106E+1   3.999106E+1   1.771362E+1   6.400107E+3   6.400107E+3   9.000000E+1   6.400107E+3   6.400107E+3   5.084091E-1   5.084091E-4   
+3.121840E+2   4.000284E+1   4.000284E+1   1.771054E+1   6.500132E+3   6.500132E+3   9.000000E+1   6.500132E+3   6.500132E+3   5.084091E-1   5.084091E-4   
+3.169150E+2   3.998801E+1   3.998801E+1   1.770792E+1   6.599990E+3   6.599990E+3   9.000000E+1   6.599990E+3   6.599990E+3   5.107884E-1   5.107884E-4   
+3.216430E+2   4.000449E+1   4.000449E+1   1.770844E+1   6.700083E+3   6.700083E+3   9.000000E+1   6.700083E+3   6.700083E+3   5.084091E-1   5.084091E-4   
+3.263880E+2   3.999170E+1   3.999170E+1   1.770822E+1   6.800158E+3   6.800158E+3   9.000000E+1   6.800158E+3   6.800158E+3   5.099953E-1   5.099953E-4   
+3.311330E+2   4.000739E+1   4.000739E+1   1.770819E+1   6.900076E+3   6.900076E+3   9.000000E+1   6.900076E+3   6.900076E+3   5.099953E-1   5.099953E-4   
+3.358620E+2   3.999850E+1   3.999850E+1   1.770825E+1   7.000015E+3   7.000015E+3   9.000000E+1   7.000015E+3   7.000015E+3   5.115814E-1   5.115814E-4   
+3.406070E+2   3.999582E+1   3.999582E+1   1.770425E+1   7.100137E+3   7.100137E+3   9.000000E+1   7.100137E+3   7.100137E+3   5.099953E-1   5.099953E-4   
+3.453350E+2   3.999796E+1   3.999796E+1   1.770117E+1   7.200023E+3   7.200023E+3   9.000000E+1   7.200023E+3   7.200023E+3   5.099953E-1   5.099953E-4   
+3.500660E+2   3.999823E+1   3.999823E+1   1.769727E+1   7.300037E+3   7.300037E+3   9.000000E+1   7.300037E+3   7.300037E+3   5.123745E-1   5.123745E-4   
+3.548270E+2   3.999286E+1   3.999286E+1   1.769485E+1   7.400080E+3   7.400080E+3   9.000000E+1   7.400080E+3   7.400080E+3   5.115814E-1   5.115814E-4   
+3.595260E+2   4.000574E+1   4.000574E+1   1.769489E+1   7.500106E+3   7.500106E+3   9.000000E+1   7.500106E+3   7.500106E+3   5.123745E-1   5.123745E-4   
+3.641100E+2   3.999570E+1   3.999570E+1   1.769363E+1   7.599977E+3   7.599977E+3   9.000000E+1   7.599977E+3   7.599977E+3   5.107884E-1   5.107884E-4   
+3.687610E+2   4.000363E+1   4.000363E+1   1.769254E+1   7.700074E+3   7.700074E+3   9.000000E+1   7.700074E+3   7.700074E+3   5.139607E-1   5.139607E-4   
+3.733450E+2   3.999020E+1   3.999020E+1   1.769336E+1   7.800034E+3   7.800034E+3   9.000000E+1   7.800034E+3   7.800034E+3   5.123745E-1   5.123745E-4   
+3.780570E+2   4.000983E+1   4.000983E+1   1.769226E+1   7.900002E+3   7.900002E+3   9.000000E+1   7.900002E+3   7.900002E+3   5.139607E-1   5.139607E-4   
+3.828370E+2   3.998346E+1   3.998346E+1   1.769217E+1   8.000178E+3   8.000178E+3   9.000000E+1   8.000178E+3   8.000178E+3   5.115814E-1   5.115814E-4   
+3.875460E+2   4.001334E+1   4.001334E+1   1.769144E+1   8.099981E+3   8.099981E+3   9.000000E+1   8.099981E+3   8.099981E+3   5.139607E-1   5.139607E-4   
+3.922920E+2   3.999173E+1   3.999173E+1   1.769489E+1   8.200042E+3   8.200042E+3   9.000000E+1   8.200042E+3   8.200042E+3   5.123745E-1   5.123745E-4   
+3.970380E+2   3.999564E+1   3.999564E+1   1.769867E+1   8.299960E+3   8.299960E+3   9.000000E+1   8.299960E+3   8.299960E+3   5.139607E-1   5.139607E-4   
+4.017480E+2   3.999704E+1   3.999704E+1   1.769861E+1   8.400057E+3   8.400057E+3   9.000000E+1   8.400057E+3   8.400057E+3   5.155469E-1   5.155469E-4   
+4.064970E+2   4.000742E+1   4.000742E+1   1.770068E+1   8.500071E+3   8.500071E+3   9.000000E+1   8.500071E+3   8.500071E+3   5.131676E-1   5.131676E-4   
+4.112250E+2   3.999319E+1   3.999319E+1   1.770187E+1   8.600039E+3   8.600039E+3   9.000000E+1   8.600039E+3   8.600039E+3   5.139607E-1   5.139607E-4   
+4.159710E+2   4.000198E+1   4.000198E+1   1.770041E+1   8.699939E+3   8.699939E+3   9.000000E+1   8.699939E+3   8.699939E+3   5.171330E-1   5.171330E-4   
+4.207170E+2   3.999814E+1   3.999814E+1   1.769980E+1   8.800122E+3   8.800122E+3   9.000000E+1   8.800122E+3   8.800122E+3   5.155469E-1   5.155469E-4   
+4.254280E+2   4.000208E+1   4.000208E+1   1.769702E+1   8.900090E+3   8.900090E+3   9.000000E+1   8.900090E+3   8.900090E+3   5.147538E-1   5.147538E-4   
+4.301720E+2   3.999677E+1   3.999677E+1   1.769504E+1   9.000151E+3   9.000151E+3   9.000000E+1   9.000151E+3   9.000151E+3   5.171330E-1   5.171330E-4   
+4.347420E+2   3.999948E+1   3.999948E+1   1.769400E+1   9.100015E+3   9.100015E+3   9.000000E+1   9.100015E+3   9.100015E+3   5.163399E-1   5.163399E-4   
+4.394110E+2   3.999072E+1   3.999072E+1   1.769479E+1   9.200023E+3   9.200023E+3   9.000000E+1   9.200023E+3   9.200023E+3   5.179261E-1   5.179261E-4   
+4.442020E+2   3.999857E+1   3.999857E+1   1.769476E+1   9.299976E+3   9.299976E+3   9.000000E+1   9.299976E+3   9.299976E+3   5.171330E-1   5.171330E-4   
+4.488700E+2   3.999814E+1   3.999814E+1   1.769904E+1   9.400012E+3   9.400012E+3   9.000000E+1   9.400012E+3   9.400012E+3   5.163399E-1   5.163399E-4   
+4.536960E+2   3.999329E+1   3.999329E+1   1.769891E+1   9.499912E+3   9.499912E+3   9.000000E+1   9.499912E+3   9.499912E+3   5.171330E-1   5.171330E-4   
+4.584390E+2   4.000726E+1   4.000726E+1   1.769992E+1   9.600091E+3   9.600091E+3   9.000000E+1   9.600091E+3   9.600091E+3   5.187192E-1   5.187192E-4   
+4.631690E+2   3.999557E+1   3.999557E+1   1.770282E+1   9.699905E+3   9.699905E+3   9.000000E+1   9.699905E+3   9.699905E+3   5.187192E-1   5.187192E-4   
+4.679120E+2   3.999432E+1   3.999432E+1   1.770682E+1   9.800024E+3   9.800024E+3   9.000000E+1   9.800024E+3   9.800024E+3   5.187192E-1   5.187192E-4   
+4.726440E+2   3.999353E+1   3.999353E+1   1.771021E+1   9.899963E+3   9.899963E+3   9.000000E+1   9.899963E+3   9.899963E+3   5.195123E-1   5.195123E-4   
+4.773090E+2   3.999979E+1   3.999979E+1   1.771793E+1   1.000001E+4   1.000001E+4   9.000000E+1   1.000001E+4   1.000001E+4   5.195123E-1   5.195123E-4   
+@@END Data.
+@Time at end of measurement: 20:26:31
+@NO Instrument  Changes.
+First Error: 
+
+
+Error History:
+@@Final Manipulated Data
+New Section: Section 0: 
+4.863000E+0   3.999384E+1   3.999384E+1   1.773349E+1   4.971400E-2   4.971400E-2   9.000000E+1   4.971400E-2   4.971400E-2   1.427670E-2   1.427670E-5   
+9.544000E+0   3.996582E+1   3.996582E+1   1.772870E+1   9.996405E+1   9.996405E+1   9.000000E+1   9.996405E+1   9.996405E+1   6.186584E-2   6.186584E-5   
+1.424300E+1   3.995941E+1   3.995941E+1   1.772473E+1   2.000822E+2   2.000822E+2   9.000000E+1   2.000822E+2   2.000822E+2   8.883254E-2   8.883254E-5   
+1.897000E+1   4.000812E+1   4.000812E+1   1.772079E+1   3.000645E+2   3.000645E+2   9.000000E+1   3.000645E+2   3.000645E+2   1.102479E-1   1.102479E-4   
+2.368500E+1   3.996133E+1   3.996133E+1   1.772070E+1   3.999717E+2   3.999717E+2   9.000000E+1   3.999717E+2   3.999717E+2   1.292835E-1   1.292835E-4   
+2.850800E+1   3.997986E+1   3.997986E+1   1.772046E+1   4.999933E+2   4.999933E+2   9.000000E+1   4.999933E+2   4.999933E+2   1.475258E-1   1.475258E-4   
+3.323800E+1   3.999084E+1   3.999084E+1   1.771960E+1   6.000078E+2   6.000078E+2   9.000000E+1   6.000078E+2   6.000078E+2   1.633888E-1   1.633888E-4   
+3.785500E+1   3.996890E+1   3.996890E+1   1.772202E+1   7.000795E+2   7.000795E+2   9.000000E+1   7.000795E+2   7.000795E+2   1.800449E-1   1.800449E-4   
+4.263100E+1   3.995737E+1   3.995737E+1   1.772351E+1   7.999831E+2   7.999831E+2   9.000000E+1   7.999831E+2   7.999831E+2   1.943214E-1   1.943214E-4   
+4.737700E+1   4.000009E+1   4.000009E+1   1.772394E+1   9.000799E+2   9.000799E+2   9.000000E+1   9.000799E+2   9.000799E+2   2.078057E-1   2.078057E-4   
+5.199400E+1   3.997787E+1   3.997787E+1   1.772165E+1   9.999656E+2   9.999656E+2   9.000000E+1   9.999656E+2   9.999656E+2   2.212892E-1   2.212892E-4   
+5.685100E+1   3.998129E+1   3.998129E+1   1.772217E+1   1.100002E+3   1.100002E+3   9.000000E+1   1.100002E+3   1.100002E+3   2.363588E-1   2.363588E-4   
+6.153200E+1   3.998596E+1   3.998596E+1   1.772293E+1   1.200037E+3   1.200037E+3   9.000000E+1   1.200037E+3   1.200037E+3   2.490492E-1   2.490492E-4   
+6.617900E+1   3.999185E+1   3.999185E+1   1.772372E+1   1.300030E+3   1.300030E+3   9.000000E+1   1.300030E+3   1.300030E+3   2.609463E-1   2.609463E-4   
+7.090700E+1   3.998413E+1   3.998413E+1   1.771906E+1   1.399988E+3   1.399988E+3   9.000000E+1   1.399988E+3   1.399988E+3   2.736378E-1   2.736378E-4   
+7.574900E+1   4.001849E+1   4.001849E+1   1.771738E+1   1.499959E+3   1.499959E+3   9.000000E+1   1.499959E+3   1.499959E+3   2.863271E-1   2.863271E-4   
+8.038300E+1   3.997501E+1   3.997501E+1   1.771616E+1   1.600077E+3   1.600077E+3   9.000000E+1   1.600077E+3   1.600077E+3   2.974303E-1   2.974303E-4   
+8.511100E+1   4.000549E+1   4.000549E+1   1.771280E+1   1.699974E+3   1.699974E+3   9.000000E+1   1.699974E+3   1.699974E+3   3.093292E-1   3.093292E-4   
+8.993700E+1   3.997232E+1   3.997232E+1   1.770963E+1   1.799996E+3   1.799996E+3   9.000000E+1   1.799996E+3   1.799996E+3   3.212254E-1   3.212254E-4   
+9.468300E+1   3.997412E+1   3.997412E+1   1.770981E+1   1.900049E+3   1.900049E+3   9.000000E+1   1.900049E+3   1.900049E+3   3.323286E-1   3.323286E-4   
+9.944400E+1   4.000183E+1   4.000183E+1   1.771249E+1   2.000039E+3   2.000039E+3   9.000000E+1   2.000039E+3   2.000039E+3   3.426413E-1   3.426413E-4   
+1.041400E+2   4.001831E+1   4.001831E+1   1.771585E+1   2.100143E+3   2.100143E+3   9.000000E+1   2.100143E+3   2.100143E+3   3.537445E-1   3.537445E-4   
+1.087920E+2   3.998212E+1   3.998212E+1   1.771957E+1   2.200089E+3   2.200089E+3   9.000000E+1   2.200089E+3   2.200089E+3   3.632615E-1   3.632615E-4   
+1.136170E+2   3.998300E+1   3.998300E+1   1.771906E+1   2.300125E+3   2.300125E+3   9.000000E+1   2.300125E+3   2.300125E+3   3.751604E-1   3.751604E-4   
+1.182690E+2   4.000558E+1   4.000558E+1   1.771561E+1   2.400075E+3   2.400075E+3   9.000000E+1   2.400075E+3   2.400075E+3   3.846774E-1   3.846774E-4   
+1.230600E+2   3.999432E+1   3.999432E+1   1.771494E+1   2.500029E+3   2.500029E+3   9.000000E+1   2.500029E+3   2.500029E+3   3.934013E-1   3.934013E-4   
+1.278050E+2   3.999506E+1   3.999506E+1   1.771530E+1   2.599993E+3   2.599993E+3   9.000000E+1   2.599993E+3   2.599993E+3   4.045045E-1   4.045045E-4   
+1.325490E+2   4.000415E+1   4.000415E+1   1.771667E+1   2.700036E+3   2.700036E+3   9.000000E+1   2.700036E+3   2.700036E+3   4.124380E-1   4.124380E-4   
+1.372800E+2   3.999356E+1   3.999356E+1   1.771652E+1   2.800087E+3   2.800087E+3   9.000000E+1   2.800087E+3   2.800087E+3   4.219577E-1   4.219577E-4   
+1.419930E+2   3.999771E+1   3.999771E+1   1.771863E+1   2.900015E+3   2.900015E+3   9.000000E+1   2.900015E+3   2.900015E+3   4.306816E-1   4.306816E-4   
+1.467550E+2   3.999725E+1   3.999725E+1   1.772009E+1   3.000058E+3   3.000058E+3   9.000000E+1   3.000058E+3   3.000058E+3   4.394055E-1   4.394055E-4   
+1.514040E+2   3.998029E+1   3.998029E+1   1.772177E+1   3.100055E+3   3.100055E+3   9.000000E+1   3.100055E+3   3.100055E+3   4.473363E-1   4.473363E-4   
+1.561970E+2   4.000104E+1   4.000104E+1   1.772168E+1   3.200127E+3   3.200127E+3   9.000000E+1   3.200127E+3   3.200127E+3   4.520948E-1   4.520948E-4   
+1.609580E+2   3.999500E+1   3.999500E+1   1.771832E+1   3.300120E+3   3.300120E+3   9.000000E+1   3.300120E+3   3.300120E+3   4.600283E-1   4.600283E-4   
+1.656700E+2   4.000101E+1   4.000101E+1   1.771597E+1   3.400013E+3   3.400013E+3   9.000000E+1   3.400013E+3   3.400013E+3   4.655799E-1   4.655799E-4   
+1.703240E+2   4.000732E+1   4.000732E+1   1.771896E+1   3.500041E+3   3.500041E+3   9.000000E+1   3.500041E+3   3.500041E+3   4.695453E-1   4.695453E-4   
+1.751450E+2   3.999683E+1   3.999683E+1   1.772052E+1   3.599977E+3   3.599977E+3   9.000000E+1   3.599977E+3   3.599977E+3   4.735108E-1   4.735108E-4   
+1.798570E+2   4.000265E+1   4.000265E+1   1.772211E+1   3.700074E+3   3.700074E+3   9.000000E+1   3.700074E+3   3.700074E+3   4.766831E-1   4.766831E-4   
+1.846190E+2   3.999777E+1   3.999777E+1   1.772058E+1   3.800038E+3   3.800038E+3   9.000000E+1   3.800038E+3   3.800038E+3   4.830278E-1   4.830278E-4   
+1.893480E+2   3.999475E+1   3.999475E+1   1.772089E+1   3.900074E+3   3.900074E+3   9.000000E+1   3.900074E+3   3.900074E+3   4.846139E-1   4.846139E-4   
+1.940140E+2   3.999039E+1   3.999039E+1   1.771963E+1   3.999971E+3   3.999971E+3   9.000000E+1   3.999971E+3   3.999971E+3   4.877863E-1   4.877863E-4   
+1.987420E+2   4.000107E+1   4.000107E+1   1.772205E+1   4.100071E+3   4.100071E+3   9.000000E+1   4.100071E+3   4.100071E+3   4.885794E-1   4.885794E-4   
+2.035690E+2   4.000488E+1   4.000488E+1   1.772379E+1   4.200114E+3   4.200114E+3   9.000000E+1   4.200114E+3   4.200114E+3   4.909613E-1   4.909613E-4   
+2.082820E+2   3.999326E+1   3.999326E+1   1.772263E+1   4.300061E+3   4.300061E+3   9.000000E+1   4.300061E+3   4.300061E+3   4.933405E-1   4.933405E-4   
+2.129930E+2   3.999847E+1   3.999847E+1   1.772150E+1   4.400122E+3   4.400122E+3   9.000000E+1   4.400122E+3   4.400122E+3   4.933405E-1   4.933405E-4   
+2.177390E+2   4.000607E+1   4.000607E+1   1.771997E+1   4.500054E+3   4.500054E+3   9.000000E+1   4.500054E+3   4.500054E+3   4.965128E-1   4.965128E-4   
+2.224670E+2   3.999261E+1   3.999261E+1   1.772098E+1   4.599975E+3   4.599975E+3   9.000000E+1   4.599975E+3   4.599975E+3   4.973059E-1   4.973059E-4   
+2.272310E+2   3.999857E+1   3.999857E+1   1.771826E+1   4.700058E+3   4.700058E+3   9.000000E+1   4.700058E+3   4.700058E+3   4.980990E-1   4.980990E-4   
+2.319590E+2   3.999826E+1   3.999826E+1   1.771603E+1   4.800033E+3   4.800033E+3   9.000000E+1   4.800033E+3   4.800033E+3   4.973059E-1   4.973059E-4   
+2.366750E+2   3.999478E+1   3.999478E+1   1.771616E+1   4.900105E+3   4.900105E+3   9.000000E+1   4.900105E+3   4.900105E+3   5.020644E-1   5.020644E-4   
+2.413250E+2   4.000125E+1   4.000125E+1   1.771429E+1   5.000105E+3   5.000105E+3   9.000000E+1   5.000105E+3   5.000105E+3   5.012713E-1   5.012713E-4   
+2.460870E+2   3.998593E+1   3.998593E+1   1.771207E+1   5.100155E+3   5.100155E+3   9.000000E+1   5.100155E+3   5.100155E+3   5.028575E-1   5.028575E-4   
+2.509140E+2   4.000848E+1   4.000848E+1   1.771069E+1   5.200001E+3   5.200001E+3   9.000000E+1   5.200001E+3   5.200001E+3   5.028575E-1   5.028575E-4   
+2.555310E+2   3.999527E+1   3.999527E+1   1.771283E+1   5.300091E+3   5.300091E+3   9.000000E+1   5.300091E+3   5.300091E+3   5.036506E-1   5.036506E-4   
+2.602630E+2   4.002200E+1   4.002200E+1   1.771271E+1   5.400027E+3   5.400027E+3   9.000000E+1   5.400027E+3   5.400027E+3   5.036506E-1   5.036506E-4   
+2.651040E+2   3.998883E+1   3.998883E+1   1.771219E+1   5.500002E+3   5.500002E+3   9.000000E+1   5.500002E+3   5.500002E+3   5.044437E-1   5.044437E-4   
+2.698160E+2   4.000131E+1   4.000131E+1   1.771460E+1   5.600041E+3   5.600041E+3   9.000000E+1   5.600041E+3   5.600041E+3   5.060298E-1   5.060298E-4   
+2.744780E+2   3.999759E+1   3.999759E+1   1.771622E+1   5.700049E+3   5.700049E+3   9.000000E+1   5.700049E+3   5.700049E+3   5.068229E-1   5.068229E-4   
+2.790500E+2   3.999649E+1   3.999649E+1   1.771393E+1   5.800106E+3   5.800106E+3   9.000000E+1   5.800106E+3   5.800106E+3   5.060298E-1   5.060298E-4   
+2.837790E+2   4.000619E+1   4.000619E+1   1.770914E+1   5.899974E+3   5.899974E+3   9.000000E+1   5.899974E+3   5.899974E+3   5.060298E-1   5.060298E-4   
+2.885070E+2   3.999408E+1   3.999408E+1   1.770892E+1   6.000146E+3   6.000146E+3   9.000000E+1   6.000146E+3   6.000146E+3   5.068229E-1   5.068229E-4   
+2.932400E+2   4.000827E+1   4.000827E+1   1.770892E+1   6.100007E+3   6.100007E+3   9.000000E+1   6.100007E+3   6.100007E+3   5.084091E-1   5.084091E-4   
+2.979510E+2   3.999081E+1   3.999081E+1   1.770914E+1   6.200114E+3   6.200114E+3   9.000000E+1   6.200114E+3   6.200114E+3   5.076160E-1   5.076160E-4   
+3.027100E+2   4.000055E+1   4.000055E+1   1.771225E+1   6.300103E+3   6.300103E+3   9.000000E+1   6.300103E+3   6.300103E+3   5.084091E-1   5.084091E-4   
+3.074420E+2   3.999106E+1   3.999106E+1   1.771362E+1   6.400107E+3   6.400107E+3   9.000000E+1   6.400107E+3   6.400107E+3   5.084091E-1   5.084091E-4   
+3.121840E+2   4.000284E+1   4.000284E+1   1.771054E+1   6.500132E+3   6.500132E+3   9.000000E+1   6.500132E+3   6.500132E+3   5.084091E-1   5.084091E-4   
+3.169150E+2   3.998801E+1   3.998801E+1   1.770792E+1   6.599990E+3   6.599990E+3   9.000000E+1   6.599990E+3   6.599990E+3   5.107884E-1   5.107884E-4   
+3.216430E+2   4.000449E+1   4.000449E+1   1.770844E+1   6.700083E+3   6.700083E+3   9.000000E+1   6.700083E+3   6.700083E+3   5.084091E-1   5.084091E-4   
+3.263880E+2   3.999170E+1   3.999170E+1   1.770822E+1   6.800158E+3   6.800158E+3   9.000000E+1   6.800158E+3   6.800158E+3   5.099953E-1   5.099953E-4   
+3.311330E+2   4.000739E+1   4.000739E+1   1.770819E+1   6.900076E+3   6.900076E+3   9.000000E+1   6.900076E+3   6.900076E+3   5.099953E-1   5.099953E-4   
+3.358620E+2   3.999850E+1   3.999850E+1   1.770825E+1   7.000015E+3   7.000015E+3   9.000000E+1   7.000015E+3   7.000015E+3   5.115814E-1   5.115814E-4   
+3.406070E+2   3.999582E+1   3.999582E+1   1.770425E+1   7.100137E+3   7.100137E+3   9.000000E+1   7.100137E+3   7.100137E+3   5.099953E-1   5.099953E-4   
+3.453350E+2   3.999796E+1   3.999796E+1   1.770117E+1   7.200023E+3   7.200023E+3   9.000000E+1   7.200023E+3   7.200023E+3   5.099953E-1   5.099953E-4   
+3.500660E+2   3.999823E+1   3.999823E+1   1.769727E+1   7.300037E+3   7.300037E+3   9.000000E+1   7.300037E+3   7.300037E+3   5.123745E-1   5.123745E-4   
+3.548270E+2   3.999286E+1   3.999286E+1   1.769485E+1   7.400080E+3   7.400080E+3   9.000000E+1   7.400080E+3   7.400080E+3   5.115814E-1   5.115814E-4   
+3.595260E+2   4.000574E+1   4.000574E+1   1.769489E+1   7.500106E+3   7.500106E+3   9.000000E+1   7.500106E+3   7.500106E+3   5.123745E-1   5.123745E-4   
+3.641100E+2   3.999570E+1   3.999570E+1   1.769363E+1   7.599977E+3   7.599977E+3   9.000000E+1   7.599977E+3   7.599977E+3   5.107884E-1   5.107884E-4   
+3.687610E+2   4.000363E+1   4.000363E+1   1.769254E+1   7.700074E+3   7.700074E+3   9.000000E+1   7.700074E+3   7.700074E+3   5.139607E-1   5.139607E-4   
+3.733450E+2   3.999020E+1   3.999020E+1   1.769336E+1   7.800034E+3   7.800034E+3   9.000000E+1   7.800034E+3   7.800034E+3   5.123745E-1   5.123745E-4   
+3.780570E+2   4.000983E+1   4.000983E+1   1.769226E+1   7.900002E+3   7.900002E+3   9.000000E+1   7.900002E+3   7.900002E+3   5.139607E-1   5.139607E-4   
+3.828370E+2   3.998346E+1   3.998346E+1   1.769217E+1   8.000178E+3   8.000178E+3   9.000000E+1   8.000178E+3   8.000178E+3   5.115814E-1   5.115814E-4   
+3.875460E+2   4.001334E+1   4.001334E+1   1.769144E+1   8.099981E+3   8.099981E+3   9.000000E+1   8.099981E+3   8.099981E+3   5.139607E-1   5.139607E-4   
+3.922920E+2   3.999173E+1   3.999173E+1   1.769489E+1   8.200042E+3   8.200042E+3   9.000000E+1   8.200042E+3   8.200042E+3   5.123745E-1   5.123745E-4   
+3.970380E+2   3.999564E+1   3.999564E+1   1.769867E+1   8.299960E+3   8.299960E+3   9.000000E+1   8.299960E+3   8.299960E+3   5.139607E-1   5.139607E-4   
+4.017480E+2   3.999704E+1   3.999704E+1   1.769861E+1   8.400057E+3   8.400057E+3   9.000000E+1   8.400057E+3   8.400057E+3   5.155469E-1   5.155469E-4   
+4.064970E+2   4.000742E+1   4.000742E+1   1.770068E+1   8.500071E+3   8.500071E+3   9.000000E+1   8.500071E+3   8.500071E+3   5.131676E-1   5.131676E-4   
+4.112250E+2   3.999319E+1   3.999319E+1   1.770187E+1   8.600039E+3   8.600039E+3   9.000000E+1   8.600039E+3   8.600039E+3   5.139607E-1   5.139607E-4   
+4.159710E+2   4.000198E+1   4.000198E+1   1.770041E+1   8.699939E+3   8.699939E+3   9.000000E+1   8.699939E+3   8.699939E+3   5.171330E-1   5.171330E-4   
+4.207170E+2   3.999814E+1   3.999814E+1   1.769980E+1   8.800122E+3   8.800122E+3   9.000000E+1   8.800122E+3   8.800122E+3   5.155469E-1   5.155469E-4   
+4.254280E+2   4.000208E+1   4.000208E+1   1.769702E+1   8.900090E+3   8.900090E+3   9.000000E+1   8.900090E+3   8.900090E+3   5.147538E-1   5.147538E-4   
+4.301720E+2   3.999677E+1   3.999677E+1   1.769504E+1   9.000151E+3   9.000151E+3   9.000000E+1   9.000151E+3   9.000151E+3   5.171330E-1   5.171330E-4   
+4.347420E+2   3.999948E+1   3.999948E+1   1.769400E+1   9.100015E+3   9.100015E+3   9.000000E+1   9.100015E+3   9.100015E+3   5.163399E-1   5.163399E-4   
+4.394110E+2   3.999072E+1   3.999072E+1   1.769479E+1   9.200023E+3   9.200023E+3   9.000000E+1   9.200023E+3   9.200023E+3   5.179261E-1   5.179261E-4   
+4.442020E+2   3.999857E+1   3.999857E+1   1.769476E+1   9.299976E+3   9.299976E+3   9.000000E+1   9.299976E+3   9.299976E+3   5.171330E-1   5.171330E-4   
+4.488700E+2   3.999814E+1   3.999814E+1   1.769904E+1   9.400012E+3   9.400012E+3   9.000000E+1   9.400012E+3   9.400012E+3   5.163399E-1   5.163399E-4   
+4.536960E+2   3.999329E+1   3.999329E+1   1.769891E+1   9.499912E+3   9.499912E+3   9.000000E+1   9.499912E+3   9.499912E+3   5.171330E-1   5.171330E-4   
+4.584390E+2   4.000726E+1   4.000726E+1   1.769992E+1   9.600091E+3   9.600091E+3   9.000000E+1   9.600091E+3   9.600091E+3   5.187192E-1   5.187192E-4   
+4.631690E+2   3.999557E+1   3.999557E+1   1.770282E+1   9.699905E+3   9.699905E+3   9.000000E+1   9.699905E+3   9.699905E+3   5.187192E-1   5.187192E-4   
+4.679120E+2   3.999432E+1   3.999432E+1   1.770682E+1   9.800024E+3   9.800024E+3   9.000000E+1   9.800024E+3   9.800024E+3   5.187192E-1   5.187192E-4   
+4.726440E+2   3.999353E+1   3.999353E+1   1.771021E+1   9.899963E+3   9.899963E+3   9.000000E+1   9.899963E+3   9.899963E+3   5.195123E-1   5.195123E-4   
+4.773090E+2   3.999979E+1   3.999979E+1   1.771793E+1   1.000001E+4   1.000001E+4   9.000000E+1   1.000001E+4   1.000001E+4   5.195123E-1   5.195123E-4   
+@@END Data.
+@Measurement parameters
+                                        Up             Down           Average        Unit                                    
+Virgin Curve                                                                                                                 
+                                                                                                                             
+Ms                                                                                                                           
+M at H max                              519.512E-6                    519.512E-6     emu                                     
+Hc'                                     1290.03                       1290.03        Oe                                      
+Hs'                                     4406.30                       4406.30        Oe                                      
+Area_vir                                NaN                           NaN            Oe * emu                                
+                                                                                                                             
+
+@END Measurement parameters

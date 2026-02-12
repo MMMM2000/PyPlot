@@ -27,6 +27,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **TXT exports**: the default filename mirrors the current workbook/plot label so exported TXT/CSV files match the names shown in the Project Explorer and carry the sample/procedure context baked into those labels.
 - **Graph export**: Save graph supports `PNG`, `PDF`, and `SVG`.
   Save dialog memory: the last selected graph-export format is remembered and reused as the default next time.
+- **Check outliers** now performs a worksheet scan (IQR-based with z-score fallback for low-spread columns), shows a per-sheet summary, and can remove flagged rows in-place across affected worksheets.
 
 ## Origin export checklist
 - Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.
@@ -47,6 +48,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. Defaults now align better with shared PyPlot graph sizing/label style so formatting behavior is consistent across plugins. |
 | VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. Workbooks group each temperature graph into a single worksheet with XY column pairs per angle. |
 | VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; can combine low/high field runs into a dual-axis plot; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. Core parsing/export logic now lives in `plotting.plugins.vsm_temperature_scan.core` so PyPlot and Data Builder share one implementation. |
+| VSM Isotherms           | `plotting.plugins.vsm_isotherms`                      | Parses VIR exports (`.VSM-VIR-Data`) and groups plots by field angle (for example separate 0° and 90° graphs with all same-angle temperatures overlaid); duplicate same-temperature runs are consolidated per angle (full-field curves preferred) and workbook sheets are auto-generated for both isotherms and entropy tables. Entropy field levels (`ΔH`) can be user-defined in the plugin settings, or left blank for automatic levels. |
 | DMA Iso-Stress          | `plotting.plugins.dma_iso_stress`                     | Parses TA DMA IsoStress TXT files into temperature/strain plots per stress level; includes a Graph formatting panel (title/X/Y label text + visibility toggles, grid, legend location, editable legend-entry text, line width/font size, per-axis tick mode `Auto`/`By increment`/`By count`, optional axis limits, apply current/all, and selective copy to chosen DMA graphs), plus Origin export from the toolbar. PyPlot project save/load now restores DMA plotted tabs and their formatting state (not only imported worksheets). Parsing is plugin-local (`plotting.plugins.dma_iso_stress.parser`) and Tk-independent. |
 | FMR                     | `plotting.plugins.fmr`                                | Plots Field vs X/Y voltage traces from FMR CSV files and exports to Origin with X/Y columns; includes an option to combine all samples into a single X-only plot with a per-sample legend, lock-in phase rotation controls (auto flatten-Y or manual angle), and optional automatic forward/back sweep field alignment. |
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
@@ -56,7 +58,7 @@ Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Prov
 ## Importing Data
 
 1. Use the **Import data…** button (or the Data menu) to select files/folders (multi-select folders are supported).
-2. Supported formats: CSV/TSV/TXT/XLS/XLSX/XLSM/JSON/VSM `.vsm-hys-data`. Plug-ins can add their own loaders (see `PyPlotPlugin.load_data` implementations).
+2. Supported formats: CSV/TSV/TXT/XLS/XLSX/XLSM/JSON/VSM `.vsm-hys-data`, `.vsm-tscn-data`, `.vsm-vir-data`. Plug-ins can add their own loaders (see `PyPlotPlugin.load_data` implementations).
 3. After import, plug-ins that set `auto_load_on_import` can register their own workbooks automatically. Plug-ins that declare `requires_imported_data` keep Plot disabled until Load Data (or auto-load) populates their data.
 4. All worksheets live under `Imported Data` → `<folder>` → `<workbook>` so every plug-in can reuse them (export to Origin, duplicate, edit columns, etc.).
 

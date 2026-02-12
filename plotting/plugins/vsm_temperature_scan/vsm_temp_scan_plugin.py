@@ -278,7 +278,21 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
                     else:
                         y_label_right = y_label
                     ax_right.set_ylabel(y_label_right)
-                ax_left.legend(loc="best")
+                legend_handles: list[Any] = []
+                legend_labels: list[str] = []
+                seen_labels: set[str] = set()
+                for legend_axis in (ax_left, ax_right):
+                    if legend_axis is None:
+                        continue
+                    handles, labels = legend_axis.get_legend_handles_labels()
+                    for handle, label in zip(handles, labels):
+                        if not label or label in seen_labels:
+                            continue
+                        seen_labels.add(label)
+                        legend_handles.append(handle)
+                        legend_labels.append(label)
+                if legend_handles:
+                    ax_left.legend(legend_handles, legend_labels, loc="best")
                 tab = QtWidgets.QWidget()
                 layout = QtWidgets.QVBoxLayout(tab)
                 layout.setContentsMargins(0, 0, 0, 0)
