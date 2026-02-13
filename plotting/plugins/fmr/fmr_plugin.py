@@ -375,16 +375,16 @@ class FmrPlugin(PyPlotPlugin):
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._dataset:
             self.load_data()
-        if not self._dataset:
-            return
-        try:
+        exported_holder = {"count": 0}
+
+        def _task() -> None:
             with origin_session(keep_open=True) as op:
                 exported = 0
                 show_markers = bool(
                     self._markers_checkbox.isChecked() if self._markers_checkbox is not None else False
                 )
                 marker_size = 6.0 if show_markers else 0.0
-                for entry in self._dataset:
+                for entry in self._dataset or []:
                     columns = [str(col) for col in entry.frame.columns]
                     field_col, x_col, y_col = select_fmr_axes(columns)
                     if not field_col or not x_col or not y_col:
@@ -514,11 +514,22 @@ class FmrPlugin(PyPlotPlugin):
                             except Exception:
                                 pass
                     exported += 1
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self.host, self.name, f"Failed to send data to Origin:\n{exc}")
-            self._log(f"Origin export failed: {exc}", level="error")
+                exported_holder["count"] = exported
+
+        ok = self.run_origin_export(
+            ready=bool(self._dataset),
+            missing_message="Load FMR data before exporting to Origin.",
+            task=_task,
+            success_log=None,
+            failure_message="Failed to send data to Origin",
+        )
+        if not ok:
             return
-        self._log("Sent FMR data to Origin.")
+        exported = int(exported_holder.get("count", 0))
+        if exported > 0:
+            self._log("Sent FMR data to Origin.")
+        else:
+            self._log("No FMR curves were exported to Origin.", level="error")
 
     def _sync_phase_controls(self) -> None:
         rotate_enabled = bool(
@@ -622,18 +633,14 @@ class FmrPlugin(PyPlotPlugin):
 
     def update_ui(self) -> None:  # type: ignore[override]
         has_data = bool(self._dataset)
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data or self._host_has_data_selection())
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(has_data)
-        if hasattr(self.host, "export_origin_button"):
-            self.host.export_origin_button.setEnabled(False)
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(False)
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
+        self.apply_shared_action_state(
+            can_plot=has_data or self._host_has_data_selection(),
+            can_save_graph=False,
+            can_normalize=False,
+            can_export_txt=False,
+            can_open_origin=has_data,
+            can_export_workbooks=False,
+        )
         if self._summary_label is not None:
             if not has_data:
                 self._summary_label.setText(
@@ -641,25 +648,9 @@ class FmrPlugin(PyPlotPlugin):
                 )
             else:
                 self._summary_label.clear()
-        self.host._update_project_actions()
 
     def _clear_tabs(self) -> None:
-        if not self._plot_tabs:
-            return
-        host = self.host
-        for tab in list(self._plot_tabs):
-            remover = getattr(host, "_remove_tab_internal", None)
-            if callable(remover):
-                try:
-                    remover(tab)
-                    continue
-                except Exception:
-                    pass
-            index = host.tab_widget.indexOf(tab)
-            if index >= 0:
-                host.tab_widget.removeTab(index)
-        self._plot_tabs.clear()
-        host._rebuild_object_manager_for_tab(host.tab_widget.currentWidget())
+        self.clear_plot_tabs(self._plot_tabs)
 
     def _set_tab_bar_visible(self, visible: bool) -> None:
         bar_getter = getattr(self.host.tab_widget, "tabBar", None)

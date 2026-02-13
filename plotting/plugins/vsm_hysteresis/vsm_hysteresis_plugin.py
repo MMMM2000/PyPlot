@@ -221,19 +221,19 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
     def open_matplotlib(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        self.host._open_matplotlib_window()
+        super().open_matplotlib()
 
     def save_graph(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        self.host._save_current_graph()
+        super().save_graph()
 
     def normalize(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        self.host._normalize_current_graph()
+        super().normalize()
 
     def export_txt(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
-        self.host._export_txt()
+        super().export_txt()
 
     def open_origin(self) -> None:  # type: ignore[override]
         self._ensure_initialized()
@@ -248,8 +248,10 @@ class VSMHysteresisPlugin(PyPlotPlugin):
             self._summary_label.setText(
                 "Select one or more VSM hysteresis files and click Plot VSM Hysteresis Loops."
             )
-        if hasattr(host, "plot_button"):
-            host.plot_button.setEnabled(has_paths or bool(host.path_edit.text().strip()))
+        self.apply_shared_action_state(
+            can_plot=has_paths or bool(host.path_edit.text().strip()),
+            update_project_actions=False,
+        )
         if hasattr(host, "_update_save_graph_enabled"):
             host._update_save_graph_enabled()
         if hasattr(host, "_update_normalize_enabled"):

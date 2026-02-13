@@ -237,6 +237,99 @@ class PyPlotPlugin:
                 return False
         return False
 
+    # Shared plugin helpers -------------------------------------------
+    def _set_host_action_enabled(self, attr_name: str, enabled: bool) -> None:
+        control = getattr(self.host, attr_name, None)
+        if isinstance(control, (QtWidgets.QWidget, QtGui.QAction)):
+            try:
+                control.setEnabled(bool(enabled))
+            except Exception:
+                pass
+
+    def apply_shared_action_state(
+        self,
+        *,
+        can_plot: bool | None = None,
+        can_save_graph: bool | None = None,
+        can_normalize: bool | None = None,
+        can_export_txt: bool | None = None,
+        can_open_origin: bool | None = None,
+        can_export_workbooks: bool | None = None,
+        can_popout: bool | None = None,
+        update_project_actions: bool = True,
+    ) -> None:
+        if can_plot is not None:
+            self._set_host_action_enabled("plot_button", can_plot)
+        if can_save_graph is not None:
+            self._set_host_action_enabled("save_graph_button", can_save_graph)
+        if can_normalize is not None:
+            self._set_host_action_enabled("normalize_button", can_normalize)
+        if can_export_txt is not None:
+            self._set_host_action_enabled("export_button", can_export_txt)
+        if can_open_origin is not None:
+            self._set_host_action_enabled("open_origin_button", can_open_origin)
+        if can_export_workbooks is not None:
+            self._set_host_action_enabled("export_origin_button", can_export_workbooks)
+        if can_popout is not None:
+            self._set_host_action_enabled("popout_button", can_popout)
+        if update_project_actions:
+            updater = getattr(self.host, "_update_project_actions", None)
+            if callable(updater):
+                try:
+                    updater()
+                except Exception:
+                    pass
+
+    def clear_plot_tabs(self, tabs: list[QtWidgets.QWidget]) -> None:
+        if not tabs:
+            return
+        clear = getattr(self.host, "_clear_tab_list", None)
+        if callable(clear):
+            clear(tabs)
+        else:
+            for tab in list(tabs):
+                index = self.host.tab_widget.indexOf(tab)
+                if index >= 0:
+                    self.host.tab_widget.removeTab(index)
+        tabs.clear()
+        rebuild = getattr(self.host, "_rebuild_object_manager_for_tab", None)
+        if callable(rebuild):
+            try:
+                rebuild(self.host.tab_widget.currentWidget())
+            except Exception:
+                pass
+
+    def run_origin_export(
+        self,
+        *,
+        ready: bool,
+        missing_message: str,
+        task: Callable[[], None],
+        success_log: str | None = None,
+        failure_message: str = "Failed to export to Origin",
+        failure_log_prefix: str = "Origin export failed",
+    ) -> bool:
+        if not ready:
+            QtWidgets.QMessageBox.information(
+                self.host,
+                self.name,
+                missing_message,
+            )
+            return False
+        try:
+            task()
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self.host,
+                self.name,
+                f"{failure_message}:\n{exc}",
+            )
+            self._log(f"{failure_log_prefix}: {exc}", level="error")
+            return False
+        if isinstance(success_log, str) and success_log.strip():
+            self._log(success_log)
+        return True
+
 
 class ExternalPlotterPlugin(PyPlotPlugin):
     """Adapter that launches legacy standalone plotters from within PyPlot."""
@@ -310,18 +403,14 @@ class ExternalPlotterPlugin(PyPlotPlugin):
         self._launch()
 
     def update_ui(self) -> None:
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(False)
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(False)
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(False)
-        if hasattr(self.host, "popout_button"):
-            self.host.popout_button.setEnabled(False)
+        self.apply_shared_action_state(
+            can_plot=False,
+            can_save_graph=False,
+            can_normalize=False,
+            can_export_txt=False,
+            can_open_origin=False,
+            can_popout=False,
+        )
 
 
 class EmbeddedWidgetPlugin(PyPlotPlugin):
@@ -392,19 +481,18 @@ class EmbeddedWidgetPlugin(PyPlotPlugin):
         return None
 
     def update_ui(self) -> None:  # type: ignore[override]
-        for attr in (
-            "plot_button",
-            "save_graph_button",
-            "normalize_button",
-            "export_button",
-            "open_origin_button",
-            "popout_button",
-        ):
-            widget = getattr(self.host, attr, None)
-            if isinstance(widget, (QtWidgets.QWidget, QtGui.QAction)):
-                widget.setEnabled(False)
-                if attr == "plot_button" and hasattr(widget, "setText"):
-                    widget.setText("Plot graphs")
+        self.apply_shared_action_state(
+            can_plot=False,
+            can_save_graph=False,
+            can_normalize=False,
+            can_export_txt=False,
+            can_open_origin=False,
+            can_popout=False,
+            update_project_actions=False,
+        )
+        widget = getattr(self.host, "plot_button", None)
+        if hasattr(widget, "setText"):
+            widget.setText("Plot graphs")
 
 
 __all__ = [

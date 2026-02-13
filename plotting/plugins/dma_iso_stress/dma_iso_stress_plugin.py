@@ -384,18 +384,14 @@ class DmaIsoStressPlugin(PyPlotPlugin):
     def update_ui(self) -> None:  # type: ignore[override]
         has_data = bool(self._dataset)
         has_plots = any(True for _ in self._iter_dma_descriptors())
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data or self._host_has_data_selection())
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(has_data)
-        if hasattr(self.host, "export_origin_button"):
-            self.host.export_origin_button.setEnabled(False)
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(has_plots)
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(has_plots)
+        self.apply_shared_action_state(
+            can_plot=has_data or self._host_has_data_selection(),
+            can_save_graph=has_plots,
+            can_normalize=has_plots,
+            can_export_txt=False,
+            can_open_origin=has_data,
+            can_export_workbooks=False,
+        )
         if self._summary_label is not None:
             if not has_data:
                 self._summary_label.setText(
@@ -403,7 +399,6 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                 )
             else:
                 self._summary_label.clear()
-        self.host._update_project_actions()
 
     def _set_limit_controls_enabled(self, axis: str, enabled: bool) -> None:
         widgets: Iterable[QtWidgets.QDoubleSpinBox | None]
@@ -1718,9 +1713,9 @@ class DmaIsoStressPlugin(PyPlotPlugin):
     def open_origin(self) -> None:  # type: ignore[override]
         if not self._dataset:
             self.load_data()
-        if not self._dataset:
-            return
-        try:
+        exported_holder = {"count": 0}
+
+        def _task() -> None:
             with origin_session(keep_open=True) as op:
                 exported = 0
                 sort_stress = bool(
@@ -1731,7 +1726,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                 )
                 marker_size = 6.0 if show_markers else 0.0
                 line_width = self._line_width_value()
-                for entry in self._dataset:
+                for entry in self._dataset or []:
                     if not entry.datasets:
                         continue
                     try:
@@ -1793,7 +1788,9 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                         except Exception:
                             pass
                         try:
-                            plot_obj = layer.add_plot(sheet, coly=col_index + 1, colx=col_index, type="y")
+                            plot_obj = layer.add_plot(
+                                sheet, coly=col_index + 1, colx=col_index, type="y"
+                            )
                         except Exception:
                             plot_obj = None
                         if plot_obj is not None:
@@ -1848,24 +1845,23 @@ class DmaIsoStressPlugin(PyPlotPlugin):
                         except Exception:
                             pass
                     exported += 1
-                if exported:
-                    self._log(f"Sent {exported} DMA iso-stress graph(s) to Origin.")
-                else:
-                    self._log("No DMA iso-stress graphs were exported to Origin.", level="error")
-        except (ModuleNotFoundError, ImportError) as exc:
-            QtWidgets.QMessageBox.critical(
-                self.host,
-                self.name,
-                f"Origin export failed:\n{exc}",
-            )
-            self._log(f"Origin export failed: {exc}", level="error")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self.host,
-                self.name,
-                f"Origin export failed:\n{exc}",
-            )
-            self._log(f"Origin export failed: {exc}", level="error")
+                exported_holder["count"] = exported
+
+        ok = self.run_origin_export(
+            ready=bool(self._dataset),
+            missing_message="Load DMA iso-stress data before exporting to Origin.",
+            task=_task,
+            success_log=None,
+            failure_message="Origin export failed",
+            failure_log_prefix="Origin export failed",
+        )
+        if not ok:
+            return
+        exported = int(exported_holder.get("count", 0))
+        if exported > 0:
+            self._log(f"Sent {exported} DMA iso-stress graph(s) to Origin.")
+        else:
+            self._log("No DMA iso-stress graphs were exported to Origin.", level="error")
 
     @staticmethod
     def _origin_graph_name(label: str) -> str:
@@ -1873,22 +1869,7 @@ class DmaIsoStressPlugin(PyPlotPlugin):
         return (cleaned or "DMA_IsoStress")[:18]
 
     def _clear_tabs(self) -> None:
-        if not self._plot_tabs:
-            return
-        host = self.host
-        for tab in list(self._plot_tabs):
-            remover = getattr(host, "_remove_tab_internal", None)
-            if callable(remover):
-                try:
-                    remover(tab)
-                    continue
-                except Exception:
-                    pass
-            index = host.tab_widget.indexOf(tab)
-            if index >= 0:
-                host.tab_widget.removeTab(index)
-        self._plot_tabs.clear()
-        host._rebuild_object_manager_for_tab(host.tab_widget.currentWidget())
+        self.clear_plot_tabs(self._plot_tabs)
 
     def _set_tab_bar_visible(self, visible: bool) -> None:
         bar_getter = getattr(self.host.tab_widget, "tabBar", None)

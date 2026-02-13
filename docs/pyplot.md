@@ -56,7 +56,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
 
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.
-Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph formatting`, `TXT export`, shared `Open in Origin`, and shared plot-workbooks) and only override per-plugin behavior when the workflow truly needs custom handling. If a plugin already manages its own workbook lifecycle, set `uses_shared_plot_workbooks = False`.
+Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph formatting`, `TXT export`, shared `Open in Origin`, and shared plot-workbooks) and only override per-plugin behavior when the workflow truly needs custom handling. Use `PyPlotPlugin.apply_shared_action_state(...)`, `PyPlotPlugin.clear_plot_tabs(...)`, and `PyPlotPlugin.run_origin_export(...)` to avoid repeating boilerplate per plugin. If a plugin already manages its own workbook lifecycle, set `uses_shared_plot_workbooks = False`.
 
 ## Importing Data
 

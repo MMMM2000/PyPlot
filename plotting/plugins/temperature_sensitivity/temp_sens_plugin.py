@@ -705,29 +705,31 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
             cleanup()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        if not self._loaded_files:
-            QtWidgets.QMessageBox.information(
-                self.host,
-                self.name,
-                "Load temperature sensitivity data before exporting to Origin.",
-            )
-            return
-        try:
+        def _task() -> None:
             self._apply_settings_to_core()
             temp_sens_core.SHOW_PLOTS = False
             temp_sens_core.main(self._loaded_files, backend="origin")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self.host, self.name, f"Failed to export to Origin:\n{exc}")
-            self._log(f"Origin export failed: {exc}", level="error")
-        else:
-            self._log("Sent temperature sensitivity plots to Origin.")
+
+        self.run_origin_export(
+            ready=bool(self._loaded_files),
+            missing_message="Load temperature sensitivity data before exporting to Origin.",
+            task=_task,
+            success_log="Sent temperature sensitivity plots to Origin.",
+        )
 
     def update_ui(self) -> None:
         host = self.host
         has_data = self._has_loaded_data()
         ready_to_plot = has_data
-        if hasattr(host, "plot_button"):
-            host.plot_button.setEnabled(ready_to_plot)
+        self.apply_shared_action_state(
+            can_plot=ready_to_plot,
+            can_save_graph=bool(self._plot_tabs),
+            can_normalize=False,
+            can_export_txt=has_data,
+            can_open_origin=has_data,
+            can_popout=bool(self._plot_tabs),
+            update_project_actions=False,
+        )
         if self._summary_label is not None:
             if self._plot_tabs:
                 self._summary_label.clear()
@@ -746,14 +748,4 @@ class TemperatureSensitivityPlugin(PyPlotPlugin):
                     self._summary_label.setText(
                         "Data loaded. Adjust settings and click Plot Temperature Sensitivity to create graphs and workbooks."
                     )
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(has_data)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(has_data)
-        if hasattr(self.host, "popout_button"):
-            self.host.popout_button.setEnabled(bool(self._plot_tabs))
         self.host._update_project_actions()

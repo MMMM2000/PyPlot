@@ -146,17 +146,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         return core.STRAIN_DIRECTION_TOLERANCE
 
     def _clear_tabs(self) -> None:
-        if not self._plot_tabs:
-            return
-        clear = getattr(self.host, "_clear_tab_list", None)
-        if callable(clear):
-            clear(self._plot_tabs)
-        else:
-            for tab in self._plot_tabs:
-                index = self.host.tab_widget.indexOf(tab)
-                if index >= 0:
-                    self.host.tab_widget.removeTab(index)
-        self._plot_tabs.clear()
+        self.clear_plot_tabs(self._plot_tabs)
 
     def _set_tab_bar_visible(self, visible: bool) -> None:
         tab_bar = self.host.tab_widget.tabBar()

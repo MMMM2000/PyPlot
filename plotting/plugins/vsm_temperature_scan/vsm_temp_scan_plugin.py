@@ -492,34 +492,24 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
     def open_origin(self) -> None:  # type: ignore[override]
         if self._dataset is None:
             self.load_data()
-        if self._dataset is None:
-            return
         self._apply_smoothing_settings()
-        try:
-            self._processor.plot_origin(self._dataset)
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self.host, self.name, f"Failed to send data to Origin:\n{exc}")
-            self._log(f"Origin export failed: {exc}", level="error")
-            return
-        self._log("Sent VSM temperature scan data to Origin.")
+        dataset = self._dataset
+
+        def _task() -> None:
+            if dataset is None:
+                return
+            self._processor.plot_origin(dataset)
+
+        self.run_origin_export(
+            ready=dataset is not None,
+            missing_message="Load VSM temperature scan data before exporting to Origin.",
+            task=_task,
+            success_log="Sent VSM temperature scan data to Origin.",
+            failure_message="Failed to send data to Origin",
+        )
 
     def _clear_tabs(self) -> None:
-        if not self._plot_tabs:
-            return
-        host = self.host
-        for tab in list(self._plot_tabs):
-            remover = getattr(host, "_remove_tab_internal", None)
-            if callable(remover):
-                try:
-                    remover(tab)
-                    continue
-                except Exception:
-                    pass
-            index = host.tab_widget.indexOf(tab)
-            if index >= 0:
-                host.tab_widget.removeTab(index)
-        self._plot_tabs.clear()
-        host._rebuild_object_manager_for_tab(host.tab_widget.currentWidget())
+        self.clear_plot_tabs(self._plot_tabs)
 
     def _set_tab_bar_visible(self, visible: bool) -> None:
         bar_getter = getattr(self.host.tab_widget, "tabBar", None)
@@ -543,24 +533,19 @@ class VSMTemperatureScanPlugin(PyPlotPlugin):
     # ------------------------------------------------------------------ UI state
     def update_ui(self) -> None:
         has_data = self._dataset is not None
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data or self._host_has_data_selection())
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(has_data)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(has_data)
-        if hasattr(self.host, "export_origin_button"):
-            self.host.export_origin_button.setEnabled(has_data)
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(False)
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
+        self.apply_shared_action_state(
+            can_plot=has_data or self._host_has_data_selection(),
+            can_save_graph=False,
+            can_normalize=False,
+            can_export_txt=has_data,
+            can_open_origin=has_data,
+            can_export_workbooks=has_data,
+        )
         if self._summary_label is not None:
             if not has_data:
                 self._summary_label.setText("Import VSM temperature scan files, then plot or export.")
             else:
                 self._summary_label.clear()
-        self.host._update_project_actions()
 
     # ------------------------------------------------------------------ internal helpers
     def _apply_smoothing_settings(self) -> None:

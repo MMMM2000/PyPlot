@@ -350,22 +350,7 @@ class VSMIsothermsPlugin(PyPlotPlugin):
         self._set_tab_bar_visible(False)
 
     def _clear_tabs(self) -> None:
-        if not self._plot_tabs:
-            return
-        host = self.host
-        for tab in list(self._plot_tabs):
-            remover = getattr(host, "_remove_tab_internal", None)
-            if callable(remover):
-                try:
-                    remover(tab)
-                    continue
-                except Exception:
-                    pass
-            index = host.tab_widget.indexOf(tab)
-            if index >= 0:
-                host.tab_widget.removeTab(index)
-        self._plot_tabs.clear()
-        host._rebuild_object_manager_for_tab(host.tab_widget.currentWidget())
+        self.clear_plot_tabs(self._plot_tabs)
 
     # ------------------------------------------------------------------ workbook helpers
     def _grouped_entries(self) -> dict[tuple[str, float], list[VSMIsothermEntry]]:
@@ -582,16 +567,14 @@ class VSMIsothermsPlugin(PyPlotPlugin):
     def update_ui(self) -> None:
         has_data = self._dataset is not None
         has_plots = bool(self._plot_tabs)
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(has_data or self._host_has_data_selection())
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(has_plots)
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
-        if hasattr(self.host, "export_origin_button"):
-            self.host.export_origin_button.setEnabled(bool(self._managed_workbooks))
+        self.apply_shared_action_state(
+            can_plot=has_data or self._host_has_data_selection(),
+            can_save_graph=has_plots,
+            can_normalize=False,
+            can_export_txt=False,
+            can_export_workbooks=bool(self._managed_workbooks),
+            update_project_actions=False,
+        )
         if self._summary_label is not None:
             if not has_data:
                 self._summary_label.setText(

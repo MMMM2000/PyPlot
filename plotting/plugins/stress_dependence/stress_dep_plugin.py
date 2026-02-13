@@ -430,26 +430,19 @@ class StressDependencePlugin(PyPlotPlugin):
     def open_origin(self) -> None:  # type: ignore[override]
         if self._data is None:
             self.load_data()
-        if self._data is None or not self._loaded_files:
-            QtWidgets.QMessageBox.information(
-                self.host,
-                self.name,
-                "Load stress dependence data before exporting to Origin.",
-            )
-            return
         self._apply_settings_to_core()
-        try:
+
+        def _task() -> None:
             stress_core.SHOW_PLOTS = False
             stress_core.main(self._loaded_files, backend="origin")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(
-                self.host,
-                self.name,
-                f"Failed to export stress dependence plots to Origin:\n{exc}",
-            )
-            self._log(f"Origin export failed: {exc}", level="error")
-        else:
-            self._log("Sent stress dependence plots to Origin.")
+
+        self.run_origin_export(
+            ready=bool(self._data is not None and self._loaded_files),
+            missing_message="Load stress dependence data before exporting to Origin.",
+            task=_task,
+            success_log="Sent stress dependence plots to Origin.",
+            failure_message="Failed to export stress dependence plots to Origin",
+        )
 
     def export_txt(self) -> None:  # type: ignore[override]
         if self._data is None:
@@ -506,16 +499,11 @@ class StressDependencePlugin(PyPlotPlugin):
         has_files = bool(self._loaded_files)
         has_plots = bool(self._plot_tabs)
         ready_to_plot = has_data or has_files or self._host_has_data_selection()
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(ready_to_plot)
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(has_plots)
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(has_data)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(has_files)
-        if hasattr(self.host, "popout_button"):
-            self.host.popout_button.setEnabled(has_plots)
-        self.host._update_project_actions()
+        self.apply_shared_action_state(
+            can_plot=ready_to_plot,
+            can_save_graph=has_plots,
+            can_normalize=False,
+            can_export_txt=has_data,
+            can_open_origin=has_files,
+            can_popout=has_plots,
+        )

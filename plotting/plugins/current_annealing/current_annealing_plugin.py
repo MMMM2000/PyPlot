@@ -227,39 +227,29 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
         self.update_ui()
 
     def open_origin(self) -> None:  # type: ignore[override]
-        if not self._loaded_files:
-            QtWidgets.QMessageBox.information(
-                self.host,
-                self.name,
-                "Load current annealing data before exporting to Origin.",
-            )
-            return
-        try:
+        def _task() -> None:
             self._apply_settings_to_core()
             anneal_core.SHOW_PLOTS = False
             anneal_core.main(self._loaded_files, backend="origin")
-        except Exception as exc:
-            QtWidgets.QMessageBox.critical(self.host, self.name, f"Failed to export to Origin:\n{exc}")
-            self._log(f"Origin export failed: {exc}", level="error")
-        else:
-            self._log("Sent current annealing plots to Origin.")
+
+        self.run_origin_export(
+            ready=bool(self._loaded_files),
+            missing_message="Load current annealing data before exporting to Origin.",
+            task=_task,
+            success_log="Sent current annealing plots to Origin.",
+        )
 
     def update_ui(self) -> None:
         has_data = bool(self._data_by_file)
         ready_to_plot = True
-        if hasattr(self.host, "plot_button"):
-            self.host.plot_button.setEnabled(ready_to_plot)
-        if hasattr(self.host, "save_graph_button"):
-            self.host.save_graph_button.setEnabled(bool(self._plot_tabs))
-        if hasattr(self.host, "normalize_button"):
-            self.host.normalize_button.setEnabled(False)
-        if hasattr(self.host, "export_button"):
-            self.host.export_button.setEnabled(False)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(has_data)
-        if hasattr(self.host, "popout_button"):
-            self.host.popout_button.setEnabled(bool(self._plot_tabs))
-        self.host._update_project_actions()
+        self.apply_shared_action_state(
+            can_plot=ready_to_plot,
+            can_save_graph=bool(self._plot_tabs),
+            can_normalize=False,
+            can_export_txt=False,
+            can_open_origin=has_data,
+            can_popout=bool(self._plot_tabs),
+        )
 
     def _register_workbooks(self) -> None:
         host = self.host
