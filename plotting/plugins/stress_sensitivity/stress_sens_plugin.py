@@ -37,6 +37,7 @@ class StressSensitivityPlugin(PyPlotPlugin):
     """Embed the stress sensitivity workflow directly inside PyPlot."""
 
     requires_imported_data = True
+    uses_shared_plot_workbooks = False
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)

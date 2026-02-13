@@ -24,6 +24,7 @@ class TemperatureDependencePlugin(PyPlotPlugin):
     """Embed the temperature dependence workflow directly inside PyPlot."""
 
     requires_imported_data = True
+    uses_shared_plot_workbooks = False
 
     _VAR_LABELS = {
         "sum": "T1+T2",

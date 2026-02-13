@@ -84,6 +84,7 @@ PRIMARY_DOCK_EXPANDED_FRACTION = 0.18
 PRIMARY_DOCK_EXPANDED_MAX = 520
 PRIMARY_DOCK_MAX_FRACTION = 0.35
 UNIT_SUFFIX_PAREN_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\((?P<unit>[^()]{1,24})\)\s*$")
+UNIT_SUFFIX_BRACKET_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\[(?P<unit>[^\[\]]{1,24})\]\s*$")
 OUTLIER_IQR_FACTOR = 1.5
 OUTLIER_MIN_POINTS = 8
 OUTLIER_ZSCORE_THRESHOLD = 3.5
@@ -2088,6 +2089,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._data_workbook_items: Dict[Hashable, QtWidgets.QTreeWidgetItem] = {}
         self._workbooks: Dict[Hashable, WorkbookData] = {}
         self._worksheets: Dict[Hashable, WorksheetData] = {}
+        self._shared_plot_workbook_keys: set[Hashable] = set()
+        self._shared_plot_workbook_by_tab: Dict[QtWidgets.QWidget, Hashable] = {}
+        self._pruning_shared_plot_workbooks = False
         self._worksheet_models: Dict[Hashable, WorksheetTableModel] = {}
         self._project_tree_update_depth = 0
         self._project_tree_updates_prev = True
@@ -2903,6 +2907,315 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             f"Exported {len(series)} data series to {path}",
         )
 
+    def _plugin_uses_shared_plot_workbooks(self, plugin_name: str | None) -> bool:
+        if not plugin_name:
+            return True
+        plugin = None
+        current_name = getattr(self, "_current_plotter_name", None)
+        if isinstance(current_name, str) and current_name == plugin_name:
+            plugin = getattr(self, "_current_plugin", None)
+        if plugin is None:
+            instances = getattr(self, "_plugin_instances", None)
+            if isinstance(instances, dict):
+                plugin = instances.get(plugin_name)
+        if plugin is None:
+            return True
+        return bool(getattr(plugin, "uses_shared_plot_workbooks", True))
+
+    @staticmethod
+    def _safe_series_token(text: str, *, fallback: str) -> str:
+        cleaned = "".join(
+            ch if ch.isalnum() or ch in {"_", "-"} else "_"
+            for ch in str(text)
+        ).strip("_")
+        return cleaned or fallback
+
+    @staticmethod
+    def _label_parts(text: str) -> tuple[str, str]:
+        label = str(text or "").strip()
+        if not label:
+            return "", ""
+        for pattern in (UNIT_SUFFIX_BRACKET_RE, UNIT_SUFFIX_PAREN_RE):
+            match = pattern.match(label)
+            if not match:
+                continue
+            prefix = str(match.group("prefix") or "").strip()
+            unit = str(match.group("unit") or "").strip()
+            return prefix or label, unit
+        return label, ""
+
+    @staticmethod
+    def _paired_numeric_arrays(x_values: Any, y_values: Any) -> tuple[np.ndarray, np.ndarray]:
+        try:
+            x_raw = np.asarray(x_values).ravel()
+            y_raw = np.asarray(y_values).ravel()
+        except Exception:
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
+        count = min(int(x_raw.size), int(y_raw.size))
+        if count <= 0:
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
+        x_num = pd.to_numeric(pd.Series(x_raw[:count]), errors="coerce").to_numpy(dtype=float)
+        y_num = pd.to_numeric(pd.Series(y_raw[:count]), errors="coerce").to_numpy(dtype=float)
+        mask = np.isfinite(x_num) & np.isfinite(y_num)
+        if not np.any(mask):
+            return np.asarray([], dtype=float), np.asarray([], dtype=float)
+        return x_num[mask], y_num[mask]
+
+    def _tab_series_data(
+        self,
+        descriptor: TabDescriptor,
+        *,
+        include_hidden: bool = False,
+    ) -> list[tuple[str, np.ndarray, np.ndarray]]:
+        series: list[tuple[str, np.ndarray, np.ndarray]] = []
+        if isinstance(descriptor.lines, dict) and descriptor.lines:
+            for index, state in enumerate(descriptor.lines.values(), start=1):
+                label = (state.label or f"Series {index}").strip() or f"Series {index}"
+                visible = True
+                line_obj = getattr(state, "line", None)
+                getter = getattr(line_obj, "get_visible", None)
+                if callable(getter):
+                    try:
+                        visible = bool(getter())
+                    except Exception:
+                        visible = True
+                if not include_hidden and not visible:
+                    continue
+                x_vals, y_vals = self._paired_numeric_arrays(state.x_data(), state.y_data())
+                if x_vals.size == 0 or y_vals.size == 0:
+                    continue
+                series.append((label, x_vals, y_vals))
+        if series:
+            return series
+
+        axes = getattr(descriptor, "axes", None)
+        if axes is None:
+            return []
+        try:
+            axis_lines = list(axes.get_lines())
+        except Exception:
+            axis_lines = []
+        for index, line in enumerate(axis_lines, start=1):
+            label = str(getattr(line, "get_label", lambda: f"Series {index}")() or "").strip()
+            if not label or label.startswith("_"):
+                label = f"Series {index}"
+            if not include_hidden:
+                visible_getter = getattr(line, "get_visible", None)
+                if callable(visible_getter):
+                    try:
+                        if not bool(visible_getter()):
+                            continue
+                    except Exception:
+                        pass
+            x_vals, y_vals = self._paired_numeric_arrays(line.get_xdata(), line.get_ydata())
+            if x_vals.size == 0 or y_vals.size == 0:
+                continue
+            series.append((label, x_vals, y_vals))
+        return series
+
+    def _shared_plot_workbook_key(
+        self,
+        tab: QtWidgets.QWidget,
+        *,
+        plugin_name: str | None,
+    ) -> str:
+        plugin_token = self._safe_series_token(plugin_name or "plugin", fallback="plugin")
+        return f"shared_plot::{plugin_token}::{id(tab)}"
+
+    def _build_shared_plot_workbook(
+        self,
+        tab: QtWidgets.QWidget,
+        descriptor: TabDescriptor,
+    ) -> tuple[WorkbookData, list[WorksheetData]] | None:
+        plugin_name = self._tab_plugin_name(descriptor)
+        series = self._tab_series_data(descriptor, include_hidden=False)
+        if not series:
+            series = self._tab_series_data(descriptor, include_hidden=True)
+        if not series:
+            return None
+
+        workbook_name = str(descriptor.root_label or descriptor.title or "Plot data").strip() or "Plot data"
+        workbook = WorkbookData(
+            key=self._shared_plot_workbook_key(tab, plugin_name=plugin_name),
+            name=workbook_name,
+            source=None,
+            folder=None,
+        )
+
+        x_label, x_unit = self._label_parts(descriptor.x_label)
+        y_label, y_unit = self._label_parts(descriptor.y_label)
+        x_label = x_label or "X"
+        y_label = y_label or "Y"
+
+        columns: Dict[str, pd.Series] = {}
+        metadata: Dict[str, WorksheetColumnMeta] = {}
+        axis_roles: list[str] = []
+        used_columns: set[str] = set()
+        for index, (label, x_vals, y_vals) in enumerate(series, start=1):
+            token = self._safe_series_token(label, fallback=f"series_{index:02d}")
+            x_name = f"{token}_x"
+            y_name = f"{token}_y"
+            suffix = 1
+            while x_name in used_columns or y_name in used_columns:
+                suffix += 1
+                x_name = f"{token}_x_{suffix}"
+                y_name = f"{token}_y_{suffix}"
+            used_columns.add(x_name)
+            used_columns.add(y_name)
+            columns[x_name] = pd.Series(x_vals)
+            columns[y_name] = pd.Series(y_vals)
+            metadata[x_name] = WorksheetColumnMeta(
+                long_name=f"{label} {x_label}",
+                units=x_unit,
+                comments=label,
+            )
+            metadata[y_name] = WorksheetColumnMeta(
+                long_name=f"{label} {y_label}",
+                units=y_unit,
+                comments=label,
+            )
+            axis_roles.extend(["X", "Y"])
+
+        frame = pd.DataFrame(columns)
+        worksheet = WorksheetData(
+            key=self._worksheet_key(workbook.key, "Plot data"),
+            name="Plot data",
+            dataframe=frame,
+            columns=metadata,
+            source=None,
+            workbook_key=workbook.key,
+            axis_roles="".join(axis_roles),
+        )
+        workbook.worksheets = [worksheet.key]
+        return workbook, [worksheet]
+
+    def _register_shared_plot_workbook_for_tab(
+        self,
+        tab: QtWidgets.QWidget,
+        descriptor: TabDescriptor,
+    ) -> None:
+        plugin_name = self._tab_plugin_name(descriptor)
+        if not self._plugin_uses_shared_plot_workbooks(plugin_name):
+            return
+        built = self._build_shared_plot_workbook(tab, descriptor)
+        if built is None:
+            self._remove_shared_plot_workbook_for_tab(tab)
+            return
+        workbook, worksheets = built
+        self._shared_plot_workbook_keys.add(workbook.key)
+        self._shared_plot_workbook_by_tab[tab] = workbook.key
+        self._register_imported_workbook(workbook, worksheets)
+
+    def _remove_shared_plot_workbook_for_tab(self, tab: QtWidgets.QWidget) -> None:
+        key = self._shared_plot_workbook_by_tab.pop(tab, None)
+        if key is None:
+            return
+        self._shared_plot_workbook_keys.discard(key)
+        if key in self._workbooks:
+            self._remove_imported_workbook(key)
+
+    def _prune_shared_plot_workbooks(self) -> None:
+        if self._pruning_shared_plot_workbooks:
+            return
+        self._pruning_shared_plot_workbooks = True
+        try:
+            stale_tabs = [
+                tab
+                for tab in list(self._shared_plot_workbook_by_tab.keys())
+                if self.tab_widget.indexOf(tab) < 0
+            ]
+            for tab in stale_tabs:
+                self._remove_shared_plot_workbook_for_tab(tab)
+            stale_keys = [
+                key for key in list(self._shared_plot_workbook_keys) if key not in self._workbooks
+            ]
+            for key in stale_keys:
+                self._shared_plot_workbook_keys.discard(key)
+        finally:
+            self._pruning_shared_plot_workbooks = False
+
+    def _shared_plot_workbooks_for_plugin(self, plugin_name: str | None) -> list[WorkbookData]:
+        results: list[WorkbookData] = []
+        seen: set[Hashable] = set()
+        for tab, key in list(self._shared_plot_workbook_by_tab.items()):
+            if self.tab_widget.indexOf(tab) < 0:
+                continue
+            descriptor = self._tab_descriptors.get(tab)
+            if descriptor is None:
+                continue
+            tab_plugin = self._tab_plugin_name(descriptor)
+            if plugin_name and tab_plugin != plugin_name:
+                continue
+            workbook = self._workbooks.get(key)
+            if workbook is None:
+                continue
+            if workbook.key in seen:
+                continue
+            worksheets = [self._worksheets.get(sheet_key) for sheet_key in workbook.worksheets]
+            if not any(sheet is not None for sheet in worksheets):
+                continue
+            seen.add(workbook.key)
+            results.append(workbook)
+        return results
+
+    def _open_origin_shared(self) -> None:
+        plugin_name = getattr(self, "_current_plotter_name", None)
+        plugin_token = plugin_name if isinstance(plugin_name, str) and plugin_name.strip() else None
+        self._prune_shared_plot_workbooks()
+        workbooks = self._shared_plot_workbooks_for_plugin(plugin_token)
+        if not workbooks:
+            tab = self.tab_widget.currentWidget()
+            descriptor = self._tab_descriptors.get(tab) if tab is not None else None
+            if tab is not None and descriptor is not None:
+                self._register_shared_plot_workbook_for_tab(tab, descriptor)
+                workbooks = self._shared_plot_workbooks_for_plugin(plugin_token)
+        if not workbooks:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open in Origin",
+                "Plot at least one graph before exporting to Origin.",
+            )
+            return
+
+        try:
+            exported, errors = self._push_workbooks_to_origin(workbooks)
+        except ModuleNotFoundError:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open in Origin",
+                "The OriginPro Python package is not available. Install it to export data.",
+            )
+            return
+        except Exception as exc:  # pragma: no cover - GUI error path
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Open in Origin",
+                f"Failed to export data to Origin:\n{exc}",
+            )
+            self._append_log(f"Origin export failed: {exc}", level="error")
+            return
+
+        if exported:
+            schedule_origin_release()
+            message = f"Sent {exported} worksheet{'s' if exported != 1 else ''} to Origin."
+            self._append_log(message)
+            QtWidgets.QMessageBox.information(self, "Open in Origin", message)
+        else:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Open in Origin",
+                "No worksheet data was exported to Origin.",
+            )
+
+        if errors:
+            details = "\n".join(errors)
+            self._append_log("Some Origin exports failed:\n" + details, level="error")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Open in Origin",
+                "Some items could not be exported. Check the message log for details.",
+            )
+
     def _open_origin_prompt(self) -> None:
         raise NotImplementedError
 
@@ -3160,6 +3473,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return str(text).replace("\"", "''")
 
     def _sync_shared_action_states(self) -> None:
+        self._prune_shared_plot_workbooks()
         has_worksheets = any(
             self._worksheets.get(key) is not None
             for workbook in self._workbooks.values()
@@ -3171,6 +3485,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         outlier_button = getattr(self, "check_outliers_button", None)
         if isinstance(outlier_button, QtGui.QAction):
             outlier_button.setEnabled(has_worksheets)
+        open_button = getattr(self, "open_origin_button", None)
+        if isinstance(open_button, QtGui.QAction):
+            plugin = getattr(self, "_current_plugin", None)
+            uses_shared_open = (
+                isinstance(plugin, PyPlotPlugin)
+                and type(plugin).open_origin is PyPlotPlugin.open_origin
+            )
+            if uses_shared_open:
+                plugin_name = getattr(self, "_current_plotter_name", None)
+                token = plugin_name if isinstance(plugin_name, str) and plugin_name.strip() else None
+                open_button.setEnabled(bool(self._shared_plot_workbooks_for_plugin(token)))
 
     @staticmethod
     def _detect_outlier_rows(
@@ -5656,6 +5981,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     undo=_undo_creation,
                     redo=_redo_creation,
                 )
+            self._register_shared_plot_workbook_for_tab(tab, descriptor)
         self._update_save_graph_enabled()
         self._update_normalize_enabled()
         if self._dark_mode_enabled:
@@ -6475,6 +6801,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._sync_shared_action_states()
 
     def _remove_imported_workbook(self, key: Hashable) -> None:
+        if key in self._shared_plot_workbook_keys:
+            self._shared_plot_workbook_keys.discard(key)
+            for tab, workbook_key in list(self._shared_plot_workbook_by_tab.items()):
+                if workbook_key == key:
+                    self._shared_plot_workbook_by_tab.pop(tab, None)
         workbook = self._workbooks.get(key)
         if workbook is None:
             return
@@ -9355,6 +9686,27 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 return forward
         return None
 
+    def _clear_tab_list(self, tabs: Iterable[QtWidgets.QWidget]) -> None:
+        """Remove tabs using the same internal cleanup path as manual close actions."""
+
+        for tab in list(tabs):
+            if not isinstance(tab, QtWidgets.QWidget):
+                continue
+            if self.tab_widget.indexOf(tab) < 0:
+                self._remove_shared_plot_workbook_for_tab(tab)
+                continue
+            info = self._remove_tab_internal(tab)
+            if info is None:
+                try:
+                    index = self.tab_widget.indexOf(tab)
+                    if index >= 0:
+                        self.tab_widget.removeTab(index)
+                except Exception:
+                    pass
+                self._remove_shared_plot_workbook_for_tab(tab)
+        self._update_tab_buttons()
+        self._rebuild_object_manager_for_tab(self.tab_widget.currentWidget())
+
     def _close_tab(self, tab: QtWidgets.QWidget) -> None:
         info = self._remove_tab_internal(tab)
         if info is None:
@@ -9410,6 +9762,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if worksheet_key is not None:
             self._worksheet_tabs_open.pop(worksheet_key, None)
             self._update_worksheet_item_state(worksheet_key)
+        self._remove_shared_plot_workbook_for_tab(tab)
         was_hidden = tab in self._hidden_tabs
         self._hidden_tabs.discard(tab)
         was_current = self.tab_widget.currentWidget() is tab

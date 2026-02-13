@@ -11,9 +11,12 @@ import pandas as pd
 import pytest
 
 from PyQt6 import QtWidgets
+from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.figure import Figure
 
 from plotting.pyplot.window import (
     TOOLBAR_SECTION_PROPERTY,
+    TabDescriptor,
     WorksheetColumnMeta,
     WorksheetData,
     WorkbookData,
@@ -194,6 +197,107 @@ def test_push_workbooks_to_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     pd.testing.assert_frame_equal(sheet.data.reset_index(drop=True), df.reset_index(drop=True))
 
     window.close()
+
+
+def _make_simple_plot_tab(window: PyPlotWorkbench, *, plugin_name: str) -> QtWidgets.QWidget:
+    fig = Figure(figsize=(4, 3))
+    axes = fig.add_subplot(111)
+    axes.set_title("Example")
+    axes.set_xlabel("Strain [%]")
+    axes.set_ylabel("Stress [MPa]")
+    axes.plot([0.0, 1.0, 2.0], [0.0, 10.0, 20.0], label="Loading 1")
+    canvas = FigureCanvas(fig)
+    tab = QtWidgets.QWidget()
+    layout = QtWidgets.QVBoxLayout(tab)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(canvas)
+    descriptor = TabDescriptor(
+        kind="unit_test",
+        title="Example",
+        root_label="Example Plot",
+        x_label=axes.get_xlabel(),
+        y_label=axes.get_ylabel(),
+        canvas=canvas,
+        axes=axes,
+        lines={},
+        metadata={"plugin": plugin_name},
+    )
+    window.tab_widget.addTab(tab, "Example Plot")
+    window.tab_widget.setCurrentWidget(tab)
+    window._register_plot_tab(tab, canvas, axes, descriptor)  # noqa: SLF001
+    return tab
+
+
+def test_shared_plot_workbook_is_created_from_plot_tab() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        plugin_name = "Shared Test Plugin"
+        _make_simple_plot_tab(window, plugin_name=plugin_name)
+        assert window._shared_plot_workbook_by_tab  # noqa: SLF001
+        workbook_key = next(iter(window._shared_plot_workbook_by_tab.values()))  # noqa: SLF001
+        workbook = window._workbooks.get(workbook_key)  # noqa: SLF001
+        assert workbook is not None
+        assert workbook.worksheets
+        worksheet = window._worksheets.get(workbook.worksheets[0])  # noqa: SLF001
+        assert worksheet is not None
+        assert list(worksheet.dataframe.columns) == ["Loading_1_x", "Loading_1_y"]
+        assert worksheet.axis_roles == "XY"
+    finally:
+        window.close()
+
+
+def test_clear_tab_list_removes_shared_workbook() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        tab = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        assert window._shared_plot_workbook_by_tab  # noqa: SLF001
+        window._clear_tab_list([tab])  # noqa: SLF001
+        assert window.tab_widget.indexOf(tab) < 0
+        assert not window._shared_plot_workbook_by_tab  # noqa: SLF001
+    finally:
+        window.close()
+
+
+def test_open_origin_shared_exports_plugin_workbooks(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        plugin_name = "Shared Test Plugin"
+        _make_simple_plot_tab(window, plugin_name=plugin_name)
+        window._current_plotter_name = plugin_name  # noqa: SLF001
+
+        captured: dict[str, object] = {}
+
+        def _fake_push(workbooks: list[WorkbookData]) -> tuple[int, list[str]]:
+            captured["count"] = len(workbooks)
+            return (1, [])
+
+        monkeypatch.setattr(window, "_push_workbooks_to_origin", _fake_push)
+        monkeypatch.setattr("plotting.pyplot.window.schedule_origin_release", lambda: None)
+        monkeypatch.setattr(QtWidgets.QMessageBox, "information", lambda *args, **kwargs: None)
+        monkeypatch.setattr(QtWidgets.QMessageBox, "warning", lambda *args, **kwargs: None)
+        monkeypatch.setattr(QtWidgets.QMessageBox, "critical", lambda *args, **kwargs: None)
+
+        window._open_origin_shared()  # noqa: SLF001
+        assert captured.get("count") == 1
+    finally:
+        window.close()
+
+
+def test_open_origin_button_enabled_for_shared_plugin() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        plugin = PyPlotPlugin(window, "Shared Test Plugin")
+        window._current_plugin = plugin  # noqa: SLF001
+        window._current_plotter_name = plugin.name  # noqa: SLF001
+        _make_simple_plot_tab(window, plugin_name=plugin.name)
+        window._sync_shared_action_states()  # noqa: SLF001
+        assert window.open_origin_button.isEnabled()
+    finally:
+        window.close()
 
 
 def test_available_plotters_wrapped_as_external_plugins() -> None:

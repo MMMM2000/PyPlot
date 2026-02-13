@@ -17,6 +17,7 @@ class StressDependencePlugin(PyPlotPlugin):
     """Port the stress dependence workflow into the shared PyPlot frame."""
 
     requires_imported_data = True
+    uses_shared_plot_workbooks = False
 
     _VAR_LABELS = {
         "sum": "T1+T2",

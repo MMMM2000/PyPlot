@@ -18,6 +18,7 @@ class VSMHysteresisPlugin(PyPlotPlugin):
 
     _METHOD_EXCLUDES = {"__init__", "_selected_paths", "_create_dock_widget", "_create_dock_switcher"}
     requires_imported_data = True
+    uses_shared_plot_workbooks = False
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)

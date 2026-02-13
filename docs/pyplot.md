@@ -25,6 +25,8 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Legends** default to “text colour follows plot” for every plug-in. Legend options (show symbols, placement, orientation, drag, follow colours) are remembered per plug-in between sessions so each workflow keeps its own defaults.
 - **Fullscreen**: maximizing any graph/workbook hides the others and maximizes the active subwindow; switching tabs or double-clicking a different graph keeps fullscreen on (only the active window is visible) until you restore a window to normal.
 - **TXT exports**: the default filename mirrors the current workbook/plot label so exported TXT/CSV files match the names shown in the Project Explorer and carry the sample/procedure context baked into those labels.
+- **Shared plot workbooks**: for plug-ins that do not implement their own workbook builder, PyPlot now auto-creates a `Plot data` workbook per graph tab (XY column pairs from plotted lines). This keeps `Export workbooks to Origin...` and worksheet tooling available consistently across plotting plug-ins.
+- **Shared Origin fallback**: when a plug-in uses the base `Open in Origin...` action, PyPlot exports the active plug-in’s shared plot workbooks to Origin, so the button works even without a plug-in-specific Origin export implementation.
 - **Graph export**: Save graph supports `PNG`, `PDF`, and `SVG`.
   Save dialog memory: the last selected graph-export format is remembered and reused as the default next time.
 - **Check outliers** now performs a worksheet scan (IQR-based with z-score fallback for low-spread columns), shows a per-sheet summary, and can remove flagged rows in-place across affected worksheets.
@@ -54,6 +56,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Maxion / PDF / HSW tools| `plotting.plugins.maxion_continuous`, `...pdf_plotter`| These are embedded legacy UIs launched inside the PyPlot frame. |
 
 Use `plotting/plugins/__init__.py` as the registry when you add a new tool. Provide `requires_imported_data = True` if the plug-in needs imported worksheets before plotting, and give its Plot button a descriptive label such as “Plot Temperature Sensitivity” so users always know what the action will generate.
+Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph formatting`, `TXT export`, shared `Open in Origin`, and shared plot-workbooks) and only override per-plugin behavior when the workflow truly needs custom handling. If a plugin already manages its own workbook lifecycle, set `uses_shared_plot_workbooks = False`.
 
 ## Importing Data
 

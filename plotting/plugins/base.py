@@ -13,6 +13,9 @@ class PyPlotPlugin:
     requires_imported_data: bool = False
     exposes_load_data: bool = True
     auto_load_on_import: bool = False
+    # Default to shared plot->workbook registration; plug-ins with custom
+    # workbook lifecycles can opt out by setting this to False.
+    uses_shared_plot_workbooks: bool = True
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         self.host = host
@@ -107,6 +110,10 @@ class PyPlotPlugin:
         )
 
     def open_origin(self) -> None:
+        opener = getattr(self.host, "_open_origin_shared", None)
+        if callable(opener):
+            opener()
+            return
         QtWidgets.QMessageBox.information(
             self.host,
             self.name,

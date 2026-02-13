@@ -590,8 +590,6 @@ class VSMIsothermsPlugin(PyPlotPlugin):
             self.host.normalize_button.setEnabled(False)
         if hasattr(self.host, "export_button"):
             self.host.export_button.setEnabled(False)
-        if hasattr(self.host, "open_origin_button"):
-            self.host.open_origin_button.setEnabled(False)
         if hasattr(self.host, "export_origin_button"):
             self.host.export_origin_button.setEnabled(bool(self._managed_workbooks))
         if self._summary_label is not None:

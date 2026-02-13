@@ -495,6 +495,9 @@ class PyPlotWorkbench(PyPlotWindow):
         outlier_action = getattr(self, "check_outliers_button", None)
         if isinstance(outlier_action, QtGui.QAction):
             outlier_action.setEnabled(False)
+        open_origin_action = getattr(self, "open_origin_button", None)
+        if isinstance(open_origin_action, QtGui.QAction):
+            open_origin_action.setEnabled(False)
 
         if self._current_plugin is not None:
             self._set_plot_button_label(self._current_plugin)
@@ -823,6 +826,12 @@ class PyPlotWorkbench(PyPlotWindow):
             self._remove_worksheet(key)
         self._workbooks.clear()
         self._worksheets.clear()
+        shared_keys = getattr(self, "_shared_plot_workbook_keys", None)
+        if isinstance(shared_keys, set):
+            shared_keys.clear()
+        shared_map = getattr(self, "_shared_plot_workbook_by_tab", None)
+        if isinstance(shared_map, dict):
+            shared_map.clear()
         self._data_workbook_items.clear()
         self._data_folder_items.clear()
         self._worksheet_tree_items.clear()

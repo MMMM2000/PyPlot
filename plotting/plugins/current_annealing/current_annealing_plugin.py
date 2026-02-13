@@ -28,6 +28,7 @@ class CurrentAnnealingPlugin(PyPlotPlugin):
 
     requires_imported_data = True
     auto_load_on_import = True
+    uses_shared_plot_workbooks = False
 
     def __init__(self, host: "PyPlotWorkbench", name: str) -> None:
         super().__init__(host, name)
