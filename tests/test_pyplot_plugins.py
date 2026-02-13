@@ -10,7 +10,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from PyQt6 import QtWidgets
+from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 from matplotlib.figure import Figure
 
@@ -52,6 +52,17 @@ def _iter_toolbar_sections(widget: QtWidgets.QWidget | None) -> list[str]:
     return sections
 
 
+def _menu_by_object_name(
+    menu_bar: QtWidgets.QMenuBar,
+    object_name: str,
+) -> QtWidgets.QMenu | None:
+    for action in menu_bar.actions():
+        menu = action.menu()
+        if menu is not None and menu.objectName() == object_name:
+            return menu
+    return None
+
+
 def test_plugin_settings_provide_toolbar_sections_and_mount() -> None:
     _ensure_app()
     registry = builtin_plugin_registry()
@@ -87,6 +98,137 @@ def test_plugin_settings_provide_toolbar_sections_and_mount() -> None:
                     menu = window._build_graph_section_menu(title, anchor)  # noqa: SLF001
                     assert menu is not None
                     menu.deleteLater()
+    finally:
+        window.close()
+
+
+def test_window_menu_exposes_arrangement_actions() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        window_menu = _menu_by_object_name(window.menuBar(), "mw_shared_window")
+        assert window_menu is not None
+        labels = {
+            action.text().replace("&", "").strip().lower()
+            for action in window_menu.actions()
+            if not action.isSeparator()
+        }
+        assert "cascade" in labels
+        assert "tile vertical" in labels
+        assert "tile horizontal" in labels
+    finally:
+        window.close()
+
+
+def test_window_arrangement_mode_defaults_to_cascade() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        arrange_mode = getattr(window.tab_widget, "arrangement_mode", None)
+        assert callable(arrange_mode)
+        assert arrange_mode() == "cascade"
+    finally:
+        window.close()
+
+
+def test_switching_subwindows_keeps_manual_geometry_in_cascade_mode() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        first = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        second = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        set_mode = getattr(window.tab_widget, "set_arrangement_mode", None)
+        assert callable(set_mode)
+        set_mode("cascade")
+        subwindow_for = getattr(window.tab_widget, "_subwindow_for", None)
+        assert callable(subwindow_for)
+        first_sub = subwindow_for(first)
+        second_sub = subwindow_for(second)
+        assert first_sub is not None
+        assert second_sub is not None
+
+        first_rect = QtCore.QRect(40, 60, 620, 420)
+        second_rect = QtCore.QRect(120, 140, 600, 400)
+        first_sub.setGeometry(first_rect)
+        second_sub.setGeometry(second_rect)
+
+        window.tab_widget.setCurrentWidget(first)
+        window.tab_widget.setCurrentWidget(second)
+
+        assert first_sub.geometry().width() == first_rect.width()
+        assert first_sub.geometry().height() == first_rect.height()
+        assert second_sub.geometry().width() == second_rect.width()
+        assert second_sub.geometry().height() == second_rect.height()
+    finally:
+        window.close()
+
+
+def test_double_click_legend_opens_shared_legend_controls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+
+        called: dict[str, object] = {}
+
+        def _fake_open_graph_format_dialog(
+            checked: bool = False,
+            *,
+            focus_key: str | None = None,
+            select_all: bool = False,
+        ) -> bool:
+            called["checked"] = checked
+            called["focus_key"] = focus_key
+            called["select_all"] = select_all
+            return True
+
+        monkeypatch.setattr(window, "_open_graph_format_dialog", _fake_open_graph_format_dialog)
+        opened = window._open_shared_graph_format_from_double_click(  # noqa: SLF001
+            axes=axes,
+            legend=True,
+        )
+        assert opened is True
+        assert called.get("focus_key") == "show_legend_cb"
+    finally:
+        window.close()
+
+
+def test_graph_option_apply_refreshes_open_graphs() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+
+        updated = window._clean_graph_option_payload(  # noqa: SLF001
+            {
+                **window.GRAPH_OPTION_DEFAULTS,
+                "figure_width": 9.0,
+                "figure_height": 4.5,
+                "line_width": 2.2,
+                "legend_columns": 2,
+            }
+        )
+        window._store_graph_option_defaults(  # noqa: SLF001
+            global_payload=updated,
+            plugin_key="",
+            plugin_override_enabled=False,
+            plugin_payload=None,
+            refresh_open_graphs=True,
+        )
+
+        width, height = axes.figure.get_size_inches()
+        assert float(width) == pytest.approx(9.0, rel=1e-2)
+        assert float(height) == pytest.approx(4.5, rel=1e-2)
+        line = axes.get_lines()[0]
+        assert float(line.get_linewidth()) == pytest.approx(2.2, rel=1e-2)
     finally:
         window.close()
 

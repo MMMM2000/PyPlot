@@ -7,5 +7,18 @@
 - Added `Settings -> Graph options...` with global defaults and optional plugin-specific overrides for shared graph/legend defaults.
 - Updated the Shape Memory Stress/Strain plugin to use shared action-state wiring so shared toolbar actions (save/normalize/TXT/Origin) follow plugin/tab readiness.
 - Fixed shared side-panel behavior: dock switchers now use click-toggle mode and no longer force Project Explorer/Object Manager visible, preventing resize flashing and allowing panels to stay hidden when toggled off.
+- Fixed side-panel width restore on switcher clicks: dock reopen now uses stored/default widths instead of oversized widget `sizeHint` widths, so Project Explorer/Object Manager no longer jump excessively wide when toggled.
+- Prevented side-panel width drift across repeated open/close cycles by ignoring transient splitter-driven growth when caching dock widths; side-dock max width clamp is now stricter.
+- Side-panel toggle now explicitly persists the current dock width on hide and restores that same stored width on next show, so repeated side-button open/close cycles keep user-set widths stable.
+- Fixed shared MDI graph-window arrangement defaults: new graph/workbook windows now open in `Cascade` mode, and shared `Window` menu actions (`Cascade`, `Tile Vertical`, `Tile Horizontal`) are restored for all plugins.
+- Cascade arrangement now normalizes graph subwindow sizes to a shared target width instead of reusing stale per-window widths, so simultaneously opened graphs stay visually consistent.
+- Fixed MDI maximize/restore behavior so restoring a maximized graph reliably returns to windowed view.
+- Locked shared graph subwindow display geometry to the figure aspect ratio (including resize/maximize) so on-screen plot proportions remain consistent with saved output proportions.
+- Improved shared legend auto-layout: when orientation is `auto`, dense/long legends prefer vertical layout instead of forcing unreadable horizontal rows.
+- Extended shared `Settings -> Graph options...` defaults with `Figure width`/`Figure height`, and apply those defaults when new plugin graphs are registered so graph windows start with consistent dimensions.
+- Added shared Graph Options dialog controls for `Apply`, `Cancel`, and `Reset to defaults`; applying now immediately refreshes all currently open graphs.
+- Enabled shared legend double-click routing: double-clicking legend content opens the shared Graph formatting window on legend controls.
+- Fixed shared cascade activation behavior so selecting another graph no longer resets manually positioned subwindow geometry.
+- Stabilized shared MDI aspect-ratio handling to prevent progressive graph-height collapse during focus/task switching.
 - Upgraded shared `Open in Origin...` to create Origin graphs from exported worksheets (not only transfer worksheet data).
 - Standardized shared Origin metadata mapping for worksheet headers: `Long Name` stores physical quantity, `Units` stores units, and `Comments` stores legend/series labels.

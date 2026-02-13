@@ -81,8 +81,8 @@ PRIMARY_DOCK_DEFAULT_WIDTH = 320
 PRIMARY_DOCK_MIN_WIDTH = 160
 PRIMARY_DOCK_EXPAND_THRESHOLD = 1300
 PRIMARY_DOCK_EXPANDED_FRACTION = 0.18
-PRIMARY_DOCK_EXPANDED_MAX = 520
-PRIMARY_DOCK_MAX_FRACTION = 0.35
+PRIMARY_DOCK_EXPANDED_MAX = 460
+PRIMARY_DOCK_MAX_FRACTION = 0.28
 UNIT_SUFFIX_PAREN_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\((?P<unit>[^()]{1,24})\)\s*$")
 UNIT_SUFFIX_BRACKET_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\[(?P<unit>[^\[\]]{1,24})\]\s*$")
 OUTLIER_IQR_FACTOR = 1.5
@@ -514,7 +514,19 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                     )
                 except Exception:
                     stored_width = 0
-            self._dock_widths[dock] = max(base_width, stored_width, 220)
+            if stored_width > 0:
+                width = stored_width
+            else:
+                width = base_width if base_width > 0 else PRIMARY_DOCK_DEFAULT_WIDTH
+                width = min(width, PRIMARY_DOCK_DEFAULT_WIDTH)
+            width = max(width, PRIMARY_DOCK_MIN_WIDTH, 220)
+            clamp_width = getattr(main_window, "_clamp_primary_dock_width", None)
+            if callable(clamp_width):
+                try:
+                    width = int(clamp_width(dock, width))
+                except Exception:
+                    pass
+            self._dock_widths[dock] = width
             dock.hide()
 
         self._tab_bar.currentChanged.connect(self._activate_index)
@@ -641,26 +653,51 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
     def _handle_visibility_change(self, index: int, visible: bool) -> None:
         if self._syncing or not self._docks:
             return
+        current = self._docks[index]
+        main = self._main_window()
         if visible:
-            if not self._docks[index].isFloating():
-                current = self._docks[index]
-                self._dock_widths[current] = max(current.width(), self._dock_widths.get(current, 220))
-                main = self._main_window()
-                if hasattr(main, "_primary_dock_widths"):
-                    try:
-                        main._primary_dock_widths[current] = max(  # type: ignore[attr-defined]
-                            current.width(),
-                            main._primary_dock_widths.get(current, 0),  # type: ignore[attr-defined]
-                        )
-                    except Exception:
-                        pass
+            if not current.isFloating() and hasattr(main, "_primary_dock_widths"):
+                try:
+                    stored_width = main._primary_dock_widths.get(current, 0)  # type: ignore[attr-defined]
+                except Exception:
+                    stored_width = 0
+                if stored_width > 0:
+                    self._dock_widths[current] = stored_width
             self._expanded_index = index
             self._collapse_timer.stop()
             if self._tab_bar.currentIndex() != index:
                 self._syncing = True
                 self._tab_bar.setCurrentIndex(index)
                 self._syncing = False
+            refresher = getattr(main, "_refresh_primary_dock_layout", None)
+            if callable(refresher):
+                QtCore.QTimer.singleShot(0, refresher)
         else:
+            if not current.isFloating():
+                measured_width = current.width()
+                if measured_width <= 0:
+                    measured_width = self._dock_widths.get(current, 0)
+                if measured_width > 0:
+                    clamped = measured_width
+                    clamp_width = getattr(main, "_clamp_primary_dock_width", None)
+                    if callable(clamp_width):
+                        try:
+                            clamped = int(clamp_width(current, measured_width))
+                        except Exception:
+                            clamped = measured_width
+                    clamped = max(clamped, 220)
+                    self._dock_widths[current] = clamped
+                    if hasattr(main, "_primary_dock_widths"):
+                        try:
+                            main._primary_dock_widths[current] = clamped  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+                    remember_width = getattr(main, "_remember_primary_dock_width", None)
+                    if callable(remember_width):
+                        try:
+                            remember_width(current)
+                        except Exception:
+                            pass
             if self._pinned_index == index:
                 self._update_pinned_index(None)
         if self._expanded_index == index:
@@ -834,15 +871,21 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
         if isinstance(main, QtWidgets.QMainWindow):
             target_getter = getattr(main, "_primary_dock_target_width", None)
             if callable(target_getter):
-                fallback = max(dock.sizeHint().width(), width, 220)
+                fallback = max(width, PRIMARY_DOCK_DEFAULT_WIDTH, PRIMARY_DOCK_MIN_WIDTH)
                 try:
                     computed = int(target_getter(dock, fallback))
                 except Exception:
                     computed = fallback
-                if computed > 0:
-                    width = max(width, computed)
+                if width <= 0 and computed > 0:
+                    width = computed
+            clamp_width = getattr(main, "_clamp_primary_dock_width", None)
+            if callable(clamp_width) and width > 0:
+                try:
+                    width = int(clamp_width(dock, width))
+                except Exception:
+                    pass
         if width <= 0:
-            width = max(dock.sizeHint().width(), 220)
+            width = max(PRIMARY_DOCK_DEFAULT_WIDTH, PRIMARY_DOCK_MIN_WIDTH, 220)
         self._dock_widths[dock] = width
         return width
 
@@ -7441,6 +7484,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             "mw_shared_file",
             "mw_shared_edit",
             "mw_shared_view",
+            "mw_shared_window",
             "mw_shared_developer",
             "mw_shared_help",
             "mw_shared_data",
@@ -7648,7 +7692,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if isinstance(log_dock, QtWidgets.QDockWidget):
             width = self._load_primary_dock_width(log_dock)
             if width is None or width <= 0:
-                width = max(log_dock.sizeHint().width(), 220)
+                width = max(220, PRIMARY_DOCK_MIN_WIDTH)
             self._primary_dock_widths[log_dock] = width
 
     def _refresh_primary_dock_layout(self) -> None:
@@ -7675,7 +7719,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                         dock.show()
                     except Exception:
                         continue
-                base_width = max(dock.sizeHint().width(), PRIMARY_DOCK_DEFAULT_WIDTH)
+                base_width = self._primary_dock_widths.get(dock, 0)
+                if base_width <= 0:
+                    base_width = PRIMARY_DOCK_DEFAULT_WIDTH
                 docks.append(dock)
                 widths.append(self._primary_dock_target_width(dock, base_width))
             if not docks:
@@ -7699,7 +7745,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         width = self._load_primary_dock_width(dock)
         min_width = max(PRIMARY_DOCK_MIN_WIDTH, dock.minimumWidth())
         if width is None or width <= 0:
-            width = max(dock.sizeHint().width(), default_width)
+            width = default_width
         width = max(width, min_width)
         width = self._clamp_primary_dock_width(dock, width)
         self._primary_dock_widths[dock] = width
@@ -7765,17 +7811,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if width <= 0:
             width = default_width
         width = max(width, PRIMARY_DOCK_MIN_WIDTH)
-
-        if (
-            isinstance(dock, QtWidgets.QDockWidget)
-            and dock.objectName() in {"projectExplorerDock", "objectManagerDock"}
-        ):
-            window_width = max(self.width(), self.size().width())
-            if window_width >= PRIMARY_DOCK_EXPAND_THRESHOLD:
-                scaled_min = int(window_width * PRIMARY_DOCK_EXPANDED_FRACTION)
-                if PRIMARY_DOCK_EXPANDED_MAX > 0:
-                    scaled_min = min(scaled_min, PRIMARY_DOCK_EXPANDED_MAX)
-                width = max(width, scaled_min, PRIMARY_DOCK_MIN_WIDTH)
 
         return self._clamp_primary_dock_width(dock, width)
 
@@ -7939,6 +7974,8 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         self._remember_primary_dock_state(dock, visible=dock.isVisible())
         if dock.isVisible():
             self._queue_retabify_primary_docks()
+            return
+        self._remember_primary_dock_width(dock)
 
     def _queue_retabify_primary_docks(self) -> None:
         if getattr(self, "_retabify_pending", False):
@@ -7964,14 +8001,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             tracked_widths: Dict[QtWidgets.QDockWidget, int] = {}
             for candidate in (project_dock, log_dock, graph_dock, object_dock):
                 if isinstance(candidate, QtWidgets.QDockWidget):
-                    current_width = candidate.width()
                     stored_width = self._primary_dock_widths.get(candidate, 0)
-                    width_reference = max(current_width, stored_width)
-                    if width_reference <= 0:
+                    if stored_width <= 0:
                         continue
-                    if stored_width and abs(width_reference - stored_width) <= 2:
+                    if not candidate.isVisible() or candidate.isFloating():
                         continue
-                    tracked_widths[candidate] = width_reference
+                    tracked_widths[candidate] = stored_width
 
             left_switcher = next(
                 (
@@ -8349,6 +8384,57 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return state
 
     def _apply_legend_snapshot(self, legend: Legend, state: Dict[str, Any]) -> None:
+        def _legend_entry_count() -> int:
+            handles = _legend_handles(legend)
+            if handles:
+                return len(handles)
+            try:
+                return len(list(legend.get_texts()))
+            except Exception:
+                return 0
+
+        def _legend_auto_layout() -> tuple[str, int]:
+            count = _legend_entry_count()
+            if count <= 1:
+                return "vertical", 1
+            try:
+                texts = [str(text.get_text() or "") for text in legend.get_texts()]
+            except Exception:
+                texts = []
+            max_chars = max((len(text.strip()) for text in texts), default=0)
+            try:
+                font_px = float(state.get("font_size", 10.0))
+            except Exception:
+                font_px = 10.0
+            if font_px <= 0:
+                font_px = 10.0
+            show_symbols = bool(state.get("show_symbols", True))
+            symbol_px = font_px * (1.6 if show_symbols else 0.6)
+            entry_px = max(font_px * max(6.0, max_chars) * 0.58 + symbol_px, font_px * 8.0)
+            axes_width = 0.0
+            try:
+                axes = getattr(legend, "axes", None)
+                if axes is not None and hasattr(axes, "bbox"):
+                    axes_width = float(getattr(axes.bbox, "width", 0.0))
+            except Exception:
+                axes_width = 0.0
+            if axes_width <= 0:
+                try:
+                    fig = legend.figure
+                    axes_width = float(getattr(getattr(fig, "bbox", None), "width", 0.0))
+                except Exception:
+                    axes_width = 0.0
+            horizontal_width = count * entry_px
+            horizontal_ok = (
+                count <= 3
+                and max_chars <= 14
+                and axes_width > 0
+                and horizontal_width <= axes_width * 0.9
+            )
+            if horizontal_ok:
+                return "horizontal", count
+            return "vertical", 1
+
         try:
             legend.set_visible(bool(state.get("visible", True)))
         except Exception:
@@ -8371,15 +8457,24 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     legend.get_title().set_fontsize(float(font_size))
                 except Exception:
                     pass
-        ncol = state.get("ncol")
-        if isinstance(ncol, int) and ncol > 0:
+        ncol_state = state.get("ncol")
+        requested_ncol = int(ncol_state) if isinstance(ncol_state, int) and ncol_state > 0 else 1
+        orientation_token = str(state.get("orientation", "auto") or "auto").strip().lower()
+        if orientation_token not in {"auto", "horizontal", "vertical"}:
+            orientation_token = "auto"
+        if orientation_token == "auto":
+            _resolved_orientation, resolved_ncol = _legend_auto_layout()
+        elif orientation_token == "horizontal":
+            resolved_ncol = max(1, requested_ncol, _legend_entry_count())
+        else:
+            resolved_ncol = 1
+        try:
+            legend.set_ncol(int(resolved_ncol))
+        except Exception:
             try:
-                legend.set_ncol(ncol)
+                legend._ncol = int(resolved_ncol)
             except Exception:
-                try:
-                    legend._ncol = ncol
-                except Exception:
-                    pass
+                pass
         try:
             legend.set_frame_on(bool(state.get("frame_on", True)))
         except Exception:
@@ -8430,7 +8525,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             except Exception:
                 pass
 
-        legend._mw_orientation = state.get("orientation", "auto")
+        legend._mw_orientation = orientation_token
         _set_legend_symbol_visibility(legend, bool(state.get("show_symbols", True)))
         _set_legend_text_follow_handles(
             legend,
@@ -9750,6 +9845,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         *,
         text_field: Literal["title", "x_label", "y_label"] | None = None,
         axis: Literal["x", "y"] | None = None,
+        legend: bool = False,
     ) -> bool:
         """Allow concrete hosts to route double-clicks into shared formatting UI."""
 
@@ -9757,7 +9853,12 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if not callable(opener):
             return False
         try:
-            result = opener(axes=axes, text_field=text_field, axis=axis)
+            result = opener(
+                axes=axes,
+                text_field=text_field,
+                axis=axis,
+                legend=legend,
+            )
         except Exception:
             return False
         return bool(result)
@@ -9795,6 +9896,35 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                     if not opened:
                         self._edit_axes_text_from_double_click(axes, field)
                     return
+
+        for axes in candidates:
+            legend = None
+            try:
+                legend = axes.get_legend()
+            except Exception:
+                legend = None
+            if legend is None:
+                continue
+            try:
+                if not bool(legend.get_visible()):
+                    continue
+            except Exception:
+                pass
+            legend_artists: list[Any] = [legend, getattr(legend, "get_frame", lambda: None)()]
+            try:
+                legend_artists.extend(list(legend.get_texts()))
+            except Exception:
+                pass
+            try:
+                legend_artists.extend(_legend_handles(legend))
+            except Exception:
+                pass
+            if any(self._artist_hit(artist, event) for artist in legend_artists if artist is not None):
+                self._open_shared_graph_format_from_canvas_target(
+                    axes,
+                    legend=True,
+                )
+                return
 
         for axes in candidates:
             axis = self._axis_from_event_hit(event, axes)
@@ -10230,6 +10360,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         """Cascade visible graph/workbook subwindows inside the workspace."""
 
         _ = widgets
+        proxy = getattr(self, "tab_widget", None)
+        setter = getattr(proxy, "set_arrangement_mode", None)
+        if callable(setter):
+            try:
+                setter("cascade")
+                return
+            except Exception:
+                pass
         area = self._mdi_area()
         if area is None:
             return
@@ -10244,6 +10382,19 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         """Tile visible subwindows within the QMdiArea using the requested orientation."""
 
         _ = widgets
+        proxy = getattr(self, "tab_widget", None)
+        setter = getattr(proxy, "set_arrangement_mode", None)
+        if callable(setter):
+            token = (
+                "tile_vertical"
+                if orientation == "vertical"
+                else "tile_horizontal"
+            )
+            try:
+                setter(token)
+                return
+            except Exception:
+                pass
         area = self._mdi_area()
         if area is None:
             return
@@ -10363,7 +10514,17 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
             return super().resizeEvent(event)
         if getattr(self._owner, "_global_maximized", False) or getattr(self._owner, "_fullscreen_lock", False):
             return super().resizeEvent(event)
+        if getattr(self._owner, "_arranging_subwindows", False):
+            return super().resizeEvent(event)
         if self._aspect_ratio is None:
+            return super().resizeEvent(event)
+        try:
+            buttons = QtWidgets.QApplication.mouseButtons()
+        except Exception:
+            buttons = QtCore.Qt.MouseButton.NoButton
+        # Ignore synthetic/background resizes (for example task switching) and
+        # only enforce aspect when the user is actively dragging the frame.
+        if not bool(buttons & QtCore.Qt.MouseButton.LeftButton):
             return super().resizeEvent(event)
         self._resizing = True
         try:
@@ -10418,40 +10579,90 @@ class _MdiTabProxy(QtWidgets.QWidget):
         except Exception:
             pass
         self._layout_margin = 6
+        self._arranging_subwindows = False
+        self._arrangement_mode: Literal["cascade", "tile_vertical", "tile_horizontal"] = "cascade"
 
     # ------------------------------------------------------------------ helpers
+    def _subwindow_aspect_ratio(self, sub: _ManagedSubWindow | None) -> float:
+        if sub is None:
+            return 1.6
+        stored_ratio = getattr(sub, "_aspect_ratio", None)
+        try:
+            stored_value = float(stored_ratio)
+        except Exception:
+            stored_value = 0.0
+        if stored_value > 0.0:
+            return stored_value
+        widget = sub.widget()
+        if widget is None:
+            return float(getattr(sub, "_aspect_ratio", 1.6) or 1.6)
+        canvas: FigureCanvas | None = None
+        if isinstance(widget, FigureCanvas):
+            canvas = widget
+        else:
+            try:
+                canvases = widget.findChildren(FigureCanvas)
+            except Exception:
+                canvases = []
+            if canvases:
+                canvas = canvases[0]
+        if canvas is not None:
+            try:
+                size = canvas.figure.get_size_inches()
+                if len(size) >= 2:
+                    width = float(size[0])
+                    height = float(size[1])
+                    if width > 0 and height > 0:
+                        ratio = width / height
+                        sub.set_aspect_ratio(ratio)
+                        return ratio
+            except Exception:
+                pass
+        fallback = float(getattr(sub, "_aspect_ratio", 1.6) or 1.6)
+        if fallback <= 0:
+            fallback = 1.6
+        return fallback
+
+    @staticmethod
+    def _fit_rect_to_aspect(rect: QtCore.QRect, aspect: float) -> QtCore.QRect:
+        if not rect.isValid() or rect.width() <= 0 or rect.height() <= 0:
+            return rect
+        if aspect <= 0:
+            return rect
+        width = rect.width()
+        height = rect.height()
+        target_w = width
+        target_h = int(round(target_w / aspect))
+        if target_h > height:
+            target_h = height
+            target_w = int(round(target_h * aspect))
+        target_w = max(1, target_w)
+        target_h = max(1, target_h)
+        x = rect.left() + (width - target_w) // 2
+        y = rect.top() + (height - target_h) // 2
+        return QtCore.QRect(x, y, target_w, target_h)
+
     def _apply_fullscreen_geometry(self, sub: _ManagedSubWindow) -> bool:
         viewport = self._mdi.viewport() if self._mdi is not None else None
         if viewport is None:
             return False
-        rect = viewport.rect()
+        margin = self._layout_margin
+        rect = viewport.rect().adjusted(margin, margin, -margin, -margin)
         if not rect.isValid() or rect.width() < 40 or rect.height() < 40:
             return False
-        frame = sub.frameGeometry()
-        inner = sub.geometry()
-        left_pad = max(0, inner.left() - frame.left())
-        top_pad = max(0, inner.top() - frame.top())
-        right_pad = max(0, frame.right() - inner.right())
-        bottom_pad = max(0, frame.bottom() - inner.bottom())
-        target = QtCore.QRect(
-            rect.left() - left_pad,
-            rect.top() - top_pad,
-            rect.width() + left_pad + right_pad,
-            rect.height() + top_pad + bottom_pad,
-        )
+        aspect = self._subwindow_aspect_ratio(sub)
+        target = self._fit_rect_to_aspect(rect, aspect)
         sub.setGeometry(target)
         return True
 
     def _maybe_apply_maximize(self, sub: _ManagedSubWindow) -> None:
-        if self._native_subwindow_maximize:
-            sub.showMaximized()
-        else:
-            self._apply_fullscreen_geometry(sub)
-            sub.show()
+        self._apply_fullscreen_geometry(sub)
+        sub.show()
 
     def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
         if self._blocking:
             return
+        was_global_maximized = bool(self._global_maximized or self._fullscreen_lock)
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
         if sub is not None:
@@ -10459,12 +10670,15 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 is_max = sub.isMaximized() or sub.isFullScreen() or self._fullscreen_lock
             else:
                 is_max = self._fullscreen_lock
-            self._global_maximized = is_max
             if is_max:
                 self._fullscreen_lock = True
+                self._global_maximized = True
                 self._maximize_single(sub)
             else:
-                self._apply_global_window_state(active=sub)
+                self._fullscreen_lock = False
+                self._global_maximized = False
+                if was_global_maximized:
+                    self._apply_global_window_state(active=sub)
             self._register_visible(sub)
         if self._global_maximized and sub is not None and not sub.isMaximized():
             self._syncing_state = True
@@ -10516,9 +10730,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 else:
                     self._apply_global_window_state()
             else:
-                # Do not clear fullscreen lock on incidental restores; only a manual restore should clear it.
-                if not self._fullscreen_lock:
-                    self._global_maximized = False
+                self._fullscreen_lock = False
+                self._global_maximized = False
                 self._apply_global_window_state()
         finally:
             self._syncing_state = False
@@ -10628,7 +10841,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
         min_size = widget.minimumSize() if widget is not None else QtCore.QSize(0, 0)
         base_w = max(hint.width(), min_hint.width(), min_size.width(), 400)
         base_h = max(hint.height(), min_hint.height(), min_size.height(), 300)
-        aspect = base_w / base_h if base_h else 1.6
+        aspect = self._subwindow_aspect_ratio(sub)
+        if aspect <= 0:
+            aspect = base_w / base_h if base_h else 1.6
         sub.set_aspect_ratio(aspect)
         available_w = area_size.width()
         available_h = area_size.height()
@@ -10636,14 +10851,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
 
         slot_width = available_w if not use_half_width else max(1, available_w // 2)
-        target_w = slot_width if preferred_width is None else min(preferred_width, available_w)
-        min_width = max(base_w, 400)
+        target_w = slot_width if preferred_width is None else min(preferred_width, slot_width)
         target_w = max(300, min(target_w, slot_width))
-        if use_half_width:
-            target_w = min(target_w, slot_width)
-        else:
-            target_w = max(min_width, target_w)
-
         target_h = int(target_w / aspect) if aspect else available_h
         min_height = min(available_h, max(base_h, 220))
         if available_h >= min_height:
@@ -10654,44 +10863,175 @@ class _MdiTabProxy(QtWidgets.QWidget):
             target_h = max(200, int(target_h * scale))
         sub.resize(target_w, target_h)
 
+    def arrangement_mode(self) -> str:
+        return self._arrangement_mode
+
+    def set_arrangement_mode(self, mode: str) -> None:
+        token = str(mode or "").strip().lower()
+        if token not in {"cascade", "tile_vertical", "tile_horizontal"}:
+            token = "cascade"
+        if token == self._arrangement_mode:
+            self._arrange_subwindows()
+            return
+        self._arrangement_mode = cast(
+            Literal["cascade", "tile_vertical", "tile_horizontal"],
+            token,
+        )
+        self._arrange_subwindows()
+
+    def _ordered_visible_subwindows(self) -> list[_ManagedSubWindow]:
+        visible_subwindows = [
+            self._subwindow_for(widget)
+            for widget in self._widgets
+            if self._visible.get(widget, True)
+        ]
+        return [
+            sub
+            for sub in visible_subwindows
+            if isinstance(sub, _ManagedSubWindow) and sub not in self._hidden_subwindows
+        ]
+
+    def _arrange_cascade_visible(self, subwindows: Sequence[_ManagedSubWindow]) -> None:
+        if not subwindows:
+            return
+        viewport = self._mdi.viewport().rect()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
+        margin = self._layout_margin
+        max_w = max(320, viewport.width() - margin * 2)
+        max_h = max(220, viewport.height() - margin * 2)
+        count = max(1, len(subwindows))
+        # Keep cascaded windows consistently sized instead of inheriting stale
+        # per-window widths from earlier manual resizes.
+        cascade_fraction = 0.62 if count <= 2 else 0.56
+        shared_preferred_width = int(round(viewport.width() * cascade_fraction))
+        shared_preferred_width = max(320, min(max_w, shared_preferred_width))
+        self._arranging_subwindows = True
+        try:
+            for sub in subwindows:
+                sub.show()
+                sub.showNormal()
+            self._mdi.cascadeSubWindows()
+            for sub in subwindows:
+                self._fit_subwindow(
+                    sub,
+                    use_half_width=False,
+                    preferred_width=shared_preferred_width,
+                )
+                geometry = sub.geometry()
+                clamped_w = min(max_w, geometry.width())
+                clamped_h = min(max_h, geometry.height())
+                x = max(
+                    viewport.left() + margin,
+                    min(
+                        geometry.x(),
+                        viewport.right() - clamped_w - margin + 1,
+                    ),
+                )
+                y = max(
+                    viewport.top() + margin,
+                    min(
+                        geometry.y(),
+                        viewport.bottom() - clamped_h - margin + 1,
+                    ),
+                )
+                sub.setGeometry(x, y, clamped_w, clamped_h)
+            active = self._mdi.activeSubWindow()
+            if isinstance(active, QtWidgets.QMdiSubWindow):
+                active.raise_()
+        finally:
+            self._arranging_subwindows = False
+
+    def _arrange_tile_visible(
+        self,
+        subwindows: Sequence[_ManagedSubWindow],
+        *,
+        orientation: Literal["vertical", "horizontal"],
+    ) -> None:
+        if not subwindows:
+            return
+        viewport = self._mdi.viewport().rect()
+        if viewport.width() <= 0 or viewport.height() <= 0:
+            return
+        margin = self._layout_margin
+        inner = viewport.adjusted(margin, margin, -margin, -margin)
+        if inner.width() <= 0 or inner.height() <= 0:
+            return
+        count = len(subwindows)
+        self._arranging_subwindows = True
+        try:
+            for sub in subwindows:
+                sub.show()
+                sub.showNormal()
+            if orientation == "vertical":
+                width_span = max(1, inner.width())
+                for idx, sub in enumerate(subwindows):
+                    left = inner.left() + int(round(idx * width_span / count))
+                    right = inner.left() + int(round((idx + 1) * width_span / count)) - 1
+                    cell = QtCore.QRect(
+                        left,
+                        inner.top(),
+                        max(1, right - left + 1),
+                        inner.height(),
+                    )
+                    target = self._fit_rect_to_aspect(cell, self._subwindow_aspect_ratio(sub))
+                    sub.setGeometry(target)
+            else:
+                height_span = max(1, inner.height())
+                for idx, sub in enumerate(subwindows):
+                    top = inner.top() + int(round(idx * height_span / count))
+                    bottom = inner.top() + int(round((idx + 1) * height_span / count)) - 1
+                    cell = QtCore.QRect(
+                        inner.left(),
+                        top,
+                        inner.width(),
+                        max(1, bottom - top + 1),
+                    )
+                    target = self._fit_rect_to_aspect(cell, self._subwindow_aspect_ratio(sub))
+                    sub.setGeometry(target)
+            active = self._mdi.activeSubWindow()
+            if isinstance(active, QtWidgets.QMdiSubWindow):
+                active.raise_()
+        finally:
+            self._arranging_subwindows = False
+
     def _arrange_subwindows(self) -> None:
-        """Lay out visible subwindows side-by-side by default."""
+        """Lay out visible subwindows using the selected arrangement mode."""
 
         if self._global_maximized:
             return
         viewport = self._mdi.viewport().rect()
         if viewport.width() <= 0 or viewport.height() <= 0:
             return
-        visible_widgets = [
-            widget
-            for widget in self._widgets
-            if self._visible.get(widget, True)
-        ]
-        if not visible_widgets:
+        visible_subwindows = self._ordered_visible_subwindows()
+        if not visible_subwindows:
             return
         margin = self._layout_margin
-        offset = 28
-        max_w = max(320, viewport.width() - margin * 2)
-        max_h = max(220, viewport.height() - margin * 2)
-        if len(visible_widgets) == 1:
-            sub = self._subwindow_for(visible_widgets[0])
-            if sub is None or sub in self._hidden_subwindows:
-                return
-            sub.showNormal()
-            sub.resize(max_w, max_h)
-            sub.move(viewport.left() + margin, viewport.top() + margin)
+        count = len(visible_subwindows)
+        if count == 1:
+            sub = visible_subwindows[0]
+            cell = QtCore.QRect(
+                viewport.left() + margin,
+                viewport.top() + margin,
+                max(1, viewport.width() - margin * 2),
+                max(1, viewport.height() - margin * 2),
+            )
+            aspect = self._subwindow_aspect_ratio(sub)
+            target = self._fit_rect_to_aspect(cell, aspect)
+            self._arranging_subwindows = True
+            try:
+                sub.showNormal()
+                sub.setGeometry(target)
+            finally:
+                self._arranging_subwindows = False
             return
-        for idx, widget in enumerate(visible_widgets):
-            sub = self._subwindow_for(widget)
-            if sub is None or sub in self._hidden_subwindows:
-                continue
-            sub.showNormal()
-            width = min(sub.width() or max_w, max_w)
-            height = min(sub.height() or max_h, max_h)
-            x = viewport.left() + margin + (idx * offset) % max(1, viewport.width() - width - margin)
-            y = viewport.top() + margin + (idx * offset) % max(1, viewport.height() - height - margin)
-            sub.resize(width, height)
-            sub.move(x, y)
+        if self._arrangement_mode == "tile_vertical":
+            self._arrange_tile_visible(visible_subwindows, orientation="vertical")
+            return
+        if self._arrangement_mode == "tile_horizontal":
+            self._arrange_tile_visible(visible_subwindows, orientation="horizontal")
+            return
+        self._arrange_cascade_visible(visible_subwindows)
 
     def eventFilter(self, source: QtCore.QObject, event: QtCore.QEvent) -> bool:  # type: ignore[override]
         if source is self._mdi.viewport() and event.type() == QtCore.QEvent.Type.Resize:
@@ -10700,7 +11040,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 if active is not None:
                     self._apply_fullscreen_geometry(active)
             else:
-                self._arrange_subwindows()
+                if self._arrangement_mode in {"tile_vertical", "tile_horizontal"}:
+                    self._arrange_subwindows()
         return super().eventFilter(source, event)
 
     def _remove_widget(self, widget: QtWidgets.QWidget | None) -> None:
@@ -10784,6 +11125,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
 
     def setCurrentIndex(self, index: int) -> None:
         self._activate_index(index)
+
+    def setCurrentWidget(self, widget: QtWidgets.QWidget | None) -> None:
+        self._activate_index(self.indexOf(widget))
 
     def currentIndex(self) -> int:
         active = self._mdi.activeSubWindow()

@@ -67,6 +67,8 @@ class PyPlotWorkbench(PyPlotWindow):
         "tick_font": 10,
         "line_width": 1.5,
         "marker_size": 6.0,
+        "figure_width": 7.5,
+        "figure_height": 5.0,
         "legend_location": "best",
         "legend_font_size": 10,
         "legend_columns": 1,
@@ -440,6 +442,10 @@ class PyPlotWorkbench(PyPlotWindow):
                     parsed = max(0.1, min(parsed, 20.0))
                 elif key == "marker_size":
                     parsed = max(0.1, min(parsed, 30.0))
+                elif key == "figure_width":
+                    parsed = max(1.0, min(parsed, 40.0))
+                elif key == "figure_height":
+                    parsed = max(1.0, min(parsed, 30.0))
                 cleaned[key] = parsed
                 continue
             cleaned[key] = value
@@ -559,8 +565,16 @@ class PyPlotWorkbench(PyPlotWindow):
         marker_size_spin = QtWidgets.QDoubleSpinBox(parent)
         marker_size_spin.setRange(0.1, 30.0)
         marker_size_spin.setSingleStep(0.2)
+        figure_width_spin = QtWidgets.QDoubleSpinBox(parent)
+        figure_width_spin.setRange(1.0, 40.0)
+        figure_width_spin.setSingleStep(0.2)
+        figure_height_spin = QtWidgets.QDoubleSpinBox(parent)
+        figure_height_spin.setRange(1.0, 30.0)
+        figure_height_spin.setSingleStep(0.2)
         form.addRow("Line width:", line_width_spin)
         form.addRow("Marker size:", marker_size_spin)
+        form.addRow("Figure width (in):", figure_width_spin)
+        form.addRow("Figure height (in):", figure_height_spin)
 
         legend_location_combo = QtWidgets.QComboBox(parent)
         for label, token in self._legend_location_choices():
@@ -590,6 +604,8 @@ class PyPlotWorkbench(PyPlotWindow):
             "tick_font": tick_font_spin,
             "line_width": line_width_spin,
             "marker_size": marker_size_spin,
+            "figure_width": figure_width_spin,
+            "figure_height": figure_height_spin,
             "legend_location": legend_location_combo,
             "legend_font_size": legend_font_size_spin,
             "legend_columns": legend_columns_spin,
@@ -602,20 +618,73 @@ class PyPlotWorkbench(PyPlotWindow):
         if not self._graph_format_controls:
             return
         options = self._effective_graph_options(plugin_name or self._current_plotter_name)
+        control_key_map = {
+            "show_grid": "show_grid_cb",
+            "show_legend": "show_legend_cb",
+            "title_font": "title_font_spin",
+            "label_font": "label_font_spin",
+            "tick_font": "tick_font_spin",
+            "line_width": "line_width_spin",
+            "marker_size": "marker_size_spin",
+            "figure_width": "figure_width_spin",
+            "figure_height": "figure_height_spin",
+            "legend_location": "legend_location_combo",
+            "legend_font_size": "legend_font_spin",
+            "legend_columns": "legend_columns_spin",
+            "legend_show_symbols": "legend_show_symbols_cb",
+            "legend_text_follow_colors": "legend_text_follow_colors_cb",
+            "legend_draggable": "legend_draggable_cb",
+        }
+        mapped_widgets: Dict[str, QtWidgets.QWidget] = {}
+        for option_key, control_key in control_key_map.items():
+            widget = self._graph_format_controls.get(control_key)
+            if isinstance(widget, QtWidgets.QWidget):
+                mapped_widgets[option_key] = widget
         self._graph_format_updating = True
         try:
-            self._set_graph_options_widgets(
-                {
-                    key: widget
-                    for key, widget in self._graph_format_controls.items()
-                    if isinstance(widget, QtWidgets.QWidget)
-                },
-                options,
-            )
+            self._set_graph_options_widgets(mapped_widgets, options)
         finally:
             self._graph_format_updating = False
         self._sync_tick_mode_inputs()
         self._sync_aspect_controls()
+
+    def _apply_graph_options_to_all_open_graphs(self) -> int:
+        applied = 0
+        seen: set[int] = set()
+        for axes in self._axes_by_tab.values():
+            if axes is None:
+                continue
+            marker = id(axes)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            plugin_name = self._plugin_name_for_axes(axes)
+            self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
+            applied += 1
+        return applied
+
+    def _store_graph_option_defaults(
+        self,
+        *,
+        global_payload: Dict[str, Any],
+        plugin_key: str,
+        plugin_override_enabled: bool,
+        plugin_payload: Dict[str, Any] | None,
+        refresh_open_graphs: bool,
+    ) -> None:
+        self._graph_option_defaults_global = self._clean_graph_option_payload(global_payload)
+        if plugin_key:
+            if plugin_override_enabled and isinstance(plugin_payload, dict):
+                self._graph_option_defaults_by_plugin[plugin_key] = self._clean_graph_option_payload(plugin_payload)
+            else:
+                self._graph_option_defaults_by_plugin.pop(plugin_key, None)
+        self._save_graph_option_settings()
+        self._apply_graph_option_defaults_to_controls(self._current_plotter_name)
+        refreshed = self._apply_graph_options_to_all_open_graphs() if refresh_open_graphs else 0
+        if refreshed > 0:
+            self._append_log(f"Updated shared graph option defaults and refreshed {refreshed} open graph(s).")
+        else:
+            self._append_log("Updated shared graph option defaults.")
 
     def _open_graph_options_dialog(self) -> None:
         dialog = QtWidgets.QDialog(self)
@@ -684,35 +753,82 @@ class PyPlotWorkbench(PyPlotWindow):
         plugin_override_cb.toggled.connect(plugin_widgets_holder.setEnabled)
         _sync_plugin_editor()
 
-        buttons = QtWidgets.QDialogButtonBox(
-            QtWidgets.QDialogButtonBox.StandardButton.Ok
-            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
-            parent=dialog,
-        )
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
+        buttons = QtWidgets.QDialogButtonBox(parent=dialog)
+        apply_btn = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Apply)
+        reset_btn = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.RestoreDefaults)
+        cancel_btn = buttons.addButton(QtWidgets.QDialogButtonBox.StandardButton.Cancel)
+        apply_btn.setDefault(True)
+        cancel_btn.clicked.connect(dialog.reject)
         root_layout.addWidget(buttons, 0)
 
-        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
-            return
+        def _apply_changes() -> None:
+            plugin_name = plugin_selector.currentData()
+            plugin_key = str(plugin_name) if isinstance(plugin_name, str) else ""
+            global_payload = self._graph_options_from_widgets(global_widgets)
+            plugin_payload = (
+                self._graph_options_from_widgets(plugin_widgets)
+                if plugin_override_cb.isChecked()
+                else None
+            )
+            self._store_graph_option_defaults(
+                global_payload=global_payload,
+                plugin_key=plugin_key,
+                plugin_override_enabled=bool(plugin_override_cb.isChecked()),
+                plugin_payload=plugin_payload,
+                refresh_open_graphs=True,
+            )
 
-        self._graph_option_defaults_global = self._graph_options_from_widgets(global_widgets)
-        plugin_name = plugin_selector.currentData()
-        plugin_key = str(plugin_name) if isinstance(plugin_name, str) else ""
-        if plugin_key:
-            if plugin_override_cb.isChecked():
-                self._graph_option_defaults_by_plugin[plugin_key] = self._graph_options_from_widgets(plugin_widgets)
-            else:
-                self._graph_option_defaults_by_plugin.pop(plugin_key, None)
-        self._save_graph_option_settings()
-        self._apply_graph_option_defaults_to_controls(self._current_plotter_name)
-        self._append_log("Updated shared graph option defaults.")
+        def _reset_defaults() -> None:
+            defaults = self._clean_graph_option_payload(self.GRAPH_OPTION_DEFAULTS)
+            self._set_graph_options_widgets(global_widgets, defaults)
+            plugin_override_cb.blockSignals(True)
+            plugin_override_cb.setChecked(False)
+            plugin_override_cb.blockSignals(False)
+            plugin_widgets_holder.setEnabled(False)
+            self._set_graph_options_widgets(plugin_widgets, defaults)
+
+        def _safe_apply() -> None:
+            try:
+                _apply_changes()
+            except Exception as exc:
+                LOGGER.exception("Failed to update shared graph option defaults")
+                self._append_log(f"Failed to update shared graph option defaults: {exc}", level="error")
+                QtWidgets.QMessageBox.warning(
+                    self,
+                    "Graph options",
+                    f"Could not save graph options:\n{exc}",
+                )
+
+        apply_btn.clicked.connect(_safe_apply)
+        reset_btn.clicked.connect(_reset_defaults)
+        dialog.exec()
 
     def _apply_graph_options_to_axes(self, axes: Any, *, plugin_name: str | None) -> None:
         if axes is None:
             return
         options = self._effective_graph_options(plugin_name)
         figure = getattr(axes, "figure", None)
+        try:
+            figure_width = float(options.get("figure_width", 7.5))
+        except Exception:
+            figure_width = 7.5
+        try:
+            figure_height = float(options.get("figure_height", 5.0))
+        except Exception:
+            figure_height = 5.0
+        if not math.isfinite(figure_width) or figure_width <= 0.0:
+            figure_width = 7.5
+        if not math.isfinite(figure_height) or figure_height <= 0.0:
+            figure_height = 5.0
+        if figure is not None:
+            try:
+                figure.set_size_inches(
+                    max(1.0, figure_width),
+                    max(1.0, figure_height),
+                    forward=True,
+                )
+            except Exception:
+                pass
         targets: list[Any]
         if figure is not None:
             try:
@@ -795,6 +911,47 @@ class PyPlotWorkbench(PyPlotWindow):
                         pass
 
         self._fit_figure_to_content(figure)
+        tab = self._tab_for_axes(axes)  # noqa: SLF001 - shared helper
+        if tab is None:
+            return
+        subwindow_for = getattr(self.tab_widget, "_subwindow_for", None)
+        if not callable(subwindow_for):
+            return
+        try:
+            sub = subwindow_for(tab)
+        except Exception:
+            sub = None
+        if sub is None:
+            return
+        try:
+            aspect = float(figure_width) / float(figure_height)
+        except Exception:
+            aspect = 0.0
+        if math.isfinite(aspect) and aspect > 0.0:
+            setter = getattr(sub, "set_aspect_ratio", None)
+            if callable(setter):
+                try:
+                    setter(aspect)
+                except Exception:
+                    pass
+        if bool(getattr(self.tab_widget, "_global_maximized", False) or getattr(self.tab_widget, "_fullscreen_lock", False)):
+            maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+            if callable(maybe_maximize):
+                try:
+                    maybe_maximize(sub)
+                except Exception:
+                    pass
+            return
+        try:
+            dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
+        except Exception:
+            dpi = 100.0
+        target_w = int(max(360.0, figure_width * dpi + 48.0))
+        target_h = int(max(260.0, figure_height * dpi + 72.0))
+        try:
+            sub.resize(target_w, target_h)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ Qt hooks
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
@@ -2465,6 +2622,7 @@ class PyPlotWorkbench(PyPlotWindow):
         axes: Any,
         text_field: str | None = None,
         axis: str | None = None,
+        legend: bool = False,
     ) -> bool:
         tab = self._tab_for_axes(axes)
         if isinstance(tab, QtWidgets.QWidget):
@@ -2485,6 +2643,8 @@ class PyPlotWorkbench(PyPlotWindow):
         elif field_token == "y_label":
             focus_key = "y_label_edit"
             select_all = True
+        elif legend:
+            focus_key = "show_legend_cb"
         elif axis_token == "x":
             focus_key = "x_scale_combo"
         elif axis_token == "y":
@@ -2947,6 +3107,29 @@ class PyPlotWorkbench(PyPlotWindow):
                         except Exception:
                             sub = None
                         if sub is not None:
+                            try:
+                                aspect = float(figure_width) / float(figure_height)
+                            except Exception:
+                                aspect = 0.0
+                            if math.isfinite(aspect) and aspect > 0.0:
+                                setter = getattr(sub, "set_aspect_ratio", None)
+                                if callable(setter):
+                                    try:
+                                        setter(aspect)
+                                    except Exception:
+                                        pass
+                            if bool(
+                                getattr(self.tab_widget, "_global_maximized", False)
+                                or getattr(self.tab_widget, "_fullscreen_lock", False)
+                            ):
+                                maybe_maximize = getattr(self.tab_widget, "_maybe_apply_maximize", None)
+                                if callable(maybe_maximize):
+                                    try:
+                                        maybe_maximize(sub)
+                                    except Exception:
+                                        pass
+                                touched += 1
+                                continue
                             try:
                                 dpi = float(getattr(figure, "dpi", 100.0) or 100.0) if figure is not None else 100.0
                             except Exception:

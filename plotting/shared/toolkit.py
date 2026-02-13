@@ -800,6 +800,79 @@ def install_standard_menu(
         if reset_action is not None:
             reset_action.triggered.connect(_reset_layout)
 
+    window_targets_getter = getattr(target, "_window_menu_arrangement_targets", None)
+    window_cascade_handler = getattr(target, "_window_menu_cascade", None)
+    window_tile_handler = getattr(target, "_window_menu_tile", None)
+    if (
+        callable(window_targets_getter)
+        and callable(window_cascade_handler)
+        and callable(window_tile_handler)
+    ):
+        window_menu = menu_bar.addMenu("&Window")
+        if window_menu is not None:
+            window_menu.setObjectName("mw_shared_window")
+
+            def _window_targets() -> list[QtWidgets.QWidget]:
+                try:
+                    targets = window_targets_getter()
+                except Exception:
+                    return []
+                if not isinstance(targets, (list, tuple)):
+                    return []
+                widgets: list[QtWidgets.QWidget] = []
+                for candidate in targets:
+                    if isinstance(candidate, QtWidgets.QWidget):
+                        widgets.append(candidate)
+                return widgets
+
+            def _run_cascade() -> None:
+                widgets = _window_targets()
+                if not widgets:
+                    return
+                try:
+                    window_cascade_handler(widgets)
+                except Exception:
+                    return
+
+            def _run_tile(orientation: str) -> None:
+                widgets = _window_targets()
+                if not widgets:
+                    return
+                try:
+                    window_tile_handler(widgets, orientation=orientation)
+                except Exception:
+                    return
+
+            cascade_action = window_menu.addAction("&Cascade")
+            if cascade_action is not None:
+                cascade_action.triggered.connect(_run_cascade)
+
+            tile_vertical_action = window_menu.addAction("Tile &Vertical")
+            if tile_vertical_action is not None:
+                tile_vertical_action.triggered.connect(
+                    lambda _checked=False: _run_tile("vertical")
+                )
+
+            tile_horizontal_action = window_menu.addAction("Tile &Horizontal")
+            if tile_horizontal_action is not None:
+                tile_horizontal_action.triggered.connect(
+                    lambda _checked=False: _run_tile("horizontal")
+                )
+
+            def _sync_window_actions() -> None:
+                widgets = _window_targets()
+                has_windows = bool(widgets)
+                can_tile = len(widgets) > 1
+                if cascade_action is not None:
+                    cascade_action.setEnabled(has_windows)
+                if tile_vertical_action is not None:
+                    tile_vertical_action.setEnabled(can_tile)
+                if tile_horizontal_action is not None:
+                    tile_horizontal_action.setEnabled(can_tile)
+
+            window_menu.aboutToShow.connect(_sync_window_actions)
+            _sync_window_actions()
+
     developer_menu = developer_options().create_menu(menu_bar)
     developer_menu.setObjectName("mw_shared_developer")
     menu_bar.addMenu(developer_menu)
@@ -826,6 +899,8 @@ def install_standard_menu(
         help_menu.setEnabled(False)
 
     return menu_bar
+
+
 class _ThemeManager(QtCore.QObject):
     """Coordinate theme changes across every window."""
 
