@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
-from PyQt6 import QtCore, QtGui, QtWidgets
+from PyQt6 import QtCore, QtWidgets
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg as FigureCanvas
 
 from plotting.plugins.base import PyPlotPlugin, register_plugin
@@ -244,9 +244,15 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             self._summary_label.setText(
                 "Import manual stress/strain logger TXT files and plot segmented loading/unloading loops."
             )
-        plot_button = getattr(self.host, "plot_button", None)
-        if isinstance(plot_button, QtGui.QAction):
-            plot_button.setEnabled(count > 0)
+        has_tabs = any(self.host.tab_widget.indexOf(tab) >= 0 for tab in self._plot_tabs)
+        self.apply_shared_action_state(
+            can_plot=count > 0,
+            can_save_graph=has_tabs,
+            can_normalize=has_tabs,
+            can_export_txt=has_tabs,
+            can_open_origin=has_tabs,
+            can_popout=has_tabs,
+        )
         save_sync = getattr(self.host, "_update_save_graph_enabled", None)
         if callable(save_sync):
             save_sync()

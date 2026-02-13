@@ -170,15 +170,16 @@ def test_push_workbooks_to_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_origin = _FakeOrigin()
 
     @contextlib.contextmanager
-    def fake_session() -> Iterator[_FakeOrigin]:
+    def fake_session(*_: object, **__: object) -> Iterator[_FakeOrigin]:
         yield fake_origin
 
     monkeypatch.setattr("plotting.pyplot.window.origin_session", fake_session)
     monkeypatch.setattr("plotting.pyplot.window.schedule_origin_release", lambda: None)
 
-    exported, errors = window._push_workbooks_to_origin([workbook])
+    exported, plotted, errors = window._push_workbooks_to_origin([workbook])
 
     assert exported == 1
+    assert plotted == 0
     assert errors == []
     assert fake_origin.books, "expected workbook to be created"
     book = fake_origin.books[0]
@@ -195,6 +196,141 @@ def test_push_workbooks_to_origin(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("unit$=\"A\"" in cmd for cmd in fake_origin.lt_commands)
     assert sheet.data is not None
     pd.testing.assert_frame_equal(sheet.data.reset_index(drop=True), df.reset_index(drop=True))
+
+    window.close()
+
+
+def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch) -> None:
+    _ensure_app()
+
+    window = PyPlotWorkbench(plotters={})
+
+    df = pd.DataFrame({"time": [0.0, 1.0], "value": [2.0, 4.0]})
+    worksheet = WorksheetData(
+        key="sheet::graph",
+        name="Plot data",
+        dataframe=df,
+        columns={
+            "time": WorksheetColumnMeta(long_name="Time", units="s", comments="Sample A"),
+            "value": WorksheetColumnMeta(long_name="Value", units="A", comments="Sample A"),
+        },
+        axis_roles="XY",
+    )
+    workbook = WorkbookData(key="workbook::graph", name="Graph Book", worksheets=[worksheet.key])
+    window._workbooks[workbook.key] = workbook
+    window._worksheets[worksheet.key] = worksheet
+
+    class _FakeSheet:
+        def __init__(self) -> None:
+            self.data: pd.DataFrame | None = None
+            self.name = ""
+
+        def from_df(self, frame: pd.DataFrame) -> None:
+            self.data = frame.copy()
+
+        def cols_axis(self, roles: str) -> None:
+            _ = roles
+
+        def set_label(self, index: int, label: str) -> None:
+            _ = (index, label)
+
+        def set_comment(self, index: int, comment: str) -> None:
+            _ = (index, comment)
+
+        def activate(self) -> None:  # pragma: no cover - no-op for fake
+            return
+
+    class _FakePlot:
+        def __init__(self) -> None:
+            self.lname = ""
+            self.long_name = ""
+            self.name = ""
+
+    class _FakeLayer:
+        def __init__(self) -> None:
+            self.plots: list[_FakePlot] = []
+
+        def add_plot(self, *_: object, **__: object) -> _FakePlot:
+            plot = _FakePlot()
+            self.plots.append(plot)
+            return plot
+
+    class _FakeGraph:
+        def __init__(self) -> None:
+            self.layer = _FakeLayer()
+            self.lname = ""
+            self.name = ""
+
+        def activate(self) -> None:  # pragma: no cover - no-op for fake
+            return
+
+        def __getitem__(self, index: int) -> _FakeLayer:
+            assert index == 0
+            return self.layer
+
+    class _FakeWorkbook(list):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lname = ""
+            self.name = ""
+
+        def activate(self) -> None:  # pragma: no cover - no-op for fake
+            return
+
+        def add_sheet(self, *_: object, lname: str | None = None) -> _FakeSheet:
+            sheet = _FakeSheet()
+            sheet.name = lname or "Sheet"
+            self.append(sheet)
+            return sheet
+
+    class _FakeOrigin:
+        def __init__(self) -> None:
+            self.books: list[_FakeWorkbook] = []
+            self.graphs: list[_FakeGraph] = []
+            self.lt_commands: list[str] = []
+
+        def new_book(self, *_: object, lname: str | None = None) -> _FakeWorkbook:
+            book = _FakeWorkbook()
+            book.lname = lname or ""
+            self.books.append(book)
+            return book
+
+        def new_sheet(self, *_: object, lname: str | None = None) -> _FakeSheet:
+            sheet = _FakeSheet()
+            sheet.name = lname or "Sheet"
+            return sheet
+
+        def new_graph(self, *_: object, **__: object) -> _FakeGraph:
+            graph = _FakeGraph()
+            self.graphs.append(graph)
+            return graph
+
+        def lt_exec(self, command: str) -> None:
+            self.lt_commands.append(command)
+
+    fake_origin = _FakeOrigin()
+
+    @contextlib.contextmanager
+    def fake_session(*_: object, **__: object) -> Iterator[_FakeOrigin]:
+        yield fake_origin
+
+    monkeypatch.setattr("plotting.pyplot.window.origin_session", fake_session)
+    monkeypatch.setattr("plotting.pyplot.window.schedule_origin_release", lambda: None)
+
+    exported, plotted, errors = window._push_workbooks_to_origin(
+        [workbook],
+        create_graphs=True,
+    )
+
+    assert exported == 1
+    assert plotted == 1
+    assert errors == []
+    assert len(fake_origin.graphs) == 1
+    assert fake_origin.graphs[0].layer.plots
+    assert fake_origin.graphs[0].layer.plots[0].lname == "Sample A"
+    assert any('lab -xb "Time [s]";' in cmd for cmd in fake_origin.lt_commands)
+    assert any('lab -yl "Value [A]";' in cmd for cmd in fake_origin.lt_commands)
+    assert any(cmd == "legend -o;" for cmd in fake_origin.lt_commands)
 
     window.close()
 
@@ -243,6 +379,14 @@ def test_shared_plot_workbook_is_created_from_plot_tab() -> None:
         assert worksheet is not None
         assert list(worksheet.dataframe.columns) == ["Loading_1_x", "Loading_1_y"]
         assert worksheet.axis_roles == "XY"
+        x_meta = worksheet.columns["Loading_1_x"]
+        y_meta = worksheet.columns["Loading_1_y"]
+        assert x_meta.long_name == "Strain"
+        assert x_meta.units == "%"
+        assert x_meta.comments == "Loading 1"
+        assert y_meta.long_name == "Stress"
+        assert y_meta.units == "MPa"
+        assert y_meta.comments == "Loading 1"
     finally:
         window.close()
 
@@ -270,9 +414,14 @@ def test_open_origin_shared_exports_plugin_workbooks(monkeypatch: pytest.MonkeyP
 
         captured: dict[str, object] = {}
 
-        def _fake_push(workbooks: list[WorkbookData]) -> tuple[int, list[str]]:
+        def _fake_push(
+            workbooks: list[WorkbookData],
+            *,
+            create_graphs: bool = False,
+        ) -> tuple[int, int, list[str]]:
             captured["count"] = len(workbooks)
-            return (1, [])
+            captured["create_graphs"] = create_graphs
+            return (1, 1, [])
 
         monkeypatch.setattr(window, "_push_workbooks_to_origin", _fake_push)
         monkeypatch.setattr("plotting.pyplot.window.schedule_origin_release", lambda: None)
@@ -282,6 +431,7 @@ def test_open_origin_shared_exports_plugin_workbooks(monkeypatch: pytest.MonkeyP
 
         window._open_origin_shared()  # noqa: SLF001
         assert captured.get("count") == 1
+        assert captured.get("create_graphs") is True
     finally:
         window.close()
 

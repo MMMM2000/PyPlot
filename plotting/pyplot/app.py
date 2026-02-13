@@ -59,6 +59,21 @@ class PyPlotWorkbench(PyPlotWindow):
     PROJECT_CODE = "pyplot"
     PROJECT_SETTINGS_PREFIX = "pyplot"
     GRAPH_DOCK_ENABLED = False
+    GRAPH_OPTION_DEFAULTS: Dict[str, Any] = {
+        "show_grid": True,
+        "show_legend": True,
+        "title_font": 16,
+        "label_font": 12,
+        "tick_font": 10,
+        "line_width": 1.5,
+        "marker_size": 6.0,
+        "legend_location": "best",
+        "legend_font_size": 10,
+        "legend_columns": 1,
+        "legend_show_symbols": True,
+        "legend_text_follow_colors": True,
+        "legend_draggable": True,
+    }
 
     def __init__(
         self,
@@ -108,6 +123,9 @@ class PyPlotWorkbench(PyPlotWindow):
         self._graph_format_dialog_container: QtWidgets.QWidget | None = None
         self._graph_format_dialog_layout: QtWidgets.QVBoxLayout | None = None
         self._graph_format_dialog_root_layout: QtWidgets.QVBoxLayout | None = None
+        self._graph_options_action: QtGui.QAction | None = None
+        self._graph_option_defaults_global: Dict[str, Any] = {}
+        self._graph_option_defaults_by_plugin: Dict[str, Dict[str, Any]] = {}
         super().__init__(title="PyPlot")
         self.setObjectName("PyPlotWorkbench")
         if not sys.platform.startswith("win") and sys.platform != "darwin":
@@ -146,6 +164,7 @@ class PyPlotWorkbench(PyPlotWindow):
         if token not in {".png", ".pdf", ".svg"}:
             token = ".png"
         self._last_graph_format = token
+        self._load_graph_option_settings()
 
         self._update_action_states()
         self._set_data_sources_visible(False)
@@ -185,6 +204,17 @@ class PyPlotWorkbench(PyPlotWindow):
             QtCore.QTimer.singleShot(500, self._refresh_primary_dock_layout)
         except Exception:
             pass
+
+    def _register_plot_tab(
+        self,
+        tab: QtWidgets.QWidget,
+        canvas: Any,
+        axes: Any,
+        descriptor: TabDescriptor | None = None,
+    ) -> None:
+        super()._register_plot_tab(tab, canvas, axes, descriptor)
+        plugin_name = self._tab_plugin_name(descriptor)
+        self._apply_graph_options_to_axes(axes, plugin_name=plugin_name)
 
     def _load_plotter_history(self) -> list[str]:
         stored = self.settings.value("plotter_history", "[]")
@@ -340,6 +370,432 @@ class PyPlotWorkbench(PyPlotWindow):
         except Exception:
             pass
 
+    def _ensure_settings_menu(self) -> None:  # type: ignore[override]
+        super()._ensure_settings_menu()
+        menu_bar = self.menuBar() if hasattr(self, "menuBar") else None
+        if not isinstance(menu_bar, QtWidgets.QMenuBar):
+            return
+        settings_menu: QtWidgets.QMenu | None = None
+        for action in menu_bar.actions():
+            menu = action.menu()
+            if isinstance(menu, QtWidgets.QMenu) and menu.title().replace("&", "").strip().lower() == "settings":
+                settings_menu = menu
+                break
+        if settings_menu is None:
+            return
+        if isinstance(self._graph_options_action, QtGui.QAction):
+            return
+        self._graph_options_action = settings_menu.addAction("Graph options…")
+        self._graph_options_action.triggered.connect(self._open_graph_options_dialog)
+
+    @staticmethod
+    def _legend_location_choices() -> list[tuple[str, str]]:
+        return [
+            ("Best", "best"),
+            ("Upper right", "upper right"),
+            ("Upper left", "upper left"),
+            ("Lower left", "lower left"),
+            ("Lower right", "lower right"),
+            ("Right", "right"),
+            ("Center left", "center left"),
+            ("Center right", "center right"),
+            ("Lower center", "lower center"),
+            ("Upper center", "upper center"),
+            ("Center", "center"),
+        ]
+
+    def _clean_graph_option_payload(self, payload: Dict[str, Any] | None) -> Dict[str, Any]:
+        defaults = dict(self.GRAPH_OPTION_DEFAULTS)
+        source = payload if isinstance(payload, dict) else {}
+        choices = {value for _, value in self._legend_location_choices()}
+        cleaned: Dict[str, Any] = {}
+        for key, default in defaults.items():
+            value = source.get(key, default)
+            if isinstance(default, bool):
+                cleaned[key] = bool(value)
+                continue
+            if key == "legend_location":
+                token = str(value).strip().lower()
+                cleaned[key] = token if token in choices else str(default)
+                continue
+            if isinstance(default, int):
+                try:
+                    parsed = int(round(float(value)))
+                except Exception:
+                    parsed = int(default)
+                if key == "legend_columns":
+                    parsed = max(1, min(parsed, 12))
+                else:
+                    parsed = max(6, min(parsed, 96))
+                cleaned[key] = parsed
+                continue
+            if isinstance(default, float):
+                try:
+                    parsed = float(value)
+                except Exception:
+                    parsed = float(default)
+                if not math.isfinite(parsed):
+                    parsed = float(default)
+                if key == "line_width":
+                    parsed = max(0.1, min(parsed, 20.0))
+                elif key == "marker_size":
+                    parsed = max(0.1, min(parsed, 30.0))
+                cleaned[key] = parsed
+                continue
+            cleaned[key] = value
+        return cleaned
+
+    def _load_graph_option_settings(self) -> None:
+        settings = getattr(self, "settings", None)
+        if not isinstance(settings, QtCore.QSettings):
+            self._graph_option_defaults_global = self._clean_graph_option_payload({})
+            self._graph_option_defaults_by_plugin = {}
+            return
+
+        raw_global = settings.value("graph_options_global", "{}")
+        try:
+            parsed_global = json.loads(raw_global) if isinstance(raw_global, str) else {}
+        except Exception:
+            parsed_global = {}
+        self._graph_option_defaults_global = self._clean_graph_option_payload(parsed_global)
+
+        raw_plugins = settings.value("graph_options_by_plugin", "{}")
+        try:
+            parsed_plugins = json.loads(raw_plugins) if isinstance(raw_plugins, str) else {}
+        except Exception:
+            parsed_plugins = {}
+        cleaned_plugins: Dict[str, Dict[str, Any]] = {}
+        if isinstance(parsed_plugins, dict):
+            for name, payload in parsed_plugins.items():
+                if not isinstance(name, str) or not name.strip() or not isinstance(payload, dict):
+                    continue
+                cleaned_plugins[name] = self._clean_graph_option_payload(payload)
+        self._graph_option_defaults_by_plugin = cleaned_plugins
+
+    def _save_graph_option_settings(self) -> None:
+        settings = getattr(self, "settings", None)
+        if not isinstance(settings, QtCore.QSettings):
+            return
+        try:
+            settings.setValue("graph_options_global", json.dumps(self._graph_option_defaults_global))
+            settings.setValue("graph_options_by_plugin", json.dumps(self._graph_option_defaults_by_plugin))
+            settings.sync()
+        except Exception:
+            pass
+
+    def _effective_graph_options(self, plugin_name: str | None) -> Dict[str, Any]:
+        effective = self._clean_graph_option_payload(self._graph_option_defaults_global)
+        if plugin_name:
+            override = self._graph_option_defaults_by_plugin.get(plugin_name)
+            if isinstance(override, dict):
+                merged = dict(effective)
+                merged.update(override)
+                effective = self._clean_graph_option_payload(merged)
+        return effective
+
+    def _set_graph_options_widgets(
+        self,
+        widgets: Dict[str, QtWidgets.QWidget],
+        payload: Dict[str, Any],
+    ) -> None:
+        options = self._clean_graph_option_payload(payload)
+        for key, value in options.items():
+            widget = widgets.get(key)
+            if isinstance(widget, QtWidgets.QCheckBox):
+                widget.setChecked(bool(value))
+            elif isinstance(widget, QtWidgets.QComboBox):
+                index = widget.findData(value)
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            elif isinstance(widget, QtWidgets.QSpinBox):
+                widget.setValue(int(value))
+            elif isinstance(widget, QtWidgets.QDoubleSpinBox):
+                widget.setValue(float(value))
+
+    def _graph_options_from_widgets(
+        self,
+        widgets: Dict[str, QtWidgets.QWidget],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        for key in self.GRAPH_OPTION_DEFAULTS:
+            widget = widgets.get(key)
+            if isinstance(widget, QtWidgets.QCheckBox):
+                payload[key] = bool(widget.isChecked())
+            elif isinstance(widget, QtWidgets.QComboBox):
+                payload[key] = str(widget.currentData() or "")
+            elif isinstance(widget, QtWidgets.QSpinBox):
+                payload[key] = int(widget.value())
+            elif isinstance(widget, QtWidgets.QDoubleSpinBox):
+                payload[key] = float(widget.value())
+        return self._clean_graph_option_payload(payload)
+
+    def _build_graph_options_widgets(
+        self,
+        parent: QtWidgets.QWidget,
+    ) -> Dict[str, QtWidgets.QWidget]:
+        form = QtWidgets.QFormLayout(parent)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(8)
+        form.setVerticalSpacing(6)
+
+        show_grid_cb = QtWidgets.QCheckBox("Show grid by default", parent)
+        show_legend_cb = QtWidgets.QCheckBox("Show legend by default", parent)
+        form.addRow(show_grid_cb)
+        form.addRow(show_legend_cb)
+
+        title_font_spin = QtWidgets.QSpinBox(parent)
+        title_font_spin.setRange(6, 96)
+        label_font_spin = QtWidgets.QSpinBox(parent)
+        label_font_spin.setRange(6, 96)
+        tick_font_spin = QtWidgets.QSpinBox(parent)
+        tick_font_spin.setRange(6, 96)
+        form.addRow("Title font:", title_font_spin)
+        form.addRow("Label font:", label_font_spin)
+        form.addRow("Tick label font:", tick_font_spin)
+
+        line_width_spin = QtWidgets.QDoubleSpinBox(parent)
+        line_width_spin.setRange(0.1, 20.0)
+        line_width_spin.setSingleStep(0.1)
+        marker_size_spin = QtWidgets.QDoubleSpinBox(parent)
+        marker_size_spin.setRange(0.1, 30.0)
+        marker_size_spin.setSingleStep(0.2)
+        form.addRow("Line width:", line_width_spin)
+        form.addRow("Marker size:", marker_size_spin)
+
+        legend_location_combo = QtWidgets.QComboBox(parent)
+        for label, token in self._legend_location_choices():
+            legend_location_combo.addItem(label, token)
+        legend_font_size_spin = QtWidgets.QSpinBox(parent)
+        legend_font_size_spin.setRange(6, 96)
+        legend_columns_spin = QtWidgets.QSpinBox(parent)
+        legend_columns_spin.setRange(1, 12)
+        legend_show_symbols_cb = QtWidgets.QCheckBox("Show legend symbols", parent)
+        legend_text_follow_colors_cb = QtWidgets.QCheckBox(
+            "Legend text follows line colours",
+            parent,
+        )
+        legend_draggable_cb = QtWidgets.QCheckBox("Legend draggable", parent)
+        form.addRow("Legend location:", legend_location_combo)
+        form.addRow("Legend font size:", legend_font_size_spin)
+        form.addRow("Legend columns:", legend_columns_spin)
+        form.addRow(legend_show_symbols_cb)
+        form.addRow(legend_text_follow_colors_cb)
+        form.addRow(legend_draggable_cb)
+
+        return {
+            "show_grid": show_grid_cb,
+            "show_legend": show_legend_cb,
+            "title_font": title_font_spin,
+            "label_font": label_font_spin,
+            "tick_font": tick_font_spin,
+            "line_width": line_width_spin,
+            "marker_size": marker_size_spin,
+            "legend_location": legend_location_combo,
+            "legend_font_size": legend_font_size_spin,
+            "legend_columns": legend_columns_spin,
+            "legend_show_symbols": legend_show_symbols_cb,
+            "legend_text_follow_colors": legend_text_follow_colors_cb,
+            "legend_draggable": legend_draggable_cb,
+        }
+
+    def _apply_graph_option_defaults_to_controls(self, plugin_name: str | None = None) -> None:
+        if not self._graph_format_controls:
+            return
+        options = self._effective_graph_options(plugin_name or self._current_plotter_name)
+        self._graph_format_updating = True
+        try:
+            self._set_graph_options_widgets(
+                {
+                    key: widget
+                    for key, widget in self._graph_format_controls.items()
+                    if isinstance(widget, QtWidgets.QWidget)
+                },
+                options,
+            )
+        finally:
+            self._graph_format_updating = False
+        self._sync_tick_mode_inputs()
+        self._sync_aspect_controls()
+
+    def _open_graph_options_dialog(self) -> None:
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Graph options")
+        dialog.setModal(True)
+        dialog.resize(520, 500)
+        root_layout = QtWidgets.QVBoxLayout(dialog)
+        root_layout.setContentsMargins(10, 10, 10, 10)
+        root_layout.setSpacing(8)
+
+        tabs = QtWidgets.QTabWidget(dialog)
+        root_layout.addWidget(tabs, 1)
+
+        global_tab = QtWidgets.QWidget(tabs)
+        global_layout = QtWidgets.QVBoxLayout(global_tab)
+        global_layout.setContentsMargins(8, 8, 8, 8)
+        global_layout.setSpacing(8)
+        global_widgets_holder = QtWidgets.QWidget(global_tab)
+        global_widgets = self._build_graph_options_widgets(global_widgets_holder)
+        global_layout.addWidget(global_widgets_holder)
+        global_layout.addStretch(1)
+        tabs.addTab(global_tab, "Global defaults")
+        self._set_graph_options_widgets(
+            global_widgets,
+            self._effective_graph_options(None),
+        )
+
+        plugin_tab = QtWidgets.QWidget(tabs)
+        plugin_layout = QtWidgets.QVBoxLayout(plugin_tab)
+        plugin_layout.setContentsMargins(8, 8, 8, 8)
+        plugin_layout.setSpacing(8)
+        plugin_selector = QtWidgets.QComboBox(plugin_tab)
+        plugin_names = self._ordered_plotter_names()
+        for name in plugin_names:
+            plugin_selector.addItem(name, name)
+        if self._current_plotter_name:
+            idx = plugin_selector.findData(self._current_plotter_name)
+            if idx >= 0:
+                plugin_selector.setCurrentIndex(idx)
+        plugin_layout.addWidget(plugin_selector)
+        plugin_override_cb = QtWidgets.QCheckBox("Enable plugin override", plugin_tab)
+        plugin_layout.addWidget(plugin_override_cb)
+        plugin_widgets_holder = QtWidgets.QWidget(plugin_tab)
+        plugin_widgets = self._build_graph_options_widgets(plugin_widgets_holder)
+        plugin_layout.addWidget(plugin_widgets_holder)
+        plugin_layout.addStretch(1)
+        tabs.addTab(plugin_tab, "Plugin override")
+
+        def _sync_plugin_editor() -> None:
+            plugin_name = plugin_selector.currentData()
+            plugin_key = str(plugin_name) if isinstance(plugin_name, str) else ""
+            override = self._graph_option_defaults_by_plugin.get(plugin_key)
+            has_override = isinstance(override, dict)
+            plugin_override_cb.blockSignals(True)
+            plugin_override_cb.setChecked(has_override)
+            plugin_override_cb.blockSignals(False)
+            payload = (
+                override
+                if has_override
+                else self._effective_graph_options(plugin_key)
+            )
+            self._set_graph_options_widgets(plugin_widgets, payload)
+            plugin_widgets_holder.setEnabled(plugin_override_cb.isChecked())
+
+        plugin_selector.currentIndexChanged.connect(_sync_plugin_editor)
+        plugin_override_cb.toggled.connect(plugin_widgets_holder.setEnabled)
+        _sync_plugin_editor()
+
+        buttons = QtWidgets.QDialogButtonBox(
+            QtWidgets.QDialogButtonBox.StandardButton.Ok
+            | QtWidgets.QDialogButtonBox.StandardButton.Cancel,
+            parent=dialog,
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        root_layout.addWidget(buttons, 0)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return
+
+        self._graph_option_defaults_global = self._graph_options_from_widgets(global_widgets)
+        plugin_name = plugin_selector.currentData()
+        plugin_key = str(plugin_name) if isinstance(plugin_name, str) else ""
+        if plugin_key:
+            if plugin_override_cb.isChecked():
+                self._graph_option_defaults_by_plugin[plugin_key] = self._graph_options_from_widgets(plugin_widgets)
+            else:
+                self._graph_option_defaults_by_plugin.pop(plugin_key, None)
+        self._save_graph_option_settings()
+        self._apply_graph_option_defaults_to_controls(self._current_plotter_name)
+        self._append_log("Updated shared graph option defaults.")
+
+    def _apply_graph_options_to_axes(self, axes: Any, *, plugin_name: str | None) -> None:
+        if axes is None:
+            return
+        options = self._effective_graph_options(plugin_name)
+        figure = getattr(axes, "figure", None)
+        targets: list[Any]
+        if figure is not None:
+            try:
+                targets = [candidate for candidate in figure.axes if candidate is not None]
+            except Exception:
+                targets = [axes]
+        else:
+            targets = [axes]
+
+        for target_axes in targets:
+            try:
+                target_axes.grid(bool(options["show_grid"]))
+            except Exception:
+                pass
+            try:
+                target_axes.title.set_fontsize(float(options["title_font"]))
+            except Exception:
+                pass
+            try:
+                target_axes.xaxis.label.set_fontsize(float(options["label_font"]))
+                target_axes.yaxis.label.set_fontsize(float(options["label_font"]))
+            except Exception:
+                pass
+            try:
+                target_axes.tick_params(
+                    axis="both",
+                    which="both",
+                    labelsize=float(options["tick_font"]),
+                )
+            except Exception:
+                pass
+            try:
+                for line in target_axes.get_lines():
+                    try:
+                        line.set_linewidth(float(options["line_width"]))
+                    except Exception:
+                        pass
+                    try:
+                        marker = str(line.get_marker()).strip().lower()
+                    except Exception:
+                        marker = ""
+                    if marker and marker != "none":
+                        try:
+                            line.set_markersize(float(options["marker_size"]))
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            show_legend = bool(options["show_legend"])
+            if show_legend:
+                legend = self._sync_axes_legend_with_visible_lines(
+                    target_axes,
+                    plugin_name=plugin_name,
+                )
+                if legend is not None:
+                    state = self._legend_state_snapshot(legend, plugin_name=plugin_name)
+                    state.update(
+                        {
+                            "visible": True,
+                            "loc": str(options["legend_location"]),
+                            "font_size": float(options["legend_font_size"]),
+                            "ncol": int(options["legend_columns"]),
+                            "show_symbols": bool(options["legend_show_symbols"]),
+                            "text_follows_handles": bool(options["legend_text_follow_colors"]),
+                            "draggable": bool(options["legend_draggable"]),
+                        }
+                    )
+                    self._apply_legend_snapshot(legend, state)
+            else:
+                legend = None
+                try:
+                    legend = target_axes.get_legend()
+                except Exception:
+                    legend = None
+                if legend is not None:
+                    try:
+                        legend.set_visible(False)
+                    except Exception:
+                        pass
+
+        self._fit_figure_to_content(figure)
+
     # ------------------------------------------------------------------ Qt hooks
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
         if self._current_plugin is not None:
@@ -365,6 +821,7 @@ class PyPlotWorkbench(PyPlotWindow):
             self.settings.setValue("legend_settings_by_plugin", json.dumps(legend_settings))
         except Exception:
             pass
+        self._save_graph_option_settings()
         self.settings.sync()
         super().closeEvent(event)
 
@@ -489,6 +946,9 @@ class PyPlotWorkbench(PyPlotWindow):
         return []
 
     def _update_action_states(self) -> None:
+        export_txt_action = getattr(self, "export_button", None)
+        if isinstance(export_txt_action, QtGui.QAction):
+            export_txt_action.setEnabled(False)
         export_origin_action = getattr(self, "export_origin_button", None)
         if isinstance(export_origin_action, QtGui.QAction):
             export_origin_action.setEnabled(False)
@@ -970,26 +1430,46 @@ class PyPlotWorkbench(PyPlotWindow):
             "Graph formatting",
             parent=panel or self,
         )
-        form = QtWidgets.QFormLayout()
-        form.setContentsMargins(0, 0, 0, 0)
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(6)
+        format_tabs = QtWidgets.QTabWidget(graph_section)
+        format_tabs.setObjectName("mw_graph_format_tabs")
+        format_tabs.setDocumentMode(True)
+        graph_section_layout.addWidget(format_tabs)
 
-        title_edit = QtWidgets.QLineEdit(graph_section)
-        x_label_edit = QtWidgets.QLineEdit(graph_section)
-        y_label_edit = QtWidgets.QLineEdit(graph_section)
-        title_visible_cb = QtWidgets.QCheckBox("Show", graph_section)
+        def _create_tab(title: str) -> tuple[QtWidgets.QWidget, QtWidgets.QFormLayout]:
+            tab = QtWidgets.QWidget(format_tabs)
+            tab_layout = QtWidgets.QVBoxLayout(tab)
+            tab_layout.setContentsMargins(6, 6, 6, 6)
+            tab_layout.setSpacing(6)
+            form = QtWidgets.QFormLayout()
+            form.setContentsMargins(0, 0, 0, 0)
+            form.setHorizontalSpacing(8)
+            form.setVerticalSpacing(6)
+            tab_layout.addLayout(form)
+            tab_layout.addStretch(1)
+            format_tabs.addTab(tab, title)
+            return tab, form
+
+        text_tab, text_form = _create_tab("Text")
+        axes_tab, axes_form = _create_tab("Axes")
+        ticks_tab, ticks_form = _create_tab("Ticks")
+        legend_tab, legend_form = _create_tab("Legend")
+
+        title_edit = QtWidgets.QLineEdit(text_tab)
+        x_label_edit = QtWidgets.QLineEdit(text_tab)
+        y_label_edit = QtWidgets.QLineEdit(text_tab)
+        title_visible_cb = QtWidgets.QCheckBox("Show", text_tab)
         title_visible_cb.setChecked(True)
-        x_label_visible_cb = QtWidgets.QCheckBox("Show", graph_section)
+        x_label_visible_cb = QtWidgets.QCheckBox("Show", text_tab)
         x_label_visible_cb.setChecked(True)
-        y_label_visible_cb = QtWidgets.QCheckBox("Show", graph_section)
+        y_label_visible_cb = QtWidgets.QCheckBox("Show", text_tab)
         y_label_visible_cb.setChecked(True)
 
         def _label_row(
             edit: QtWidgets.QLineEdit,
             visible_cb: QtWidgets.QCheckBox,
+            parent_widget: QtWidgets.QWidget,
         ) -> QtWidgets.QWidget:
-            row = QtWidgets.QWidget(graph_section)
+            row = QtWidgets.QWidget(parent_widget)
             row_layout = QtWidgets.QHBoxLayout(row)
             row_layout.setContentsMargins(0, 0, 0, 0)
             row_layout.setSpacing(6)
@@ -997,145 +1477,171 @@ class PyPlotWorkbench(PyPlotWindow):
             row_layout.addWidget(edit, 1)
             return row
 
-        form.addRow("Title:", _label_row(title_edit, title_visible_cb))
-        form.addRow("X label:", _label_row(x_label_edit, x_label_visible_cb))
-        form.addRow("Y label:", _label_row(y_label_edit, y_label_visible_cb))
+        text_form.addRow("Title:", _label_row(title_edit, title_visible_cb, text_tab))
+        text_form.addRow("X label:", _label_row(x_label_edit, x_label_visible_cb, text_tab))
+        text_form.addRow("Y label:", _label_row(y_label_edit, y_label_visible_cb, text_tab))
 
-        title_font_spin = QtWidgets.QSpinBox(graph_section)
+        title_font_spin = QtWidgets.QSpinBox(text_tab)
         title_font_spin.setRange(6, 96)
         title_font_spin.setValue(16)
-        label_font_spin = QtWidgets.QSpinBox(graph_section)
+        label_font_spin = QtWidgets.QSpinBox(text_tab)
         label_font_spin.setRange(6, 96)
         label_font_spin.setValue(12)
-        tick_font_spin = QtWidgets.QSpinBox(graph_section)
+        tick_font_spin = QtWidgets.QSpinBox(text_tab)
         tick_font_spin.setRange(6, 96)
         tick_font_spin.setValue(10)
-        form.addRow("Title font:", title_font_spin)
-        form.addRow("Label font:", label_font_spin)
-        form.addRow("Tick label font:", tick_font_spin)
+        text_form.addRow("Title font:", title_font_spin)
+        text_form.addRow("Label font:", label_font_spin)
+        text_form.addRow("Tick label font:", tick_font_spin)
 
-        tick_length_spin = QtWidgets.QDoubleSpinBox(graph_section)
-        tick_length_spin.setRange(0.0, 40.0)
-        tick_length_spin.setSingleStep(0.5)
-        tick_length_spin.setValue(3.5)
-        tick_width_spin = QtWidgets.QDoubleSpinBox(graph_section)
-        tick_width_spin.setRange(0.1, 10.0)
-        tick_width_spin.setSingleStep(0.1)
-        tick_width_spin.setValue(0.8)
-        form.addRow("Tick length:", tick_length_spin)
-        form.addRow("Tick width:", tick_width_spin)
-
-        line_width_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        line_width_spin = QtWidgets.QDoubleSpinBox(text_tab)
         line_width_spin.setRange(0.1, 20.0)
         line_width_spin.setSingleStep(0.1)
         line_width_spin.setValue(1.5)
-        marker_size_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        marker_size_spin = QtWidgets.QDoubleSpinBox(text_tab)
         marker_size_spin.setRange(0.1, 30.0)
         marker_size_spin.setSingleStep(0.2)
         marker_size_spin.setValue(6.0)
-        form.addRow("Line width:", line_width_spin)
-        form.addRow("Marker size:", marker_size_spin)
+        text_form.addRow("Line width:", line_width_spin)
+        text_form.addRow("Marker size:", marker_size_spin)
 
-        figure_width_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        figure_width_spin = QtWidgets.QDoubleSpinBox(axes_tab)
         figure_width_spin.setRange(1.0, 40.0)
         figure_width_spin.setSingleStep(0.2)
         figure_width_spin.setValue(6.0)
-        figure_height_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        figure_height_spin = QtWidgets.QDoubleSpinBox(axes_tab)
         figure_height_spin.setRange(1.0, 30.0)
         figure_height_spin.setSingleStep(0.2)
         figure_height_spin.setValue(4.0)
-        form.addRow("Figure width (in):", figure_width_spin)
-        form.addRow("Figure height (in):", figure_height_spin)
+        axes_form.addRow("Figure width (in):", figure_width_spin)
+        axes_form.addRow("Figure height (in):", figure_height_spin)
 
-        axes_aspect_combo = QtWidgets.QComboBox(graph_section)
+        axes_aspect_combo = QtWidgets.QComboBox(axes_tab)
         axes_aspect_combo.addItem("Auto", "auto")
         axes_aspect_combo.addItem("Equal", "equal")
         axes_aspect_combo.addItem("Custom (Y/X)", "custom")
-        axes_aspect_ratio_spin = QtWidgets.QDoubleSpinBox(graph_section)
+        axes_aspect_ratio_spin = QtWidgets.QDoubleSpinBox(axes_tab)
         axes_aspect_ratio_spin.setRange(0.05, 20.0)
         axes_aspect_ratio_spin.setSingleStep(0.05)
         axes_aspect_ratio_spin.setDecimals(3)
         axes_aspect_ratio_spin.setValue(1.0)
         axes_aspect_combo.currentIndexChanged.connect(self._sync_aspect_controls)
-        form.addRow("Axes aspect:", axes_aspect_combo)
-        form.addRow("Aspect ratio (Y/X):", axes_aspect_ratio_spin)
+        axes_form.addRow("Axes aspect:", axes_aspect_combo)
+        axes_form.addRow("Aspect ratio (Y/X):", axes_aspect_ratio_spin)
 
-        x_scale_combo = QtWidgets.QComboBox(graph_section)
+        x_scale_combo = QtWidgets.QComboBox(axes_tab)
         x_scale_combo.addItem("Linear", "linear")
         x_scale_combo.addItem("Log", "log")
-        y_scale_combo = QtWidgets.QComboBox(graph_section)
+        y_scale_combo = QtWidgets.QComboBox(axes_tab)
         y_scale_combo.addItem("Linear", "linear")
         y_scale_combo.addItem("Log", "log")
-        form.addRow("X scale:", x_scale_combo)
-        form.addRow("Y scale:", y_scale_combo)
+        axes_form.addRow("X scale:", x_scale_combo)
+        axes_form.addRow("Y scale:", y_scale_combo)
 
-        x_value_factor_edit = QtWidgets.QLineEdit(graph_section)
+        x_value_factor_edit = QtWidgets.QLineEdit(axes_tab)
         x_value_factor_edit.setPlaceholderText("1 (for example: 10^-3)")
         x_value_factor_edit.setText("1")
-        y_value_factor_edit = QtWidgets.QLineEdit(graph_section)
+        y_value_factor_edit = QtWidgets.QLineEdit(axes_tab)
         y_value_factor_edit.setPlaceholderText("1 (for example: 10^-3)")
         y_value_factor_edit.setText("1")
         reflect_x_scale_units_cb = QtWidgets.QCheckBox(
             "Reflect X factor in X label unit",
-            graph_section,
+            axes_tab,
         )
         reflect_y_scale_units_cb = QtWidgets.QCheckBox(
             "Reflect Y factor in Y label unit",
-            graph_section,
+            axes_tab,
         )
-        form.addRow("X value factor:", x_value_factor_edit)
-        form.addRow("Y value factor:", y_value_factor_edit)
-        form.addRow(reflect_x_scale_units_cb)
-        form.addRow(reflect_y_scale_units_cb)
+        axes_form.addRow("X value factor:", x_value_factor_edit)
+        axes_form.addRow("Y value factor:", y_value_factor_edit)
+        axes_form.addRow(reflect_x_scale_units_cb)
+        axes_form.addRow(reflect_y_scale_units_cb)
 
-        x_tick_mode_combo = QtWidgets.QComboBox(graph_section)
+        x_min_edit = QtWidgets.QLineEdit(axes_tab)
+        x_min_edit.setPlaceholderText("auto")
+        x_max_edit = QtWidgets.QLineEdit(axes_tab)
+        x_max_edit.setPlaceholderText("auto")
+        y_min_edit = QtWidgets.QLineEdit(axes_tab)
+        y_min_edit.setPlaceholderText("auto")
+        y_max_edit = QtWidgets.QLineEdit(axes_tab)
+        y_max_edit.setPlaceholderText("auto")
+        axes_form.addRow("X min:", x_min_edit)
+        axes_form.addRow("X max:", x_max_edit)
+        axes_form.addRow("Y min:", y_min_edit)
+        axes_form.addRow("Y max:", y_max_edit)
+
+        show_grid_cb = QtWidgets.QCheckBox("Show grid", axes_tab)
+        show_grid_cb.setChecked(True)
+        axes_form.addRow(show_grid_cb)
+
+        tick_length_spin = QtWidgets.QDoubleSpinBox(ticks_tab)
+        tick_length_spin.setRange(0.0, 40.0)
+        tick_length_spin.setSingleStep(0.5)
+        tick_length_spin.setValue(3.5)
+        tick_width_spin = QtWidgets.QDoubleSpinBox(ticks_tab)
+        tick_width_spin.setRange(0.1, 10.0)
+        tick_width_spin.setSingleStep(0.1)
+        tick_width_spin.setValue(0.8)
+        ticks_form.addRow("Tick length:", tick_length_spin)
+        ticks_form.addRow("Tick width:", tick_width_spin)
+
+        x_tick_mode_combo = QtWidgets.QComboBox(ticks_tab)
         x_tick_mode_combo.addItem("Auto", "auto")
         x_tick_mode_combo.addItem("By increment", "step")
         x_tick_mode_combo.addItem("By count", "count")
-        y_tick_mode_combo = QtWidgets.QComboBox(graph_section)
+        y_tick_mode_combo = QtWidgets.QComboBox(ticks_tab)
         y_tick_mode_combo.addItem("Auto", "auto")
         y_tick_mode_combo.addItem("By increment", "step")
         y_tick_mode_combo.addItem("By count", "count")
-        x_tick_step_edit = QtWidgets.QLineEdit(graph_section)
+        x_tick_step_edit = QtWidgets.QLineEdit(ticks_tab)
         x_tick_step_edit.setPlaceholderText("auto")
-        y_tick_step_edit = QtWidgets.QLineEdit(graph_section)
+        y_tick_step_edit = QtWidgets.QLineEdit(ticks_tab)
         y_tick_step_edit.setPlaceholderText("auto")
-        x_tick_count_spin = QtWidgets.QSpinBox(graph_section)
+        x_tick_count_spin = QtWidgets.QSpinBox(ticks_tab)
         x_tick_count_spin.setRange(2, 20)
         x_tick_count_spin.setValue(5)
-        y_tick_count_spin = QtWidgets.QSpinBox(graph_section)
+        y_tick_count_spin = QtWidgets.QSpinBox(ticks_tab)
         y_tick_count_spin.setRange(2, 20)
         y_tick_count_spin.setValue(5)
         x_tick_mode_combo.currentIndexChanged.connect(self._sync_tick_mode_inputs)
         y_tick_mode_combo.currentIndexChanged.connect(self._sync_tick_mode_inputs)
-        form.addRow("X ticks:", x_tick_mode_combo)
-        form.addRow("X increment:", x_tick_step_edit)
-        form.addRow("X count:", x_tick_count_spin)
-        form.addRow("Y ticks:", y_tick_mode_combo)
-        form.addRow("Y increment:", y_tick_step_edit)
-        form.addRow("Y count:", y_tick_count_spin)
+        ticks_form.addRow("X ticks:", x_tick_mode_combo)
+        ticks_form.addRow("X increment:", x_tick_step_edit)
+        ticks_form.addRow("X count:", x_tick_count_spin)
+        ticks_form.addRow("Y ticks:", y_tick_mode_combo)
+        ticks_form.addRow("Y increment:", y_tick_step_edit)
+        ticks_form.addRow("Y count:", y_tick_count_spin)
 
-        x_min_edit = QtWidgets.QLineEdit(graph_section)
-        x_min_edit.setPlaceholderText("auto")
-        x_max_edit = QtWidgets.QLineEdit(graph_section)
-        x_max_edit.setPlaceholderText("auto")
-        y_min_edit = QtWidgets.QLineEdit(graph_section)
-        y_min_edit.setPlaceholderText("auto")
-        y_max_edit = QtWidgets.QLineEdit(graph_section)
-        y_max_edit.setPlaceholderText("auto")
-        form.addRow("X min:", x_min_edit)
-        form.addRow("X max:", x_max_edit)
-        form.addRow("Y min:", y_min_edit)
-        form.addRow("Y max:", y_max_edit)
-
-        show_grid_cb = QtWidgets.QCheckBox("Show grid", graph_section)
-        show_grid_cb.setChecked(True)
-        show_legend_cb = QtWidgets.QCheckBox("Show legend", graph_section)
+        show_legend_cb = QtWidgets.QCheckBox("Show legend", legend_tab)
         show_legend_cb.setChecked(True)
-        form.addRow(show_grid_cb)
-        form.addRow(show_legend_cb)
+        legend_form.addRow(show_legend_cb)
 
-        graph_section_layout.addLayout(form)
+        legend_location_combo = QtWidgets.QComboBox(legend_tab)
+        for label, token in self._legend_location_choices():
+            legend_location_combo.addItem(label, token)
+        legend_form.addRow("Location:", legend_location_combo)
+
+        legend_font_spin = QtWidgets.QSpinBox(legend_tab)
+        legend_font_spin.setRange(6, 96)
+        legend_font_spin.setValue(10)
+        legend_columns_spin = QtWidgets.QSpinBox(legend_tab)
+        legend_columns_spin.setRange(1, 12)
+        legend_columns_spin.setValue(1)
+        legend_form.addRow("Font size:", legend_font_spin)
+        legend_form.addRow("Columns:", legend_columns_spin)
+
+        legend_show_symbols_cb = QtWidgets.QCheckBox("Show symbols", legend_tab)
+        legend_show_symbols_cb.setChecked(True)
+        legend_text_follow_colors_cb = QtWidgets.QCheckBox(
+            "Text follows line colors",
+            legend_tab,
+        )
+        legend_text_follow_colors_cb.setChecked(True)
+        legend_draggable_cb = QtWidgets.QCheckBox("Draggable legend", legend_tab)
+        legend_draggable_cb.setChecked(True)
+        legend_form.addRow(legend_show_symbols_cb)
+        legend_form.addRow(legend_text_follow_colors_cb)
+        legend_form.addRow(legend_draggable_cb)
 
         button_panel = QtWidgets.QWidget(panel or self)
         button_row = QtWidgets.QHBoxLayout(button_panel)
@@ -1173,6 +1679,7 @@ class PyPlotWorkbench(PyPlotWindow):
 
         self._graph_format_controls = {
             "section": graph_section,
+            "format_tabs": format_tabs,
             "title_edit": title_edit,
             "x_label_edit": x_label_edit,
             "y_label_edit": y_label_edit,
@@ -1208,12 +1715,19 @@ class PyPlotWorkbench(PyPlotWindow):
             "y_max_edit": y_max_edit,
             "show_grid_cb": show_grid_cb,
             "show_legend_cb": show_legend_cb,
+            "legend_location_combo": legend_location_combo,
+            "legend_font_spin": legend_font_spin,
+            "legend_columns_spin": legend_columns_spin,
+            "legend_show_symbols_cb": legend_show_symbols_cb,
+            "legend_text_follow_colors_cb": legend_text_follow_colors_cb,
+            "legend_draggable_cb": legend_draggable_cb,
             "button_panel": button_panel,
             "apply_current_btn": apply_current_btn,
             "apply_all_btn": apply_all_btn,
             "refresh_btn": refresh_btn,
             "open_graph_format_btn": open_graph_format_btn,
         }
+        self._apply_graph_option_defaults_to_controls(self._current_plotter_name)
         self._set_graph_format_dialog_section(graph_section)
         self._sync_tick_mode_inputs()
         self._sync_aspect_controls()
@@ -1657,6 +2171,7 @@ class PyPlotWorkbench(PyPlotWindow):
     def _sync_graph_format_controls_from_current_axes(self) -> None:
         axes = self._current_axes()
         if axes is None:
+            self._apply_graph_option_defaults_to_controls(self._current_plotter_name)
             self._set_graph_format_controls_enabled(False)
             return
 
@@ -1696,6 +2211,12 @@ class PyPlotWorkbench(PyPlotWindow):
         y_max_edit = self._control_widget("y_max_edit")
         show_grid_cb = self._control_widget("show_grid_cb")
         show_legend_cb = self._control_widget("show_legend_cb")
+        legend_location_combo = self._control_widget("legend_location_combo")
+        legend_font_spin = self._control_widget("legend_font_spin")
+        legend_columns_spin = self._control_widget("legend_columns_spin")
+        legend_show_symbols_cb = self._control_widget("legend_show_symbols_cb")
+        legend_text_follow_colors_cb = self._control_widget("legend_text_follow_colors_cb")
+        legend_draggable_cb = self._control_widget("legend_draggable_cb")
 
         self._graph_format_updating = True
         try:
@@ -1873,13 +2394,34 @@ class PyPlotWorkbench(PyPlotWindow):
                     show_grid_cb.setChecked(any(bool(line.get_visible()) for line in grid_lines))
                 except Exception:
                     show_grid_cb.setChecked(False)
-            if isinstance(show_legend_cb, QtWidgets.QCheckBox):
+            legend = None
+            try:
+                legend = axes.get_legend()
+            except Exception:
                 legend = None
-                try:
-                    legend = axes.get_legend()
-                except Exception:
-                    legend = None
-                show_legend_cb.setChecked(bool(legend is not None and legend.get_visible()))
+            plugin_name = self._plugin_name_for_axes(axes)
+            legend_state = self._legend_state_snapshot(legend, plugin_name=plugin_name)
+            if isinstance(show_legend_cb, QtWidgets.QCheckBox):
+                show_legend_cb.setChecked(bool(legend_state.get("visible", True)))
+            if isinstance(legend_location_combo, QtWidgets.QComboBox):
+                loc = str(legend_state.get("loc", "best"))
+                idx = legend_location_combo.findData(loc)
+                if idx < 0:
+                    idx = legend_location_combo.findData("best")
+                if idx >= 0:
+                    legend_location_combo.setCurrentIndex(idx)
+            if isinstance(legend_font_spin, QtWidgets.QSpinBox):
+                legend_font_spin.setValue(int(legend_state.get("font_size", 10)))
+            if isinstance(legend_columns_spin, QtWidgets.QSpinBox):
+                legend_columns_spin.setValue(max(1, int(legend_state.get("ncol", 1))))
+            if isinstance(legend_show_symbols_cb, QtWidgets.QCheckBox):
+                legend_show_symbols_cb.setChecked(bool(legend_state.get("show_symbols", True)))
+            if isinstance(legend_text_follow_colors_cb, QtWidgets.QCheckBox):
+                legend_text_follow_colors_cb.setChecked(
+                    bool(legend_state.get("text_follows_handles", True))
+                )
+            if isinstance(legend_draggable_cb, QtWidgets.QCheckBox):
+                legend_draggable_cb.setChecked(bool(legend_state.get("draggable", True)))
         finally:
             self._graph_format_updating = False
         self._sync_tick_mode_inputs()
@@ -1895,6 +2437,15 @@ class PyPlotWorkbench(PyPlotWindow):
         widget = self._control_widget(key)
         if not isinstance(widget, QtWidgets.QWidget):
             return
+        tabs = self._control_widget("format_tabs")
+        if isinstance(tabs, QtWidgets.QTabWidget):
+            for index in range(tabs.count()):
+                page = tabs.widget(index)
+                if page is None:
+                    continue
+                if page is widget or page.isAncestorOf(widget):
+                    tabs.setCurrentIndex(index)
+                    break
 
         def _apply_focus() -> None:
             try:
@@ -2010,6 +2561,12 @@ class PyPlotWorkbench(PyPlotWindow):
         y_tick_count_spin = self._control_widget("y_tick_count_spin")
         show_grid_cb = self._control_widget("show_grid_cb")
         show_legend_cb = self._control_widget("show_legend_cb")
+        legend_location_combo = self._control_widget("legend_location_combo")
+        legend_font_spin = self._control_widget("legend_font_spin")
+        legend_columns_spin = self._control_widget("legend_columns_spin")
+        legend_show_symbols_cb = self._control_widget("legend_show_symbols_cb")
+        legend_text_follow_colors_cb = self._control_widget("legend_text_follow_colors_cb")
+        legend_draggable_cb = self._control_widget("legend_draggable_cb")
 
         title = title_edit.text() if isinstance(title_edit, QtWidgets.QLineEdit) else ""
         x_label = x_label_edit.text() if isinstance(x_label_edit, QtWidgets.QLineEdit) else ""
@@ -2129,6 +2686,36 @@ class PyPlotWorkbench(PyPlotWindow):
         show_grid = bool(show_grid_cb.isChecked()) if isinstance(show_grid_cb, QtWidgets.QCheckBox) else False
         show_legend = (
             bool(show_legend_cb.isChecked()) if isinstance(show_legend_cb, QtWidgets.QCheckBox) else True
+        )
+        legend_location = (
+            str(legend_location_combo.currentData())
+            if isinstance(legend_location_combo, QtWidgets.QComboBox)
+            else "best"
+        )
+        legend_font_size = (
+            float(legend_font_spin.value())
+            if isinstance(legend_font_spin, QtWidgets.QSpinBox)
+            else 10.0
+        )
+        legend_columns = (
+            int(legend_columns_spin.value())
+            if isinstance(legend_columns_spin, QtWidgets.QSpinBox)
+            else 1
+        )
+        legend_show_symbols = (
+            bool(legend_show_symbols_cb.isChecked())
+            if isinstance(legend_show_symbols_cb, QtWidgets.QCheckBox)
+            else True
+        )
+        legend_text_follow_colors = (
+            bool(legend_text_follow_colors_cb.isChecked())
+            if isinstance(legend_text_follow_colors_cb, QtWidgets.QCheckBox)
+            else True
+        )
+        legend_draggable = (
+            bool(legend_draggable_cb.isChecked())
+            if isinstance(legend_draggable_cb, QtWidgets.QCheckBox)
+            else True
         )
 
         x_min = self._float_from_edit("x_min_edit")
@@ -2308,20 +2895,37 @@ class PyPlotWorkbench(PyPlotWindow):
 
                 for axis in sibling_axes:
                     if show_legend:
+                        legend = None
                         try:
-                            self._sync_axes_legend_with_visible_lines(
+                            legend = self._sync_axes_legend_with_visible_lines(
                                 axis,
                                 plugin_name=plugin_name,
                             )
                         except Exception:
                             legend = None
+                        if legend is None:
                             try:
                                 legend = axis.get_legend()
                             except Exception:
                                 legend = None
-                            if legend is None:
+                        if legend is not None:
+                            try:
+                                state = self._legend_state_snapshot(legend, plugin_name=plugin_name)
+                                state.update(
+                                    {
+                                        "visible": True,
+                                        "loc": legend_location,
+                                        "font_size": legend_font_size,
+                                        "ncol": max(1, legend_columns),
+                                        "show_symbols": legend_show_symbols,
+                                        "text_follows_handles": legend_text_follow_colors,
+                                        "draggable": legend_draggable,
+                                    }
+                                )
+                                self._apply_legend_snapshot(legend, state)
+                            except Exception:
                                 try:
-                                    axis.legend(loc="best")
+                                    legend.set_visible(True)
                                 except Exception:
                                     pass
                     else:
@@ -2409,6 +3013,7 @@ class PyPlotWorkbench(PyPlotWindow):
             self._set_plugin_settings_widget(None)
             self._active_plugin_updater = None
             self._set_plot_button_label(None)
+            self._apply_graph_option_defaults_to_controls(None)
             self._update_window_title()
             self._update_action_states()
             return
@@ -2441,6 +3046,7 @@ class PyPlotWorkbench(PyPlotWindow):
             self._set_plugin_settings_widget(plugin.settings_widget())
             plugin.activate()
             self._set_plot_button_label(plugin)
+            self._apply_graph_option_defaults_to_controls(name)
             last_dir = self._plugin_last_directories.get(name)
             if last_dir is not None:
                 self._last_directory = last_dir if last_dir.exists() else self._last_directory

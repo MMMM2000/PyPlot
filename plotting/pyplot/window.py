@@ -661,17 +661,8 @@ class _DockSwitcherWidget(QtWidgets.QWidget):
                 self._tab_bar.setCurrentIndex(index)
                 self._syncing = False
         else:
-            if self._pinned_index == index and not self._docks[index].isFloating():
-                dock = self._docks[index]
-                self._syncing = True
-                dock.show()
-                try:
-                    dock.raise_()
-                except Exception:
-                    pass
-                self._syncing = False
-                self._collapse_timer.stop()
-                return
+            if self._pinned_index == index:
+                self._update_pinned_index(None)
         if self._expanded_index == index:
             self._expanded_index = None
         self._floating_indices.discard(index)
@@ -2779,7 +2770,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
 
         descriptor = self._tab_descriptors.get(tab)
-        if descriptor is None or not descriptor.lines:
+        if descriptor is None:
             QtWidgets.QMessageBox.information(
                 self,
                 "Export TXT",
@@ -2788,39 +2779,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
 
         plugin_name = self._tab_plugin_name(descriptor)
-        series: list[tuple[str, Any, Any]] = []
-        for index, state in enumerate(descriptor.lines.values(), start=1):
-            label = state.label or f"Series {index}"
-            line = state.line
-            visible = True
-            getter = getattr(line, "get_visible", None)
-            if callable(getter):
-                try:
-                    visible = bool(getter())
-                except Exception:
-                    visible = True
-            if not visible:
-                continue
-            x_data = state.x_data()
-            y_data = state.y_data()
-            if x_data is None or y_data is None:
-                continue
-            series.append((label, x_data, y_data))
+        series = self._tab_series_data(descriptor, include_hidden=False)
         if not series:
-            for index, state in enumerate(descriptor.lines.values(), start=1):
-                x_data = state.x_data()
-                y_data = state.y_data()
-                if x_data is None or y_data is None:
-                    continue
-                label = state.label or f"Series {index}"
-                series.append((label, x_data, y_data))
-            if not series:
-                QtWidgets.QMessageBox.information(
-                    self,
-                    "Export TXT",
-                    "No plotted data is available to export.",
-                )
-                return
+            series = self._tab_series_data(descriptor, include_hidden=True)
+        if not series:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Export TXT",
+                "No plotted data is available to export.",
+            )
+            return
 
         def _clean_stem(text: str) -> str:
             stem_chars = [
@@ -3013,6 +2981,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             series.append((label, x_vals, y_vals))
         return series
 
+    def _tab_has_exportable_series(
+        self,
+        tab: QtWidgets.QWidget | None = None,
+    ) -> bool:
+        target_tab = tab or self.tab_widget.currentWidget()
+        if not isinstance(target_tab, QtWidgets.QWidget):
+            return False
+        descriptor = self._tab_descriptors.get(target_tab)
+        if descriptor is None:
+            return False
+        if self._tab_series_data(descriptor, include_hidden=False):
+            return True
+        return bool(self._tab_series_data(descriptor, include_hidden=True))
+
     def _shared_plot_workbook_key(
         self,
         tab: QtWidgets.QWidget,
@@ -3065,12 +3047,12 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             columns[x_name] = pd.Series(x_vals)
             columns[y_name] = pd.Series(y_vals)
             metadata[x_name] = WorksheetColumnMeta(
-                long_name=f"{label} {x_label}",
+                long_name=x_label,
                 units=x_unit,
                 comments=label,
             )
             metadata[y_name] = WorksheetColumnMeta(
-                long_name=f"{label} {y_label}",
+                long_name=y_label,
                 units=y_unit,
                 comments=label,
             )
@@ -3178,7 +3160,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            exported, errors = self._push_workbooks_to_origin(workbooks)
+            exported, plotted, errors = self._push_workbooks_to_origin(
+                workbooks,
+                create_graphs=True,
+            )
         except ModuleNotFoundError:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -3197,7 +3182,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         if exported:
             schedule_origin_release()
-            message = f"Sent {exported} worksheet{'s' if exported != 1 else ''} to Origin."
+            message = (
+                f"Sent {exported} worksheet{'s' if exported != 1 else ''} to Origin "
+                f"and created {plotted} graph{'s' if plotted != 1 else ''}."
+            )
             self._append_log(message)
             QtWidgets.QMessageBox.information(self, "Open in Origin", message)
         else:
@@ -3234,7 +3222,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return
 
         try:
-            exported, errors = self._push_workbooks_to_origin(workbooks)
+            exported, _plotted, errors = self._push_workbooks_to_origin(workbooks)
         except ModuleNotFoundError:
             QtWidgets.QMessageBox.warning(
                 self,
@@ -3276,12 +3264,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
 
     def _push_workbooks_to_origin(
-        self, workbooks: Iterable[WorkbookData]
-    ) -> tuple[int, list[str]]:
+        self,
+        workbooks: Iterable[WorkbookData],
+        *,
+        create_graphs: bool = False,
+    ) -> tuple[int, int, list[str]]:
         errors: list[str] = []
         exported = 0
+        plotted = 0
 
-        with origin_session() as origin_any:
+        with origin_session(keep_open=True) as origin_any:
             schedule_origin_release()
             workbook_names: set[str] = set()
             for workbook in workbooks:
@@ -3374,8 +3366,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
                     self._apply_origin_metadata(origin_any, sheet, worksheet)
                     exported += 1
+                    if create_graphs:
+                        try:
+                            if self._plot_origin_worksheet(
+                                origin_any,
+                                sheet,
+                                workbook,
+                                worksheet,
+                                roles=roles,
+                            ):
+                                plotted += 1
+                        except Exception as exc:  # pragma: no cover - Origin runtime dependent
+                            errors.append(f"{workbook.name}/{worksheet.name} graph: {exc}")
 
-        return exported, errors
+        return exported, plotted, errors
 
     def _apply_origin_metadata(
         self,
@@ -3390,32 +3394,275 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             sheet.activate()
         except Exception:
             pass
+        try:
+            header_rows = getattr(sheet, "header_rows", None)
+            if callable(header_rows):
+                header_rows("LUC")
+        except Exception:
+            pass
 
         for index, column in enumerate(columns):
             meta = worksheet.columns.get(
                 column, WorksheetColumnMeta(long_name=str(column))
             )
             label = meta.long_name or str(column)
-            if label:
-                try:
-                    sheet.set_label(index, label)
-                except Exception:
-                    pass
-            if meta.comments:
-                try:
-                    sheet.set_comment(index, meta.comments)
-                except Exception:
-                    pass
+            self._set_origin_column_text(origin_any, sheet, index, label, code="L", field="lname")
+            self._set_origin_column_text(
+                origin_any,
+                sheet,
+                index,
+                meta.units,
+                code="U",
+                field="unit",
+            )
+            self._set_origin_column_text(
+                origin_any,
+                sheet,
+                index,
+                meta.comments,
+                code="C",
+                field="comment",
+            )
 
-            for value, field in ((meta.units, "unit"), (meta.formula, "formula")):
-                if not value:
-                    continue
-                safe_value = self._escape_origin_text(str(value))
-                command = f"wks.col{index + 1}.{field}$=\"{safe_value}\";"
+            if meta.formula:
+                safe_formula = self._escape_origin_text(str(meta.formula))
+                command = f"wks.col{index + 1}.formula$=\"{safe_formula}\";"
                 try:
                     origin_any.lt_exec(command)
                 except Exception:
                     continue
+
+    def _set_origin_column_text(
+        self,
+        origin_any: Any,
+        sheet: Any,
+        index: int,
+        value: str,
+        *,
+        code: str,
+        field: str,
+    ) -> None:
+        text = str(value or "").strip()
+        if not text:
+            return
+
+        set_label = getattr(sheet, "set_label", None)
+        if callable(set_label):
+            try:
+                set_label(index, text, code)
+                return
+            except TypeError:
+                if code == "L":
+                    try:
+                        set_label(index, text)
+                        return
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        if code == "C":
+            set_comment = getattr(sheet, "set_comment", None)
+            if callable(set_comment):
+                try:
+                    set_comment(index, text)
+                    return
+                except Exception:
+                    pass
+
+        safe_text = self._escape_origin_text(text)
+        command = f"wks.col{index + 1}.{field}$=\"{safe_text}\";"
+        try:
+            origin_any.lt_exec(command)
+        except Exception:
+            return
+
+    def _origin_roles_for_sheet(self, frame: pd.DataFrame, roles: str) -> list[str]:
+        columns = list(frame.columns) if frame is not None else []
+        if not columns:
+            return []
+        role_list = [char.upper() for char in str(roles or "") if char.strip()]
+        if len(role_list) < len(columns):
+            fallback = [char.upper() for char in self._origin_axis_roles(frame)]
+            role_list.extend(fallback[len(role_list): len(columns)])
+        if len(role_list) < len(columns):
+            role_list.extend(["Y"] * (len(columns) - len(role_list)))
+        role_list = role_list[: len(columns)]
+        if "X" not in role_list:
+            role_list[0] = "X"
+        return role_list
+
+    def _origin_plot_pairs(self, frame: pd.DataFrame, roles: str) -> list[tuple[int, int]]:
+        columns = list(frame.columns) if frame is not None else []
+        if not columns:
+            return []
+        role_list = self._origin_roles_for_sheet(frame, roles)
+        x_indices = [index for index, role in enumerate(role_list) if role == "X"]
+        y_indices = [index for index, role in enumerate(role_list) if role == "Y"]
+        if not x_indices:
+            x_indices = [0]
+        if not y_indices:
+            y_indices = [index for index in range(len(columns)) if index not in x_indices]
+        pairs: list[tuple[int, int]] = []
+        seen: set[tuple[int, int]] = set()
+        for y_index in y_indices:
+            x_index = x_indices[0]
+            for candidate in x_indices:
+                if candidate <= y_index:
+                    x_index = candidate
+                else:
+                    break
+            if x_index == y_index:
+                continue
+            pair = (x_index, y_index)
+            if pair in seen:
+                continue
+            seen.add(pair)
+            pairs.append(pair)
+        return pairs
+
+    def _origin_axis_title(
+        self,
+        worksheet: WorksheetData,
+        column_name: str,
+    ) -> str:
+        meta = worksheet.columns.get(column_name)
+        if isinstance(meta, WorksheetColumnMeta):
+            long_name = str(meta.long_name or "").strip() or str(column_name)
+            units = str(meta.units or "").strip()
+            if units:
+                return f"{long_name} [{units}]"
+            return long_name
+        return str(column_name)
+
+    def _apply_origin_plot_label(
+        self,
+        plot_obj: Any,
+        worksheet: WorksheetData,
+        y_index: int,
+    ) -> None:
+        columns = list(worksheet.dataframe.columns)
+        if y_index < 0 or y_index >= len(columns):
+            return
+        column_name = columns[y_index]
+        meta = worksheet.columns.get(column_name)
+        label = ""
+        if isinstance(meta, WorksheetColumnMeta):
+            label = str(meta.comments or "").strip()
+            if not label:
+                label = str(meta.long_name or "").strip()
+        if not label:
+            label = str(column_name)
+        for attr, value in (
+            ("lname", label),
+            ("long_name", label),
+            ("name", self._origin_safe_token(label, fallback="Plot")[:13]),
+        ):
+            try:
+                setattr(plot_obj, attr, value)
+            except Exception:
+                continue
+
+    def _plot_origin_worksheet(
+        self,
+        origin_any: Any,
+        sheet: Any,
+        workbook: WorkbookData,
+        worksheet: WorksheetData,
+        *,
+        roles: str,
+    ) -> bool:
+        frame = worksheet.dataframe
+        pairs = self._origin_plot_pairs(frame, roles)
+        if not pairs:
+            return False
+
+        graph_obj = None
+        for template in ("line", "scatter", ""):
+            try:
+                if template:
+                    graph_obj = origin_any.new_graph(template=template)
+                else:
+                    graph_obj = origin_any.new_graph()
+            except Exception:
+                continue
+            if graph_obj is not None:
+                break
+        if graph_obj is None:
+            return False
+
+        graph = cast(Any, graph_obj)
+        try:
+            graph.activate()
+        except Exception:
+            pass
+
+        layer = None
+        try:
+            layer = graph[0]
+        except Exception:
+            layer = None
+        if layer is None:
+            add_layer = getattr(graph, "add_layer", None)
+            if callable(add_layer):
+                try:
+                    layer = add_layer()
+                except Exception:
+                    layer = None
+        if layer is None:
+            return False
+
+        plotted_any = False
+        for x_index, y_index in pairs:
+            add_plot = getattr(layer, "add_plot", None)
+            if not callable(add_plot):
+                continue
+            plot_obj = None
+            try:
+                plot_obj = add_plot(sheet, coly=y_index, colx=x_index, type='y')
+            except TypeError:
+                try:
+                    plot_obj = add_plot(sheet, coly=y_index, colx=x_index)
+                except Exception:
+                    continue
+            except Exception:
+                continue
+            if plot_obj is None:
+                continue
+            plotted_any = True
+            self._apply_origin_plot_label(plot_obj, worksheet, y_index)
+        if not plotted_any:
+            return False
+
+        columns = list(frame.columns)
+        x_name = columns[pairs[0][0]]
+        y_name = columns[pairs[0][1]]
+        x_title = self._origin_axis_title(worksheet, x_name)
+        y_title = self._origin_axis_title(worksheet, y_name)
+        graph_title = str(workbook.name or worksheet.name or "Plot").strip() or "Plot"
+        if worksheet.name and worksheet.name != "Plot data":
+            graph_title = f"{graph_title} - {worksheet.name}"
+
+        graph_short = self._origin_safe_token(graph_title, fallback="Graph")[:13]
+        for attr, value in (("lname", graph_title), ("name", graph_short)):
+            try:
+                setattr(graph, attr, value)
+            except Exception:
+                continue
+
+        for command in (
+            "page.antialias=1;",
+            "layer -aa 1;",
+            f'title -s "{self._escape_origin_text(graph_title)}";',
+            f'lab -xb "{self._escape_origin_text(x_title)}";',
+            f'lab -yl "{self._escape_origin_text(y_title)}";',
+            "legend -o;",
+        ):
+            try:
+                origin_any.lt_exec(command)
+            except Exception:
+                continue
+        return True
 
     def _origin_axis_roles(self, frame: pd.DataFrame) -> str:
         if frame is None or frame.empty:
@@ -3479,6 +3726,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             for workbook in self._workbooks.values()
             for key in workbook.worksheets
         )
+        export_txt_button = getattr(self, "export_button", None)
+        if isinstance(export_txt_button, QtGui.QAction):
+            plugin = getattr(self, "_current_plugin", None)
+            uses_shared_export = (
+                isinstance(plugin, PyPlotPlugin)
+                and type(plugin).export_txt is PyPlotPlugin.export_txt
+            )
+            if uses_shared_export:
+                export_txt_button.setEnabled(self._tab_has_exportable_series())
         export_button = getattr(self, "export_origin_button", None)
         if isinstance(export_button, QtGui.QAction):
             export_button.setEnabled(has_worksheets)
@@ -3901,9 +4157,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._create_dock_switcher(
                     left_docks,
                     side="left",
-                    enable_hover=sys.platform != "darwin",
-                    enable_overlay=sys.platform != "darwin",
-                    auto_collapse=sys.platform != "darwin",
+                    enable_hover=False,
+                    enable_overlay=False,
+                    auto_collapse=False,
                     initial_visible=(0,),
                 )
             )
@@ -3916,9 +4172,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._create_dock_switcher(
                     right_docks,
                     side="right",
-                    enable_hover=sys.platform != "darwin",
-                    enable_overlay=sys.platform != "darwin",
-                    auto_collapse=sys.platform != "darwin",
+                    enable_hover=False,
+                    enable_overlay=False,
+                    auto_collapse=False,
                     initial_visible=(0,),
                 )
             )
@@ -7314,10 +7570,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         env_override = os.environ.get("MW_DISABLE_DOCK_SWITCHER", "")
         if env_override.strip().lower() in {"1", "true", "yes", "on"}:
             return False
-        # Native dock widgets are more predictable on Windows laptops
-        # (DPI scaling + window-manager interactions).
-        if sys.platform.startswith("win"):
-            return False
+        # Keep switchers available on all platforms unless explicitly disabled.
         return True
 
     def _create_dock_switcher(
@@ -7403,19 +7656,30 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
         if self._primary_dock_layout_refreshing:
             return
-        docks = [dock for dock in (getattr(self, "project_dock", None), getattr(self, "object_dock", None)) if isinstance(dock, QtWidgets.QDockWidget)]
-        if not docks:
+        all_docks = [
+            dock
+            for dock in (getattr(self, "project_dock", None), getattr(self, "object_dock", None))
+            if isinstance(dock, QtWidgets.QDockWidget)
+        ]
+        if not all_docks:
             return
         self._primary_dock_layout_refreshing = True
         try:
+            docks: list[QtWidgets.QDockWidget] = []
             widths: list[int] = []
-            for dock in docks:
-                try:
-                    dock.show()
-                except Exception:
-                    pass
+            for dock in all_docks:
+                if not self._primary_dock_should_show(dock):
+                    continue
+                if not dock.isVisible():
+                    try:
+                        dock.show()
+                    except Exception:
+                        continue
                 base_width = max(dock.sizeHint().width(), PRIMARY_DOCK_DEFAULT_WIDTH)
+                docks.append(dock)
                 widths.append(self._primary_dock_target_width(dock, base_width))
+            if not docks:
+                return
             try:
                 self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
             except Exception:
@@ -7537,9 +7801,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         key = self._primary_dock_visibility_key(dock)
         if key is None:
             return True
-        name = dock.objectName() if isinstance(dock, QtWidgets.QDockWidget) else ""
-        if name in {"projectExplorerDock", "objectManagerDock"}:
-            return True
         value = self.settings.value(key, "")
         if isinstance(value, str):
             return value.lower() not in {"0", "false", "no"}
@@ -7628,10 +7889,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 dock.raise_()
             except Exception:
                 pass
-        try:
-            self._pin_primary_dock_switchers()
-        except Exception:
-            pass
 
     def _pin_primary_dock_switchers(self) -> None:
         panels = getattr(self, "_dock_switcher_panels", [])
@@ -7679,8 +7936,9 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         if getattr(self, "_retabbing_docks", False):
             return
         _ = dock
-        self._queue_retabify_primary_docks()
         self._remember_primary_dock_state(dock, visible=dock.isVisible())
+        if dock.isVisible():
+            self._queue_retabify_primary_docks()
 
     def _queue_retabify_primary_docks(self) -> None:
         if getattr(self, "_retabify_pending", False):
@@ -7734,7 +7992,11 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 None,
             )
 
-            if isinstance(project_dock, QtWidgets.QDockWidget) and not project_dock.isFloating():
+            if (
+                isinstance(project_dock, QtWidgets.QDockWidget)
+                and project_dock.isVisible()
+                and not project_dock.isFloating()
+            ):
                 if isinstance(left_switcher, QtWidgets.QDockWidget):
                     try:
                         self.splitDockWidget(
@@ -7756,6 +8018,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             if (
                 isinstance(right_switcher, QtWidgets.QDockWidget)
                 and isinstance(object_dock, QtWidgets.QDockWidget)
+                and object_dock.isVisible()
                 and not object_dock.isFloating()
             ):
                 try:
@@ -9787,7 +10050,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return info
 
     def _normalize_docks_initial(self) -> None:
-        """Ensure primary docks start at readable sizes and stay visible."""
+        """Ensure visible primary docks start at readable sizes."""
 
         if getattr(self, "_normalizing_docks", False):
             return
@@ -9805,14 +10068,15 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             ):
                 if not isinstance(dock, QtWidgets.QDockWidget):
                     continue
+                if not self._primary_dock_should_show(dock):
+                    continue
                 width = self._primary_dock_target_width(dock, PRIMARY_DOCK_DEFAULT_WIDTH)
                 dock_specs.append((dock, width))
-                if self._primary_dock_should_show(dock):
-                    try:
-                        dock.setFloating(False)
-                        dock.show()
-                    except Exception:
-                        pass
+                try:
+                    dock.setFloating(False)
+                    dock.show()
+                except Exception:
+                    pass
             for dock, width in dock_specs:
                 try:
                     self._apply_dock_width(dock, width)
@@ -9823,11 +10087,6 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
                 widths = [width for _, width in dock_specs]
                 try:
                     self.resizeDocks(docks, widths, QtCore.Qt.Orientation.Horizontal)
-                    self.resizeDocks(
-                        docks,
-                        [max(360, self.height() // 2)] * len(docks),
-                        QtCore.Qt.Orientation.Vertical,
-                    )
                 except Exception:
                     pass
             panels = [
