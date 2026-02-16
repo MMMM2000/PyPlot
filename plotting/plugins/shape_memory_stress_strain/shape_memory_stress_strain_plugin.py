@@ -12,6 +12,9 @@ from plotting.plugins._window import window_api
 
 from . import core
 
+LAYOUT_SEPARATE_TABS = "separate_tabs"
+LAYOUT_DUAL_AXIS = "dual_axis_overlay"
+
 
 @dataclass
 class ShapeMemoryEntry:
@@ -31,6 +34,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         self._dataset: list[ShapeMemoryEntry] = []
         self._plot_tabs: list[QtWidgets.QWidget] = []
         self._summary_label: QtWidgets.QLabel | None = None
+        self._layout_mode_combo: QtWidgets.QComboBox | None = None
         self._seg_tolerance_spin: QtWidgets.QDoubleSpinBox | None = None
 
     def panel_widget(self) -> QtWidgets.QWidget | None:  # type: ignore[override]
@@ -74,6 +78,12 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             parent=container,
             layout_factory=_form_layout,
         )
+        layout_mode_combo = QtWidgets.QComboBox(section)
+        layout_mode_combo.addItem("Separate tabs", LAYOUT_SEPARATE_TABS)
+        layout_mode_combo.addItem("Dual-axis overlay (one graph)", LAYOUT_DUAL_AXIS)
+        self._layout_mode_combo = layout_mode_combo
+        form.addRow("Graph layout:", layout_mode_combo)
+
         tolerance_spin = QtWidgets.QDoubleSpinBox(section)
         tolerance_spin.setDecimals(8)
         tolerance_spin.setRange(0.0, 1.0)
@@ -145,6 +155,13 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             return float(self._seg_tolerance_spin.value())
         return core.STRAIN_DIRECTION_TOLERANCE
 
+    def _plot_layout_mode(self) -> str:
+        if isinstance(self._layout_mode_combo, QtWidgets.QComboBox):
+            mode = self._layout_mode_combo.currentData()
+            if isinstance(mode, str):
+                return mode
+        return LAYOUT_SEPARATE_TABS
+
     def _clear_tabs(self) -> None:
         self.clear_plot_tabs(self._plot_tabs)
 
@@ -166,10 +183,65 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
 
         self._clear_tabs()
         tolerance = self._segmentation_tolerance()
+        layout_mode = self._plot_layout_mode()
         window_module = window_api()
         plots_created = 0
 
         for entry in self._dataset:
+            if layout_mode == LAYOUT_DUAL_AXIS:
+                try:
+                    figure = core.make_dual_axis_overlay_figure(
+                        entry.frame,
+                        title=entry.path.stem,
+                        tolerance=tolerance,
+                    )
+                except Exception as exc:
+                    self._log(
+                        f"Failed to plot dual-axis overlay for {entry.path.name}: {exc}",
+                        level="error",
+                    )
+                    continue
+
+                canvas = FigureCanvas(figure)
+                canvas.setFocusPolicy(QtCore.Qt.FocusPolicy.ClickFocus)
+
+                tab = QtWidgets.QWidget()
+                tab_layout = QtWidgets.QVBoxLayout(tab)
+                tab_layout.setContentsMargins(0, 0, 0, 0)
+                tab_layout.addWidget(canvas)
+
+                axes = figure.axes[0] if figure.axes else None
+                descriptor = window_module.TabDescriptor(
+                    kind="shape_memory_dual_axis_overlay",
+                    title=f"{entry.path.stem} - Dual-axis overlay",
+                    root_label=f"{entry.path.stem} Dual-axis overlay",
+                    x_label="Displacement (mm) / Strain (%)",
+                    y_label="Load (g) / Stress (MPa)",
+                    canvas=canvas,
+                    axes=axes,
+                    lines={},
+                    metadata={
+                        "path": str(entry.path),
+                        "plot_kind": "shape_memory_dual_axis_overlay",
+                        "layout_mode": layout_mode,
+                        "tolerance": tolerance,
+                        "segments": len(
+                            core.split_segments_by_strain_direction(
+                                entry.frame["strain_pct"].tolist(),
+                                tolerance=tolerance,
+                            )
+                        ),
+                    },
+                )
+
+                tab_label = f"{entry.path.stem} - Dual-axis overlay"
+                index = self.host.tab_widget.addTab(tab, tab_label)
+                self.host.tab_widget.setCurrentIndex(index)
+                self.host._register_plot_tab(tab, canvas, axes, descriptor)
+                self._plot_tabs.append(tab)
+                plots_created += 1
+                continue
+
             plot_builders = (
                 (
                     "shape_memory_load_displacement",
@@ -217,6 +289,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
                     metadata={
                         "path": str(entry.path),
                         "plot_kind": plot_kind,
+                        "layout_mode": layout_mode,
                         "tolerance": tolerance,
                         "segments": len(
                             core.split_segments_by_strain_direction(

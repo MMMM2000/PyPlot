@@ -461,6 +461,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             2. Enter sample geometry (initial length `L0` and wire diameter). Stress is
                calculated from load and cross-section area; strain is calculated relative to the
                last zero-load displacement point before loading starts.
+               Optionally connect a Microwire Database Builder project (`.pydpj` / `.pypdj`) and
+               use **Auto-fill diameter** to pull `d (µm)` directly from the project data.
             3. Click **Start**, then manually enter displacement and load values point-by-point.
                Use **Add Point** to append each measurement.
 
@@ -479,6 +481,8 @@ _HELP_CONTENT: dict[str, dict[str, str]] = {
             * The **Logged Data** table updates row-by-row during measurement and is shown under
               the graph area for easier monitoring while logging.
             * Use **Plot view** to switch between both graphs and `Load vs Displacement` only.
+            * **Plot view** also supports a dual-axis overlay: load/displacement on the left+bottom
+              axes and stress/strain on the right+top axes within one combined graph.
             * Use **Reset d=0** to quickly return displacement input to zero without clearing data.
 
             ### Output format

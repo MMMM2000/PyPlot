@@ -20,3 +20,7 @@
 - Added a quick-start option in the `Session not started` popup so users can start logging directly when trying to add a point.
 - Corrected micrometer-points scaling in the manual logger from `10^-3 mm` to `10^-2 mm`, including updated axis/input labels (`x10$_{-2}$`).
 - Data migration: corrected sample measurements in `sample_data/manual_stress-strain` by multiplying displacement and strain values by 10 to match the updated `10^-2 mm` points scale.
+- Added a dual-axis overlay plot-view mode in the manual logger (`Load vs Displacement` on left+bottom, `Stress vs Strain` on right+top) while keeping existing separate-plot modes.
+- Added matching layout options to the PyPlot `Shape Memory Stress/Strain` plugin: separate tabs or one dual-axis overlay graph.
+- Added Sample Geometry integration with Microwire Data Builder project files (`.pydpj`/`.pypdj`): you can connect a project and auto-fill wire diameter from `d (µm)`, with composition+microwire matching and manual fallback selection.
+- Fixed manual logger name-builder layout collapse by enforcing stable minimum field/panel heights so filename metadata inputs stay readable.

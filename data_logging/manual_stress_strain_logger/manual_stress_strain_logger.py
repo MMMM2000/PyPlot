@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import math
 import os
+import json
 import re
 import sys
 import time
 from importlib import import_module
 from pathlib import Path
-from typing import TextIO
+from typing import Any, Mapping, TextIO
 
 from PyQt6 import QtCore, QtGui, QtWidgets
 
@@ -94,6 +95,7 @@ DISPLACEMENT_MODE_MM = "mm"
 DISPLACEMENT_MODE_POINTS = "points"
 PLOT_VIEW_BOTH = "both"
 PLOT_VIEW_RAW_ONLY = "raw_only"
+PLOT_VIEW_DUAL_AXIS = "dual_axis"
 UI_MAX_DECIMALS = 3
 MICROMETER_DISPLAY_CYCLE = 50
 MICROMETER_DISPLAY_STEP = 5
@@ -101,6 +103,8 @@ STRAIN_DIRECTION_TOLERANCE = 1e-9
 LOADING_COLORS = ("#1f77b4", "#2ca02c", "#17becf", "#9467bd")
 UNLOADING_COLORS = ("#d62728", "#ff7f0e", "#8c564b", "#e377c2")
 HOLD_COLORS = ("#7f7f7f",)
+BUILDER_PROJECT_KIND = "MicrowireDataBuilder"
+PROJECT_DIAMETER_KEYS = ("d (µm)", "d (μm)", "d (um)", "diameter")
 
 # Keep references to windows created via main() to prevent collection when
 # launched from the master launcher.
@@ -118,6 +122,10 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         super().__init__(parent)
         self.target = target
         self.settings = QtCore.QSettings("microwire", "manual_stress_strain_name_builder")
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Preferred,
+        )
 
         layout = QtWidgets.QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -157,8 +165,19 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         self.s_notes.setPlaceholderText("optional, e.g. no glass")
         form.addRow("Notes:", self.s_notes)
 
+        field_min_height = max(24, self.s_comp.sizeHint().height())
+        for field in (
+            self.s_comp,
+            self.s_sample,
+            self.s_number,
+            self.s_current,
+            self.s_notes,
+        ):
+            field.setMinimumHeight(field_min_height)
+
         self.stacked.addWidget(stress)
         self.stacked.addWidget(QtWidgets.QWidget(self))  # custom mode placeholder
+        self.stacked.setMinimumHeight(field_min_height * 5 + 36)
 
         buttons = QtWidgets.QHBoxLayout()
         buttons.addStretch(1)
@@ -512,7 +531,9 @@ class MainWindow(QtWidgets.QMainWindow):
         log_grid.addWidget(self.label_session_status, 3, 0, 1, 4)
 
         self.name_builder = ManualFileNameBuilderWidget(self.group_log, self.lineEdit_log_file)
+        self.name_builder.setMinimumHeight(220)
         log_grid.addWidget(self.name_builder, 4, 0, 1, 4)
+        log_grid.setRowStretch(4, 1)
 
         left_layout.addWidget(self.group_log)
 
@@ -544,6 +565,25 @@ class MainWindow(QtWidgets.QMainWindow):
         diameter_layout.addWidget(self.spin_diameter, stretch=1)
         diameter_layout.addWidget(self.combo_diameter_unit)
         geom_form.addRow("Diameter:", diameter_row)
+
+        project_path_row = QtWidgets.QWidget(self.group_geometry)
+        project_path_layout = QtWidgets.QHBoxLayout(project_path_row)
+        project_path_layout.setContentsMargins(0, 0, 0, 0)
+        project_path_layout.setSpacing(6)
+        self.line_builder_project = QtWidgets.QLineEdit(self.group_geometry)
+        self.line_builder_project.setReadOnly(True)
+        self.line_builder_project.setPlaceholderText("Optional: connect .pydpj / .pypdj")
+        project_path_layout.addWidget(self.line_builder_project, stretch=1)
+        self.pushButton_connect_project = QtWidgets.QPushButton("Connect...")
+        self.pushButton_connect_project.setFixedWidth(96)
+        project_path_layout.addWidget(self.pushButton_connect_project, stretch=0)
+        geom_form.addRow("DB project:", project_path_row)
+
+        project_action_row = QtWidgets.QHBoxLayout()
+        self.pushButton_autofill_diameter = QtWidgets.QPushButton("Auto-fill diameter")
+        project_action_row.addWidget(self.pushButton_autofill_diameter)
+        project_action_row.addStretch(1)
+        geom_form.addRow("", project_action_row)
 
         self.label_cross_section = QtWidgets.QLabel("N/A")
         geom_form.addRow("Area:", self.label_cross_section)
@@ -670,6 +710,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_plot_view = QtWidgets.QComboBox(right_panel)
         self.combo_plot_view.addItem("Load vs Displacement + Stress vs Strain", PLOT_VIEW_BOTH)
         self.combo_plot_view.addItem("Load vs Displacement only", PLOT_VIEW_RAW_ONLY)
+        self.combo_plot_view.addItem(
+            "Dual-axis overlay (left/bottom + right/top)",
+            PLOT_VIEW_DUAL_AXIS,
+        )
         plot_controls.addWidget(self.combo_plot_view, stretch=1)
         plot_controls.addStretch(1)
         right_layout.addLayout(plot_controls)
@@ -685,7 +729,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self._plot_toolbar: QtWidgets.QWidget | None = None
         self.ax_raw = None
         self.ax_derived = None
-        self._plot_derived_visible = True
+        self.ax_overlay_right = None
+        self.ax_overlay_top = None
+        self._plot_view_state = PLOT_VIEW_BOTH
 
         if FigureCanvas is not None:
             self.figure = Figure(figsize=(10, 5), tight_layout=True)
@@ -696,7 +742,7 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._plot_toolbar = toolbar
                 plot_layout.addWidget(toolbar)
             plot_layout.addWidget(canvas)
-            self._rebuild_plot_axes(show_derived=True)
+            self._rebuild_plot_axes(view_mode=PLOT_VIEW_BOTH)
         else:
             placeholder = QtWidgets.QLabel("Matplotlib Qt backend is unavailable.")
             placeholder.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
@@ -758,6 +804,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_clear_points.clicked.connect(self.clear_points)
         self.pushButton_reset_displacement.clicked.connect(self.handle_reset_displacement)
         self.pushButton_scale_rezero.clicked.connect(self.handle_scale_rezero)
+        self.pushButton_connect_project.clicked.connect(self.choose_builder_project)
+        self.pushButton_autofill_diameter.clicked.connect(self.autofill_diameter_from_project)
 
         self.lineEdit_log_file.returnPressed.connect(self.start_session)
         self.spin_displacement.lineEdit().returnPressed.connect(self._handle_displacement_enter)
@@ -834,6 +882,9 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_diameter_unit.setCurrentIndex(
             int(self.settings.value("diameter_unit", 0) or 0)
         )
+        builder_project_path = self.settings.value("builder_project_path", "", type=str).strip()
+        self.line_builder_project.setText(builder_project_path)
+        self.line_builder_project.setToolTip(builder_project_path)
 
         stored_mode = self.settings.value("displacement_mode", DISPLACEMENT_MODE_MM, type=str)
         self.combo_displacement_mode.blockSignals(True)
@@ -853,7 +904,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_plot_view.blockSignals(True)
         self._select_plot_view(stored_plot_view)
         self.combo_plot_view.blockSignals(False)
-        self._rebuild_plot_axes(show_derived=self._plot_view_shows_derived())
+        self._rebuild_plot_axes(view_mode=self._current_plot_view())
 
     def _save_settings(self) -> None:
         dir_text = self.lineEdit_log_dir.text().strip() or self.log_dir
@@ -865,6 +916,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("l0_mm", self.spin_l0_mm.value())
         self.settings.setValue("diameter_value", self.spin_diameter.value())
         self.settings.setValue("diameter_unit", self.combo_diameter_unit.currentIndex())
+        self.settings.setValue("builder_project_path", self.line_builder_project.text().strip())
         self.settings.setValue("displacement_mode", self._current_displacement_mode())
         self.settings.setValue("input_disp_mm", self._displacement_mm_from_input())
         self.settings.setValue("input_load_raw", self.spin_load_g.value())
@@ -893,7 +945,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return PLOT_VIEW_BOTH
 
     def _plot_view_shows_derived(self) -> bool:
-        return self._current_plot_view() == PLOT_VIEW_BOTH
+        return self._current_plot_view() in (PLOT_VIEW_BOTH, PLOT_VIEW_DUAL_AXIS)
 
     def _apply_displacement_mode(self, mode: str, *, preserve_mm: bool = True) -> None:
         current_mm = self._displacement_mm_from_input() if preserve_mm else 0.0
@@ -902,7 +954,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.spin_displacement.setDecimals(0)
             self.spin_displacement.setSingleStep(10.0)
             self.spin_displacement.setValue(0.0)
-            self.spin_displacement.setSuffix(" x10₋₂ mm")
+            self.spin_displacement.setSuffix(" x10⁻² mm")
         else:
             self.spin_displacement.setDecimals(UI_MAX_DECIMALS)
             self.spin_displacement.setSingleStep(0.01)
@@ -933,7 +985,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def _displacement_display_values(self) -> tuple[list[float], str]:
         if self._current_displacement_mode() == DISPLACEMENT_MODE_POINTS:
             values = [value_mm / MM_PER_POINT for value_mm in self.displacements]
-            return values, r"Displacement (x10$_{-2}$ mm)"
+            return values, r"Displacement (x10$^{-2}$ mm)"
         return list(self.displacements), "Displacement (mm)"
 
     def _handle_displacement_mode_changed(self, _index: int) -> None:
@@ -943,16 +995,27 @@ class MainWindow(QtWidgets.QMainWindow):
         self._refresh_plot()
 
     def _handle_plot_view_changed(self, _index: int) -> None:
-        self._rebuild_plot_axes(show_derived=self._plot_view_shows_derived())
+        self._rebuild_plot_axes(view_mode=self._current_plot_view())
         self._refresh_plot()
 
-    def _rebuild_plot_axes(self, *, show_derived: bool) -> None:
+    def _rebuild_plot_axes(self, *, view_mode: str) -> None:
         if self.figure is None:
             return
         self.figure.clear()
-        self.ax_raw = self.figure.add_subplot(111 if not show_derived else 121)
-        self.ax_derived = self.figure.add_subplot(122) if show_derived else None
-        self._plot_derived_visible = show_derived
+        self.ax_overlay_right = None
+        self.ax_overlay_top = None
+        if view_mode == PLOT_VIEW_BOTH:
+            self.ax_raw = self.figure.add_subplot(121)
+            self.ax_derived = self.figure.add_subplot(122)
+        elif view_mode == PLOT_VIEW_RAW_ONLY:
+            self.ax_raw = self.figure.add_subplot(111)
+            self.ax_derived = None
+        else:
+            self.ax_raw = self.figure.add_subplot(111)
+            self.ax_overlay_right = self.ax_raw.twinx()
+            self.ax_overlay_top = self.ax_overlay_right.twiny()
+            self.ax_derived = self.ax_overlay_top
+        self._plot_view_state = view_mode
 
     def _update_micrometer_display(self) -> None:
         if not hasattr(self, "line_micrometer_display"):
@@ -965,6 +1028,292 @@ class MainWindow(QtWidgets.QMainWindow):
         zero_display = int(self.spin_micrometer_zero.value())
         displayed = self.micrometer_display_from_points(points_value, zero_display)
         self.line_micrometer_display.setText(str(displayed))
+
+    def _project_dialog_start_path(self) -> str:
+        selected = self.line_builder_project.text().strip()
+        if selected:
+            selected_path = Path(selected)
+            if selected_path.exists():
+                if selected_path.is_file():
+                    return str(selected_path.parent)
+                return str(selected_path)
+        log_dir = self.lineEdit_log_dir.text().strip() or self.root_log_dir
+        if self._is_valid_dir(log_dir):
+            return log_dir
+        return str(Path.home())
+
+    @staticmethod
+    def _normalize_comp_token(value: object) -> str:
+        return str(value or "").strip().lower()
+
+    @staticmethod
+    def _normalize_microwire_token(value: object) -> str:
+        text = str(value or "").strip().lower()
+        text = text.replace("\\", "/").replace("_", "/")
+        text = re.sub(r"\s+", "", text)
+        return text.strip("/")
+
+    @staticmethod
+    def _to_positive_float(value: object) -> float | None:
+        if isinstance(value, (int, float)):
+            parsed = float(value)
+        elif isinstance(value, str):
+            cleaned = value.strip().replace(",", ".")
+            if not cleaned:
+                return None
+            try:
+                parsed = float(cleaned)
+            except ValueError:
+                return None
+        else:
+            return None
+        if not math.isfinite(parsed) or parsed <= 0:
+            return None
+        return parsed
+
+    @staticmethod
+    def _parse_project_key(key_value: object) -> tuple[str, str]:
+        if not isinstance(key_value, str):
+            return "", ""
+        parts = [part.strip() for part in key_value.split("|")]
+        if len(parts) < 3:
+            return "", ""
+        composition = parts[0]
+        microwire = "/".join(part for part in parts[1:] if part)
+        return composition, microwire
+
+    @classmethod
+    def extract_project_diameter_candidates(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(payload, Mapping):
+            return []
+
+        sections_payload = payload.get("sections")
+        section_items: list[tuple[str, Mapping[str, Any]]] = []
+        if isinstance(sections_payload, Mapping):
+            microscope_payload = sections_payload.get("microscope")
+            if isinstance(microscope_payload, Mapping):
+                section_items.append(("microscope", microscope_payload))
+            for section_name, section_payload in sections_payload.items():
+                if section_name == "microscope":
+                    continue
+                if isinstance(section_payload, Mapping):
+                    section_items.append((str(section_name), section_payload))
+        else:
+            section_items.append(("root", payload))
+
+        candidates: list[dict[str, Any]] = []
+        for section_name, section_payload in section_items:
+            rows_payload = section_payload.get("rows")
+            if not isinstance(rows_payload, (list, tuple)):
+                continue
+            for row_payload in rows_payload:
+                if not isinstance(row_payload, Mapping):
+                    continue
+                diameter_um: float | None = None
+                for key in PROJECT_DIAMETER_KEYS:
+                    diameter_um = cls._to_positive_float(row_payload.get(key))
+                    if diameter_um is not None:
+                        break
+                if diameter_um is None:
+                    continue
+
+                key_comp, key_wire = cls._parse_project_key(row_payload.get("_key"))
+                composition = str(
+                    row_payload.get("Composition")
+                    or row_payload.get("composition")
+                    or key_comp
+                    or ""
+                ).strip()
+                microwire = str(
+                    row_payload.get("Microwire")
+                    or row_payload.get("microwire")
+                    or key_wire
+                    or ""
+                ).strip()
+
+                candidates.append(
+                    {
+                        "section": section_name,
+                        "composition": composition,
+                        "microwire": microwire,
+                        "diameter_um": diameter_um,
+                        "composition_norm": cls._normalize_comp_token(composition),
+                        "microwire_norm": cls._normalize_microwire_token(microwire),
+                    }
+                )
+        return candidates
+
+    @classmethod
+    def choose_project_diameter_candidate(
+        cls,
+        candidates: list[dict[str, Any]],
+        *,
+        composition_hint: str,
+        microwire_hint: str,
+    ) -> int | None:
+        if not candidates:
+            return None
+
+        comp_norm = cls._normalize_comp_token(composition_hint)
+        wire_norm = cls._normalize_microwire_token(microwire_hint)
+
+        def _matching_indices(
+            *,
+            require_comp: bool,
+            require_wire: bool,
+        ) -> list[int]:
+            indices: list[int] = []
+            for index, candidate in enumerate(candidates):
+                candidate_comp = cls._normalize_comp_token(candidate.get("composition"))
+                candidate_wire = cls._normalize_microwire_token(candidate.get("microwire"))
+                if require_comp and candidate_comp != comp_norm:
+                    continue
+                if require_wire and candidate_wire != wire_norm:
+                    continue
+                indices.append(index)
+            return indices
+
+        if comp_norm and wire_norm:
+            matches = _matching_indices(require_comp=True, require_wire=True)
+            if matches:
+                return matches[0]
+
+        if comp_norm:
+            matches = _matching_indices(require_comp=True, require_wire=False)
+            if len(matches) == 1:
+                return matches[0]
+
+        if wire_norm:
+            matches = _matching_indices(require_comp=False, require_wire=True)
+            if len(matches) == 1:
+                return matches[0]
+
+        if len(candidates) == 1:
+            return 0
+        return None
+
+    def _project_candidate_label(self, candidate: Mapping[str, Any]) -> str:
+        composition = str(candidate.get("composition", "")).strip() or "?"
+        microwire = str(candidate.get("microwire", "")).strip() or "?"
+        section = str(candidate.get("section", "")).strip() or "section"
+        diameter_um = float(candidate.get("diameter_um", 0.0) or 0.0)
+        return (
+            f"{composition} | {microwire} | "
+            f"d={self._format_ui(diameter_um)} um ({section})"
+        )
+
+    def _load_builder_project_payload(self, project_path: str) -> Mapping[str, Any] | None:
+        path_obj = Path(project_path)
+        try:
+            payload = json.loads(path_obj.read_text(encoding="utf-8"))
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Project read error",
+                f"Failed to open project file:\n{exc}",
+            )
+            return None
+        if not isinstance(payload, Mapping):
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Project format",
+                "Project file does not contain a valid JSON object.",
+            )
+            return None
+
+        kind = payload.get("kind")
+        if isinstance(kind, str) and kind and kind != BUILDER_PROJECT_KIND:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Project format",
+                f"Unsupported project kind '{kind}'. Expected '{BUILDER_PROJECT_KIND}'.",
+            )
+            return None
+        return payload
+
+    def choose_builder_project(self) -> None:
+        start_path = self._project_dialog_start_path()
+        filters = "Microwire Project (*.pydpj *.pypdj);;All files (*)"
+        selected_path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Select microwire project",
+            start_path,
+            filters,
+        )
+        if not selected_path:
+            return
+        self.line_builder_project.setText(selected_path)
+        self.line_builder_project.setToolTip(selected_path)
+        self.autofill_diameter_from_project()
+
+    def autofill_diameter_from_project(self) -> None:
+        project_path = self.line_builder_project.text().strip()
+        if not project_path:
+            self.choose_builder_project()
+            return
+
+        payload = self._load_builder_project_payload(project_path)
+        if payload is None:
+            return
+
+        candidates = self.extract_project_diameter_candidates(payload)
+        if not candidates:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Diameter not found",
+                "No valid diameter values were found in this project file.",
+            )
+            return
+
+        composition_hint = ""
+        microwire_hint = ""
+        if isinstance(getattr(self.name_builder, "s_comp", None), QtWidgets.QLineEdit):
+            composition_hint = self.name_builder.s_comp.text().strip()
+        if isinstance(getattr(self.name_builder, "s_sample", None), QtWidgets.QLineEdit):
+            microwire_hint = self.name_builder.s_sample.text().strip()
+
+        candidate_index = self.choose_project_diameter_candidate(
+            candidates,
+            composition_hint=composition_hint,
+            microwire_hint=microwire_hint,
+        )
+
+        if candidate_index is None:
+            labels = [self._project_candidate_label(candidate) for candidate in candidates]
+            selected_label, confirmed = QtWidgets.QInputDialog.getItem(
+                self,
+                "Select diameter",
+                "Choose the diameter record to apply:",
+                labels,
+                0,
+                False,
+            )
+            if not confirmed:
+                return
+            try:
+                candidate_index = labels.index(selected_label)
+            except ValueError:
+                candidate_index = None
+        if candidate_index is None:
+            return
+
+        selected = candidates[candidate_index]
+        diameter_um = self._to_positive_float(selected.get("diameter_um"))
+        if diameter_um is None:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Diameter not found",
+                "Selected record does not contain a valid positive diameter.",
+            )
+            return
+
+        unit_index = self.combo_diameter_unit.findText("um")
+        if unit_index >= 0:
+            self.combo_diameter_unit.setCurrentIndex(unit_index)
+        self.spin_diameter.setValue(diameter_um)
 
     def _current_format(self) -> str:
         return self.name_builder.combo_format.currentText().strip()
@@ -989,6 +1338,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_l0_mm.setEnabled(not active)
         self.spin_diameter.setEnabled(not active)
         self.combo_diameter_unit.setEnabled(not active)
+        self.pushButton_connect_project.setEnabled(not active)
+        self.pushButton_autofill_diameter.setEnabled(not active)
 
         self._update_action_buttons()
 
@@ -1136,27 +1487,46 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_plot(self) -> None:
         if self.figure is None or self.canvas is None:
             return
-        show_derived = self._plot_view_shows_derived()
-        if self.ax_raw is None or show_derived != self._plot_derived_visible:
-            self._rebuild_plot_axes(show_derived=show_derived)
+        view_mode = self._current_plot_view()
+        if self.ax_raw is None or view_mode != self._plot_view_state:
+            self._rebuild_plot_axes(view_mode=view_mode)
+        if self.ax_raw is None:
+            return
+        if view_mode == PLOT_VIEW_DUAL_AXIS:
+            self._refresh_plot_dual_axis()
+        else:
+            self._refresh_plot_standard(show_derived=(view_mode == PLOT_VIEW_BOTH))
+        self.figure.tight_layout()
+        self.canvas.draw_idle()
+
+    def _style_axis(
+        self,
+        axis: object,
+        *,
+        axis_bg: str,
+        axis_fg: str,
+        show_grid: bool,
+        clear_first: bool = True,
+    ) -> None:
+        if clear_first:
+            axis.clear()
+        axis.set_facecolor(axis_bg)
+        axis.tick_params(colors=axis_fg)
+        for spine in axis.spines.values():
+            spine.set_color(axis_fg)
+        if show_grid:
+            axis.grid(True, color=(0.35, 0.35, 0.35, 0.35))
+        else:
+            axis.grid(False)
+
+    def _refresh_plot_standard(self, *, show_derived: bool) -> None:
         if self.ax_raw is None:
             return
 
         axis_bg, axis_fg, _ = self._apply_plot_theme()
-        self.ax_raw.clear()
+        self._style_axis(self.ax_raw, axis_bg=axis_bg, axis_fg=axis_fg, show_grid=True)
         if show_derived and self.ax_derived is not None:
-            self.ax_derived.clear()
-
-        axes = [self.ax_raw]
-        if show_derived and self.ax_derived is not None:
-            axes.append(self.ax_derived)
-
-        for axis in axes:
-            axis.set_facecolor(axis_bg)
-            axis.tick_params(colors=axis_fg)
-            for spine in axis.spines.values():
-                spine.set_color(axis_fg)
-            axis.grid(True, color=(0.35, 0.35, 0.35, 0.35))
+            self._style_axis(self.ax_derived, axis_bg=axis_bg, axis_fg=axis_fg, show_grid=True)
 
         x_values, x_label = self._displacement_display_values()
 
@@ -1233,8 +1603,96 @@ class MainWindow(QtWidgets.QMainWindow):
                 color=axis_fg,
             )
 
-        self.figure.tight_layout()
-        self.canvas.draw_idle()
+    def _refresh_plot_dual_axis(self) -> None:
+        if (
+            self.ax_raw is None
+            or self.ax_overlay_right is None
+            or self.ax_overlay_top is None
+        ):
+            return
+
+        axis_bg, axis_fg, _ = self._apply_plot_theme()
+        self._style_axis(self.ax_raw, axis_bg=axis_bg, axis_fg=axis_fg, show_grid=True)
+        self._style_axis(
+            self.ax_overlay_right,
+            axis_bg=axis_bg,
+            axis_fg=axis_fg,
+            show_grid=False,
+        )
+        self._style_axis(
+            self.ax_overlay_top,
+            axis_bg=axis_bg,
+            axis_fg=axis_fg,
+            show_grid=False,
+        )
+
+        self.ax_overlay_right.patch.set_alpha(0.0)
+        self.ax_overlay_top.patch.set_alpha(0.0)
+        self.ax_overlay_right.xaxis.set_visible(False)
+        self.ax_overlay_top.yaxis.set_visible(False)
+
+        x_values, x_label = self._displacement_display_values()
+        self.ax_raw.set_title("Load vs Displacement + Stress vs Strain", color=axis_fg)
+        self.ax_raw.set_xlabel(x_label, color=axis_fg)
+        self.ax_raw.set_ylabel("Load (g)", color=axis_fg)
+        self.ax_overlay_top.set_xlabel("Strain (%)", color=axis_fg)
+        self.ax_overlay_right.set_ylabel("Stress (MPa)", color=axis_fg)
+
+        styles = self.build_segment_styles(self.strains)
+
+        raw_plotted = False
+        if x_values:
+            for _direction, start_index, end_index, label, color in styles:
+                if start_index >= len(x_values):
+                    continue
+                end = min(end_index, len(x_values) - 1, len(self.loads) - 1)
+                if end < start_index:
+                    continue
+                self.ax_raw.plot(
+                    x_values[start_index : end + 1],
+                    self.loads[start_index : end + 1],
+                    color=color,
+                    marker="o",
+                    linewidth=1.6,
+                    markersize=4,
+                    label=f"Load {label}",
+                )
+                raw_plotted = True
+        else:
+            self.ax_raw.text(
+                0.5,
+                0.5,
+                "No data yet",
+                transform=self.ax_raw.transAxes,
+                ha="center",
+                va="center",
+                color=axis_fg,
+            )
+
+        stress_plotted = False
+        if self.strains:
+            for _direction, start_index, end_index, label, color in styles:
+                if start_index >= len(self.strains):
+                    continue
+                end = min(end_index, len(self.strains) - 1, len(self.stresses) - 1)
+                if end < start_index:
+                    continue
+                self.ax_overlay_top.plot(
+                    self.strains[start_index : end + 1],
+                    self.stresses[start_index : end + 1],
+                    color=color,
+                    linestyle="--",
+                    marker="o",
+                    linewidth=1.4,
+                    markersize=3.5,
+                    label=f"Stress {label}",
+                )
+                stress_plotted = True
+
+        if raw_plotted:
+            self.ax_raw.legend(loc="upper left", fontsize=8)
+        if stress_plotted:
+            self.ax_overlay_top.legend(loc="upper right", fontsize=8)
 
     def choose_log_dir(self) -> None:
         current_dir = self.lineEdit_log_dir.text().strip() or self.log_dir

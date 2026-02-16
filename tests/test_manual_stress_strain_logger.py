@@ -111,3 +111,56 @@ def test_segment_styles_label_loops_by_direction() -> None:
     styles = logger_mod.MainWindow.build_segment_styles(strains)
     labels = [entry[3] for entry in styles]
     assert labels == ["Loading 1", "Unloading 1", "Loading 2"]
+
+
+def test_extract_project_diameter_candidates_prefers_microscope_section() -> None:
+    payload = {
+        "kind": "MicrowireDataBuilder",
+        "sections": {
+            "microscope": {
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "5/4",
+                        "d (µm)": 19.4,
+                    }
+                ]
+            },
+            "other": {
+                "rows": [
+                    {
+                        "Composition": "Other",
+                        "Microwire": "1/1",
+                        "diameter": 11.0,
+                    }
+                ]
+            },
+        },
+    }
+
+    candidates = logger_mod.MainWindow.extract_project_diameter_candidates(payload)
+
+    assert len(candidates) == 2
+    assert candidates[0]["section"] == "microscope"
+    assert candidates[0]["diameter_um"] == pytest.approx(19.4)
+
+
+def test_choose_project_diameter_candidate_matches_underscore_microwire() -> None:
+    candidates = [
+        {
+            "composition": "Ni50Fe27Ga23",
+            "microwire": "5/4",
+            "diameter_um": 19.4,
+        },
+        {
+            "composition": "Ni50Fe27Ga23",
+            "microwire": "6/2",
+            "diameter_um": 15.0,
+        },
+    ]
+    selected = logger_mod.MainWindow.choose_project_diameter_candidate(
+        candidates,
+        composition_hint="Ni50Fe27Ga23",
+        microwire_hint="5_4",
+    )
+    assert selected == 0

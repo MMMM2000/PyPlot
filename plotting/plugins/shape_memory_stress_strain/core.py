@@ -226,11 +226,71 @@ def make_stress_strain_figure(
     return fig
 
 
+def make_dual_axis_overlay_figure(
+    frame: pd.DataFrame,
+    *,
+    title: str,
+    tolerance: float = STRAIN_DIRECTION_TOLERANCE,
+) -> Figure:
+    fig = Figure(figsize=(8.5, 5), tight_layout=True)
+    ax_load = fig.add_subplot(111)
+    ax_stress_y = ax_load.twinx()
+    ax_stress = ax_stress_y.twiny()
+
+    x_raw = frame["displacement_mm"].tolist()
+    y_raw = frame["load_g"].tolist()
+    x_stress = frame["strain_pct"].tolist()
+    y_stress = frame["stress_mpa"].tolist()
+    segments = build_segment_styles(x_stress, tolerance=tolerance)
+
+    ax_load.set_title(f"{title}\nDual-axis overlay")
+    ax_load.set_xlabel("Displacement (mm)")
+    ax_load.set_ylabel("Load (g)")
+    ax_stress.set_xlabel("Strain (%)")
+    ax_stress_y.set_ylabel("Stress (MPa)")
+
+    ax_stress.patch.set_alpha(0.0)
+    ax_stress_y.patch.set_alpha(0.0)
+    ax_stress_y.xaxis.set_visible(False)
+    ax_stress.yaxis.set_visible(False)
+
+    load_plotted = _plot_segmented_curve(
+        ax_load,
+        x_raw,
+        y_raw,
+        segments,
+        label_prefix="Load ",
+    )
+    stress_plotted = _plot_segmented_curve(
+        ax_stress,
+        x_stress,
+        y_stress,
+        segments,
+        label_prefix="Stress ",
+        linestyle="--",
+        linewidth=1.4,
+        markersize=3.5,
+    )
+
+    if load_plotted:
+        ax_load.legend(loc="upper left", fontsize=8)
+    if stress_plotted:
+        ax_stress.legend(loc="upper right", fontsize=8)
+
+    ax_load.grid(True, alpha=0.3)
+    return fig
+
+
 def _plot_segmented_curve(
     axis: object,
     x_values: Sequence[float],
     y_values: Sequence[float],
     segments: Sequence[DirectionSegment],
+    *,
+    label_prefix: str = "",
+    linestyle: str = "-",
+    linewidth: float = 1.6,
+    markersize: float = 4.0,
 ) -> bool:
     plotted = False
     for segment in segments:
@@ -247,9 +307,10 @@ def _plot_segmented_curve(
             y_values[start_index : end_index + 1],
             color=segment.color,
             marker="o",
-            linewidth=1.6,
-            markersize=4,
-            label=segment.label,
+            linestyle=linestyle,
+            linewidth=linewidth,
+            markersize=markersize,
+            label=f"{label_prefix}{segment.label}",
         )
         plotted = True
     return plotted
