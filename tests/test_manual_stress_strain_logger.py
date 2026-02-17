@@ -30,6 +30,23 @@ def test_strain_percent_from_reference() -> None:
     assert strain == pytest.approx(0.15)
 
 
+def test_effective_l0_subtracts_start_offset() -> None:
+    effective = logger_mod.MainWindow.effective_initial_length_mm(20.0, 0.1)
+    assert effective == pytest.approx(19.9)
+
+
+def test_strain_with_start10_uses_effective_l0() -> None:
+    effective_l0 = logger_mod.MainWindow.effective_initial_length_mm(20.0, 0.1)
+    assert effective_l0 is not None
+    strain = logger_mod.MainWindow.strain_percent(0.1, effective_l0, 0.0)
+    assert strain == pytest.approx(0.50251256, rel=1e-6)
+
+
+def test_effective_l0_invalid_when_offset_too_large() -> None:
+    effective = logger_mod.MainWindow.effective_initial_length_mm(0.1, 0.1)
+    assert effective is None
+
+
 def test_reference_uses_last_zero_before_loading() -> None:
     reference = None
     preload = True
@@ -172,6 +189,32 @@ def test_extract_project_diameter_candidates_prefers_microscope_section() -> Non
     assert candidates[0]["diameter_um"] == pytest.approx(19.4)
 
 
+def test_extract_project_annealing_candidates_reads_row_sources() -> None:
+    payload = {
+        "kind": "MicrowireDataBuilder",
+        "sections": {
+            "annealing": {
+                "rows": [
+                    {
+                        "Composition": "Ni50Fe27Ga23",
+                        "Microwire": "9/3",
+                        "_sources": [
+                            "C:/data/Ni50Fe27Ga23 9_3 s1 1000mA.txt",
+                            "C:/data/Ni50Fe27Ga23 9_3 s2 70mA.txt",
+                        ],
+                    }
+                ]
+            }
+        },
+    }
+
+    candidates = logger_mod.MainWindow.extract_project_annealing_candidates(payload)
+    assert len(candidates) == 1
+    assert candidates[0]["composition"] == "Ni50Fe27Ga23"
+    assert candidates[0]["microwire"] == "9/3"
+    assert len(candidates[0]["sources"]) == 2
+
+
 def test_choose_project_diameter_candidate_matches_underscore_microwire() -> None:
     candidates = [
         {
@@ -191,6 +234,48 @@ def test_choose_project_diameter_candidate_matches_underscore_microwire() -> Non
         microwire_hint="5_4",
     )
     assert selected == 0
+
+
+def test_choose_project_annealing_candidate_matches_wire_hint() -> None:
+    candidates = [
+        {"composition": "Ni50Fe27Ga23", "microwire": "9/3", "sources": ["a.txt"]},
+        {"composition": "Ni50Fe27Ga23", "microwire": "5/4", "sources": ["b.txt"]},
+    ]
+    selected = logger_mod.MainWindow.choose_project_annealing_candidate(
+        candidates,
+        composition_hint="Ni50Fe27Ga23",
+        microwire_hint="9_3",
+    )
+    assert selected == 0
+
+
+def test_annealing_setpoint_from_source_parses_ma_token() -> None:
+    setpoint = logger_mod.MainWindow.annealing_setpoint_from_source(
+        "Ni50Fe27Ga23 9_3 s1 1000mA.txt"
+    )
+    assert setpoint == pytest.approx(1000.0)
+
+
+def test_annealing_current_bucket_detects_high_and_low() -> None:
+    high_bucket = logger_mod.MainWindow.annealing_current_bucket(
+        source_path="sample s1 1000mA.txt",
+        currents_mA=[0.0, 1000.0],
+    )
+    low_bucket = logger_mod.MainWindow.annealing_current_bucket(
+        source_path="sample s2 70mA.txt",
+        currents_mA=[0.0, 70.0],
+    )
+    assert high_bucket == "high"
+    assert low_bucket == "low"
+
+
+def test_filter_annealing_sources_by_sample_prefers_matching_token() -> None:
+    sources = [
+        "Ni50Fe27Ga23 9_3 s1 1000mA.txt",
+        "Ni50Fe27Ga23 9_3 s2 70mA.txt",
+    ]
+    filtered = logger_mod.MainWindow.filter_annealing_sources_by_sample(sources, "s2")
+    assert filtered == ["Ni50Fe27Ga23 9_3 s2 70mA.txt"]
 
 
 def test_format_single_axis_coord_reports_one_pair() -> None:

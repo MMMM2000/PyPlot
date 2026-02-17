@@ -111,6 +111,11 @@ UNLOADING_COLORS = ("#d62728", "#ff7f0e", "#8c564b", "#e377c2")
 HOLD_COLORS = ("#7f7f7f",)
 BUILDER_PROJECT_KIND = "MicrowireDataBuilder"
 PROJECT_DIAMETER_KEYS = ("d (µm)", "d (μm)", "d (um)", "diameter")
+ANNEALING_FALLBACK_DIRS = (
+    "sample_data/database_builder/current annealing data",
+    "sample_data/current_annealing",
+)
+ANNEALING_HIGH_CURRENT_THRESHOLD_MA = 500.0
 
 # Keep references to windows created via main() to prevent collection when
 # launched from the master launcher.
@@ -289,6 +294,86 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         self.load_settings()
 
 
+class AnnealingPreviewDialog(QtWidgets.QDialog):
+    """Non-modal preview of current annealing curves for a selected sample."""
+
+    def __init__(
+        self,
+        parent: QtWidgets.QWidget | None,
+        title: str,
+        series: list[dict[str, Any]],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"Current Annealing Preview - {title}")
+        self.resize(980, 760)
+
+        layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        if FigureCanvas is None:
+            label = QtWidgets.QLabel("Matplotlib Qt backend is unavailable.", self)
+            label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+            layout.addWidget(label, stretch=1)
+            return
+
+        figure = Figure(figsize=(9.0, 7.0), tight_layout=True)
+        canvas = FigureCanvas(figure)
+        if NavigationToolbar is not None:
+            toolbar = NavigationToolbar(canvas, self)
+            layout.addWidget(toolbar)
+        layout.addWidget(canvas, stretch=1)
+
+        axis_high = figure.add_subplot(121)
+        axis_low = figure.add_subplot(122)
+
+        high_series = [entry for entry in series if str(entry.get("bucket", "")) == "high"]
+        low_series = [entry for entry in series if str(entry.get("bucket", "")) != "high"]
+
+        def _plot_bucket(
+            axis: Any,
+            bucket_series: list[dict[str, Any]],
+            bucket_title: str,
+            empty_text: str,
+        ) -> None:
+            for entry in bucket_series:
+                label = str(entry.get("label", "Series"))
+                currents = entry.get("currents")
+                resistances = entry.get("resistances")
+                if currents is None or resistances is None:
+                    continue
+                if len(resistances) == 0:
+                    continue
+                axis.plot(
+                    currents,
+                    resistances,
+                    marker="o",
+                    linewidth=1.2,
+                    markersize=3.2,
+                    label=label,
+                )
+            axis.set_title(bucket_title)
+            axis.set_xlabel("Current (mA)")
+            axis.set_ylabel("Resistance (Ohm)")
+            axis.grid(True, alpha=0.35)
+            if bucket_series:
+                axis.legend(loc="best", fontsize=8)
+            else:
+                axis.text(
+                    0.5,
+                    0.5,
+                    empty_text,
+                    transform=axis.transAxes,
+                    ha="center",
+                    va="center",
+                )
+
+        _plot_bucket(axis_high, high_series, f"{title}\nHigh current", "No high-current curves")
+        _plot_bucket(axis_low, low_series, f"{title}\nLow current", "No low-current curves")
+
+        canvas.draw_idle()
+
+
 class MainWindow(QtWidgets.QMainWindow):
     """Manual displacement/load logger with live stress-strain conversion."""
 
@@ -320,6 +405,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._pending_displacement_mm: float | None = None
         self._last_load_change_ts: float | None = None
         self._last_logged_load: float | None = None
+        self._annealing_preview_windows: list[QtWidgets.QWidget] = []
 
         self._build_ui()
         self._bind_signals()
@@ -370,6 +456,16 @@ class MainWindow(QtWidgets.QMainWindow):
         if reference_mm is None or initial_length_mm <= 0:
             return None
         return ((displacement_mm - reference_mm) / initial_length_mm) * 100.0
+
+    @staticmethod
+    def effective_initial_length_mm(
+        initial_length_mm: float,
+        start_offset_mm: float,
+    ) -> float | None:
+        effective = float(initial_length_mm) - max(0.0, float(start_offset_mm))
+        if effective <= 0.0:
+            return None
+        return effective
 
     @staticmethod
     def stress_mpa_from_load_g(load_g: float, diameter_mm: float) -> float | None:
@@ -606,6 +702,8 @@ class MainWindow(QtWidgets.QMainWindow):
         project_action_row = QtWidgets.QHBoxLayout()
         self.pushButton_autofill_diameter = QtWidgets.QPushButton("Auto-fill diameter")
         project_action_row.addWidget(self.pushButton_autofill_diameter)
+        self.pushButton_show_annealing = QtWidgets.QPushButton("Show annealing graphs")
+        project_action_row.addWidget(self.pushButton_show_annealing)
         project_action_row.addStretch(1)
         geom_form.addRow("", project_action_row)
 
@@ -835,6 +933,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pushButton_scale_rezero.clicked.connect(self.handle_scale_rezero)
         self.pushButton_connect_project.clicked.connect(self.choose_builder_project)
         self.pushButton_autofill_diameter.clicked.connect(self.autofill_diameter_from_project)
+        self.pushButton_show_annealing.clicked.connect(self.show_project_annealing_graphs)
 
         self.lineEdit_log_file.returnPressed.connect(self.start_session)
         self.spin_displacement.lineEdit().returnPressed.connect(self._handle_displacement_enter)
@@ -987,6 +1086,12 @@ class MainWindow(QtWidgets.QMainWindow):
     def _start_displacement_mm(self) -> float:
         return float(self._current_start_points()) * MM_PER_POINT
 
+    def _effective_l0_mm(self) -> float | None:
+        return self.effective_initial_length_mm(
+            float(self.spin_l0_mm.value()),
+            self._start_displacement_mm(),
+        )
+
     def _apply_start_mode_ui(self) -> None:
         start_points = self._current_start_points()
         self.pushButton_reset_displacement.setText(f"Reset d={start_points}")
@@ -1067,8 +1172,8 @@ class MainWindow(QtWidgets.QMainWindow):
         if not self.displacements:
             self.handle_reset_displacement()
         else:
+            self._recalculate_derived(persist=True)
             self._update_micrometer_display()
-            self._update_status_labels()
 
     def _handle_plot_view_changed(self, _index: int) -> None:
         self._rebuild_plot_axes(view_mode=self._current_plot_view())
@@ -1275,6 +1380,305 @@ class MainWindow(QtWidgets.QMainWindow):
             return 0
         return None
 
+    @classmethod
+    def extract_project_annealing_candidates(
+        cls,
+        payload: Mapping[str, Any],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(payload, Mapping):
+            return []
+        sections_payload = payload.get("sections")
+        if not isinstance(sections_payload, Mapping):
+            return []
+        annealing_payload = sections_payload.get("annealing")
+        if not isinstance(annealing_payload, Mapping):
+            return []
+        rows_payload = annealing_payload.get("rows")
+        if not isinstance(rows_payload, (list, tuple)):
+            return []
+
+        candidates: list[dict[str, Any]] = []
+        for row_payload in rows_payload:
+            if not isinstance(row_payload, Mapping):
+                continue
+
+            raw_sources = row_payload.get("_sources")
+            if not isinstance(raw_sources, (list, tuple)):
+                continue
+            sources = [str(source).strip() for source in raw_sources if str(source).strip()]
+            if not sources:
+                continue
+
+            composition = str(
+                row_payload.get("Composition")
+                or row_payload.get("composition")
+                or ""
+            ).strip()
+            microwire = str(
+                row_payload.get("Microwire")
+                or row_payload.get("microwire")
+                or ""
+            ).strip()
+
+            candidates.append(
+                {
+                    "composition": composition,
+                    "microwire": microwire,
+                    "sources": sources,
+                    "group_key": str(row_payload.get("_group_key") or ""),
+                    "composition_norm": cls._normalize_comp_token(composition),
+                    "microwire_norm": cls._normalize_microwire_token(microwire),
+                }
+            )
+        return candidates
+
+    @classmethod
+    def choose_project_annealing_candidate(
+        cls,
+        candidates: list[dict[str, Any]],
+        *,
+        composition_hint: str,
+        microwire_hint: str,
+    ) -> int | None:
+        if not candidates:
+            return None
+
+        comp_norm = cls._normalize_comp_token(composition_hint)
+        wire_norm = cls._normalize_microwire_token(microwire_hint)
+
+        def _matching_indices(
+            *,
+            require_comp: bool,
+            require_wire: bool,
+        ) -> list[int]:
+            indices: list[int] = []
+            for index, candidate in enumerate(candidates):
+                candidate_comp = cls._normalize_comp_token(candidate.get("composition"))
+                candidate_wire = cls._normalize_microwire_token(candidate.get("microwire"))
+                if require_comp and candidate_comp != comp_norm:
+                    continue
+                if require_wire and candidate_wire != wire_norm:
+                    continue
+                indices.append(index)
+            return indices
+
+        if comp_norm and wire_norm:
+            matches = _matching_indices(require_comp=True, require_wire=True)
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                return matches[0]
+
+        if comp_norm:
+            matches = _matching_indices(require_comp=True, require_wire=False)
+            if len(matches) == 1:
+                return matches[0]
+
+        if wire_norm:
+            matches = _matching_indices(require_comp=False, require_wire=True)
+            if len(matches) == 1:
+                return matches[0]
+
+        if len(candidates) == 1:
+            return 0
+        return None
+
+    @staticmethod
+    def _source_basename(source_path: str) -> str:
+        normalized = str(source_path).replace("\\", "/").strip()
+        if not normalized:
+            return ""
+        return Path(normalized).name
+
+    @staticmethod
+    def annealing_setpoint_from_source(source_path: str) -> float | None:
+        stem = Path(str(source_path).replace("\\", "/")).stem
+        text = stem.replace(",", ".")
+        match = re.search(r"(\d+(?:\.\d+)?)\s*mA\b", text, flags=re.IGNORECASE)
+        if match is None:
+            return None
+        try:
+            return abs(float(match.group(1)))
+        except ValueError:
+            return None
+
+    @classmethod
+    def annealing_current_bucket(
+        cls,
+        *,
+        source_path: str,
+        currents_mA: Any,
+    ) -> str:
+        setpoint = cls.annealing_setpoint_from_source(source_path)
+        if setpoint is None:
+            try:
+                setpoint = max(abs(float(value)) for value in currents_mA)
+            except Exception:
+                setpoint = 0.0
+        return "high" if float(setpoint) >= ANNEALING_HIGH_CURRENT_THRESHOLD_MA else "low"
+
+    @classmethod
+    def filter_annealing_sources_by_sample(
+        cls,
+        sources: list[str],
+        sample_hint: str,
+    ) -> list[str]:
+        sample = str(sample_hint or "").strip().lower()
+        if not sample:
+            return list(sources)
+
+        variants = {
+            sample,
+            sample.replace("/", "_"),
+            sample.replace("_", "/"),
+            re.sub(r"\s+", "", sample),
+        }
+        matches: list[str] = []
+        for source in sources:
+            stem = Path(str(source).replace("\\", "/")).stem.lower()
+            stem_dense = re.sub(r"\s+", "", stem)
+            if any(token and (token in stem or token in stem_dense) for token in variants):
+                matches.append(source)
+        return matches if matches else list(sources)
+
+    def _project_root_dir(self) -> Path:
+        return Path(__file__).resolve().parents[2]
+
+    def _resolve_annealing_source_file(
+        self,
+        *,
+        project_path: str,
+        source_path: str,
+    ) -> Path | None:
+        source_text = str(source_path).strip()
+        if not source_text:
+            return None
+
+        direct = Path(source_text)
+        try:
+            if direct.exists() and direct.is_file():
+                return direct
+        except Exception:
+            pass
+
+        normalized = source_text.replace("\\", "/")
+        normalized_path = Path(normalized)
+        try:
+            if normalized_path.exists() and normalized_path.is_file():
+                return normalized_path
+        except Exception:
+            pass
+
+        basename = self._source_basename(source_text)
+        if not basename:
+            return None
+
+        project_dir = Path(project_path).resolve().parent if project_path else Path.cwd()
+        repo_root = self._project_root_dir()
+        candidates = [
+            project_dir / basename,
+            project_dir / "current annealing data" / basename,
+            project_dir.parent / "current annealing data" / basename,
+        ]
+        for rel_dir in ANNEALING_FALLBACK_DIRS:
+            candidates.append(repo_root / rel_dir / basename)
+
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return candidate
+            except Exception:
+                continue
+
+        search_roots = [repo_root / rel_dir for rel_dir in ANNEALING_FALLBACK_DIRS]
+        for root in search_roots:
+            try:
+                if not root.exists():
+                    continue
+                match = next(root.rglob(basename), None)
+                if match is not None and match.is_file():
+                    return match
+            except Exception:
+                continue
+
+        return None
+
+    def _annealing_candidate_label(self, candidate: Mapping[str, Any]) -> str:
+        composition = str(candidate.get("composition", "")).strip() or "?"
+        microwire = str(candidate.get("microwire", "")).strip() or "?"
+        source_count = len(candidate.get("sources", []) or [])
+        return f"{composition} | {microwire} | {source_count} source file(s)"
+
+    def _load_annealing_preview_series(
+        self,
+        *,
+        project_path: str,
+        sources: list[str],
+    ) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+        try:
+            from plotting.plugins.current_annealing import core as annealing_core
+        except Exception as exc:
+            QtWidgets.QMessageBox.critical(
+                self,
+                "Annealing preview",
+                f"Failed to import current annealing parser:\n{exc}",
+            )
+            return [], [], []
+
+        loaded_series: list[dict[str, Any]] = []
+        missing_sources: list[str] = []
+        failed_sources: list[str] = []
+
+        for source in sources:
+            resolved = self._resolve_annealing_source_file(
+                project_path=project_path,
+                source_path=source,
+            )
+            if resolved is None:
+                missing_sources.append(source)
+                continue
+            try:
+                frame = annealing_core.load_file(str(resolved))
+            except Exception as exc:
+                failed_sources.append(f"{self._source_basename(source)}: {exc}")
+                continue
+
+            try:
+                currents = frame["I_mA"].to_numpy(dtype=float)
+                resistances = frame["R_Ohm"].to_numpy(dtype=float)
+            except Exception as exc:
+                failed_sources.append(f"{self._source_basename(source)}: {exc}")
+                continue
+
+            if len(currents) == 0:
+                continue
+
+            bucket = self.annealing_current_bucket(
+                source_path=source,
+                currents_mA=currents,
+            )
+            setpoint_mA = self.annealing_setpoint_from_source(source)
+            label = Path(str(source).replace("\\", "/")).stem
+            if setpoint_mA is None:
+                try:
+                    setpoint_mA = max(abs(float(value)) for value in currents)
+                except Exception:
+                    setpoint_mA = None
+            if setpoint_mA is not None:
+                label = f"{label} ({self._format_ui(setpoint_mA)} mA)"
+
+            loaded_series.append(
+                {
+                    "label": label,
+                    "currents": currents,
+                    "resistances": resistances,
+                    "path": str(resolved),
+                    "bucket": bucket,
+                }
+            )
+
+        return loaded_series, missing_sources, failed_sources
+
     def _project_candidate_label(self, candidate: Mapping[str, Any]) -> str:
         composition = str(candidate.get("composition", "")).strip() or "?"
         microwire = str(candidate.get("microwire", "")).strip() or "?"
@@ -1394,6 +1798,141 @@ class MainWindow(QtWidgets.QMainWindow):
         if unit_index >= 0:
             self.combo_diameter_unit.setCurrentIndex(unit_index)
         self.spin_diameter.setValue(diameter_um)
+
+    def show_project_annealing_graphs(self) -> None:
+        project_path = self.line_builder_project.text().strip()
+        if not project_path:
+            QtWidgets.QMessageBox.information(
+                self,
+                "Annealing preview",
+                "Connect a .pydpj project first.",
+            )
+            return
+
+        payload = self._load_builder_project_payload(project_path)
+        if payload is None:
+            return
+
+        candidates = self.extract_project_annealing_candidates(payload)
+        if not candidates:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Annealing preview",
+                "No annealing source files were found in this project.",
+            )
+            return
+
+        composition_hint = ""
+        microwire_hint = ""
+        sample_hint = ""
+        if isinstance(getattr(self.name_builder, "s_comp", None), QtWidgets.QLineEdit):
+            composition_hint = self.name_builder.s_comp.text().strip()
+        if isinstance(getattr(self.name_builder, "s_sample", None), QtWidgets.QLineEdit):
+            microwire_hint = self.name_builder.s_sample.text().strip()
+        if isinstance(getattr(self.name_builder, "s_number", None), QtWidgets.QLineEdit):
+            sample_hint = self.name_builder.s_number.text().strip()
+
+        candidate_index = self.choose_project_annealing_candidate(
+            candidates,
+            composition_hint=composition_hint,
+            microwire_hint=microwire_hint,
+        )
+        if candidate_index is None:
+            labels = [self._annealing_candidate_label(candidate) for candidate in candidates]
+            selected_label, confirmed = QtWidgets.QInputDialog.getItem(
+                self,
+                "Select annealing sample",
+                "Choose which project row to preview:",
+                labels,
+                0,
+                False,
+            )
+            if not confirmed:
+                return
+            try:
+                candidate_index = labels.index(selected_label)
+            except ValueError:
+                candidate_index = None
+        if candidate_index is None:
+            return
+
+        candidate = candidates[candidate_index]
+        sources = [
+            str(source).strip()
+            for source in candidate.get("sources", [])
+            if str(source).strip()
+        ]
+        if not sources:
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Annealing preview",
+                "No source files matched this selection.",
+            )
+            return
+
+        series, missing_sources, failed_sources = self._load_annealing_preview_series(
+            project_path=project_path,
+            sources=sources,
+        )
+        if not series:
+            details: list[str] = []
+            if missing_sources:
+                details.append("Missing source files:")
+                details.extend(f"  - {self._source_basename(path)}" for path in missing_sources[:12])
+            if failed_sources:
+                details.append("Failed to parse:")
+                details.extend(f"  - {item}" for item in failed_sources[:12])
+            detail_text = "\n".join(details) if details else "No valid annealing curves found."
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Annealing preview",
+                detail_text,
+            )
+            return
+
+        high_count = sum(1 for entry in series if str(entry.get("bucket", "")) == "high")
+        low_count = len(series) - high_count
+
+        title_parts = [
+            str(candidate.get("composition", "")).strip(),
+            str(candidate.get("microwire", "")).strip(),
+        ]
+        title = " ".join(part for part in title_parts if part) or "Current annealing preview"
+
+        dialog = AnnealingPreviewDialog(self, title, series)
+        dialog.setAttribute(QtCore.Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dialog.destroyed.connect(
+            lambda _obj=None, dlg=dialog: self._annealing_preview_windows.remove(dlg)
+            if dlg in self._annealing_preview_windows
+            else None
+        )
+        self._annealing_preview_windows.append(dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        if missing_sources or failed_sources:
+            message_lines: list[str] = []
+            if missing_sources:
+                message_lines.append(
+                    f"Some files were not found ({len(missing_sources)})."
+                )
+            if failed_sources:
+                message_lines.append(
+                    f"Some files failed to parse ({len(failed_sources)})."
+                )
+            QtWidgets.QMessageBox.information(
+                self,
+                "Annealing preview",
+                " ".join(message_lines),
+            )
+        if high_count == 0 or low_count == 0:
+            missing_bucket = "high-current" if high_count == 0 else "low-current"
+            QtWidgets.QMessageBox.information(
+                self,
+                "Annealing preview",
+                f"Loaded curves, but no {missing_bucket} dataset was detected.",
+            )
 
     def _current_format(self) -> str:
         return self.name_builder.combo_format.currentText().strip()
@@ -1617,7 +2156,11 @@ class MainWindow(QtWidgets.QMainWindow):
         raw_y_min, raw_y_max = self.ax_raw.get_ylim()
 
         reference_mm = self._strain_reference_disp
-        l0_mm = float(self.spin_l0_mm.value())
+        l0_mm = self._effective_l0_mm()
+        if l0_mm is None:
+            self.ax_overlay_top.set_xlim(raw_x_min, raw_x_max)
+            self.ax_overlay_right.set_ylim(raw_y_min, raw_y_max)
+            return
         strain_min = self.strain_percent(
             self._display_displacement_to_mm(raw_x_min),
             l0_mm,
@@ -2082,12 +2625,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.stresses = []
         self._reset_reference_tracking()
 
-        l0_mm = float(self.spin_l0_mm.value())
+        l0_mm = self._effective_l0_mm()
         diameter_mm = self._diameter_mm()
 
         for displacement, load in zip(self.displacements, self.loads):
             reference = self._advance_reference(displacement, load)
-            strain = self.strain_percent(displacement, l0_mm, reference)
+            strain = (
+                self.strain_percent(displacement, l0_mm, reference)
+                if l0_mm is not None
+                else None
+            )
             stress = self.stress_mpa_from_load_g(load, diameter_mm)
             self.strains.append(0.0 if strain is None else strain)
             self.stresses.append(0.0 if stress is None else stress)
