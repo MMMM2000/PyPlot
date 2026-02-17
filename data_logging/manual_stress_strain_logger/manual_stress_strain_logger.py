@@ -116,6 +116,20 @@ ANNEALING_FALLBACK_DIRS = (
     "sample_data/current_annealing",
 )
 ANNEALING_HIGH_CURRENT_THRESHOLD_MA = 500.0
+SUPERSCRIPT_MAP = str.maketrans({
+    "-": "⁻",
+    "+": "⁺",
+    "0": "⁰",
+    "1": "¹",
+    "2": "²",
+    "3": "³",
+    "4": "⁴",
+    "5": "⁵",
+    "6": "⁶",
+    "7": "⁷",
+    "8": "⁸",
+    "9": "⁹",
+})
 
 # Keep references to windows created via main() to prevent collection when
 # launched from the master launcher.
@@ -142,39 +156,53 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
+        top_row = QtWidgets.QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(6)
         self.combo_format = QtWidgets.QComboBox(self)
         self.combo_format.addItems(["Stress", "Custom"])
-        layout.addWidget(self.combo_format)
+        top_row.addWidget(self.combo_format, stretch=1)
+        self.reset_btn = QtWidgets.QPushButton("Reset", self)
+        self.reset_btn.setFixedWidth(92)
+        top_row.addWidget(self.reset_btn, stretch=0)
+        layout.addLayout(top_row)
 
         self.stacked = QtWidgets.QStackedWidget(self)
         layout.addWidget(self.stacked)
 
         stress = QtWidgets.QWidget(self)
-        form = QtWidgets.QFormLayout(stress)
-        form.setFieldGrowthPolicy(QtWidgets.QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-        form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(4)
+        grid = QtWidgets.QGridLayout(stress)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(8)
+        grid.setVerticalSpacing(4)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(3, 1)
 
         self.s_comp = QtWidgets.QLineEdit(self)
         self.s_comp.setText("FeSiBP")
-        form.addRow("Composition:", self.s_comp)
+        grid.addWidget(QtWidgets.QLabel("Composition:", stress), 0, 0)
+        grid.addWidget(self.s_comp, 0, 1)
 
         self.s_sample = QtWidgets.QLineEdit(self)
         self.s_sample.setText("156_2")
-        form.addRow("Microwire:", self.s_sample)
+        grid.addWidget(QtWidgets.QLabel("Microwire:", stress), 0, 2)
+        grid.addWidget(self.s_sample, 0, 3)
 
         self.s_number = QtWidgets.QLineEdit(self)
         self.s_number.setPlaceholderText("optional, e.g. s1")
         self.s_number.setText("s1")
-        form.addRow("Sample number:", self.s_number)
+        grid.addWidget(QtWidgets.QLabel("Sample number:", stress), 1, 0)
+        grid.addWidget(self.s_number, 1, 1)
 
         self.s_current = QtWidgets.QLineEdit(self)
         self.s_current.setText("74mA")
-        form.addRow("Current:", self.s_current)
+        grid.addWidget(QtWidgets.QLabel("Current:", stress), 1, 2)
+        grid.addWidget(self.s_current, 1, 3)
 
         self.s_notes = QtWidgets.QLineEdit(self)
         self.s_notes.setPlaceholderText("optional, e.g. no glass")
-        form.addRow("Notes:", self.s_notes)
+        grid.addWidget(QtWidgets.QLabel("Notes:", stress), 2, 0)
+        grid.addWidget(self.s_notes, 2, 1, 1, 3)
 
         field_min_height = max(24, self.s_comp.sizeHint().height())
         for field in (
@@ -188,13 +216,7 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
 
         self.stacked.addWidget(stress)
         self.stacked.addWidget(QtWidgets.QWidget(self))  # custom mode placeholder
-        self.stacked.setMinimumHeight(field_min_height * 5 + 36)
-
-        buttons = QtWidgets.QHBoxLayout()
-        buttons.addStretch(1)
-        self.reset_btn = QtWidgets.QPushButton("Reset", self)
-        buttons.addWidget(self.reset_btn)
-        layout.addLayout(buttons)
+        self.stacked.setMinimumHeight(field_min_height * 3 + 20)
 
         self.combo_format.currentIndexChanged.connect(self._handle_format_changed)
         for widget in (
@@ -498,6 +520,22 @@ class MainWindow(QtWidgets.QMainWindow):
             float(anchor_display) + (float(displacement_points) - float(anchor_points))
         )
 
+    @classmethod
+    def micrometer_display_from_mm(
+        cls,
+        displacement_mm: float,
+        anchor_display: int,
+        *,
+        anchor_points: float = 0.0,
+        mm_per_point: float = MM_PER_POINT,
+    ) -> int:
+        points = float(displacement_mm) / float(mm_per_point)
+        return cls.micrometer_display_from_points(
+            points,
+            anchor_display,
+            anchor_points=anchor_points,
+        )
+
     @staticmethod
     def should_insert_zero_anchor_point(
         *,
@@ -651,9 +689,9 @@ class MainWindow(QtWidgets.QMainWindow):
         log_grid.addWidget(self.label_session_status, 3, 0, 1, 4)
 
         self.name_builder = ManualFileNameBuilderWidget(self.group_log, self.lineEdit_log_file)
-        self.name_builder.setMinimumHeight(220)
+        self.name_builder.setMinimumHeight(170)
         log_grid.addWidget(self.name_builder, 4, 0, 1, 4)
-        log_grid.setRowStretch(4, 1)
+        log_grid.setRowStretch(4, 0)
 
         left_layout.addWidget(self.group_log)
 
@@ -680,10 +718,16 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_diameter.setRange(0.001, 1_000_000.0)
         self.spin_diameter.setSingleStep(1.0)
         self.spin_diameter.setValue(30.0)
+        self.spin_diameter.setMaximumWidth(180)
         self.combo_diameter_unit = QtWidgets.QComboBox()
         self.combo_diameter_unit.addItems(["um", "mm"])
-        diameter_layout.addWidget(self.spin_diameter, stretch=1)
+        self.combo_diameter_unit.setFixedWidth(70)
+        self.pushButton_autofill_diameter = QtWidgets.QPushButton("Auto-fill diameter")
+        self.pushButton_autofill_diameter.setFixedWidth(130)
+        diameter_layout.addWidget(self.spin_diameter, stretch=0)
         diameter_layout.addWidget(self.combo_diameter_unit)
+        diameter_layout.addWidget(self.pushButton_autofill_diameter, stretch=0)
+        diameter_layout.addStretch(1)
         geom_form.addRow("Diameter:", diameter_row)
 
         project_path_row = QtWidgets.QWidget(self.group_geometry)
@@ -695,17 +739,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.line_builder_project.setPlaceholderText("Optional: connect .pydpj / .pypdj")
         project_path_layout.addWidget(self.line_builder_project, stretch=1)
         self.pushButton_connect_project = QtWidgets.QPushButton("Connect...")
-        self.pushButton_connect_project.setFixedWidth(96)
+        self.pushButton_connect_project.setFixedWidth(82)
         project_path_layout.addWidget(self.pushButton_connect_project, stretch=0)
+        self.pushButton_show_annealing = QtWidgets.QPushButton("Show annealing")
+        self.pushButton_show_annealing.setFixedWidth(112)
+        project_path_layout.addWidget(self.pushButton_show_annealing, stretch=0)
         geom_form.addRow("DB project:", project_path_row)
-
-        project_action_row = QtWidgets.QHBoxLayout()
-        self.pushButton_autofill_diameter = QtWidgets.QPushButton("Auto-fill diameter")
-        project_action_row.addWidget(self.pushButton_autofill_diameter)
-        self.pushButton_show_annealing = QtWidgets.QPushButton("Show annealing graphs")
-        project_action_row.addWidget(self.pushButton_show_annealing)
-        project_action_row.addStretch(1)
-        geom_form.addRow("", project_action_row)
 
         self.label_cross_section = QtWidgets.QLabel("N/A")
         geom_form.addRow("Area:", self.label_cross_section)
@@ -724,12 +763,18 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_displacement_mode = QtWidgets.QComboBox(self)
         self.combo_displacement_mode.addItem("Millimeters", DISPLACEMENT_MODE_MM)
         self.combo_displacement_mode.addItem("Micrometer points (10^-2 mm)", DISPLACEMENT_MODE_POINTS)
-        input_form.addRow("Displacement mode:", self.combo_displacement_mode)
-
         self.combo_start_mode = QtWidgets.QComboBox(self)
         self.combo_start_mode.addItem("Start from 0 points", START_MODE_FROM_ZERO)
         self.combo_start_mode.addItem("Start from 10 points", START_MODE_FROM_TEN)
-        input_form.addRow("Start displacement:", self.combo_start_mode)
+        setup_row = QtWidgets.QWidget(self.group_input)
+        setup_layout = QtWidgets.QHBoxLayout(setup_row)
+        setup_layout.setContentsMargins(0, 0, 0, 0)
+        setup_layout.setSpacing(6)
+        setup_layout.addWidget(QtWidgets.QLabel("Mode:", setup_row), stretch=0)
+        setup_layout.addWidget(self.combo_displacement_mode, stretch=1)
+        setup_layout.addWidget(QtWidgets.QLabel("Start:", setup_row), stretch=0)
+        setup_layout.addWidget(self.combo_start_mode, stretch=1)
+        input_form.addRow("Displacement:", setup_row)
 
         displacement_row = QtWidgets.QWidget(self.group_input)
         displacement_layout = QtWidgets.QHBoxLayout(displacement_row)
@@ -881,9 +926,15 @@ class MainWindow(QtWidgets.QMainWindow):
         table_layout = QtWidgets.QVBoxLayout(self.group_table)
         table_layout.setContentsMargins(8, 8, 8, 8)
         table_layout.setSpacing(6)
-        self.table_data = QtWidgets.QTableWidget(0, 4, self.group_table)
+        self.table_data = QtWidgets.QTableWidget(0, 5, self.group_table)
         self.table_data.setHorizontalHeaderLabels(
-            ["Displacement (mm)", "Load (g)", "Strain (%)", "Stress (MPa)"]
+            [
+                "Displacement (mm)",
+                "Micrometer (0..45)",
+                "Load (g)",
+                "Strain (%)",
+                "Stress (MPa)",
+            ]
         )
         self.table_data.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table_data.setSelectionBehavior(
@@ -906,7 +957,10 @@ class MainWindow(QtWidgets.QMainWindow):
             2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
         )
         self.table_data.horizontalHeader().setSectionResizeMode(
-            3, QtWidgets.QHeaderView.ResizeMode.Stretch
+            3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents
+        )
+        self.table_data.horizontalHeader().setSectionResizeMode(
+            4, QtWidgets.QHeaderView.ResizeMode.Stretch
         )
         table_layout.addWidget(self.table_data)
         right_layout.addWidget(self.group_table, stretch=2)
@@ -948,7 +1002,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_start_mode.currentIndexChanged.connect(self._handle_start_mode_changed)
         self.combo_plot_view.currentIndexChanged.connect(self._handle_plot_view_changed)
         self.spin_displacement.valueChanged.connect(self._update_micrometer_display)
-        self.spin_micrometer_zero.valueChanged.connect(self._update_micrometer_display)
+        self.spin_micrometer_zero.valueChanged.connect(self._handle_micrometer_anchor_changed)
         self.spin_load_g.valueChanged.connect(self._update_status_labels)
 
     def _install_menu(self) -> None:
@@ -1174,6 +1228,10 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self._recalculate_derived(persist=True)
             self._update_micrometer_display()
+
+    def _handle_micrometer_anchor_changed(self, _value: int) -> None:
+        self._update_micrometer_display()
+        self._refresh_data_table()
 
     def _handle_plot_view_changed(self, _index: int) -> None:
         self._rebuild_plot_axes(view_mode=self._current_plot_view())
@@ -1994,7 +2052,7 @@ class MainWindow(QtWidgets.QMainWindow):
         if area_mm2 is None:
             self.label_cross_section.setText("Invalid diameter")
         else:
-            self.label_cross_section.setText(f"{self._format_ui(area_mm2)} mm^2")
+            self.label_cross_section.setText(f"{self._format_area_mm2(area_mm2)} mm²")
 
         if self._strain_reference_disp is None:
             self.label_reference.setText("Waiting for first zero-load point")
@@ -2045,6 +2103,19 @@ class MainWindow(QtWidgets.QMainWindow):
             text = "+0" if signed else "0"
         return text
 
+    @staticmethod
+    def _format_area_mm2(value: float) -> str:
+        abs_value = abs(float(value))
+        if abs_value <= 0.0:
+            return "0"
+        if abs_value < 0.001:
+            scientific = f"{value:.3e}"
+            mantissa_text, exponent_text = scientific.split("e")
+            exponent = int(exponent_text)
+            exponent_sup = str(exponent).translate(SUPERSCRIPT_MAP)
+            return f"{mantissa_text}x10{exponent_sup}"
+        return MainWindow._format_ui(value)
+
     def _set_idle_indicator(self, text: str, fg: str, bg: str) -> None:
         self.label_idle_timer.setText(text)
         self.label_idle_timer.setStyleSheet(
@@ -2075,12 +2146,20 @@ class MainWindow(QtWidgets.QMainWindow):
     def _refresh_data_table(self) -> None:
         if not hasattr(self, "table_data"):
             return
+        anchor_display = int(self.spin_micrometer_zero.value()) if hasattr(self, "spin_micrometer_zero") else 0
+        anchor_points = float(self._current_start_points())
         self.table_data.setRowCount(len(self.displacements))
         for row, (displacement, load, strain, stress) in enumerate(
             zip(self.displacements, self.loads, self.strains, self.stresses)
         ):
+            micrometer_display = self.micrometer_display_from_mm(
+                displacement,
+                anchor_display,
+                anchor_points=anchor_points,
+            )
             values = (
                 self._format_value(displacement),
+                str(micrometer_display),
                 self._format_value(load),
                 self._format_value(strain),
                 self._format_value(stress),
@@ -2348,10 +2427,10 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax_raw.set_ylabel("Load (g)", color=axis_fg)
         self.ax_overlay_top.set_xlabel("Strain (%)", color=axis_fg, labelpad=10)
         self.ax_overlay_right.set_ylabel("Stress (MPa)", color=axis_fg, labelpad=10)
-        self.ax_raw.format_coord = lambda x, y, axis=self.ax_raw: self._format_single_axis_coord(
-            axis, x, y
+        self.ax_raw.format_coord = lambda _x, _y: ""
+        self.ax_overlay_top.format_coord = (
+            lambda x, y, axis=self.ax_overlay_top: self._format_single_axis_coord(axis, x, y)
         )
-        self.ax_overlay_top.format_coord = lambda _x, _y: ""
         self.ax_overlay_right.format_coord = lambda _x, _y: ""
 
         styles = self.build_segment_styles(self.strains)

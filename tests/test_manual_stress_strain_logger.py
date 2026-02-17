@@ -47,6 +47,16 @@ def test_effective_l0_invalid_when_offset_too_large() -> None:
     assert effective is None
 
 
+def test_format_area_mm2_uses_scientific_notation_for_tiny_values() -> None:
+    text = logger_mod.MainWindow._format_area_mm2(0.00019085)
+    assert text == "1.909x10⁻⁴"
+
+
+def test_format_area_mm2_uses_ui_format_for_regular_values() -> None:
+    text = logger_mod.MainWindow._format_area_mm2(0.1234)
+    assert text == "0.123"
+
+
 def test_reference_uses_last_zero_before_loading() -> None:
     reference = None
     preload = True
@@ -120,6 +130,15 @@ def test_micrometer_display_uses_anchor_points_offset() -> None:
         anchor_points=10.0,
     )
     assert value == 40
+
+
+def test_micrometer_display_from_mm_uses_anchor_points_and_wraps() -> None:
+    value = logger_mod.MainWindow.micrometer_display_from_mm(
+        0.7,  # 70 points
+        40,
+        anchor_points=10.0,
+    )
+    assert value == 0
 
 
 def test_auto_zero_anchor_inserted_for_first_start10_point() -> None:
