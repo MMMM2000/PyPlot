@@ -95,6 +95,7 @@ DISPLACEMENT_MODE_MM = "mm"
 DISPLACEMENT_MODE_POINTS = "points"
 START_MODE_FROM_ZERO = "start_0"
 START_MODE_FROM_TEN = "start_10"
+IDLE_TIMEOUT_DEFAULT_S = 55
 START_POINTS_BY_MODE: dict[str, int] = {
     START_MODE_FROM_ZERO: 0,
     START_MODE_FROM_TEN: 10,
@@ -376,6 +377,15 @@ class MicrowireLineEdit(QtWidgets.QLineEdit):
             self.setCursorPosition(min(cursor, len(normalized)))
         finally:
             self._normalizing = False
+
+
+class ClickableLabel(QtWidgets.QLabel):
+    clicked = QtCore.pyqtSignal()
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:  # type: ignore[override]
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class AnnealingPreviewDialog(QtWidgets.QDialog):
@@ -885,12 +895,25 @@ class MainWindow(QtWidgets.QMainWindow):
         load_layout.setSpacing(6)
         load_layout.addWidget(self.spin_load_g, stretch=1)
 
-        self.label_idle_timer = QtWidgets.QLabel("Idle: waiting", load_row)
+        self.spin_idle_timeout_s = QtWidgets.QSpinBox(load_row)
+        self.spin_idle_timeout_s.setRange(10, 600)
+        self.spin_idle_timeout_s.setSingleStep(1)
+        self.spin_idle_timeout_s.setValue(IDLE_TIMEOUT_DEFAULT_S)
+        self.spin_idle_timeout_s.setSuffix(" s")
+        self.spin_idle_timeout_s.setPrefix("T:")
+        self.spin_idle_timeout_s.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        self.spin_idle_timeout_s.setFixedWidth(90)
+        self.spin_idle_timeout_s.setToolTip("Scale timeout for countdown display.")
+        load_layout.addWidget(self.spin_idle_timeout_s, stretch=0)
+
+        self.label_idle_timer = ClickableLabel(f"{IDLE_TIMEOUT_DEFAULT_S}s left", load_row)
         self.label_idle_timer.setWordWrap(False)
         self.label_idle_timer.setAlignment(
             QtCore.Qt.AlignmentFlag.AlignCenter
         )
-        self.label_idle_timer.setMinimumWidth(210)
+        self.label_idle_timer.setMinimumWidth(145)
+        self.label_idle_timer.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+        self.label_idle_timer.setToolTip("Click to reset countdown.")
         self.label_idle_timer.setStyleSheet(
             "font-weight: 700; padding: 3px 8px; border-radius: 4px; "
             "background-color: #5a5a5a; color: #ffffff;"
@@ -1066,6 +1089,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_displacement.valueChanged.connect(self._update_micrometer_display)
         self.spin_micrometer_zero.valueChanged.connect(self._handle_micrometer_anchor_changed)
         self.spin_load_g.valueChanged.connect(self._update_status_labels)
+        self.spin_idle_timeout_s.valueChanged.connect(self._update_idle_timer_label)
+        self.label_idle_timer.clicked.connect(self.reset_idle_timer)
 
     def _install_menu(self) -> None:
         menu_bar = self.menuBar()
@@ -1147,6 +1172,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self._set_displacement_input_from_mm(disp_mm)
 
         self.spin_load_g.setValue(float(self.settings.value("input_load_raw", 0.0)))
+        idle_timeout = int(self.settings.value("idle_timeout_s", IDLE_TIMEOUT_DEFAULT_S) or IDLE_TIMEOUT_DEFAULT_S)
+        self.spin_idle_timeout_s.setValue(max(10, min(600, idle_timeout)))
         self._load_offset_g = float(self.settings.value("load_offset_g", 0.0) or 0.0)
         zero_display = int(self.settings.value("micrometer_zero_display", 0) or 0)
         self.spin_micrometer_zero.setValue(self._snap_to_micrometer_step(zero_display))
@@ -1172,6 +1199,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("start_mode", self._current_start_mode())
         self.settings.setValue("input_disp_mm", self._displacement_mm_from_input())
         self.settings.setValue("input_load_raw", self.spin_load_g.value())
+        self.settings.setValue("idle_timeout_s", self.spin_idle_timeout_s.value())
         self.settings.setValue("load_offset_g", self._load_offset_g)
         self.settings.setValue("micrometer_zero_display", self.spin_micrometer_zero.value())
         self.settings.setValue("plot_view", self._current_plot_view())
@@ -2185,25 +2213,53 @@ class MainWindow(QtWidgets.QMainWindow):
             f"background-color: {bg}; color: {fg};"
         )
 
+    def _idle_timeout_seconds(self) -> int:
+        if not hasattr(self, "spin_idle_timeout_s"):
+            return IDLE_TIMEOUT_DEFAULT_S
+        return max(1, int(self.spin_idle_timeout_s.value()))
+
+    @staticmethod
+    def countdown_seconds_left(
+        timeout_s: int,
+        *,
+        last_change_ts: float | None,
+        now_ts: float | None = None,
+    ) -> int:
+        timeout = max(0, int(timeout_s))
+        if last_change_ts is None:
+            return timeout
+        current_ts = time.monotonic() if now_ts is None else float(now_ts)
+        elapsed = max(0, int(current_ts - float(last_change_ts)))
+        return max(0, timeout - elapsed)
+
     def _update_idle_timer_label(self) -> None:
         if not hasattr(self, "label_idle_timer"):
             return
+        timeout_s = self._idle_timeout_seconds()
         if not self.logging_on:
-            self._set_idle_indicator("Idle: stopped", "#f0f0f0", "#5a5a5a")
-            return
-        if self._last_load_change_ts is None:
-            self._set_idle_indicator("Idle: waiting", "#1b1b1b", "#ffd166")
+            self._set_idle_indicator(f"{timeout_s}s left", "#f0f0f0", "#5a5a5a")
             return
 
-        elapsed = max(0, int(time.monotonic() - self._last_load_change_ts))
-        remaining = max(0, 60 - elapsed)
-        text = f"Idle: {elapsed}s ({remaining}s left)"
-        if remaining <= 5:
+        remaining = self.countdown_seconds_left(
+            timeout_s,
+            last_change_ts=self._last_load_change_ts,
+        )
+
+        text = f"{remaining}s left"
+        red_limit = max(5, min(15, timeout_s // 6))
+        amber_limit = max(10, min(25, timeout_s // 3))
+        if remaining <= red_limit:
             self._set_idle_indicator(text, "#ffffff", "#d7263d")
-        elif remaining <= 10:
+        elif remaining <= amber_limit:
             self._set_idle_indicator(text, "#1b1b1b", "#ffb347")
         else:
             self._set_idle_indicator(text, "#ffffff", "#228b22")
+
+    def reset_idle_timer(self) -> None:
+        if not self.logging_on:
+            return
+        self._last_load_change_ts = time.monotonic()
+        self._update_idle_timer_label()
 
     def _refresh_data_table(self) -> None:
         if not hasattr(self, "table_data"):

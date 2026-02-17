@@ -329,3 +329,27 @@ def test_microwire_display_text_keeps_slash_separator() -> None:
 
 def test_microwire_filename_token_uses_underscore() -> None:
     assert logger_mod.MicrowireLineEdit.to_filename_token("11/1") == "11_1"
+
+
+def test_countdown_seconds_left_uses_full_timeout_without_change() -> None:
+    left = logger_mod.MainWindow.countdown_seconds_left(
+        55,
+        last_change_ts=None,
+        now_ts=100.0,
+    )
+    assert left == 55
+
+
+def test_countdown_seconds_left_counts_down_and_clamps_to_zero() -> None:
+    left_mid = logger_mod.MainWindow.countdown_seconds_left(
+        55,
+        last_change_ts=100.0,
+        now_ts=120.4,
+    )
+    left_zero = logger_mod.MainWindow.countdown_seconds_left(
+        55,
+        last_change_ts=100.0,
+        now_ts=200.0,
+    )
+    assert left_mid == 35
+    assert left_zero == 0
