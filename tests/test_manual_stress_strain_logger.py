@@ -309,3 +309,23 @@ def test_format_single_axis_coord_reports_one_pair() -> None:
 
     text = logger_mod.MainWindow._format_single_axis_coord(_Axis(), 0.7825, 0.593)
     assert text == "(x, y) = (0.782, 0.593)"
+
+
+def test_map_linear_value_maps_between_ranges() -> None:
+    mapped = logger_mod.MainWindow._map_linear_value(
+        0.5,
+        src_min=0.0,
+        src_max=1.0,
+        dst_min=0.0,
+        dst_max=50.0,
+    )
+    assert mapped == pytest.approx(25.0)
+
+
+def test_microwire_display_text_keeps_slash_separator() -> None:
+    assert logger_mod.MicrowireLineEdit.to_display_text("11_1") == "11/1"
+    assert logger_mod.MicrowireLineEdit.to_display_text("11/1") == "11/1"
+
+
+def test_microwire_filename_token_uses_underscore() -> None:
+    assert logger_mod.MicrowireLineEdit.to_filename_token("11/1") == "11_1"

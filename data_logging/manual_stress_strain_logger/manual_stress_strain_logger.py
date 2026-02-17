@@ -183,8 +183,7 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         grid.addWidget(QtWidgets.QLabel("Composition:", stress), 0, 0)
         grid.addWidget(self.s_comp, 0, 1)
 
-        self.s_sample = QtWidgets.QLineEdit(self)
-        self.s_sample.setText("156_2")
+        self.s_sample = MicrowireLineEdit(self)
         grid.addWidget(QtWidgets.QLabel("Microwire:", stress), 0, 2)
         grid.addWidget(self.s_sample, 0, 3)
 
@@ -249,7 +248,7 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
         if comp:
             parts.append(comp)
 
-        wire = self.s_sample.text().strip()
+        wire = MicrowireLineEdit.to_filename_token(self.s_sample.text())
         if wire:
             parts.append(wire)
 
@@ -314,6 +313,69 @@ class ManualFileNameBuilderWidget(QtWidgets.QWidget):
     def reset_defaults(self) -> None:
         self.settings.clear()
         self.load_settings()
+
+
+class MicrowireLineEdit(QtWidgets.QLineEdit):
+    """Microwire entry with fixed slash display, file-safe token conversion."""
+
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._normalizing = False
+        self.setPlaceholderText("e.g. 11/1")
+        self.setText("156/2")
+        self.textEdited.connect(self._normalize_on_edit)
+
+    @staticmethod
+    def _split_parts(value: object) -> tuple[str, str]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return "", ""
+        text = text.replace("\\", "/").replace("_", "/")
+        text = re.sub(r"\s+", "", text)
+        if "/" in text:
+            left, right = text.split("/", 1)
+        else:
+            tokens = re.findall(r"\d+", text)
+            if len(tokens) >= 2:
+                left, right = tokens[0], tokens[1]
+            elif len(tokens) == 1:
+                left, right = tokens[0], ""
+            else:
+                left, right = "", ""
+        return re.sub(r"\D", "", left), re.sub(r"\D", "", right)
+
+    @classmethod
+    def to_display_text(cls, value: object) -> str:
+        left, right = cls._split_parts(value)
+        return f"{left}/{right}" if (left or right) else "/"
+
+    @classmethod
+    def to_filename_token(cls, value: object) -> str:
+        left, right = cls._split_parts(value)
+        if left and right:
+            return f"{left}_{right}"
+        if left:
+            return left
+        if right:
+            return right
+        return ""
+
+    def setText(self, text: str) -> None:  # type: ignore[override]
+        super().setText(self.to_display_text(text))
+
+    def _normalize_on_edit(self, _text: str) -> None:
+        if self._normalizing:
+            return
+        normalized = self.to_display_text(self.text())
+        if normalized == self.text():
+            return
+        cursor = self.cursorPosition()
+        self._normalizing = True
+        try:
+            super().setText(normalized)
+            self.setCursorPosition(min(cursor, len(normalized)))
+        finally:
+            self._normalizing = False
 
 
 class AnnealingPreviewDialog(QtWidgets.QDialog):
@@ -2161,8 +2223,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 self._format_value(displacement),
                 str(micrometer_display),
                 self._format_value(load),
-                self._format_value(strain),
-                self._format_value(stress),
+                self._format_ui(strain),
+                self._format_ui(stress),
             )
             for column, value in enumerate(values):
                 item = QtWidgets.QTableWidgetItem(value)
@@ -2222,6 +2284,56 @@ class MainWindow(QtWidgets.QMainWindow):
         x_text = "???" if x is None else axis.format_xdata(x)
         y_text = "???" if y is None else axis.format_ydata(y)
         return f"(x, y) = ({x_text}, {y_text})"
+
+    @staticmethod
+    def _map_linear_value(
+        value: float | None,
+        *,
+        src_min: float,
+        src_max: float,
+        dst_min: float,
+        dst_max: float,
+    ) -> float | None:
+        if value is None:
+            return None
+        denom = src_max - src_min
+        if not math.isfinite(denom) or abs(denom) < 1e-15:
+            return None
+        ratio = (float(value) - src_min) / denom
+        return dst_min + ratio * (dst_max - dst_min)
+
+    def _format_dual_axis_raw_coord(self, x: float | None, y: float | None) -> str:
+        if self.ax_raw is None:
+            return ""
+        return f"L/D {self._format_single_axis_coord(self.ax_raw, x, y)}"
+
+    def _format_dual_axis_derived_coord_from_top(
+        self,
+        strain_x: float | None,
+        load_y: float | None,
+    ) -> str:
+        if (
+            self.ax_overlay_top is None
+            or self.ax_raw is None
+            or self.ax_overlay_right is None
+        ):
+            return ""
+        raw_y_min, raw_y_max = self.ax_raw.get_ylim()
+        stress_y_min, stress_y_max = self.ax_overlay_right.get_ylim()
+        stress_value = self._map_linear_value(
+            load_y,
+            src_min=raw_y_min,
+            src_max=raw_y_max,
+            dst_min=stress_y_min,
+            dst_max=stress_y_max,
+        )
+        x_text = "???" if strain_x is None else self.ax_overlay_top.format_xdata(strain_x)
+        y_text = (
+            "???"
+            if stress_value is None
+            else self.ax_overlay_right.format_ydata(stress_value)
+        )
+        return f"S/S (x, y) = ({x_text}, {y_text})"
 
     def _sync_dual_axis_limits(self) -> None:
         if (
@@ -2427,9 +2539,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax_raw.set_ylabel("Load (g)", color=axis_fg)
         self.ax_overlay_top.set_xlabel("Strain (%)", color=axis_fg, labelpad=10)
         self.ax_overlay_right.set_ylabel("Stress (MPa)", color=axis_fg, labelpad=10)
-        self.ax_raw.format_coord = lambda _x, _y: ""
+        self.ax_raw.format_coord = (
+            lambda x, y: self._format_dual_axis_raw_coord(x, y)
+        )
         self.ax_overlay_top.format_coord = (
-            lambda x, y, axis=self.ax_overlay_top: self._format_single_axis_coord(axis, x, y)
+            lambda x, y: self._format_dual_axis_derived_coord_from_top(x, y)
         )
         self.ax_overlay_right.format_coord = lambda _x, _y: ""
 
