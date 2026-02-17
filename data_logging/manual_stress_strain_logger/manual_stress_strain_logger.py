@@ -93,6 +93,12 @@ ZERO_TOLERANCE_G = 1e-9
 MM_PER_POINT = 0.01
 DISPLACEMENT_MODE_MM = "mm"
 DISPLACEMENT_MODE_POINTS = "points"
+START_MODE_FROM_ZERO = "start_0"
+START_MODE_FROM_TEN = "start_10"
+START_POINTS_BY_MODE: dict[str, int] = {
+    START_MODE_FROM_ZERO: 0,
+    START_MODE_FROM_TEN: 10,
+}
 PLOT_VIEW_BOTH = "both"
 PLOT_VIEW_RAW_ONLY = "raw_only"
 PLOT_VIEW_DUAL_AXIS = "dual_axis"
@@ -388,9 +394,27 @@ class MainWindow(QtWidgets.QMainWindow):
     def micrometer_display_from_points(
         cls,
         displacement_points: float,
-        zero_display: int,
+        anchor_display: int,
+        *,
+        anchor_points: float = 0.0,
     ) -> int:
-        return cls._snap_to_micrometer_step(float(zero_display) + float(displacement_points))
+        return cls._snap_to_micrometer_step(
+            float(anchor_display) + (float(displacement_points) - float(anchor_points))
+        )
+
+    @staticmethod
+    def should_insert_zero_anchor_point(
+        *,
+        existing_point_count: int,
+        start_points: int,
+        displacement_mm: float,
+        mm_per_point: float = MM_PER_POINT,
+    ) -> bool:
+        if existing_point_count != 0 or start_points <= 0:
+            return False
+        start_mm = float(start_points) * float(mm_per_point)
+        tolerance_mm = float(mm_per_point) * 0.5
+        return displacement_mm >= (start_mm - tolerance_mm)
 
     @staticmethod
     def split_segments_by_strain_direction(
@@ -604,6 +628,11 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_displacement_mode.addItem("Micrometer points (10^-2 mm)", DISPLACEMENT_MODE_POINTS)
         input_form.addRow("Displacement mode:", self.combo_displacement_mode)
 
+        self.combo_start_mode = QtWidgets.QComboBox(self)
+        self.combo_start_mode.addItem("Start from 0 points", START_MODE_FROM_ZERO)
+        self.combo_start_mode.addItem("Start from 10 points", START_MODE_FROM_TEN)
+        input_form.addRow("Start displacement:", self.combo_start_mode)
+
         displacement_row = QtWidgets.QWidget(self.group_input)
         displacement_layout = QtWidgets.QHBoxLayout(displacement_row)
         displacement_layout.setContentsMargins(0, 0, 0, 0)
@@ -631,7 +660,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
         input_form.addRow("Displacement:", displacement_row)
 
-        self.label_micrometer_zero = QtWidgets.QLabel("Micrometer at d=0:")
+        self.label_micrometer_zero = QtWidgets.QLabel("Micrometer at d=10:")
         self.spin_micrometer_zero = QtWidgets.QSpinBox(self.group_input)
         self.spin_micrometer_zero.setRange(0, 45)
         self.spin_micrometer_zero.setSingleStep(5)
@@ -665,7 +694,7 @@ class MainWindow(QtWidgets.QMainWindow):
         input_form.addRow("Load:", load_row)
 
         scale_row = QtWidgets.QHBoxLayout()
-        self.pushButton_reset_displacement = QtWidgets.QPushButton("Reset d=0")
+        self.pushButton_reset_displacement = QtWidgets.QPushButton("Reset d=10")
         scale_row.addWidget(self.pushButton_reset_displacement)
         self.pushButton_scale_rezero = QtWidgets.QPushButton("Scale Re-zero")
         scale_row.addWidget(self.pushButton_scale_rezero)
@@ -817,6 +846,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.combo_displacement_mode.currentIndexChanged.connect(
             self._handle_displacement_mode_changed
         )
+        self.combo_start_mode.currentIndexChanged.connect(self._handle_start_mode_changed)
         self.combo_plot_view.currentIndexChanged.connect(self._handle_plot_view_changed)
         self.spin_displacement.valueChanged.connect(self._update_micrometer_display)
         self.spin_micrometer_zero.valueChanged.connect(self._update_micrometer_display)
@@ -891,8 +921,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self._select_displacement_mode(stored_mode)
         self.combo_displacement_mode.blockSignals(False)
 
+        stored_start_mode = self.settings.value("start_mode", START_MODE_FROM_TEN, type=str)
+        self.combo_start_mode.blockSignals(True)
+        self._select_start_mode(stored_start_mode)
+        self.combo_start_mode.blockSignals(False)
+        self._apply_start_mode_ui()
+
         self._apply_displacement_mode(self._current_displacement_mode(), preserve_mm=False)
-        disp_mm = float(self.settings.value("input_disp_mm", 0.0))
+        disp_mm = float(self.settings.value("input_disp_mm", self._start_displacement_mm()))
         self._set_displacement_input_from_mm(disp_mm)
 
         self.spin_load_g.setValue(float(self.settings.value("input_load_raw", 0.0)))
@@ -918,6 +954,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.setValue("diameter_unit", self.combo_diameter_unit.currentIndex())
         self.settings.setValue("builder_project_path", self.line_builder_project.text().strip())
         self.settings.setValue("displacement_mode", self._current_displacement_mode())
+        self.settings.setValue("start_mode", self._current_start_mode())
         self.settings.setValue("input_disp_mm", self._displacement_mm_from_input())
         self.settings.setValue("input_load_raw", self.spin_load_g.value())
         self.settings.setValue("load_offset_g", self._load_offset_g)
@@ -929,6 +966,31 @@ class MainWindow(QtWidgets.QMainWindow):
         if isinstance(mode, str):
             return mode
         return DISPLACEMENT_MODE_MM
+
+    def _select_start_mode(self, mode: str) -> None:
+        index = self.combo_start_mode.findData(mode)
+        if index < 0:
+            index = self.combo_start_mode.findData(START_MODE_FROM_TEN)
+        if index < 0:
+            index = 0
+        self.combo_start_mode.setCurrentIndex(index)
+
+    def _current_start_mode(self) -> str:
+        mode = self.combo_start_mode.currentData()
+        if isinstance(mode, str):
+            return mode
+        return START_MODE_FROM_TEN
+
+    def _current_start_points(self) -> int:
+        return START_POINTS_BY_MODE.get(self._current_start_mode(), 10)
+
+    def _start_displacement_mm(self) -> float:
+        return float(self._current_start_points()) * MM_PER_POINT
+
+    def _apply_start_mode_ui(self) -> None:
+        start_points = self._current_start_points()
+        self.pushButton_reset_displacement.setText(f"Reset d={start_points}")
+        self.label_micrometer_zero.setText(f"Micrometer at d={start_points}:")
 
     def _select_plot_view(self, mode: str) -> None:
         index = self.combo_plot_view.findData(mode)
@@ -948,7 +1010,7 @@ class MainWindow(QtWidgets.QMainWindow):
         return self._current_plot_view() in (PLOT_VIEW_BOTH, PLOT_VIEW_DUAL_AXIS)
 
     def _apply_displacement_mode(self, mode: str, *, preserve_mm: bool = True) -> None:
-        current_mm = self._displacement_mm_from_input() if preserve_mm else 0.0
+        current_mm = self._displacement_mm_from_input() if preserve_mm else self._start_displacement_mm()
 
         if mode == DISPLACEMENT_MODE_POINTS:
             self.spin_displacement.setDecimals(0)
@@ -988,11 +1050,25 @@ class MainWindow(QtWidgets.QMainWindow):
             return values, r"Displacement (x10$^{-2}$ mm)"
         return list(self.displacements), "Displacement (mm)"
 
+    def _display_displacement_to_mm(self, value: float) -> float:
+        if self._current_displacement_mode() == DISPLACEMENT_MODE_POINTS:
+            return float(value) * MM_PER_POINT
+        return float(value)
+
     def _handle_displacement_mode_changed(self, _index: int) -> None:
         self._apply_displacement_mode(self._current_displacement_mode(), preserve_mm=True)
         self._pending_displacement_mm = None
         self._update_status_labels()
         self._refresh_plot()
+
+    def _handle_start_mode_changed(self, _index: int) -> None:
+        self._apply_start_mode_ui()
+        self._pending_displacement_mm = None
+        if not self.displacements:
+            self.handle_reset_displacement()
+        else:
+            self._update_micrometer_display()
+            self._update_status_labels()
 
     def _handle_plot_view_changed(self, _index: int) -> None:
         self._rebuild_plot_axes(view_mode=self._current_plot_view())
@@ -1013,7 +1089,7 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             self.ax_raw = self.figure.add_subplot(111)
             self.ax_overlay_right = self.ax_raw.twinx()
-            self.ax_overlay_top = self.ax_overlay_right.twiny()
+            self.ax_overlay_top = self.ax_raw.twiny()
             self.ax_derived = self.ax_overlay_top
         self._plot_view_state = view_mode
 
@@ -1026,7 +1102,11 @@ class MainWindow(QtWidgets.QMainWindow):
 
         points_value = float(self.spin_displacement.value())
         zero_display = int(self.spin_micrometer_zero.value())
-        displayed = self.micrometer_display_from_points(points_value, zero_display)
+        displayed = self.micrometer_display_from_points(
+            points_value,
+            zero_display,
+            anchor_points=float(self._current_start_points()),
+        )
         self.line_micrometer_display.setText(str(displayed))
 
     def _project_dialog_start_path(self) -> str:
@@ -1519,6 +1599,48 @@ class MainWindow(QtWidgets.QMainWindow):
         else:
             axis.grid(False)
 
+    @staticmethod
+    def _format_single_axis_coord(axis: object, x: float | None, y: float | None) -> str:
+        x_text = "???" if x is None else axis.format_xdata(x)
+        y_text = "???" if y is None else axis.format_ydata(y)
+        return f"(x, y) = ({x_text}, {y_text})"
+
+    def _sync_dual_axis_limits(self) -> None:
+        if (
+            self.ax_raw is None
+            or self.ax_overlay_top is None
+            or self.ax_overlay_right is None
+        ):
+            return
+
+        raw_x_min, raw_x_max = self.ax_raw.get_xlim()
+        raw_y_min, raw_y_max = self.ax_raw.get_ylim()
+
+        reference_mm = self._strain_reference_disp
+        l0_mm = float(self.spin_l0_mm.value())
+        strain_min = self.strain_percent(
+            self._display_displacement_to_mm(raw_x_min),
+            l0_mm,
+            reference_mm,
+        )
+        strain_max = self.strain_percent(
+            self._display_displacement_to_mm(raw_x_max),
+            l0_mm,
+            reference_mm,
+        )
+        if strain_min is None or strain_max is None:
+            self.ax_overlay_top.set_xlim(raw_x_min, raw_x_max)
+        else:
+            self.ax_overlay_top.set_xlim(strain_min, strain_max)
+
+        diameter_mm = self._diameter_mm()
+        stress_min = self.stress_mpa_from_load_g(raw_y_min, diameter_mm)
+        stress_max = self.stress_mpa_from_load_g(raw_y_max, diameter_mm)
+        if stress_min is None or stress_max is None:
+            self.ax_overlay_right.set_ylim(raw_y_min, raw_y_max)
+        else:
+            self.ax_overlay_right.set_ylim(stress_min, stress_max)
+
     def _refresh_plot_standard(self, *, show_derived: bool) -> None:
         if self.ax_raw is None:
             return
@@ -1630,13 +1752,64 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax_overlay_top.patch.set_alpha(0.0)
         self.ax_overlay_right.xaxis.set_visible(False)
         self.ax_overlay_top.yaxis.set_visible(False)
+        self.ax_raw.spines["top"].set_visible(False)
+        self.ax_raw.spines["right"].set_visible(False)
+        self.ax_raw.xaxis.set_label_position("bottom")
+        self.ax_raw.yaxis.set_label_position("left")
+        self.ax_raw.tick_params(
+            axis="x",
+            colors=axis_fg,
+            bottom=True,
+            labelbottom=True,
+            top=False,
+            labeltop=False,
+        )
+        self.ax_raw.tick_params(
+            axis="y",
+            colors=axis_fg,
+            left=True,
+            labelleft=True,
+            right=False,
+            labelright=False,
+        )
+        self.ax_overlay_top.xaxis.set_label_position("top")
+        self.ax_overlay_top.xaxis.tick_top()
+        self.ax_overlay_top.tick_params(
+            axis="x",
+            colors=axis_fg,
+            top=True,
+            labeltop=True,
+            bottom=False,
+            labelbottom=False,
+        )
+        self.ax_overlay_right.yaxis.set_label_position("right")
+        self.ax_overlay_right.yaxis.tick_right()
+        self.ax_overlay_right.tick_params(
+            axis="y",
+            colors=axis_fg,
+            right=True,
+            labelright=True,
+            left=False,
+            labelleft=False,
+        )
+        self.ax_overlay_top.spines["left"].set_visible(False)
+        self.ax_overlay_top.spines["right"].set_visible(False)
+        self.ax_overlay_top.spines["bottom"].set_visible(False)
+        self.ax_overlay_right.spines["left"].set_visible(False)
+        self.ax_overlay_right.spines["bottom"].set_visible(False)
+        self.ax_overlay_right.spines["top"].set_visible(False)
 
         x_values, x_label = self._displacement_display_values()
         self.ax_raw.set_title("Load vs Displacement + Stress vs Strain", color=axis_fg)
         self.ax_raw.set_xlabel(x_label, color=axis_fg)
         self.ax_raw.set_ylabel("Load (g)", color=axis_fg)
-        self.ax_overlay_top.set_xlabel("Strain (%)", color=axis_fg)
-        self.ax_overlay_right.set_ylabel("Stress (MPa)", color=axis_fg)
+        self.ax_overlay_top.set_xlabel("Strain (%)", color=axis_fg, labelpad=10)
+        self.ax_overlay_right.set_ylabel("Stress (MPa)", color=axis_fg, labelpad=10)
+        self.ax_raw.format_coord = lambda x, y, axis=self.ax_raw: self._format_single_axis_coord(
+            axis, x, y
+        )
+        self.ax_overlay_top.format_coord = lambda _x, _y: ""
+        self.ax_overlay_right.format_coord = lambda _x, _y: ""
 
         styles = self.build_segment_styles(self.strains)
 
@@ -1655,7 +1828,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     marker="o",
                     linewidth=1.6,
                     markersize=4,
-                    label=f"Load {label}",
+                    label=label,
                 )
                 raw_plotted = True
         else:
@@ -1669,30 +1842,9 @@ class MainWindow(QtWidgets.QMainWindow):
                 color=axis_fg,
             )
 
-        stress_plotted = False
-        if self.strains:
-            for _direction, start_index, end_index, label, color in styles:
-                if start_index >= len(self.strains):
-                    continue
-                end = min(end_index, len(self.strains) - 1, len(self.stresses) - 1)
-                if end < start_index:
-                    continue
-                self.ax_overlay_top.plot(
-                    self.strains[start_index : end + 1],
-                    self.stresses[start_index : end + 1],
-                    color=color,
-                    linestyle="--",
-                    marker="o",
-                    linewidth=1.4,
-                    markersize=3.5,
-                    label=f"Stress {label}",
-                )
-                stress_plotted = True
-
         if raw_plotted:
             self.ax_raw.legend(loc="upper left", fontsize=8)
-        if stress_plotted:
-            self.ax_overlay_top.legend(loc="upper right", fontsize=8)
+        self._sync_dual_axis_limits()
 
     def choose_log_dir(self) -> None:
         current_dir = self.lineEdit_log_dir.text().strip() or self.log_dir
@@ -1999,6 +2151,15 @@ class MainWindow(QtWidgets.QMainWindow):
         self.spin_displacement.lineEdit().selectAll()
 
     def _append_point(self, displacement_mm: float, raw_load_g: float) -> None:
+        if self.should_insert_zero_anchor_point(
+            existing_point_count=len(self.displacements),
+            start_points=self._current_start_points(),
+            displacement_mm=displacement_mm,
+        ):
+            self.displacements.append(0.0)
+            self.loads.append(0.0)
+            self._last_logged_load = 0.0
+
         effective = self.effective_load_from_raw(raw_load_g, self._load_offset_g)
         if self._last_logged_load is None or abs(effective - self._last_logged_load) > ZERO_TOLERANCE_G:
             self._last_load_change_ts = time.monotonic()
@@ -2029,7 +2190,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._update_status_labels()
 
     def handle_reset_displacement(self) -> None:
-        self.spin_displacement.setValue(0.0)
+        self._set_displacement_input_from_mm(self._start_displacement_mm())
         self._pending_displacement_mm = None
         self._update_micrometer_display()
         self._update_status_labels()

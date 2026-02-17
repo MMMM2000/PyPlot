@@ -96,6 +96,33 @@ def test_micrometer_display_wraps_across_cycle() -> None:
     assert value == 0
 
 
+def test_micrometer_display_uses_anchor_points_offset() -> None:
+    value = logger_mod.MainWindow.micrometer_display_from_points(
+        20.0,
+        30,
+        anchor_points=10.0,
+    )
+    assert value == 40
+
+
+def test_auto_zero_anchor_inserted_for_first_start10_point() -> None:
+    should_insert = logger_mod.MainWindow.should_insert_zero_anchor_point(
+        existing_point_count=0,
+        start_points=10,
+        displacement_mm=0.1,
+    )
+    assert should_insert is True
+
+
+def test_auto_zero_anchor_not_inserted_with_existing_points() -> None:
+    should_insert = logger_mod.MainWindow.should_insert_zero_anchor_point(
+        existing_point_count=1,
+        start_points=10,
+        displacement_mm=0.1,
+    )
+    assert should_insert is False
+
+
 def test_segment_split_detects_loading_unloading_loops() -> None:
     strains = [0.0, 0.05, 0.10, 0.06, 0.02, 0.08]
     segments = logger_mod.MainWindow.split_segments_by_strain_direction(strains)
@@ -164,3 +191,17 @@ def test_choose_project_diameter_candidate_matches_underscore_microwire() -> Non
         microwire_hint="5_4",
     )
     assert selected == 0
+
+
+def test_format_single_axis_coord_reports_one_pair() -> None:
+    class _Axis:
+        @staticmethod
+        def format_xdata(value: float) -> str:
+            return f"{value:.3f}"
+
+        @staticmethod
+        def format_ydata(value: float) -> str:
+            return f"{value:.3f}"
+
+    text = logger_mod.MainWindow._format_single_axis_coord(_Axis(), 0.7825, 0.593)
+    assert text == "(x, y) = (0.782, 0.593)"

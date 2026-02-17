@@ -1,5 +1,107 @@
 # Changelog
 
+## 2026-02-17 08:38 UTC
+
+- Current Annealing Logger now preserves key process settings per selected power-supply profile (max/start current, step, hold time, max voltage, channel, reset-on-start, and voltage-limit action).
+- Fixed cropped text in the Current Annealing Logger process settings by reflowing the voltage-limit controls into a multi-row layout.
+- Updated the Current Annealing Logger sample field so it can be left empty (optional) while still supporting numbered sample values.
+- Improved Owon SPE behavior by refreshing the voltage setpoint before each current setpoint update, removing the need for manual pre-adjustment in typical runs.
+
+## 2026-02-13 12:20 UTC
+
+- Fixed shared PyPlot `Export TXT...` behavior for plugins that rely on base actions: the toolbar action now enables from plotted tab data and export falls back to Matplotlib lines when plugin line-state metadata is absent.
+- Fixed shared Origin workbook export/session handling so `Open in Origin...` and workbook export keep Origin open instead of immediately exiting the Origin session.
+- Restored shared side dock switcher buttons (Project Explorer/Object Manager) across platforms.
+- Upgraded shared Graph formatting UI into tabbed sections (`Text`, `Axes`, `Ticks`, `Legend`) and added legend location/font/columns/symbol/follow-color/draggable controls to the same shared window.
+- Added `Settings -> Graph options...` with global defaults and optional plugin-specific overrides for shared graph/legend defaults.
+- Updated the Shape Memory Stress/Strain plugin to use shared action-state wiring so shared toolbar actions (save/normalize/TXT/Origin) follow plugin/tab readiness.
+- Fixed shared side-panel behavior: dock switchers now use click-toggle mode and no longer force Project Explorer/Object Manager visible, preventing resize flashing and allowing panels to stay hidden when toggled off.
+- Fixed side-panel width restore on switcher clicks: dock reopen now uses stored/default widths instead of oversized widget `sizeHint` widths, so Project Explorer/Object Manager no longer jump excessively wide when toggled.
+- Prevented side-panel width drift across repeated open/close cycles by ignoring transient splitter-driven growth when caching dock widths; side-dock max width clamp is now stricter.
+- Side-panel toggle now explicitly persists the current dock width on hide and restores that same stored width on next show, so repeated side-button open/close cycles keep user-set widths stable.
+- Fixed shared MDI graph-window arrangement defaults: new graph/workbook windows now open in `Cascade` mode, and shared `Window` menu actions (`Cascade`, `Tile Vertical`, `Tile Horizontal`) are restored for all plugins.
+- Cascade arrangement now normalizes graph subwindow sizes to a shared target width instead of reusing stale per-window widths, so simultaneously opened graphs stay visually consistent.
+- Fixed MDI maximize/restore behavior so restoring a maximized graph reliably returns to windowed view.
+- Locked shared graph subwindow display geometry to the figure aspect ratio (including resize/maximize) so on-screen plot proportions remain consistent with saved output proportions.
+- Improved shared legend auto-layout: when orientation is `auto`, dense/long legends prefer vertical layout instead of forcing unreadable horizontal rows.
+- Extended shared `Settings -> Graph options...` defaults with `Figure width`/`Figure height`, and apply those defaults when new plugin graphs are registered so graph windows start with consistent dimensions.
+- Added shared Graph Options dialog controls for `Apply`, `Cancel`, and `Reset to defaults`; applying now immediately refreshes all currently open graphs.
+- Enabled shared legend double-click routing: double-clicking legend content opens the shared Graph formatting window on legend controls.
+- Fixed shared cascade activation behavior so selecting another graph no longer resets manually positioned subwindow geometry.
+- Stabilized shared MDI aspect-ratio handling to prevent progressive graph-height collapse during focus/task switching.
+- Upgraded shared `Open in Origin...` to create Origin graphs from exported worksheets (not only transfer worksheet data).
+- Standardized shared Origin metadata mapping for worksheet headers: `Long Name` stores physical quantity, `Units` stores units, and `Comments` stores legend/series labels.
+
+## 2026-02-12 16:07 UTC
+
+- Added shared PyPlot plot-workbook generation for plugins that rely on the base workflow: plotted line data now auto-registers as `Plot data` worksheets/workbooks (XY column pairs) so workbook tooling is available even without plugin-specific workbook code.
+- Added a shared `Open in Origin...` fallback for base plugins: the action now exports the active plugin's shared plot workbooks to Origin, fixing disabled/no-op Origin export behavior in plugins such as Manual Shape Memory Stress/Strain.
+- Added a shared `_clear_tab_list(...)` tab-removal helper in PyPlot so plugin tab clearing uses the same internal teardown path, keeping plot/workbook state synchronized when regenerating graphs.
+- Marked selected plugins with custom workbook pipelines to opt out of shared auto-workbook generation, preventing duplicate workbook entries where plugin-specific workbook registration already exists.
+- Added shared `PyPlotPlugin` helper methods for plugin authors (`apply_shared_action_state`, `clear_plot_tabs`, `run_origin_export`) and migrated multiple plugins to use them so toolbar state updates, tab cleanup, and standard Origin export flows are no longer repeated plugin-by-plugin.
+
+## 2026-02-12 11:48 UTC
+
+- Replaced the PyPlot `Check outliers…` placeholder with a functional worksheet scanner that detects statistical outlier rows (IQR method with z-score fallback on low-spread columns).
+- `Check outliers…` now presents a detailed per-worksheet summary and supports removing flagged rows directly from affected worksheets, refreshing open worksheet views and Project Explorer row/column counts.
+- Added regression tests for outlier finding and in-place outlier row removal in the PyPlot worksheet model flow.
+
+## 2026-02-12 10:41 UTC
+
+- Fixed `VSM Temperature Scan` dual-axis PyPlot legends so combined `10000 Oe` + `50 Oe` plots list series from both left and right axes.
+- Updated VSM Temperature Scan Origin export axis-title handling to use named Origin axes (`x`, `y`, `x2`) with robust fallbacks, so exported axis labels now match PyPlot labels.
+- Added explicit Origin graph-title application for all VSM Temperature Scan exports (main, smoothed, derivative, and smoothed derivative) so each exported graph shows its full title consistently.
+
+## 2026-02-12 09:23 UTC
+
+- Added a new `VSM Isotherms` PyPlot plugin that parses VIR exports and plots isotherms grouped by sample angle, so `0°` and `90°` measurements render in separate graphs with same-angle temperatures overlaid.
+- Added a derived magnetocaloric entropy view (`-ΔS_M` vs temperature) computed from isothermal `M(H)` curves using a finite-difference Maxwell-relation estimate.
+- Extended PyPlot import support/documentation for VSM VIR files by adding `.vsm-vir-data` to supported extensions.
+- Fixed VSM VIR import handling in the generic workbook loader so `.VSM-VIR-DATA` files are no longer skipped as unsupported during folder import.
+- Switched folder import to the native OS directory picker and disabled the custom dock-switcher overlay by default on Windows for more stable side-panel behavior.
+- VSM Isotherms now registers imported workbooks automatically (per angle isotherms + entropy sheets), enabling `Export workbooks to Origin...` for this plugin.
+- VSM Isotherms now ignores non-VIR file extensions during load and consolidates duplicate same-temperature runs per angle, preferring full-field curves so legends and overlays stay readable.
+- VSM Isotherms Derived metrics now accepts user-defined entropy field levels (`ΔH` in Oe) for both plotted entropy curves and entropy workbooks.
+- Primary side docks (Project Explorer/Object Manager) now clamp oversized persisted widths to avoid reopening in overly wide states.
+
+## 2026-02-10 16:30 UTC
+
+- Added a new Manual Stress/Strain Logger with manual displacement/load input, live load-displacement plotting, and live stress-strain plotting.
+- Added geometry-driven conversion (`L0`, diameter) so logged points are saved with derived strain (%) and stress (MPa).
+- Added TXT export format for the manual logger with first-row long names and second-row units, plus stress-style file naming via the shared name builder.
+- Launcher update: registered the new logger in the Loggers tab.
+- Updated manual logger naming workflow: only `Stress` and `Custom` modes, renamed `Annealing` to `Current`, removed stress-load naming fields, added optional sample number and notes.
+- Added displacement display mode toggle (`mm` vs `10^-3 mm` points), keyboard entry workflow (Enter-to-focus/load-log), and a scale re-zero offset action for continuity after balance auto-reset.
+- Removed the `Sample end` naming field from the manual logger builder and simplified stress naming to optional sample-number tokens (`s1`, `s2`, etc.).
+- Improved directory defaults and file-dialog start paths to avoid `microwire_paddle_cache` redirect paths when selecting log folders.
+- Added a live 60-second idle indicator (time since last logged load change) and a continuously updating table view of logged points.
+- Added micrometer-dial mapping controls in points mode: configurable `Micrometer at d=0` offset plus a live wrapped 0..45 dial readout next to displacement input.
+- Updated logger plotting to segment repeated loops automatically into `Loading n` / `Unloading n` traces based on strain direction changes.
+- Added a new PyPlot plugin: `Shape Memory Stress/Strain` for manual logger TXT files with segmented load-displacement and stress-strain loop plotting.
+- Refined manual logger layout: moved the logged-data table below the plot area and added a persistent plot-view selector (`both graphs` vs `Load vs Displacement only`).
+- UI polish: moved the 60-second idle timer into the load-input row as a high-visibility badge and limited numeric input/display fields to at most 3 decimal places.
+- Locked manual displacement entry to stepper control (read-only text field): value changes now happen via spinbox arrows only.
+- Added a dedicated `Reset d=0` action in Manual Input to zero displacement quickly without clearing logged points.
+- Updated the PyPlot `Shape Memory Stress/Strain` plugin to generate separate tabs/graphs for `Load vs Displacement` and `Stress vs Strain` instead of combining both into one figure.
+- Added a quick-start option in the `Session not started` popup so users can start logging directly when trying to add a point.
+- Corrected micrometer-points scaling in the manual logger from `10^-3 mm` to `10^-2 mm`, including updated axis/input labels (`x10$_{-2}$`).
+- Data migration: corrected sample measurements in `sample_data/manual_stress-strain` by multiplying displacement and strain values by 10 to match the updated `10^-2 mm` points scale.
+- Added a dual-axis overlay plot-view mode in the manual logger (`Load vs Displacement` on left+bottom, `Stress vs Strain` on right+top) while keeping existing separate-plot modes.
+- Added matching layout options to the PyPlot `Shape Memory Stress/Strain` plugin: separate tabs or one dual-axis overlay graph.
+- Added Sample Geometry integration with Microwire Data Builder project files (`.pydpj`/`.pypdj`): you can connect a project and auto-fill wire diameter from `d (µm)`, with composition+microwire matching and manual fallback selection.
+- Fixed manual logger name-builder layout collapse by enforcing stable minimum field/panel heights so filename metadata inputs stay readable.
+- Fixed dual-axis overlay labeling in the manual logger so stress/strain labels and ticks stay on the right/top axes, and removed duplicated toolbar coordinate readouts from twinned axes.
+- Manual logger update: added a configurable start-displacement mode (`Start from 0 points` / `Start from 10 points`), with dynamic `Reset d=...` and `Micrometer at d=...` labels tied to the selected start point.
+- Manual logger update: when start mode is `10 points`, logging the first point auto-inserts a prior anchor point at `d=0, load=0` for strain alignment while keeping a single visible curve workflow.
+- Manual logger update: dual-axis overlay now draws only one segmented load-displacement curve and uses top/right axes only as transformed strain/stress scales.
+
+## 2026-02-08 16:07 UTC
+
+- Added headless GUI smoke tests using `pytest-qt` for launcher/workbench startup and blank-graph creation paths.
+- Added deterministic parser fixtures under `tests/fixtures/` for DMA Iso-Stress and VSM temperature scan inputs with expected outputs.
+- Updated test configuration to default Qt to offscreen mode in automated/headless runs (`PYTEST_GUI_HEADLESS=0` disables this).
+- Dependency update: added `pytest-qt==4.5.0` to the `test` optional dependency set in `pyproject.toml`.
+
 ## 2026-02-11 16:23 UTC
 
 - Microwire Data Builder `Assemble` tab now includes a quick row search filter (case-insensitive across currently visible columns), with matching-count status text and search state persisted in `.pydpj` projects.

@@ -27,6 +27,7 @@ class SampleSpinBox(QtWidgets.QSpinBox):
         super().__init__(parent)
         self._prefix = "s"
         self._suffix = ""
+        self._allow_empty = False
         self.setObjectName("lineEdit_sample")
         self.setRange(0, 999_999)
         self.setAccelerated(True)
@@ -35,47 +36,65 @@ class SampleSpinBox(QtWidgets.QSpinBox):
         self.setAlignment(QtCore.Qt.AlignmentFlag.AlignLeft | QtCore.Qt.AlignmentFlag.AlignVCenter)
         line_edit = self.lineEdit()
         if isinstance(line_edit, QtWidgets.QLineEdit):
-            line_edit.setPlaceholderText("Sample, e.g., s1 or s2-1")
-            line_edit.setToolTip("Sample identifier, e.g., s1 or s2-1")
+            line_edit.setPlaceholderText("Optional sample, e.g., s1 or s2-1")
+            line_edit.setToolTip("Optional sample identifier, e.g., s1 or s2-1")
 
     # Qt uses ``textFromValue``/``valueFromText`` to keep the display updated.
     def textFromValue(self, v: int) -> str:  # noqa: D401
+        if self._allow_empty and v == self.minimum():
+            return ""
         return f"{self._prefix}{v}{self._suffix}"
 
     def valueFromText(self, text: Optional[str]) -> int:  # noqa: D401
         if text is None:
             return max(0, min(self.maximum(), self.value()))
-        parsed = self._parse(text)
+        normalized = text.strip()
+        if not normalized:
+            self._allow_empty = True
+            return self.minimum()
+        parsed = self._parse(normalized)
         if parsed is None:
             return max(0, min(self.maximum(), self.value()))
         prefix, value, suffix = parsed
         self._prefix = prefix or "s"
         self._suffix = suffix or ""
+        self._allow_empty = False
         return max(self.minimum(), min(self.maximum(), value))
 
     def validate(
         self, text: str | None, pos: int
     ) -> tuple[QtGui.QValidator.State, str, int]:  # noqa: D401
-        normalized = text or ""
+        normalized = (text or "").strip()
         if not normalized:
-            return (QtGui.QValidator.State.Intermediate, normalized, pos)
+            return (QtGui.QValidator.State.Acceptable, text or "", pos)
         if self._pattern.match(normalized):
-            return (QtGui.QValidator.State.Acceptable, normalized, pos)
+            return (QtGui.QValidator.State.Acceptable, text or "", pos)
         if re.match(r"^.*?\d*$", normalized):
-            return (QtGui.QValidator.State.Intermediate, normalized, pos)
-        return (QtGui.QValidator.State.Invalid, normalized, pos)
+            return (QtGui.QValidator.State.Intermediate, text or "", pos)
+        return (QtGui.QValidator.State.Invalid, text or "", pos)
+
     # Public helpers mirroring QLineEdit for backwards compatibility
     def text(self) -> str:  # noqa: D401
+        if self._allow_empty and self.value() == self.minimum():
+            return ""
         return super().text()
 
     def setText(self, text: str) -> None:
-        parsed = self._parse(text)
+        normalized = (text or "").strip()
+        if not normalized:
+            self._allow_empty = True
+            self.blockSignals(True)
+            self.setValue(self.minimum())
+            self.blockSignals(False)
+            return
+        parsed = self._parse(normalized)
         if parsed is None:
             self._prefix, value, self._suffix = "s", 1, ""
         else:
             prefix, value, suffix = parsed
             self._prefix = prefix or "s"
             self._suffix = suffix or ""
+        self._allow_empty = False
         self.blockSignals(True)
         self.setValue(value)
         self.blockSignals(False)
@@ -368,26 +387,35 @@ class Ui_MainWindow(object):
         grid.addLayout(rev, 4, 0, 1, 2)
 
         # Voltage limit behaviour
-        limit_layout = QtWidgets.QHBoxLayout()
-        limit_layout.addWidget(QtWidgets.QLabel("Voltage limit [V]:"))
+        limit_grid = QtWidgets.QGridLayout()
+        limit_grid.setContentsMargins(0, 0, 0, 0)
+        limit_grid.setHorizontalSpacing(10)
+        limit_grid.setVerticalSpacing(6)
+        limit_grid.setColumnStretch(6, 1)
+
+        self.label_voltage_limit = QtWidgets.QLabel("Voltage limit [V]:")
+        limit_grid.addWidget(self.label_voltage_limit, 0, 0)
         self.spinBox_max_voltage = QtWidgets.QSpinBox()
         self.spinBox_max_voltage.setRange(1, 200)
         self.spinBox_max_voltage.setValue(30)
         self.spinBox_max_voltage.setMaximumWidth(90)
-        limit_layout.addWidget(self.spinBox_max_voltage)
+        limit_grid.addWidget(self.spinBox_max_voltage, 0, 1)
+
         self.label_channel = QtWidgets.QLabel("Channel:")
-        limit_layout.addWidget(self.label_channel)
+        limit_grid.addWidget(self.label_channel, 0, 2)
         self.spinBox_channel = QtWidgets.QSpinBox()
         self.spinBox_channel.setRange(0, 4)
         self.spinBox_channel.setValue(3)
         self.spinBox_channel.setMaximumWidth(60)
         self.spinBox_channel.setToolTip("Set to 0 to skip channel selection (for single-channel supplies).")
-        limit_layout.addWidget(self.spinBox_channel)
+        limit_grid.addWidget(self.spinBox_channel, 0, 3)
+
         self.checkBox_reset_on_start = QtWidgets.QCheckBox("Reset supply on start")
         self.checkBox_reset_on_start.setChecked(True)
-        limit_layout.addWidget(self.checkBox_reset_on_start)
-        limit_layout.addSpacing(12)
-        limit_layout.addWidget(QtWidgets.QLabel("When the limit is hit:"))
+        limit_grid.addWidget(self.checkBox_reset_on_start, 0, 4, 1, 3)
+
+        self.label_limit_action = QtWidgets.QLabel("When the limit is hit:")
+        limit_grid.addWidget(self.label_limit_action, 1, 0, 1, 2)
         self.comboBox_max_voltage_action = QtWidgets.QComboBox()
         self.comboBox_max_voltage_action.addItem("Ask every time", "ask")
         self.comboBox_max_voltage_action.addItem("Hold current (stop increasing)", "hold")
@@ -396,9 +424,8 @@ class Ui_MainWindow(object):
         self.comboBox_max_voltage_action.setToolTip(
             "Choose how the logger reacts when the power supply reaches its voltage compliance limit"
         )
-        limit_layout.addWidget(self.comboBox_max_voltage_action)
-        limit_layout.addStretch(1)
-        grid.addLayout(limit_layout, 5, 0, 1, 2)
+        limit_grid.addWidget(self.comboBox_max_voltage_action, 1, 2, 1, 5)
+        grid.addLayout(limit_grid, 5, 0, 1, 2)
 
         # Name builder (file name preset)
         gb_name = QtWidgets.QGroupBox("File name preset")

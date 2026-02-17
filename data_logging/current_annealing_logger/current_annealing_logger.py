@@ -1644,6 +1644,13 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
 
+    def _load_profile_int(self, profile_id: str, name: str, default: int, minimum: int = 0) -> int:
+        try:
+            value = int(self._load_profile_setting(profile_id, name, default, int))
+        except Exception:
+            value = int(default)
+        return max(int(minimum), value)
+
     def _init_supply_profile(self) -> None:
         combo = getattr(self.ui, 'comboBox_supply', None)
         if not isinstance(combo, QtWidgets.QComboBox):
@@ -1668,7 +1675,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.supply_profile_id = profile_id
         self.min_start_current_mA = int(profile.get("min_start_current_mA", 1))
         self.voltage_first = bool(profile.get("voltage_first", False))
-        # Apply defaults to UI and internal state.
+        # Apply profile-specific defaults to UI and internal state.
         start_spin = getattr(self.ui, 'spinBox_start_current', None)
         if isinstance(start_spin, QtWidgets.QSpinBox):
             try:
@@ -1683,6 +1690,42 @@ class MainWindow(QtWidgets.QMainWindow):
             start_spin.setValue(int(start_value))
             start_spin.blockSignals(False)
             self.start_current_mA = int(start_spin.value())
+        max_spin = getattr(self.ui, 'spinBox_max_current', None)
+        if isinstance(max_spin, QtWidgets.QSpinBox):
+            default_max = self._load_profile_int(profile_id, "max_current", 10, self.min_start_current_mA)
+            max_value = self._load_profile_int(
+                profile_id,
+                "max_current",
+                default_max,
+                self.min_start_current_mA,
+            )
+            if max_value < int(getattr(self, "start_current_mA", self.min_start_current_mA)):
+                max_value = int(getattr(self, "start_current_mA", self.min_start_current_mA))
+            max_spin.blockSignals(True)
+            max_spin.setValue(max_value)
+            max_spin.blockSignals(False)
+            self.max_current_mA = int(max_spin.value())
+            try:
+                self.settings.setValue("max_current", self.max_current_mA)
+            except Exception:
+                pass
+        step_spin = getattr(self.ui, 'spinBox_step_mA', None)
+        if isinstance(step_spin, QtWidgets.QSpinBox):
+            default_step = max(1, int(step_spin.value()))
+            step_value = self._load_profile_int(profile_id, "step_mA", default_step, 1)
+            step_spin.blockSignals(True)
+            step_spin.setValue(step_value)
+            step_spin.blockSignals(False)
+            self.current_step_mA = int(step_spin.value())
+            self.current_step_A = self.current_step_mA / 1000.0
+        hold_spin = getattr(self.ui, 'spinBox_hold_duration', None)
+        if isinstance(hold_spin, QtWidgets.QSpinBox):
+            default_hold = max(1, int(hold_spin.value()))
+            hold_value = self._load_profile_int(profile_id, "hold_duration", default_hold, 1)
+            hold_spin.blockSignals(True)
+            hold_spin.setValue(hold_value)
+            hold_spin.blockSignals(False)
+            self.hold_duration_s = int(hold_spin.value())
         volt_spin = getattr(self.ui, 'spinBox_max_voltage', None)
         if isinstance(volt_spin, QtWidgets.QSpinBox):
             default_voltage = float(profile.get("max_voltage", 30.0))
@@ -1708,17 +1751,10 @@ class MainWindow(QtWidgets.QMainWindow):
             channel_spin.setValue(int(channel_value))
             channel_spin.blockSignals(False)
             self.channel_select = int(channel_spin.value())
-        max_spin = getattr(self.ui, 'spinBox_max_current', None)
-        if isinstance(max_spin, QtWidgets.QSpinBox):
-            if max_spin.value() < self.start_current_mA:
-                max_spin.blockSignals(True)
-                max_spin.setValue(self.start_current_mA)
-                max_spin.blockSignals(False)
-            self.max_current_mA = int(max_spin.value())
-            try:
-                self.settings.setValue("max_current", self.max_current_mA)
-            except Exception:
-                pass
+        try:
+            self._apply_profile_max_voltage_action(profile_id)
+        except Exception:
+            pass
         try:
             self.settings.setValue("supply_profile", profile_id)
         except Exception:
@@ -1734,6 +1770,7 @@ class MainWindow(QtWidgets.QMainWindow):
             profile_id = "hmp4030"
         self._apply_supply_profile(profile_id)
         self.update_planned_time_label()
+        self.update_file_name_from_preset()
 
     def _voltage_limit_value(self) -> float:
         try:
@@ -2093,6 +2130,11 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception:
             self.current_step_mA = 1
         self.current_step_A = self.current_step_mA/1000.0
+        try:
+            self.settings.setValue("step_mA", self.current_step_mA)
+            self._store_profile_setting("step_mA", self.current_step_mA)
+        except Exception:
+            pass
         self.update_planned_time_label()
 
     def handle_send_serial_command_clicked(self):
@@ -2102,6 +2144,19 @@ class MainWindow(QtWidgets.QMainWindow):
     def send_serial_command(self):
         self.ser_mcu.write(bytes(self.serial_command, encoding='ascii'))
         self.ui.label_last_command.setText(self.serial_command)
+
+    def _send_current_setpoint(self) -> None:
+        """Apply the next current setpoint, refreshing voltage first when required."""
+
+        if bool(getattr(self, "voltage_first", False)):
+            limit_v = self._voltage_limit_value()
+            self.serial_command = f"VOLT {limit_v:.1f}\n"
+            self.send_serial_command()
+            # Owon responds more reliably when voltage is refreshed slightly
+            # ahead of each current update.
+            self.simple_delay(80)
+        self.serial_command = f"CURR {self.current_current_set:.3f}\n"
+        self.send_serial_command()
         
     def handle_raw_vcp_mode_selected(self):
         self.operation_mode = 0
@@ -2142,6 +2197,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.max_current_mA = min_start
         try:
             self.settings.setValue("max_current", self.max_current_mA)
+            self._store_profile_setting("max_current", self.max_current_mA)
         except Exception:
             pass
         spin = getattr(self.ui, 'spinBox_start_current', None)
@@ -2153,6 +2209,7 @@ class MainWindow(QtWidgets.QMainWindow):
                     spin.blockSignals(False)
                 self.start_current_mA = int(spin.value())
                 self.settings.setValue("start_current", self.start_current_mA)
+                self._store_profile_setting("start_current", self.start_current_mA)
                 self._refresh_command_profiles()
             except Exception:
                 pass
@@ -2231,6 +2288,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.max_current_mA = max_mA
             try:
                 self.settings.setValue("max_current", max_mA)
+                self._store_profile_setting("max_current", max_mA)
             except Exception:
                 pass
         min_value = int(getattr(self, "min_start_current_mA", 1))
@@ -2252,6 +2310,11 @@ class MainWindow(QtWidgets.QMainWindow):
         
     def handle_hold_duration_value_changed(self):
         self.hold_duration_s = self.ui.spinBox_hold_duration.value()
+        try:
+            self.settings.setValue("hold_duration", int(self.hold_duration_s))
+            self._store_profile_setting("hold_duration", int(self.hold_duration_s))
+        except Exception:
+            pass
         
     def handle_hold_current_button_clicked(self):
         if not self.hold_timer_running:
@@ -2583,8 +2646,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if not self.process_running:
                 return
-            self.serial_command = f"CURR {self.current_current_set:.3f}\n"
-            self.send_serial_command()
+            self._send_current_setpoint()
            
             
                 
@@ -2663,8 +2725,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
             if not self.process_running:
                 return
-            self.serial_command = f"CURR {self.current_current_set:.3f}\n"
-            self.send_serial_command()
+            self._send_current_setpoint()
             # completed descending to zero? manage loops or stop
             if (self.current_increment < 0) and (self.current_current_set < self._start_current_A()):
                 next_loop = int(getattr(self, 'loop_idx', 0)) + 1
@@ -2835,6 +2896,24 @@ class MainWindow(QtWidgets.QMainWindow):
                 combo.setCurrentIndex(idx)
             combo.currentIndexChanged.connect(self._store_max_voltage_action)
 
+    def _apply_profile_max_voltage_action(self, profile_id: str) -> None:
+        combo = getattr(self.ui, 'comboBox_max_voltage_action', None)
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        fallback = getattr(self, "max_voltage_action", MAX_VOLTAGE_DEFAULT_ACTION)
+        stored = self._load_profile_setting(profile_id, "max_voltage_action", fallback, str)
+        if not isinstance(stored, str) or stored not in MAX_VOLTAGE_ACTION_LABELS:
+            stored = MAX_VOLTAGE_DEFAULT_ACTION
+        idx = combo.findData(stored)
+        if idx < 0:
+            idx = combo.findData(MAX_VOLTAGE_DEFAULT_ACTION)
+        if idx < 0:
+            return
+        combo.blockSignals(True)
+        combo.setCurrentIndex(idx)
+        combo.blockSignals(False)
+        self.max_voltage_action = stored
+
     def _store_max_voltage_action(self) -> None:
         combo = getattr(self.ui, 'comboBox_max_voltage_action', None)
         if not isinstance(combo, QtWidgets.QComboBox):
@@ -2845,6 +2924,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.max_voltage_action = data
         try:
             self.settings.setValue("max_voltage_action", data)
+            self._store_profile_setting("max_voltage_action", data)
         except Exception:
             pass
 
