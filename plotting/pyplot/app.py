@@ -948,10 +948,25 @@ class PyPlotWorkbench(PyPlotWindow):
             dpi = 100.0
         target_w = int(max(360.0, figure_width * dpi + 48.0))
         target_h = int(max(260.0, figure_height * dpi + 72.0))
-        try:
-            sub.resize(target_w, target_h)
-        except Exception:
-            pass
+        fitted = False
+        fitter = getattr(self.tab_widget, "_fit_subwindow", None)
+        if callable(fitter):
+            try:
+                fitter(sub, use_half_width=False, preferred_width=target_w)
+                fitted = True
+            except Exception:
+                fitted = False
+        if not fitted:
+            try:
+                sub.resize(target_w, target_h)
+            except Exception:
+                pass
+        arrange = getattr(self.tab_widget, "_arrange_subwindows", None)
+        if callable(arrange):
+            try:
+                QtCore.QTimer.singleShot(0, arrange)
+            except Exception:
+                pass
 
     # ------------------------------------------------------------------ Qt hooks
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:  # type: ignore[override]
@@ -3136,10 +3151,25 @@ class PyPlotWorkbench(PyPlotWindow):
                                 dpi = 100.0
                             target_w = int(max(360.0, figure_width * dpi + 48.0))
                             target_h = int(max(260.0, figure_height * dpi + 72.0))
-                            try:
-                                sub.resize(target_w, target_h)
-                            except Exception:
-                                pass
+                            fitted = False
+                            fitter = getattr(self.tab_widget, "_fit_subwindow", None)
+                            if callable(fitter):
+                                try:
+                                    fitter(sub, use_half_width=False, preferred_width=target_w)
+                                    fitted = True
+                                except Exception:
+                                    fitted = False
+                            if not fitted:
+                                try:
+                                    sub.resize(target_w, target_h)
+                                except Exception:
+                                    pass
+                            arrange = getattr(self.tab_widget, "_arrange_subwindows", None)
+                            if callable(arrange):
+                                try:
+                                    QtCore.QTimer.singleShot(0, arrange)
+                                except Exception:
+                                    pass
                 touched += 1
             except Exception:
                 continue

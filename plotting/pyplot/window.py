@@ -1028,6 +1028,19 @@ class GraphLineState:
         return self.full_y if self.full_y is not None else self.line.get_ydata()
 
 
+@dataclass(frozen=True)
+class _TabSeriesExportEntry:
+    """Capture one exportable XY series with axis metadata."""
+
+    label: str
+    x_values: np.ndarray
+    y_values: np.ndarray
+    x_label: str
+    x_unit: str
+    y_label: str
+    y_unit: str
+
+
 @dataclass
 class _HistoryEntry:
     description: str
@@ -2972,18 +2985,81 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return np.asarray([], dtype=float), np.asarray([], dtype=float)
         return x_num[mask], y_num[mask]
 
-    def _tab_series_data(
+    def _descriptor_axes(self, descriptor: TabDescriptor) -> list[Any]:
+        axes_list: list[Any] = []
+        seen: set[int] = set()
+        primary = getattr(descriptor, "axes", None)
+        if primary is not None:
+            axes_list.append(primary)
+            seen.add(id(primary))
+        figure = getattr(primary, "figure", None)
+        figure_axes = []
+        if figure is not None:
+            try:
+                figure_axes = list(getattr(figure, "axes", []))
+            except Exception:
+                figure_axes = []
+        for axes in figure_axes:
+            if axes is None:
+                continue
+            marker = id(axes)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            axes_list.append(axes)
+        return axes_list
+
+    def _normalize_series_label_for_export(
+        self,
+        label: str,
+        *,
+        descriptor: TabDescriptor,
+    ) -> str:
+        cleaned = str(label or "").strip()
+        if not cleaned:
+            return cleaned
+        metadata = descriptor.metadata if isinstance(descriptor.metadata, dict) else {}
+        plot_kind = str(metadata.get("plot_kind") or "").strip().lower()
+        if plot_kind == "shape_memory_dual_axis_overlay":
+            for prefix in ("load ", "stress "):
+                if cleaned.lower().startswith(prefix):
+                    trimmed = cleaned[len(prefix) :].strip()
+                    if trimmed:
+                        return trimmed
+        return cleaned
+
+    def _axis_label_parts(self, axes: Any) -> tuple[str, str, str, str]:
+        x_label = ""
+        y_label = ""
+        if axes is not None:
+            try:
+                x_label = str(axes.get_xlabel() or "")
+            except Exception:
+                x_label = ""
+            try:
+                y_label = str(axes.get_ylabel() or "")
+            except Exception:
+                y_label = ""
+        x_name, x_unit = self._label_parts(x_label)
+        y_name, y_unit = self._label_parts(y_label)
+        return x_name, x_unit, y_name, y_unit
+
+    def _tab_series_entries(
         self,
         descriptor: TabDescriptor,
         *,
         include_hidden: bool = False,
-    ) -> list[tuple[str, np.ndarray, np.ndarray]]:
-        series: list[tuple[str, np.ndarray, np.ndarray]] = []
+    ) -> list[_TabSeriesExportEntry]:
+        entries: list[_TabSeriesExportEntry] = []
+        default_x, default_x_unit = self._label_parts(descriptor.x_label)
+        default_y, default_y_unit = self._label_parts(descriptor.y_label)
+
         if isinstance(descriptor.lines, dict) and descriptor.lines:
             for index, state in enumerate(descriptor.lines.values(), start=1):
-                label = (state.label or f"Series {index}").strip() or f"Series {index}"
-                visible = True
+                raw_label = (state.label or f"Series {index}").strip() or f"Series {index}"
+                label = self._normalize_series_label_for_export(raw_label, descriptor=descriptor)
                 line_obj = getattr(state, "line", None)
+                visible = True
                 getter = getattr(line_obj, "get_visible", None)
                 if callable(getter):
                     try:
@@ -2995,34 +3071,74 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 x_vals, y_vals = self._paired_numeric_arrays(state.x_data(), state.y_data())
                 if x_vals.size == 0 or y_vals.size == 0:
                     continue
-                series.append((label, x_vals, y_vals))
-        if series:
-            return series
+                line_axes = getattr(line_obj, "axes", None)
+                x_label, x_unit, y_label, y_unit = self._axis_label_parts(line_axes)
+                entries.append(
+                    _TabSeriesExportEntry(
+                        label=label,
+                        x_values=x_vals,
+                        y_values=y_vals,
+                        x_label=x_label or default_x or "X",
+                        x_unit=x_unit or default_x_unit,
+                        y_label=y_label or default_y or "Y",
+                        y_unit=y_unit or default_y_unit,
+                    )
+                )
+        if entries:
+            return entries
 
-        axes = getattr(descriptor, "axes", None)
-        if axes is None:
-            return []
-        try:
-            axis_lines = list(axes.get_lines())
-        except Exception:
-            axis_lines = []
-        for index, line in enumerate(axis_lines, start=1):
-            label = str(getattr(line, "get_label", lambda: f"Series {index}")() or "").strip()
-            if not label or label.startswith("_"):
-                label = f"Series {index}"
-            if not include_hidden:
-                visible_getter = getattr(line, "get_visible", None)
-                if callable(visible_getter):
-                    try:
-                        if not bool(visible_getter()):
-                            continue
-                    except Exception:
-                        pass
-            x_vals, y_vals = self._paired_numeric_arrays(line.get_xdata(), line.get_ydata())
-            if x_vals.size == 0 or y_vals.size == 0:
-                continue
-            series.append((label, x_vals, y_vals))
-        return series
+        line_counter = 0
+        seen_lines: set[int] = set()
+        for axes in self._descriptor_axes(descriptor):
+            x_label, x_unit, y_label, y_unit = self._axis_label_parts(axes)
+            try:
+                axis_lines = list(axes.get_lines())
+            except Exception:
+                axis_lines = []
+            for line in axis_lines:
+                marker = id(line)
+                if marker in seen_lines:
+                    continue
+                seen_lines.add(marker)
+                line_counter += 1
+                raw_label = str(
+                    getattr(line, "get_label", lambda: f"Series {line_counter}")() or ""
+                ).strip()
+                if not raw_label or raw_label.startswith("_"):
+                    raw_label = f"Series {line_counter}"
+                label = self._normalize_series_label_for_export(raw_label, descriptor=descriptor)
+                if not include_hidden:
+                    visible_getter = getattr(line, "get_visible", None)
+                    if callable(visible_getter):
+                        try:
+                            if not bool(visible_getter()):
+                                continue
+                        except Exception:
+                            pass
+                x_vals, y_vals = self._paired_numeric_arrays(line.get_xdata(), line.get_ydata())
+                if x_vals.size == 0 or y_vals.size == 0:
+                    continue
+                entries.append(
+                    _TabSeriesExportEntry(
+                        label=label,
+                        x_values=x_vals,
+                        y_values=y_vals,
+                        x_label=x_label or default_x or "X",
+                        x_unit=x_unit or default_x_unit,
+                        y_label=y_label or default_y or "Y",
+                        y_unit=y_unit or default_y_unit,
+                    )
+                )
+        return entries
+
+    def _tab_series_data(
+        self,
+        descriptor: TabDescriptor,
+        *,
+        include_hidden: bool = False,
+    ) -> list[tuple[str, np.ndarray, np.ndarray]]:
+        entries = self._tab_series_entries(descriptor, include_hidden=include_hidden)
+        return [(entry.label, entry.x_values, entry.y_values) for entry in entries]
 
     def _tab_has_exportable_series(
         self,
@@ -3053,10 +3169,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         descriptor: TabDescriptor,
     ) -> tuple[WorkbookData, list[WorksheetData]] | None:
         plugin_name = self._tab_plugin_name(descriptor)
-        series = self._tab_series_data(descriptor, include_hidden=False)
-        if not series:
-            series = self._tab_series_data(descriptor, include_hidden=True)
-        if not series:
+        entries = self._tab_series_entries(descriptor, include_hidden=False)
+        if not entries:
+            entries = self._tab_series_entries(descriptor, include_hidden=True)
+        if not entries:
             return None
 
         workbook_name = str(descriptor.root_label or descriptor.title or "Plot data").strip() or "Plot data"
@@ -3067,16 +3183,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             folder=None,
         )
 
-        x_label, x_unit = self._label_parts(descriptor.x_label)
-        y_label, y_unit = self._label_parts(descriptor.y_label)
-        x_label = x_label or "X"
-        y_label = y_label or "Y"
-
         columns: Dict[str, pd.Series] = {}
         metadata: Dict[str, WorksheetColumnMeta] = {}
         axis_roles: list[str] = []
         used_columns: set[str] = set()
-        for index, (label, x_vals, y_vals) in enumerate(series, start=1):
+        for index, entry in enumerate(entries, start=1):
+            label = entry.label
+            x_vals = entry.x_values
+            y_vals = entry.y_values
             token = self._safe_series_token(label, fallback=f"series_{index:02d}")
             x_name = f"{token}_x"
             y_name = f"{token}_y"
@@ -3090,13 +3204,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             columns[x_name] = pd.Series(x_vals)
             columns[y_name] = pd.Series(y_vals)
             metadata[x_name] = WorksheetColumnMeta(
-                long_name=x_label,
-                units=x_unit,
+                long_name=entry.x_label or "X",
+                units=entry.x_unit,
                 comments=label,
             )
             metadata[y_name] = WorksheetColumnMeta(
-                long_name=y_label,
-                units=y_unit,
+                long_name=entry.y_label or "Y",
+                units=entry.y_unit,
                 comments=label,
             )
             axis_roles.extend(["X", "Y"])
@@ -3524,15 +3638,26 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         columns = list(frame.columns) if frame is not None else []
         if not columns:
             return []
-        role_list = [char.upper() for char in str(roles or "") if char.strip()]
+        valid_roles = {"X", "Y", "Z", "N"}
+        role_list = [
+            char.upper()
+            for char in str(roles or "")
+            if char.strip() and char.upper() in valid_roles
+        ]
         if len(role_list) < len(columns):
             fallback = [char.upper() for char in self._origin_axis_roles(frame)]
             role_list.extend(fallback[len(role_list): len(columns)])
         if len(role_list) < len(columns):
-            role_list.extend(["Y"] * (len(columns) - len(role_list)))
+            role_list.extend(["N"] * (len(columns) - len(role_list)))
         role_list = role_list[: len(columns)]
         if "X" not in role_list:
-            role_list[0] = "X"
+            for index, column in enumerate(columns):
+                try:
+                    if is_numeric_dtype(frame[column]):
+                        role_list[index] = "X"
+                        break
+                except Exception:
+                    continue
         return role_list
 
     def _origin_plot_pairs(self, frame: pd.DataFrame, roles: str) -> list[tuple[int, int]]:
@@ -3540,18 +3665,41 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not columns:
             return []
         role_list = self._origin_roles_for_sheet(frame, roles)
-        x_indices = [index for index, role in enumerate(role_list) if role == "X"]
-        y_indices = [index for index, role in enumerate(role_list) if role == "Y"]
+        numeric_indices = {
+            index
+            for index, column in enumerate(columns)
+            if index < len(role_list) and is_numeric_dtype(frame[column])
+        }
+        x_indices = [
+            index
+            for index, role in enumerate(role_list)
+            if role == "X" and index in numeric_indices
+        ]
+        y_indices = [
+            index
+            for index, role in enumerate(role_list)
+            if role == "Y" and index in numeric_indices
+        ]
         if not x_indices:
-            x_indices = [0]
+            x_indices = [index for index in numeric_indices]
+            if x_indices:
+                x_indices = [x_indices[0]]
         if not y_indices:
-            y_indices = [index for index in range(len(columns)) if index not in x_indices]
+            y_indices = [
+                index
+                for index in sorted(numeric_indices)
+                if index not in x_indices
+            ]
+        if not x_indices or not y_indices:
+            return []
         pairs: list[tuple[int, int]] = []
         seen: set[tuple[int, int]] = set()
         for y_index in y_indices:
+            if y_index not in numeric_indices:
+                continue
             x_index = x_indices[0]
             for candidate in x_indices:
-                if candidate <= y_index:
+                if candidate <= y_index and candidate in numeric_indices:
                     x_index = candidate
                 else:
                     break
@@ -3577,6 +3725,115 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 return f"{long_name} [{units}]"
             return long_name
         return str(column_name)
+
+    def _origin_axis_label_command(self, axis_name: str, title: str) -> str | None:
+        token = str(axis_name or "").strip().lower()
+        label_switch = {
+            "x": "xb",
+            "x2": "xt",
+            "y": "yl",
+            "y2": "yr",
+        }.get(token)
+        if not label_switch:
+            return None
+        safe_title = self._escape_origin_text(title)
+        return f'label -s -{label_switch} "{safe_title}";'
+
+    def _set_origin_axis_title(self, layer: Any, axis_name: str, title: str) -> None:
+        command = self._origin_axis_label_command(axis_name, title)
+        lt_exec = getattr(layer, "lt_exec", None)
+        if command and callable(lt_exec):
+            try:
+                lt_exec(command)
+                return
+            except Exception:
+                pass
+
+        axis_obj = None
+        axis_method = getattr(layer, "axis", None)
+        if callable(axis_method):
+            try:
+                axis_obj = axis_method(axis_name)
+            except Exception:
+                axis_obj = None
+        if axis_obj is not None:
+            label_obj = getattr(axis_obj, "label", None)
+            if label_obj is not None and hasattr(label_obj, "text"):
+                try:
+                    label_obj.text = title
+                    return
+                except Exception:
+                    pass
+            if hasattr(axis_obj, "title"):
+                try:
+                    axis_obj.title = title
+                    return
+                except Exception:
+                    pass
+        if command and callable(lt_exec):
+            try:
+                lt_exec(command)
+            except Exception:
+                pass
+
+    def _set_origin_graph_title(self, origin_any: Any, graph: Any, title: str) -> None:
+        safe_title = self._escape_origin_text(title)
+        try:
+            graph.set_str("title", title)
+        except Exception:
+            pass
+        try:
+            graph.lname = title
+        except Exception:
+            pass
+        try:
+            graph.name = self._origin_safe_token(title, fallback="Graph")[:13]
+        except Exception:
+            pass
+        graph_lt_exec = getattr(graph, "lt_exec", None)
+        if callable(graph_lt_exec):
+            try:
+                graph_lt_exec(f'label -s -n title "{safe_title}";')
+                return
+            except Exception:
+                pass
+        try:
+            graph.activate()
+            origin_any.lt_exec(f'label -s -n title "{safe_title}";')
+            return
+        except Exception:
+            pass
+        try:
+            graph.activate()
+            origin_any.lt_exec(f'title -s "{safe_title}";')
+        except Exception:
+            pass
+
+    def _origin_add_topx_righty_layer(self, origin_any: Any, graph: Any) -> Any | None:
+        graph_lt_exec = getattr(graph, "lt_exec", None)
+        if callable(graph_lt_exec):
+            try:
+                graph_lt_exec("layer -new Both;")
+            except Exception:
+                pass
+        else:
+            try:
+                origin_any.lt_exec("layer -new Both;")
+            except Exception:
+                pass
+        try:
+            layer_count = len(graph)
+        except Exception:
+            layer_count = 0
+        if layer_count > 1:
+            try:
+                return graph[layer_count - 1]
+            except Exception:
+                pass
+        try:
+            return graph[1]
+        except Exception:
+            return None
 
     def _apply_origin_plot_label(
         self,
@@ -3655,54 +3912,124 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if layer is None:
             return False
 
-        plotted_any = False
+        columns = list(frame.columns)
+        pair_groups: list[dict[str, Any]] = []
         for x_index, y_index in pairs:
-            add_plot = getattr(layer, "add_plot", None)
+            if not (0 <= x_index < len(columns) and 0 <= y_index < len(columns)):
+                continue
+            x_title = self._origin_axis_title(worksheet, columns[x_index]) or "X"
+            y_title = self._origin_axis_title(worksheet, columns[y_index]) or "Y"
+            group = next(
+                (
+                    item
+                    for item in pair_groups
+                    if item.get("x_title") == x_title and item.get("y_title") == y_title
+                ),
+                None,
+            )
+            if group is None:
+                pair_groups.append(
+                    {
+                        "x_title": x_title,
+                        "y_title": y_title,
+                        "pairs": [(x_index, y_index)],
+                    }
+                )
+            else:
+                cast(list[tuple[int, int]], group["pairs"]).append((x_index, y_index))
+        if not pair_groups:
+            return False
+
+        layer_groups: list[tuple[Any, str, str, list[tuple[int, int]]]] = []
+        for index, group in enumerate(pair_groups):
+            target_layer = layer
+            if index > 0:
+                extra_layer = self._origin_add_topx_righty_layer(origin_any, graph)
+                if extra_layer is not None:
+                    target_layer = extra_layer
+            layer_groups.append(
+                (
+                    target_layer,
+                    str(group.get("x_title") or "X"),
+                    str(group.get("y_title") or "Y"),
+                    list(cast(list[tuple[int, int]], group.get("pairs") or [])),
+                )
+            )
+
+        plotted_any = False
+        for target_layer, _x_title, _y_title, group_pairs in layer_groups:
+            add_plot = getattr(target_layer, "add_plot", None)
             if not callable(add_plot):
                 continue
-            plot_obj = None
-            try:
-                plot_obj = add_plot(sheet, coly=y_index, colx=x_index, type='y')
-            except TypeError:
+            for x_index, y_index in group_pairs:
+                plot_obj = None
                 try:
-                    plot_obj = add_plot(sheet, coly=y_index, colx=x_index)
+                    plot_obj = add_plot(sheet, coly=y_index, colx=x_index, type='y')
+                except TypeError:
+                    try:
+                        plot_obj = add_plot(sheet, coly=y_index, colx=x_index)
+                    except Exception:
+                        continue
                 except Exception:
                     continue
-            except Exception:
-                continue
-            if plot_obj is None:
-                continue
-            plotted_any = True
-            self._apply_origin_plot_label(plot_obj, worksheet, y_index)
+                if plot_obj is None:
+                    continue
+                plotted_any = True
+                self._apply_origin_plot_label(plot_obj, worksheet, y_index)
         if not plotted_any:
             return False
 
-        columns = list(frame.columns)
-        x_name = columns[pairs[0][0]]
-        y_name = columns[pairs[0][1]]
-        x_title = self._origin_axis_title(worksheet, x_name)
-        y_title = self._origin_axis_title(worksheet, y_name)
+        x_title = layer_groups[0][1] if layer_groups else "X"
+        y_title = layer_groups[0][2] if layer_groups else "Y"
         graph_title = str(workbook.name or worksheet.name or "Plot").strip() or "Plot"
         if worksheet.name and worksheet.name != "Plot data":
             graph_title = f"{graph_title} - {worksheet.name}"
 
-        graph_short = self._origin_safe_token(graph_title, fallback="Graph")[:13]
-        for attr, value in (("lname", graph_title), ("name", graph_short)):
-            try:
-                setattr(graph, attr, value)
-            except Exception:
-                continue
+        self._set_origin_graph_title(origin_any, graph, graph_title)
+        self._set_origin_axis_title(layer, "x", x_title)
+        self._set_origin_axis_title(layer, "y", y_title)
 
-        for command in (
-            "page.antialias=1;",
-            "layer -aa 1;",
-            f'title -s "{self._escape_origin_text(graph_title)}";',
-            f'lab -xb "{self._escape_origin_text(x_title)}";',
-            f'lab -yl "{self._escape_origin_text(y_title)}";',
-            "legend -o;",
+        for group_index, (target_layer, group_x_title, group_y_title, _group_pairs) in enumerate(
+            layer_groups[1:],
+            start=1,
         ):
+            if target_layer is layer:
+                if group_index == 1:
+                    self._set_origin_axis_title(layer, "x2", group_x_title)
+                    self._set_origin_axis_title(layer, "y2", group_y_title)
+                continue
+            self._set_origin_axis_title(target_layer, "x", group_x_title)
+            self._set_origin_axis_title(target_layer, "y", group_y_title)
+
+        for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups:
+            set_int = getattr(target_layer, "set_int", None)
+            if callable(set_int):
+                try:
+                    set_int("antialias", 1)
+                except Exception:
+                    pass
+            layer_lt_exec = getattr(target_layer, "lt_exec", None)
+            if callable(layer_lt_exec):
+                try:
+                    layer_lt_exec("layer -aa 1;")
+                except Exception:
+                    pass
+
+        primary_layer_lt_exec = getattr(layer, "lt_exec", None)
+        if callable(primary_layer_lt_exec):
             try:
-                origin_any.lt_exec(command)
+                primary_layer_lt_exec("legend -o;")
+            except Exception:
+                pass
+        else:
+            try:
+                origin_any.lt_exec("legend -o;")
+            except Exception:
+                pass
+
+        for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups:
+            try:
+                target_layer.rescale()
             except Exception:
                 continue
         return True
@@ -3719,7 +4046,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 numeric = is_numeric_dtype(series)
             except Exception:
                 numeric = False
-            if not x_assigned and numeric:
+            if not numeric:
+                roles.append("N")
+                continue
+            if not x_assigned:
                 roles.append("X")
                 x_assigned = True
             else:
@@ -3727,7 +4057,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not roles:
             return ""
         if not x_assigned:
-            roles[0] = "X"
+            for index, role in enumerate(roles):
+                if role == "Y":
+                    roles[index] = "X"
+                    x_assigned = True
+                    break
+        if not x_assigned:
+            return ""
         return "".join(roles)
 
     def _origin_unique_name(
@@ -8547,43 +8883,91 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
     ) -> Legend | None:
         if axes is None:
             return None
+        descriptor: TabDescriptor | None = None
+        tab = self._tab_for_axes(axes) if hasattr(self, "_tab_for_axes") else None
+        if tab is not None:
+            descriptor = self._tab_descriptors.get(tab)
+        metadata = descriptor.metadata if isinstance(descriptor, TabDescriptor) and isinstance(descriptor.metadata, dict) else {}
+        plot_kind = str(metadata.get("plot_kind") or "").strip().lower()
+        dual_axis_overlay = plot_kind == "shape_memory_dual_axis_overlay"
+
+        legend_axes = axes
+        legend_sources: list[Any] = [axes]
+        figure = getattr(axes, "figure", None)
+        if dual_axis_overlay and figure is not None:
+            try:
+                figure_axes = [axis for axis in list(figure.axes) if axis is not None]
+            except Exception:
+                figure_axes = []
+            if figure_axes:
+                legend_sources = figure_axes
+                primary_axes = descriptor.axes if isinstance(descriptor, TabDescriptor) else None
+                if primary_axes is not None and getattr(primary_axes, "figure", None) is figure:
+                    legend_axes = primary_axes
+                else:
+                    legend_axes = figure_axes[0]
+                for candidate_axis in figure_axes:
+                    if candidate_axis is legend_axes:
+                        continue
+                    try:
+                        candidate_legend = candidate_axis.get_legend()
+                    except Exception:
+                        candidate_legend = None
+                    if isinstance(candidate_legend, Legend):
+                        try:
+                            candidate_legend.remove()
+                        except Exception:
+                            pass
+
         old_legend: Legend | None = None
         try:
-            candidate = axes.get_legend()
+            candidate = legend_axes.get_legend()
             if isinstance(candidate, Legend):
                 old_legend = candidate
         except Exception:
             old_legend = None
 
         if plugin_name is None:
-            current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
-            descriptor = self._tab_descriptors.get(current_tab)
             plugin_name = self._tab_plugin_name(descriptor)
+            if plugin_name is None:
+                current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
+                plugin_name = self._tab_plugin_name(self._tab_descriptors.get(current_tab))
         state = self._legend_state_snapshot(old_legend, plugin_name=plugin_name)
 
         visible_lines: list[Line2D] = []
         visible_labels: list[str] = []
-        try:
-            lines = list(axes.get_lines())
-        except Exception:
-            lines = []
-        for line in lines:
-            if not isinstance(line, Line2D):
-                continue
+        seen_labels: set[str] = set()
+        for source_axes in legend_sources:
             try:
-                label = line.get_label()
+                lines = list(source_axes.get_lines())
             except Exception:
-                label = ""
-            if not label or label.startswith("_") or label == "_nolegend_":
-                continue
-            try:
-                is_visible = bool(line.get_visible())
-            except Exception:
-                is_visible = True
-            if not is_visible:
-                continue
-            visible_lines.append(line)
-            visible_labels.append(label)
+                lines = []
+            for line in lines:
+                if not isinstance(line, Line2D):
+                    continue
+                try:
+                    raw_label = str(line.get_label() or "")
+                except Exception:
+                    raw_label = ""
+                if not raw_label or raw_label.startswith("_") or raw_label == "_nolegend_":
+                    continue
+                try:
+                    is_visible = bool(line.get_visible())
+                except Exception:
+                    is_visible = True
+                if not is_visible:
+                    continue
+                label = raw_label
+                if dual_axis_overlay and descriptor is not None:
+                    normalized = self._normalize_series_label_for_export(raw_label, descriptor=descriptor).strip()
+                    if normalized:
+                        label = normalized
+                    dedupe_key = label.casefold()
+                    if dedupe_key in seen_labels:
+                        continue
+                    seen_labels.add(dedupe_key)
+                visible_lines.append(line)
+                visible_labels.append(label)
 
         if old_legend is not None:
             try:
@@ -8596,7 +8980,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         loc_value = state.get("loc", "best")
         ncol = state.get("ncol", 1)
         try:
-            legend = axes.legend(
+            legend = legend_axes.legend(
                 visible_lines,
                 visible_labels,
                 loc=loc_value,
@@ -8604,7 +8988,7 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
             )
         except Exception:
             try:
-                legend = axes.legend(visible_lines, visible_labels)
+                legend = legend_axes.legend(visible_lines, visible_labels)
             except Exception:
                 return None
         if not isinstance(legend, Legend):
@@ -8682,6 +9066,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         legend = data.get("object")
         if not isinstance(legend, Legend):
             return
+        legend_axes = getattr(legend, "axes", None)
+        if legend_axes is not None:
+            opened = self._open_shared_graph_format_from_canvas_target(
+                legend_axes,
+                legend=True,
+            )
+            if opened:
+                return
         current_tab = self.tab_widget.currentWidget() if hasattr(self, "tab_widget") else None
         descriptor = self._tab_descriptors.get(current_tab)
         plugin_name = self._tab_plugin_name(descriptor)
@@ -10583,6 +10975,37 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._arrangement_mode: Literal["cascade", "tile_vertical", "tile_horizontal"] = "cascade"
 
     # ------------------------------------------------------------------ helpers
+    @staticmethod
+    def _is_live_subwindow(sub: QtWidgets.QMdiSubWindow | None) -> bool:
+        if not isinstance(sub, _ManagedSubWindow):
+            return False
+        try:
+            sub.isHidden()
+            sub.widget()
+        except RuntimeError:
+            return False
+        except Exception:
+            return False
+        return True
+
+    def _purge_stale_subwindow_refs(self) -> None:
+        live_map: dict[QtWidgets.QWidget, _ManagedSubWindow] = {}
+        for widget, sub in list(self._subwindows.items()):
+            if not self._is_live_subwindow(sub):
+                continue
+            live_map[widget] = sub
+        self._subwindows = live_map
+        self._widgets = [widget for widget in self._widgets if widget in self._subwindows]
+        self._hidden_subwindows = {
+            sub for sub in self._hidden_subwindows if self._is_live_subwindow(sub)
+        }
+        self._maximized_hidden = {
+            sub for sub in self._maximized_hidden if self._is_live_subwindow(sub)
+        }
+        self._visibility_queue = [
+            sub for sub in self._visibility_queue if self._is_live_subwindow(sub)
+        ]
+
     def _subwindow_aspect_ratio(self, sub: _ManagedSubWindow | None) -> float:
         if sub is None:
             return 1.6
@@ -10662,6 +11085,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
     def _handle_subwindow_activated(self, sub: QtWidgets.QMdiSubWindow | None) -> None:
         if self._blocking:
             return
+        self._purge_stale_subwindow_refs()
+        if sub is not None and not self._is_live_subwindow(sub):
+            return
         was_global_maximized = bool(self._global_maximized or self._fullscreen_lock)
         widget = sub.widget() if sub is not None else None
         index = self.indexOf(widget) if widget is not None else -1
@@ -10694,16 +11120,19 @@ class _MdiTabProxy(QtWidgets.QWidget):
         return self._subwindows.get(widget)
 
     def _activate_index(self, index: int) -> None:
+        self._purge_stale_subwindow_refs()
         if not 0 <= index < len(self._widgets):
             self._mdi.setActiveSubWindow(None)
             self.currentChanged.emit(-1)
             return
         widget = self._widgets[index]
         sub = self._subwindow_for(widget)
-        if sub is None:
+        if not self._is_live_subwindow(sub):
             return
+        restored_from_hidden = False
         self._blocking = True
         if sub in self._hidden_subwindows:
+            restored_from_hidden = True
             self._hidden_subwindows.discard(sub)
             sub.show()
             self._register_visible(sub)
@@ -10712,6 +11141,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._maximize_single(sub)
         else:
             sub.showNormal()
+            if restored_from_hidden:
+                self._fit_subwindow(sub, use_half_width=False)
         sub.raise_()
         self._blocking = False
         self.currentChanged.emit(index)
@@ -10737,6 +11168,8 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._syncing_state = False
 
     def _handle_subwindow_hidden(self, sub: _ManagedSubWindow) -> None:
+        if not self._is_live_subwindow(sub):
+            return
         self._hidden_subwindows.add(sub)
         # ensure tab visibility matches hidden state
         widget = sub.widget()
@@ -10750,6 +11183,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
             pass
 
     def _apply_global_window_state(self, *, active: _ManagedSubWindow | None = None) -> None:
+        self._purge_stale_subwindow_refs()
         self._syncing_state = True
         try:
             active_sub = active or self._mdi.activeSubWindow()
@@ -10768,6 +11202,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._syncing_state = False
 
     def _register_visible(self, sub: _ManagedSubWindow) -> None:
+        self._purge_stale_subwindow_refs()
+        if not self._is_live_subwindow(sub):
+            return
         if sub in self._hidden_subwindows:
             return
         try:
@@ -10786,24 +11223,50 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._enforce_max_visible()
 
     def _enforce_max_visible(self, *, active: _ManagedSubWindow | None = None) -> None:
-        visible = [sub for sub in self._visibility_queue if sub not in self._hidden_subwindows and not sub.isHidden()]
+        self._purge_stale_subwindow_refs()
+        visible: list[_ManagedSubWindow] = []
+        for sub in self._visibility_queue:
+            if sub in self._hidden_subwindows:
+                continue
+            if not self._is_live_subwindow(sub):
+                continue
+            try:
+                if sub.isHidden():
+                    continue
+            except RuntimeError:
+                continue
+            visible.append(sub)
         while len(visible) > max(1, self._max_visible_windows):
             candidate = visible.pop(0)
             if active is not None and candidate is active:
                 visible.append(candidate)
                 continue
-            candidate.hide()
+            if not self._is_live_subwindow(candidate):
+                continue
+            try:
+                candidate.hide()
+            except RuntimeError:
+                continue
             self._hidden_subwindows.add(candidate)
             try:
                 self._visibility_queue.remove(candidate)
             except ValueError:
                 pass
-        self._visibility_queue = [sub for sub in self._visibility_queue if sub not in self._hidden_subwindows]
+        self._visibility_queue = [
+            sub
+            for sub in self._visibility_queue
+            if sub not in self._hidden_subwindows and self._is_live_subwindow(sub)
+        ]
 
     def _maximize_single(self, target: _ManagedSubWindow) -> None:
+        self._purge_stale_subwindow_refs()
+        if not self._is_live_subwindow(target):
+            return
         self._fullscreen_lock = True
         self._global_maximized = True
         for sub in self._subwindows.values():
+            if not self._is_live_subwindow(sub):
+                continue
             if sub in self._hidden_subwindows:
                 continue
             if sub is target:
@@ -10880,6 +11343,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._arrange_subwindows()
 
     def _ordered_visible_subwindows(self) -> list[_ManagedSubWindow]:
+        self._purge_stale_subwindow_refs()
         visible_subwindows = [
             self._subwindow_for(widget)
             for widget in self._widgets
@@ -10888,7 +11352,7 @@ class _MdiTabProxy(QtWidgets.QWidget):
         return [
             sub
             for sub in visible_subwindows
-            if isinstance(sub, _ManagedSubWindow) and sub not in self._hidden_subwindows
+            if self._is_live_subwindow(sub) and sub not in self._hidden_subwindows
         ]
 
     def _arrange_cascade_visible(self, subwindows: Sequence[_ManagedSubWindow]) -> None:
@@ -11008,6 +11472,9 @@ class _MdiTabProxy(QtWidgets.QWidget):
             return
         margin = self._layout_margin
         count = len(visible_subwindows)
+        if count == 1 and self._arrangement_mode == "cascade":
+            self._arrange_cascade_visible(visible_subwindows)
+            return
         if count == 1:
             sub = visible_subwindows[0]
             cell = QtCore.QRect(
@@ -11040,7 +11507,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
                 if active is not None:
                     self._apply_fullscreen_geometry(active)
             else:
-                if self._arrangement_mode in {"tile_vertical", "tile_horizontal"}:
+                visible_count = len(self._ordered_visible_subwindows())
+                if (
+                    self._arrangement_mode in {"tile_vertical", "tile_horizontal"}
+                    or visible_count <= 1
+                ):
                     self._arrange_subwindows()
         return super().eventFilter(source, event)
 
@@ -11057,9 +11528,25 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._visible.pop(widget, None)
         sub = self._subwindows.pop(widget, None)
         if sub is not None:
-            self._mdi.removeSubWindow(sub)
-            sub.setWidget(None)
-            sub.deleteLater()
+            self._hidden_subwindows.discard(sub)
+            self._maximized_hidden.discard(sub)
+            try:
+                self._visibility_queue.remove(sub)
+            except ValueError:
+                pass
+            try:
+                self._mdi.removeSubWindow(sub)
+            except Exception:
+                pass
+            try:
+                sub.setWidget(None)
+            except Exception:
+                pass
+            try:
+                sub.deleteLater()
+            except Exception:
+                pass
+            self._purge_stale_subwindow_refs()
         widget.setParent(None)
         if self._widgets:
             new_index = min(index, len(self._widgets) - 1)
@@ -11143,11 +11630,12 @@ class _MdiTabProxy(QtWidgets.QWidget):
         return len(self._widgets)
 
     def setTabVisible(self, index: int, visible: bool) -> None:
+        self._purge_stale_subwindow_refs()
         widget = self.widget(index)
         if widget is None:
             return
         sub = self._subwindow_for(widget)
-        if sub is None:
+        if not self._is_live_subwindow(sub):
             return
         self._visible[widget] = bool(visible)
         if visible:
@@ -11162,6 +11650,11 @@ class _MdiTabProxy(QtWidgets.QWidget):
         else:
             was_active = self._mdi.activeSubWindow() is sub
             sub.hide()
+            self._hidden_subwindows.add(sub)
+            try:
+                self._visibility_queue.remove(sub)
+            except ValueError:
+                pass
             if was_active:
                 for idx, candidate in enumerate(self._widgets):
                     if self._visible.get(candidate, False):
@@ -11210,16 +11703,18 @@ class _MdiTabProxy(QtWidgets.QWidget):
         return None
 
     def _set_tab_visibility(self, widget: QtWidgets.QWidget, visible: bool) -> None:
+        self._purge_stale_subwindow_refs()
         if widget not in self._widgets:
             return
         sub = self._subwindow_for(widget)
-        if sub is None:
+        if not self._is_live_subwindow(sub):
             return
         if visible:
             self._hidden_tabs.discard(widget)
             self._hidden_subwindows.discard(sub)
             self._maximized_hidden.discard(sub)
             sub.show()
+            self._register_visible(sub)
             if self._global_maximized:
                 self._maybe_apply_maximize(sub)
             else:
@@ -11229,6 +11724,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._hidden_tabs.add(widget)
             self._hidden_subwindows.add(sub)
             sub.hide()
+            try:
+                self._visibility_queue.remove(sub)
+            except ValueError:
+                pass
 
     def setTabToolTip(self, index: int, tooltip: str) -> None:
         _ = index, tooltip

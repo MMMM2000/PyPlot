@@ -199,6 +199,49 @@ def test_double_click_legend_opens_shared_legend_controls(
         window.close()
 
 
+def test_object_manager_legend_double_click_uses_shared_graph_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        tab = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        axes = window._current_axes()  # noqa: SLF001
+        assert axes is not None
+        legend = axes.legend(loc="best")
+        assert legend is not None
+        window._rebuild_object_manager_for_tab(tab)  # noqa: SLF001
+
+        item = QtWidgets.QTreeWidgetItem(["Legend"])
+        item.setData(
+            0,
+            QtCore.Qt.ItemDataRole.UserRole,
+            {"kind": "legend", "object": legend},
+        )
+
+        called: dict[str, object] = {}
+
+        def _fake_open(
+            target_axes: object,
+            *,
+            text_field: str | None = None,
+            axis: str | None = None,
+            legend: bool = False,
+        ) -> bool:
+            called["axes"] = target_axes
+            called["text_field"] = text_field
+            called["axis"] = axis
+            called["legend"] = legend
+            return True
+
+        monkeypatch.setattr(window, "_open_shared_graph_format_from_canvas_target", _fake_open)
+        window._handle_object_item_double_click(item, 0)  # noqa: SLF001
+        assert called.get("axes") is axes
+        assert called.get("legend") is True
+    finally:
+        window.close()
+
+
 def test_graph_option_apply_refreshes_open_graphs() -> None:
     _ensure_app()
     window = PyPlotWorkbench(plotters={})
@@ -389,17 +432,21 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
             self.name = ""
 
     class _FakeLayer:
-        def __init__(self) -> None:
+        def __init__(self, commands: list[str]) -> None:
             self.plots: list[_FakePlot] = []
+            self._commands = commands
 
         def add_plot(self, *_: object, **__: object) -> _FakePlot:
             plot = _FakePlot()
             self.plots.append(plot)
             return plot
 
+        def lt_exec(self, command: str) -> None:
+            self._commands.append(command)
+
     class _FakeGraph:
-        def __init__(self) -> None:
-            self.layer = _FakeLayer()
+        def __init__(self, commands: list[str]) -> None:
+            self.layer = _FakeLayer(commands)
             self.lname = ""
             self.name = ""
 
@@ -443,7 +490,7 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
             return sheet
 
         def new_graph(self, *_: object, **__: object) -> _FakeGraph:
-            graph = _FakeGraph()
+            graph = _FakeGraph(self.lt_commands)
             self.graphs.append(graph)
             return graph
 
@@ -470,11 +517,90 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
     assert len(fake_origin.graphs) == 1
     assert fake_origin.graphs[0].layer.plots
     assert fake_origin.graphs[0].layer.plots[0].lname == "Sample A"
-    assert any('lab -xb "Time [s]";' in cmd for cmd in fake_origin.lt_commands)
-    assert any('lab -yl "Value [A]";' in cmd for cmd in fake_origin.lt_commands)
+    assert any('label -s -xb "Time [s]";' in cmd for cmd in fake_origin.lt_commands)
+    assert any('label -s -yl "Value [A]";' in cmd for cmd in fake_origin.lt_commands)
     assert any(cmd == "legend -o;" for cmd in fake_origin.lt_commands)
+    assert not any("page.antialias" in cmd.lower() for cmd in fake_origin.lt_commands)
 
     window.close()
+
+
+def test_shared_plot_workbook_tracks_multi_axis_metadata() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        fig = Figure(figsize=(6, 4))
+        ax_load = fig.add_subplot(111)
+        ax_stress_y = ax_load.twinx()
+        ax_stress = ax_stress_y.twiny()
+        ax_load.set_title("Dual-axis overlay")
+        ax_load.set_xlabel("Displacement [mm]")
+        ax_load.set_ylabel("Load [g]")
+        ax_stress.set_xlabel("Strain [%]")
+        ax_stress_y.set_ylabel("Stress [MPa]")
+        ax_stress_y.xaxis.set_visible(False)
+        ax_stress.yaxis.set_visible(False)
+        ax_load.plot([0.0, 1.0, 2.0], [0.0, 5.0, 10.0], label="Loading 1")
+        ax_stress.plot([0.0, 2.0, 4.0], [0.0, 100.0, 200.0], label="Loading 1")
+        canvas = FigureCanvas(fig)
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(canvas)
+        descriptor = TabDescriptor(
+            kind="unit_test_dual_axis",
+            title="Dual-axis overlay",
+            root_label="Dual-axis overlay",
+            x_label="Displacement (mm) / Strain (%)",
+            y_label="Load (g) / Stress (MPa)",
+            canvas=canvas,
+            axes=ax_load,
+            lines={},
+            metadata={"plugin": "Shared Test Plugin", "plot_kind": "shape_memory_dual_axis_overlay"},
+        )
+        window.tab_widget.addTab(tab, "Dual-axis")
+        window.tab_widget.setCurrentWidget(tab)
+        window._register_plot_tab(tab, canvas, ax_load, descriptor)  # noqa: SLF001
+
+        assert window._shared_plot_workbook_by_tab  # noqa: SLF001
+        workbook_key = window._shared_plot_workbook_by_tab.get(tab)  # noqa: SLF001
+        assert workbook_key is not None
+        workbook = window._workbooks.get(workbook_key)  # noqa: SLF001
+        assert workbook is not None and workbook.worksheets
+        worksheet = window._worksheets.get(workbook.worksheets[0])  # noqa: SLF001
+        assert worksheet is not None
+
+        x_units: set[str] = set()
+        y_units: set[str] = set()
+        for index, column in enumerate(worksheet.dataframe.columns):
+            role = worksheet.axis_roles[index] if index < len(worksheet.axis_roles) else ""
+            meta = worksheet.columns.get(column)
+            if meta is None:
+                continue
+            if role == "X":
+                x_units.add(meta.units)
+            elif role == "Y":
+                y_units.add(meta.units)
+        assert {"mm", "%"}.issubset(x_units)
+        assert {"g", "MPa"}.issubset(y_units)
+    finally:
+        window.close()
+
+
+def test_mdi_visibility_queue_drops_deleted_subwindows() -> None:
+    _ensure_app()
+    window = PyPlotWorkbench(plotters={})
+    try:
+        first = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        second = _make_simple_plot_tab(window, plugin_name="Shared Test Plugin")
+        window.tab_widget.set_max_visible_windows(1)
+        window._clear_tab_list([first])  # noqa: SLF001
+        window.tab_widget.setCurrentWidget(second)
+        enforce = getattr(window.tab_widget, "_enforce_max_visible", None)
+        assert callable(enforce)
+        enforce()
+    finally:
+        window.close()
 
 
 def _make_simple_plot_tab(window: PyPlotWorkbench, *, plugin_name: str) -> QtWidgets.QWidget:

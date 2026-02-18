@@ -14,6 +14,7 @@ from . import core
 
 LAYOUT_SEPARATE_TABS = "separate_tabs"
 LAYOUT_DUAL_AXIS = "dual_axis_overlay"
+LAYOUT_MODE_SETTINGS_KEY = "shape_memory_stress_strain/layout_mode"
 
 
 @dataclass
@@ -81,6 +82,11 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         layout_mode_combo = QtWidgets.QComboBox(section)
         layout_mode_combo.addItem("Separate tabs", LAYOUT_SEPARATE_TABS)
         layout_mode_combo.addItem("Dual-axis overlay (one graph)", LAYOUT_DUAL_AXIS)
+        stored_mode = self._stored_layout_mode()
+        stored_index = layout_mode_combo.findData(stored_mode)
+        if stored_index >= 0:
+            layout_mode_combo.setCurrentIndex(stored_index)
+        layout_mode_combo.currentIndexChanged.connect(self._persist_layout_mode_setting)
         self._layout_mode_combo = layout_mode_combo
         form.addRow("Graph layout:", layout_mode_combo)
 
@@ -160,7 +166,22 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
             mode = self._layout_mode_combo.currentData()
             if isinstance(mode, str):
                 return mode
+        return self._stored_layout_mode()
+
+    def _stored_layout_mode(self) -> str:
+        settings = getattr(self.host, "settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            stored = settings.value(LAYOUT_MODE_SETTINGS_KEY, LAYOUT_SEPARATE_TABS)
+            if isinstance(stored, str) and stored in {LAYOUT_SEPARATE_TABS, LAYOUT_DUAL_AXIS}:
+                return stored
         return LAYOUT_SEPARATE_TABS
+
+    def _persist_layout_mode_setting(self, *_: object) -> None:
+        mode = self._plot_layout_mode()
+        settings = getattr(self.host, "settings", None)
+        if isinstance(settings, QtCore.QSettings):
+            settings.setValue(LAYOUT_MODE_SETTINGS_KEY, mode)
+            settings.sync()
 
     def _clear_tabs(self) -> None:
         self.clear_plot_tabs(self._plot_tabs)

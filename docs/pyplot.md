@@ -17,6 +17,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Axis unit style** defaults to square brackets in shared graphs (for example `Temperature [°C]`, `Strain [%]`).
 - **Large-font safety**: graph-format applies run a layout fit pass so oversized title/label/tick fonts are kept inside the canvas bounds.
 - **Direct on-canvas editing** is available on Matplotlib graphs: double-click title/X/Y label text, legend entries/box, or near an axis line to open the shared movable Graph formatting dialog, focused on the relevant controls (labels, legend, or axis scale/limits). If shared controls are unavailable for a host/plugin, PyPlot falls back to the legacy direct-edit dialogs.
+  Object Manager parity: double-clicking a legend item in Object Manager now opens the same shared Graph formatting legend controls before falling back to legacy dialogs.
 - **Dock switchers** sit on the left/right edges so you can collapse/restore the Project Explorer, Message Log, and Object Manager without losing their placement (enabled across platforms). Switchers now use click-to-toggle behavior (no hover pop-out/auto-collapse) to avoid resize flicker.
 - **Settings → Graph options** provides shared defaults for all plugins plus optional per-plugin overrides (for example grid/legend defaults, font sizes, line width/marker size, default figure width/height, legend defaults) so plugin-specific behavior can diverge without duplicating UI code. The dialog now uses `Apply`, `Cancel`, and `Reset to defaults`; `Apply` immediately refreshes all open graphs.
 - **Responsive side docks**: Project Explorer/Object Manager widths now reflow on window resize and expand on large/maximized windows, so the side panels do not stay locked to tiny startup widths.
@@ -27,21 +28,24 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - **Legends** default to “text colour follows plot” for every plug-in. Legend options (show symbols, placement, orientation, drag, follow colours) are remembered per plug-in between sessions so each workflow keeps its own defaults.
 - **Fullscreen**: maximizing any graph/workbook hides the others and maximizes the active subwindow; switching tabs or double-clicking a different graph keeps fullscreen on (only the active window is visible) until you restore a window to normal.
 - **Graph window geometry**: shared MDI graph windows preserve the figure aspect ratio during window resize and maximize/restore transitions, so displayed proportions match saved graph proportions.
+  Cascade sizing: with one visible graph in cascade mode, PyPlot now keeps cascade-style window sizing instead of an oversized first window.
 - **Cascade layout persistence**: in cascade mode, activating another graph no longer re-cascades/repositions windows automatically, so manual graph window positions are preserved while you work.
 - **Window arrangement**: the shared `Window` menu exposes `Cascade`, `Tile Vertical`, and `Tile Horizontal` for every plugin. Default graph/workbook view is `Cascade`.
 - **Legend auto layout**: when legend orientation is `Auto`, PyPlot now prefers vertical layout for dense/long series labels and uses horizontal rows only when labels/space allow it.
 - **TXT exports**: the default filename mirrors the current workbook/plot label so exported TXT/CSV files match the names shown in the Project Explorer and carry the sample/procedure context baked into those labels. Shared TXT export now also falls back to visible Matplotlib lines when a plugin does not populate explicit line-state metadata.
 - **Shared plot workbooks**: for plug-ins that do not implement their own workbook builder, PyPlot now auto-creates a `Plot data` workbook per graph tab (XY column pairs from plotted lines). This keeps `Export workbooks to Origin...` and worksheet tooling available consistently across plotting plug-ins.
 - **Shared Origin fallback**: when a plug-in uses the base `Open in Origin...` action, PyPlot exports the active plug-in’s shared plot workbooks to Origin and creates Origin graphs from those worksheets, so the button works even without a plug-in-specific Origin export implementation. Shared Origin workbook export keeps the Origin session open after transfer.
-- **Origin worksheet metadata convention (shared export)**: shared exports apply `Long Name = physical quantity`, `Units = unit`, and `Comments = series/legend label` consistently for all columns. For shared plot workbooks, this means each X/Y pair uses axis quantity names in Long Name and the segment name (for example `Loading 1`) in Comments.
+- **Origin worksheet metadata convention (shared export)**: shared exports apply `Long Name = physical quantity`, `Units = unit`, and `Comments = series/legend label` consistently for all columns. For shared plot workbooks, each X/Y pair now inherits axis metadata from the actual source axis (including multi-axis figures) instead of only descriptor-level labels.
 - **Graph export**: Save graph supports `PNG`, `PDF`, and `SVG`.
   Save dialog memory: the last selected graph-export format is remembered and reused as the default next time.
 - **Check outliers** now performs a worksheet scan (IQR-based with z-score fallback for low-spread columns), shows a per-sheet summary, and can remove flagged rows in-place across affected worksheets.
 
 ## Origin export checklist
 - Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.
+- Set graph/axis titles with Origin-compatible label commands (`label -s -n title`, `label -s -xb/-yl/-xt/-yr`) so titles render reliably across Origin builds where `PAGE.ANTIALIAS` and some direct axis/title properties are not available.
 - Preserve sample labels on X and long name/units/comments rows in the Origin worksheets (baseline, deltas, relative values documented).
 - Match line/symbol styles, widths, sizes, and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
+- For shared multi-axis exports (for example dual-axis overlays), group XY pairs by axis-title metadata and plot each group on its own linked Origin layer so displacement/load and strain/stress do not collapse onto one Y scale.
 - Use descriptive graph names/long names that match the Matplotlib title and include distinguishing metadata (field strength, temperature, or variant) when multiple graphs share a sample name.
 - Build worksheets with units and comments filled (including baselines/deltas/relative columns) and avoid terminal spam (disable tqdm/console progress); keep graph extents so nothing is cropped after export.
 
@@ -53,7 +57,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 | Temperature Dependence  | `plotting.plugins.temperature_dependence`             | Generates per-variable Matplotlib plots from the temperature dependence CSV set. |
 | Stress Sensitivity      | `plotting.plugins.stress_sensitivity`                 | Combines stress sweeps and overlays key metrics. |
 | Stress Dependence       | `plotting.plugins.stress_dependence`                  | Converts TXT exports into worksheets + line graphs. |
-| Shape Memory Stress/Strain | `plotting.plugins.shape_memory_stress_strain`     | Loads Manual Stress/Strain Logger TXT files and plots segmented loops as `Loading 1`, `Unloading 1`, `Loading 2`, ... with configurable layout: separate load/stress tabs or a single dual-axis overlay (load/displacement left+bottom, stress/strain right+top). |
+| Shape Memory Stress/Strain | `plotting.plugins.shape_memory_stress_strain`     | Loads Manual Stress/Strain Logger TXT files and plots segmented loops as `Loading 1`, `Unloading 1`, `Loading 2`, ... with configurable layout: separate load/stress tabs or a single dual-axis overlay (load/displacement left+bottom, stress/strain right+top). The selected layout mode is remembered between sessions, and dual-axis overlays keep a single shared segment legend (`Loading 1`, etc.) instead of duplicated `Load/Stress` legend groups. |
 | Current Annealing       | `plotting.plugins.current_annealing`                  | Splits batches by annealing direction and exposes workbook exports. Defaults now align better with shared PyPlot graph sizing/label style so formatting behavior is consistent across plugins. |
 | VSM Hysteresis Loops    | `plotting.plugins.vsm_hysteresis`                     | Wraps the legacy VSM plotter with the shared tooling, including Origin exports. Workbooks group each temperature graph into a single worksheet with XY column pairs per angle. |
 | VSM Temperature Scan    | `plotting.plugins.vsm_temperature_scan`               | Plots Signal X vs Temperature with heating/cooling splits; can combine low/high field runs into a dual-axis plot; Origin/TXT exports carry per-section legends and TXT filenames embed sample, temperature span, and field strength. Core parsing/export logic now lives in `plotting.plugins.vsm_temperature_scan.core` so PyPlot and Data Builder share one implementation. |
@@ -89,6 +93,7 @@ Plugin authoring note: prefer shared PyPlot features (`save graph`, `graph forma
   - When adding or updating plug-ins, keep these sizing/fullscreen rules intact and refresh this document if the behavior changes.
 - Subwindow lifecycle:
   - The close button hides a graph instead of destroying it; reopen via Project Explorer → Plots. Keep windows in fullscreen/windowed mode until the user changes it, and sync that state across subwindows when switching.
+  - Visibility queue cleanup now removes deleted subwindow references before activation/limit checks, preventing stale `wrapped C/C++ object ... has been deleted` exceptions.
 
 Feel free to expand these sections with screenshots, plugin-specific quirks, or Origin export caveats as the toolset grows.
 

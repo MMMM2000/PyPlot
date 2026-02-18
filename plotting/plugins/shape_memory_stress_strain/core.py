@@ -259,14 +259,12 @@ def make_dual_axis_overlay_figure(
         x_raw,
         y_raw,
         segments,
-        label_prefix="Load ",
     )
-    stress_plotted = _plot_segmented_curve(
+    _plot_segmented_curve(
         ax_stress,
         x_stress,
         y_stress,
         segments,
-        label_prefix="Stress ",
         linestyle="--",
         linewidth=1.4,
         markersize=3.5,
@@ -274,8 +272,6 @@ def make_dual_axis_overlay_figure(
 
     if load_plotted:
         ax_load.legend(loc="upper left", fontsize=8)
-    if stress_plotted:
-        ax_stress.legend(loc="upper right", fontsize=8)
 
     ax_load.grid(True, alpha=0.3)
     return fig
