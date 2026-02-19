@@ -3751,7 +3751,23 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         # originpro lt_exec may return bool/int or None; only explicit False/0 is failure.
         return bool(result) if result is not None else True
 
+    @staticmethod
+    def _activate_origin_layer(layer: Any) -> None:
+        activate = getattr(layer, "activate", None)
+        if callable(activate):
+            try:
+                activate()
+            except Exception:
+                pass
+
     def _set_origin_axis_title(self, layer: Any, axis_name: str, title: str) -> None:
+        command = self._origin_axis_label_command(axis_name, title)
+        if not command:
+            return
+        self._activate_origin_layer(layer)
+        lt_exec = getattr(layer, "lt_exec", None)
+        if self._origin_lt_exec(lt_exec, command):
+            return
         axis_obj = None
         axis_method = getattr(layer, "axis", None)
         if callable(axis_method):
@@ -3770,20 +3786,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             if hasattr(axis_obj, "title"):
                 try:
                     axis_obj.title = title
-                    return
                 except Exception:
                     pass
-        command = self._origin_axis_label_command(axis_name, title)
-        lt_exec = getattr(layer, "lt_exec", None)
-        if command:
-            self._origin_lt_exec(lt_exec, command)
 
     def _set_origin_graph_title(self, origin_any: Any, graph: Any, title: str) -> None:
         safe_title = self._escape_origin_text(title)
-        try:
-            graph.set_str("title", title)
-        except Exception:
-            pass
         try:
             graph.lname = title
         except Exception:
@@ -3793,30 +3800,19 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         graph_lt_exec = getattr(graph, "lt_exec", None)
-        commands = (
-            "label -r TITLE;",
-            "label -r title;",
-            f'label -p 50 2 -j 2 -n PYPLOTTITLE "{safe_title}";',
-            "PYPLOTTITLE.wrap=0;",
-            "PYPLOTTITLE.fsize=24;",
-        )
+        label_command = f'label -p 50 2 -j 1 -n title "{safe_title}";'
+        optional_commands = ("title.wrap=0;", "title.fsize=24;")
         if callable(graph_lt_exec):
-            ok = True
-            for command in commands:
-                if not self._origin_lt_exec(graph_lt_exec, command):
-                    ok = False
-                    break
-            if ok:
+            if self._origin_lt_exec(graph_lt_exec, label_command):
+                for command in optional_commands:
+                    self._origin_lt_exec(graph_lt_exec, command)
                 return
         try:
             graph.activate()
             root_lt_exec = getattr(origin_any, "lt_exec", None)
-            ok = True
-            for command in commands:
-                if not self._origin_lt_exec(root_lt_exec, command):
-                    ok = False
-                    break
-            if ok:
+            if self._origin_lt_exec(root_lt_exec, label_command):
+                for command in optional_commands:
+                    self._origin_lt_exec(root_lt_exec, command)
                 return
         except Exception:
             pass
@@ -3861,27 +3857,83 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         *,
         secondary_axes_only: bool,
     ) -> None:
+        self._activate_origin_layer(layer)
         lt_exec = getattr(layer, "lt_exec", None)
         if not callable(lt_exec):
             return
         if secondary_axes_only:
             commands = (
-                "range ll = !;",
-                "ll.x.showAxes=0;",
-                "ll.y.showAxes=0;",
-                "ll.x2.showAxes=3;",
-                "ll.y2.showAxes=3;",
+                # 2 = show opposite axes only (top/right)
+                "layer.x.showAxes=2;",
+                "layer.y.showAxes=2;",
+                "layer.x.showLabels=2;",
+                "layer.y.showLabels=2;",
+                "layer.x.showlabel=0;",
+                "layer.x2.showlabel=1;",
+                "layer.y.showlabel=0;",
+                "layer.y2.showlabel=1;",
+            )
+            compatibility_commands = (
+                "axis -ps X A 2;",
+                "axis -ps X L 2;",
+                "axis -ps Y A 2;",
+                "axis -ps Y L 2;",
             )
         else:
             commands = (
-                "range ll = !;",
-                "ll.x.showAxes=3;",
-                "ll.y.showAxes=3;",
-                "ll.x2.showAxes=0;",
-                "ll.y2.showAxes=0;",
+                # 1 = show primary axes only (bottom/left)
+                "layer.x.showAxes=1;",
+                "layer.y.showAxes=1;",
+                "layer.x.showLabels=1;",
+                "layer.y.showLabels=1;",
+                "layer.x.showlabel=1;",
+                "layer.x2.showlabel=0;",
+                "layer.y.showlabel=1;",
+                "layer.y2.showlabel=0;",
+            )
+            compatibility_commands = (
+                "axis -ps X A 1;",
+                "axis -ps X L 1;",
+                "axis -ps Y A 1;",
+                "axis -ps Y L 1;",
             )
         for command in commands:
             self._origin_lt_exec(lt_exec, command)
+        for command in compatibility_commands:
+            self._origin_lt_exec(lt_exec, command)
+        lt_range_getter = getattr(layer, "lt_range", None)
+        if callable(lt_range_getter):
+            try:
+                layer_range = str(lt_range_getter() or "").strip()
+            except Exception:
+                layer_range = ""
+            if layer_range:
+                if secondary_axes_only:
+                    range_commands = (
+                        f"range ll={layer_range};",
+                        "ll.x.showAxes=2;",
+                        "ll.y.showAxes=2;",
+                        "ll.x.showLabels=2;",
+                        "ll.y.showLabels=2;",
+                        "ll.x.showlabel=0;",
+                        "ll.x2.showlabel=1;",
+                        "ll.y.showlabel=0;",
+                        "ll.y2.showlabel=1;",
+                    )
+                else:
+                    range_commands = (
+                        f"range ll={layer_range};",
+                        "ll.x.showAxes=1;",
+                        "ll.y.showAxes=1;",
+                        "ll.x.showLabels=1;",
+                        "ll.y.showLabels=1;",
+                        "ll.x.showlabel=1;",
+                        "ll.x2.showlabel=0;",
+                        "ll.y.showlabel=1;",
+                        "ll.y2.showlabel=0;",
+                    )
+                for command in range_commands:
+                    self._origin_lt_exec(lt_exec, command)
 
     def _origin_plot_label(
         self,
@@ -4061,6 +4113,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         self._configure_origin_layer_axes(layer, secondary_axes_only=False)
         self._set_origin_axis_title(layer, "x", x_title)
         self._set_origin_axis_title(layer, "y", y_title)
+        # Explicitly clear hidden-side titles on primary layer.
+        self._set_origin_axis_title(layer, "x2", "")
+        self._set_origin_axis_title(layer, "y2", "")
 
         for group_index, (target_layer, group_x_title, group_y_title, _group_pairs) in enumerate(
             layer_groups[1:],
@@ -4072,8 +4127,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     self._set_origin_axis_title(layer, "y2", group_y_title)
                 continue
             self._configure_origin_layer_axes(target_layer, secondary_axes_only=True)
-            self._set_origin_axis_title(target_layer, "x", group_x_title)
-            self._set_origin_axis_title(target_layer, "y", group_y_title)
+            # Explicitly clear hidden-side titles on secondary layer.
+            self._set_origin_axis_title(target_layer, "x", "")
+            self._set_origin_axis_title(target_layer, "y", "")
             self._set_origin_axis_title(target_layer, "x2", group_x_title)
             self._set_origin_axis_title(target_layer, "y2", group_y_title)
 

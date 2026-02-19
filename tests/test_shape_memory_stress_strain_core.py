@@ -24,8 +24,28 @@ def test_load_manual_stress_strain_file_parses_headered_txt(tmp_path: Path) -> N
     )
     frame = core.load_manual_stress_strain_file(path)
     assert list(frame.columns) == ["displacement_mm", "load_g", "strain_pct", "stress_mpa"]
-    assert len(frame) == 3
+    assert len(frame) == 2
+    assert frame["load_g"].iloc[0] == pytest.approx(0.1)
     assert frame["stress_mpa"].iloc[-1] == pytest.approx(1.8)
+
+
+def test_load_manual_stress_strain_file_keeps_all_zero_series(tmp_path: Path) -> None:
+    path = tmp_path / "all_zero.txt"
+    path.write_text(
+        "\n".join(
+            [
+                "Displacement\tLoad\tStrain\tStress",
+                "mm\tg\t%\tMPa",
+                "0\t0\t0\t0",
+                "0.01\t0\t0.01\t0",
+                "0.02\t0\t0.02\t0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    frame = core.load_manual_stress_strain_file(path)
+    assert len(frame) == 3
+    assert (frame["load_g"] == 0.0).all()
 
 
 def test_segment_building_labels_loading_unloading_cycles() -> None:

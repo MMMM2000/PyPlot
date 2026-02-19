@@ -11,6 +11,7 @@ STRAIN_DIRECTION_TOLERANCE = 1e-9
 LOADING_COLORS = ("#1f77b4", "#2ca02c", "#17becf", "#9467bd")
 UNLOADING_COLORS = ("#d62728", "#ff7f0e", "#8c564b", "#e377c2")
 HOLD_COLORS = ("#7f7f7f",)
+LOAD_ZERO_TOLERANCE = 1e-12
 
 
 @dataclass(frozen=True)
@@ -56,10 +57,38 @@ def load_manual_stress_strain_file(path: Path) -> pd.DataFrame:
     if not rows:
         raise ValueError("No valid numeric data rows found.")
 
-    return pd.DataFrame(
+    frame = pd.DataFrame(
         rows,
         columns=["displacement_mm", "load_g", "strain_pct", "stress_mpa"],
     )
+    return _trim_leading_zero_load_rows(frame)
+
+
+def _trim_leading_zero_load_rows(
+    frame: pd.DataFrame,
+    *,
+    tolerance: float = LOAD_ZERO_TOLERANCE,
+) -> pd.DataFrame:
+    """Drop initial zero-load rows until the first non-zero load appears."""
+
+    if frame.empty or "load_g" not in frame:
+        return frame
+
+    load_values = pd.to_numeric(frame["load_g"], errors="coerce").to_numpy(dtype=float)
+    trim_until = 0
+    found_nonzero = False
+    for index, value in enumerate(load_values):
+        if not pd.notna(value):
+            break
+        if abs(float(value)) <= tolerance:
+            trim_until = index + 1
+            continue
+        found_nonzero = True
+        break
+
+    if trim_until <= 0 or not found_nonzero:
+        return frame.reset_index(drop=True)
+    return frame.iloc[trim_until:].reset_index(drop=True)
 
 
 def split_segments_by_strain_direction(
