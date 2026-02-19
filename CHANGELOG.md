@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-02-19 11:59 UTC
+
+- Shared Origin export: replaced fragile axis-title labtalk syntax with direct axis-title commands (`label -xb/-yl/-xt/-yr`) so top/right titles for dual-axis overlays apply reliably.
+- Shared Origin export: switched graph-title creation to `label -t` + explicit title font sizing, preventing missing graph titles on some Origin builds.
+- Shared Origin export: replaced invalid legend refresh command (`legend -o`) with documented legend reconstruction (`legend -r`) to stop repeated `LEGEND.SMARTPOS` Origin errors.
+- Shared Origin export: dual-axis secondary layer now uses documented `layadd userdef:=1 ... top:=1 right:=1 ...` creation so duplicate bottom/left axes are not generated.
+
+## 2026-02-18 12:27 UTC
+
+- Shared Origin export: replaced unsupported `PAGE.ANTIALIAS` and fragile axis/title assignment with Origin-compatible label commands (`label -s -n title`, `label -s -xb/-yl/-xt/-yr`) and per-layer antialias fallbacks.
+- Shared Origin export: multi-axis worksheets are now grouped by axis metadata and plotted to separate linked layers (`layer -new Both`) so dual-axis overlays export with correct scales instead of an extra near-zero trace.
+- PyPlot legends: dual-axis overlay legend rebuild now deduplicates labels across sibling axes and keeps a single host legend, preventing duplicate `Loading 1` entries.
+- PyPlot MDI sizing: graph-option and graph-format applies now re-fit and re-arrange subwindows after size changes to avoid one graph appearing larger until focus switches.
+
+## 2026-02-18 10:19 UTC
+
+- Shape Memory Stress/Strain: dual-axis overlay now keeps a single segment legend (`Loading 1`, `Unloading 1`, ...) instead of separate `Load ...` and `Stress ...` legend groups.
+- Shape Memory Stress/Strain: the selected graph layout mode (separate tabs vs dual-axis overlay) is now remembered across sessions.
+- PyPlot Object Manager: double-clicking a legend now opens the shared `Graph formatting` legend controls so legend settings are consistent with the main formatting window.
+- PyPlot MDI windows: hardened visibility-queue cleanup to avoid stale subwindow references that caused `wrapped C/C++ object ... has been deleted` runtime errors while switching/closing many graphs.
+- Shared Origin export: per-series axis metadata is taken from the actual source axes (including multi-axis figures), and graph/axis title assignment now uses OriginPro API-first setters with LabTalk fallback to improve title reliability.
+
+## 2026-02-17 15:12 UTC
+
+- Manual Stress/Strain Logger: replaced the idle badge text with a simpler countdown-only display (`Ns left`).
+- Manual Stress/Strain Logger: made scale countdown configurable from the UI with a default timeout of 55 s.
+- Manual Stress/Strain Logger: made the countdown badge clickable to manually reset the timer without changing the logged load.
+
+## 2026-02-17 13:55 UTC
+
+- Manual Stress/Strain Logger: improved the `Microwire` preset field to use slash-style entry (for example `11/1`) while still generating file-safe names with underscore tokens (for example `11_1`).
+
 ## 2026-02-17 09:31 UTC
 
 - Manual Stress/Strain logger: when start displacement is set to 10 points, strain now uses an effective gauge length `L0_effective = L0_input - 0.1 mm` (instead of raw `L0_input`).

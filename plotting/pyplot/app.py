@@ -2600,8 +2600,16 @@ class PyPlotWorkbench(PyPlotWindow):
         self._sync_aspect_controls()
 
     def _tab_for_axes(self, axes: Any) -> QtWidgets.QWidget | None:
+        if axes is None:
+            return None
+        target_figure = getattr(axes, "figure", None)
         for tab, candidate in self._axes_by_tab.items():
-            if candidate is axes and isinstance(tab, QtWidgets.QWidget):
+            if not isinstance(tab, QtWidgets.QWidget):
+                continue
+            if candidate is axes:
+                return tab
+            candidate_figure = getattr(candidate, "figure", None)
+            if target_figure is not None and candidate_figure is target_figure:
                 return tab
         return None
 
@@ -3186,8 +3194,22 @@ class PyPlotWorkbench(PyPlotWindow):
     def _fit_figure_to_content(self, figure: Any) -> None:
         if figure is None:
             return
+        constrained_layout = False
+        get_constrained_layout = getattr(figure, "get_constrained_layout", None)
+        if callable(get_constrained_layout):
+            try:
+                constrained_layout = bool(get_constrained_layout())
+            except Exception:
+                constrained_layout = False
+        if constrained_layout:
+            set_pads = getattr(figure, "set_constrained_layout_pads", None)
+            if callable(set_pads):
+                try:
+                    set_pads(w_pad=0.04, h_pad=0.04, wspace=0.02, hspace=0.02)
+                except Exception:
+                    pass
         tight_layout = getattr(figure, "tight_layout", None)
-        if callable(tight_layout):
+        if callable(tight_layout) and not constrained_layout:
             try:
                 tight_layout(pad=1.0)
             except Exception:

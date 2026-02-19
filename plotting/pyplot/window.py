@@ -3737,18 +3737,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not label_switch:
             return None
         safe_title = self._escape_origin_text(title)
-        return f'label -s -{label_switch} "{safe_title}";'
+        # Axis-title switches should be used directly (no string-substitution switch).
+        return f'label -{label_switch} "{safe_title}";'
+
+    @staticmethod
+    def _origin_lt_exec(executor: Any, command: str) -> bool:
+        if not callable(executor):
+            return False
+        try:
+            result = executor(command)
+        except Exception:
+            return False
+        # originpro lt_exec may return bool/int or None; only explicit False/0 is failure.
+        return bool(result) if result is not None else True
 
     def _set_origin_axis_title(self, layer: Any, axis_name: str, title: str) -> None:
-        command = self._origin_axis_label_command(axis_name, title)
-        lt_exec = getattr(layer, "lt_exec", None)
-        if command and callable(lt_exec):
-            try:
-                lt_exec(command)
-                return
-            except Exception:
-                pass
-
         axis_obj = None
         axis_method = getattr(layer, "axis", None)
         if callable(axis_method):
@@ -3770,11 +3773,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     return
                 except Exception:
                     pass
-        if command and callable(lt_exec):
-            try:
-                lt_exec(command)
-            except Exception:
-                pass
+        command = self._origin_axis_label_command(axis_name, title)
+        lt_exec = getattr(layer, "lt_exec", None)
+        if command:
+            self._origin_lt_exec(lt_exec, command)
 
     def _set_origin_graph_title(self, origin_any: Any, graph: Any, title: str) -> None:
         safe_title = self._escape_origin_text(title)
@@ -3791,40 +3793,58 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             pass
         graph_lt_exec = getattr(graph, "lt_exec", None)
+        commands = (
+            "label -r TITLE;",
+            "label -r title;",
+            f'label -p 50 2 -j 2 -n PYPLOTTITLE "{safe_title}";',
+            "PYPLOTTITLE.wrap=0;",
+            "PYPLOTTITLE.fsize=24;",
+        )
         if callable(graph_lt_exec):
-            try:
-                graph_lt_exec(f'label -s -n title "{safe_title}";')
+            ok = True
+            for command in commands:
+                if not self._origin_lt_exec(graph_lt_exec, command):
+                    ok = False
+                    break
+            if ok:
                 return
-            except Exception:
-                pass
         try:
             graph.activate()
-            origin_any.lt_exec(f'label -s -n title "{safe_title}";')
-            return
-        except Exception:
-            pass
-        try:
-            graph.activate()
-            origin_any.lt_exec(f'title -s "{safe_title}";')
+            root_lt_exec = getattr(origin_any, "lt_exec", None)
+            ok = True
+            for command in commands:
+                if not self._origin_lt_exec(root_lt_exec, command):
+                    ok = False
+                    break
+            if ok:
+                return
         except Exception:
             pass
 
     def _origin_add_topx_righty_layer(self, origin_any: Any, graph: Any) -> Any | None:
         graph_lt_exec = getattr(graph, "lt_exec", None)
+        commands = (
+            "layadd type:=txry activate:=1 offset:=0;",
+        )
         if callable(graph_lt_exec):
-            try:
-                graph_lt_exec("layer -new Both;")
-            except Exception:
-                pass
+            for command in commands:
+                self._origin_lt_exec(graph_lt_exec, command)
         else:
-            try:
-                origin_any.lt_exec("layer -new Both;")
-            except Exception:
-                pass
+            for command in commands:
+                self._origin_lt_exec(getattr(origin_any, "lt_exec", None), command)
         try:
             layer_count = len(graph)
         except Exception:
             layer_count = 0
+        if layer_count <= 1:
+            add_layer = getattr(graph, "add_layer", None)
+            if callable(add_layer):
+                try:
+                    added = add_layer(4)
+                    if added is not None:
+                        return added
+                except Exception:
+                    pass
         if layer_count > 1:
             try:
                 return graph[layer_count - 1]
@@ -3835,15 +3855,42 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         except Exception:
             return None
 
-    def _apply_origin_plot_label(
+    def _configure_origin_layer_axes(
         self,
-        plot_obj: Any,
+        layer: Any,
+        *,
+        secondary_axes_only: bool,
+    ) -> None:
+        lt_exec = getattr(layer, "lt_exec", None)
+        if not callable(lt_exec):
+            return
+        if secondary_axes_only:
+            commands = (
+                "range ll = !;",
+                "ll.x.showAxes=0;",
+                "ll.y.showAxes=0;",
+                "ll.x2.showAxes=3;",
+                "ll.y2.showAxes=3;",
+            )
+        else:
+            commands = (
+                "range ll = !;",
+                "ll.x.showAxes=3;",
+                "ll.y.showAxes=3;",
+                "ll.x2.showAxes=0;",
+                "ll.y2.showAxes=0;",
+            )
+        for command in commands:
+            self._origin_lt_exec(lt_exec, command)
+
+    def _origin_plot_label(
+        self,
         worksheet: WorksheetData,
         y_index: int,
-    ) -> None:
+    ) -> str:
         columns = list(worksheet.dataframe.columns)
         if y_index < 0 or y_index >= len(columns):
-            return
+            return ""
         column_name = columns[y_index]
         meta = worksheet.columns.get(column_name)
         label = ""
@@ -3853,6 +3900,24 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 label = str(meta.long_name or "").strip()
         if not label:
             label = str(column_name)
+        return label
+
+    def _apply_origin_plot_label(
+        self,
+        plot_obj: Any,
+        worksheet: WorksheetData,
+        y_index: int,
+        *,
+        override_label: str | None = None,
+    ) -> None:
+        label = str(override_label) if override_label is not None else self._origin_plot_label(worksheet, y_index)
+        if not label.strip():
+            for attr in ("lname", "long_name"):
+                try:
+                    setattr(plot_obj, attr, "")
+                except Exception:
+                    continue
+            return
         for attr, value in (
             ("lname", label),
             ("long_name", label),
@@ -3957,7 +4022,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             )
 
         plotted_any = False
-        for target_layer, _x_title, _y_title, group_pairs in layer_groups:
+        seen_plot_labels: set[str] = set()
+        for group_index, (target_layer, _x_title, _y_title, group_pairs) in enumerate(layer_groups):
             add_plot = getattr(target_layer, "add_plot", None)
             if not callable(add_plot):
                 continue
@@ -3975,7 +4041,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if plot_obj is None:
                     continue
                 plotted_any = True
-                self._apply_origin_plot_label(plot_obj, worksheet, y_index)
+                label = self._origin_plot_label(worksheet, y_index)
+                normalized = label.strip().casefold()
+                if group_index > 0 and normalized and normalized in seen_plot_labels:
+                    label = ""
+                elif normalized:
+                    seen_plot_labels.add(normalized)
+                self._apply_origin_plot_label(plot_obj, worksheet, y_index, override_label=label)
         if not plotted_any:
             return False
 
@@ -3986,6 +4058,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             graph_title = f"{graph_title} - {worksheet.name}"
 
         self._set_origin_graph_title(origin_any, graph, graph_title)
+        self._configure_origin_layer_axes(layer, secondary_axes_only=False)
         self._set_origin_axis_title(layer, "x", x_title)
         self._set_origin_axis_title(layer, "y", y_title)
 
@@ -3998,8 +4071,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     self._set_origin_axis_title(layer, "x2", group_x_title)
                     self._set_origin_axis_title(layer, "y2", group_y_title)
                 continue
+            self._configure_origin_layer_axes(target_layer, secondary_axes_only=True)
             self._set_origin_axis_title(target_layer, "x", group_x_title)
             self._set_origin_axis_title(target_layer, "y", group_y_title)
+            self._set_origin_axis_title(target_layer, "x2", group_x_title)
+            self._set_origin_axis_title(target_layer, "y2", group_y_title)
 
         for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups:
             set_int = getattr(target_layer, "set_int", None)
@@ -4015,17 +4091,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-        primary_layer_lt_exec = getattr(layer, "lt_exec", None)
-        if callable(primary_layer_lt_exec):
-            try:
-                primary_layer_lt_exec("legend -o;")
-            except Exception:
-                pass
-        else:
-            try:
-                origin_any.lt_exec("legend -o;")
-            except Exception:
-                pass
+        # Avoid LabTalk legend reconstruction here: some Origin builds emit
+        # LEGEND.SMARTPOS errors for legend commands despite plotting correctly.
 
         for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups:
             try:
@@ -10885,7 +10952,8 @@ class _ManagedSubWindow(QtWidgets.QMdiSubWindow):
                 and not self._owner._syncing_state  # noqa: SLF001
             ):
                 self._owner._handle_subwindow_state_change(  # noqa: SLF001
-                    self.isMaximized() or self.isFullScreen()
+                    self.isMaximized() or self.isFullScreen(),
+                    source=self,
                 )
                 if event.oldState() & QtCore.Qt.WindowState.WindowMinimized:
                     normalizer = getattr(self._owner, "_normalize_docks_initial", None)  # noqa: SLF001
@@ -11147,20 +11215,41 @@ class _MdiTabProxy(QtWidgets.QWidget):
         self._blocking = False
         self.currentChanged.emit(index)
 
-    def _handle_subwindow_state_change(self, maximized: bool) -> None:
+    def _handle_subwindow_state_change(
+        self,
+        maximized: bool,
+        *,
+        source: _ManagedSubWindow | None = None,
+    ) -> None:
         if self._syncing_state:
             return
+        self._purge_stale_subwindow_refs()
+        if source is not None and not self._is_live_subwindow(source):
+            source = None
         self._syncing_state = True
         try:
+            active = self._mdi.activeSubWindow()
             if maximized:
                 self._fullscreen_lock = True
                 self._global_maximized = True
-                active = self._mdi.activeSubWindow()
                 if active is not None:
                     self._maximize_single(active)
                 else:
                     self._apply_global_window_state()
             else:
+                if self._fullscreen_lock or self._global_maximized:
+                    # Ignore demote events emitted by non-active subwindows while
+                    # a different subwindow is intentionally fullscreen/maximized.
+                    if source is not None and active is not None and source is not active:
+                        return
+                    if isinstance(active, _ManagedSubWindow) and self._is_live_subwindow(active):
+                        try:
+                            if active.isMaximized() or active.isFullScreen():
+                                self._maximize_single(active)
+                                return
+                        except Exception:
+                            self._maximize_single(active)
+                            return
                 self._fullscreen_lock = False
                 self._global_maximized = False
                 self._apply_global_window_state()
@@ -11591,6 +11680,10 @@ class _MdiTabProxy(QtWidgets.QWidget):
             self._maximize_single(sub)
         else:
             self._arrange_subwindows()
+            try:
+                QtCore.QTimer.singleShot(0, self._arrange_subwindows)
+            except Exception:
+                pass
         return index
 
     def removeTab(self, index: int) -> None:

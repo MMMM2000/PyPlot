@@ -143,7 +143,7 @@ def make_shape_memory_figure(
     title: str,
     tolerance: float = STRAIN_DIRECTION_TOLERANCE,
 ) -> Figure:
-    fig = Figure(figsize=(10, 5), tight_layout=True)
+    fig = Figure(figsize=(10, 5), constrained_layout=True)
     ax_raw = fig.add_subplot(121)
     ax_stress = fig.add_subplot(122)
 
@@ -188,7 +188,7 @@ def make_load_displacement_figure(
     title: str,
     tolerance: float = STRAIN_DIRECTION_TOLERANCE,
 ) -> Figure:
-    fig = Figure(figsize=(7.5, 5), tight_layout=True)
+    fig = Figure(figsize=(7.5, 5), constrained_layout=True)
     ax = fig.add_subplot(111)
     x_raw = frame["displacement_mm"].tolist()
     y_raw = frame["load_g"].tolist()
@@ -210,7 +210,7 @@ def make_stress_strain_figure(
     title: str,
     tolerance: float = STRAIN_DIRECTION_TOLERANCE,
 ) -> Figure:
-    fig = Figure(figsize=(7.5, 5), tight_layout=True)
+    fig = Figure(figsize=(7.5, 5), constrained_layout=True)
     ax = fig.add_subplot(111)
     x_stress = frame["strain_pct"].tolist()
     y_stress = frame["stress_mpa"].tolist()
@@ -232,7 +232,7 @@ def make_dual_axis_overlay_figure(
     title: str,
     tolerance: float = STRAIN_DIRECTION_TOLERANCE,
 ) -> Figure:
-    fig = Figure(figsize=(8.5, 5), tight_layout=True)
+    fig = Figure(figsize=(8.5, 5), constrained_layout=True)
     ax_load = fig.add_subplot(111)
     ax_stress_y = ax_load.twinx()
     ax_stress = ax_stress_y.twiny()
@@ -243,10 +243,11 @@ def make_dual_axis_overlay_figure(
     y_stress = frame["stress_mpa"].tolist()
     segments = build_segment_styles(x_stress, tolerance=tolerance)
 
-    ax_load.set_title(f"{title}\nDual-axis overlay")
+    ax_load.set_title(title)
     ax_load.set_xlabel("Displacement (mm)")
     ax_load.set_ylabel("Load (g)")
     ax_stress.set_xlabel("Strain (%)")
+    ax_stress.set_ylabel("Stress (MPa)")
     ax_stress_y.set_ylabel("Stress (MPa)")
 
     ax_stress.patch.set_alpha(0.0)

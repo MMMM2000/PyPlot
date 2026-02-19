@@ -42,7 +42,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 
 ## Origin export checklist
 - Mirror the Matplotlib view: same title (top X label), axis labels, sample ordering, and delta annotations; hide Origin tick labels and draw manual sample labels when needed.
-- Set graph/axis titles with Origin-compatible label commands (`label -s -n title`, `label -s -xb/-yl/-xt/-yr`) so titles render reliably across Origin builds where `PAGE.ANTIALIAS` and some direct axis/title properties are not available.
+- Set graph/axis titles with Origin-compatible label commands (`label -n ...` / `label -xb/-yl/-xt/-yr`) so titles render reliably across Origin builds where `PAGE.ANTIALIAS` and some direct axis/title properties are not available.
 - Preserve sample labels on X and long name/units/comments rows in the Origin worksheets (baseline, deltas, relative values documented).
 - Match line/symbol styles, widths, sizes, and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
 - For shared multi-axis exports (for example dual-axis overlays), group XY pairs by axis-title metadata and plot each group on its own linked Origin layer so displacement/load and strain/stress do not collapse onto one Y scale.

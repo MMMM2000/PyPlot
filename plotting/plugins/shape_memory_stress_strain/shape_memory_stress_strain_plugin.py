@@ -234,8 +234,8 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
                 axes = figure.axes[0] if figure.axes else None
                 descriptor = window_module.TabDescriptor(
                     kind="shape_memory_dual_axis_overlay",
-                    title=f"{entry.path.stem} - Dual-axis overlay",
-                    root_label=f"{entry.path.stem} Dual-axis overlay",
+                    title=entry.path.stem,
+                    root_label=entry.path.stem,
                     x_label="Displacement (mm) / Strain (%)",
                     y_label="Load (g) / Stress (MPa)",
                     canvas=canvas,
@@ -255,7 +255,7 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
                     },
                 )
 
-                tab_label = f"{entry.path.stem} - Dual-axis overlay"
+                tab_label = entry.path.stem
                 index = self.host.tab_widget.addTab(tab, tab_label)
                 self.host.tab_widget.setCurrentIndex(index)
                 self.host._register_plot_tab(tab, canvas, axes, descriptor)
