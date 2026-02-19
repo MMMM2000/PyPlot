@@ -3818,38 +3818,15 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             pass
 
     def _origin_add_topx_righty_layer(self, origin_any: Any, graph: Any) -> Any | None:
-        graph_lt_exec = getattr(graph, "lt_exec", None)
-        commands = (
-            "layadd type:=txry activate:=1 offset:=0;",
-        )
-        if callable(graph_lt_exec):
-            for command in commands:
-                self._origin_lt_exec(graph_lt_exec, command)
-        else:
-            for command in commands:
-                self._origin_lt_exec(getattr(origin_any, "lt_exec", None), command)
-        try:
-            layer_count = len(graph)
-        except Exception:
-            layer_count = 0
-        if layer_count <= 1:
-            add_layer = getattr(graph, "add_layer", None)
-            if callable(add_layer):
-                try:
-                    added = add_layer(4)
-                    if added is not None:
-                        return added
-                except Exception:
-                    pass
-        if layer_count > 1:
+        add_layer = getattr(graph, "add_layer", None)
+        if callable(add_layer):
             try:
-                return graph[layer_count - 1]
+                added = add_layer(4)
+                if added is not None:
+                    return added
             except Exception:
-                pass
-        try:
-            return graph[1]
-        except Exception:
-            return None
+                logging.getLogger(__name__).exception("Origin add_layer(4) failed for dual-axis export.")
+        return None
 
     def _configure_origin_layer_axes(
         self,
@@ -3858,6 +3835,29 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         secondary_axes_only: bool,
     ) -> None:
         self._activate_origin_layer(layer)
+        set_int = getattr(layer, "set_int", None)
+        if callable(set_int):
+            try:
+                if secondary_axes_only:
+                    # Show top/right only on secondary layer.
+                    set_int("x.showAxes", 2)
+                    set_int("y.showAxes", 2)
+                    # Origin 2026 quirk: writing showLabels=2 can flip x2/y2 label
+                    # mode to a duplicated state. Set side visibility explicitly.
+                    set_int("x.showlabel", 0)
+                    set_int("x2.showlabel", 1)
+                    set_int("y.showlabel", 0)
+                    set_int("y2.showlabel", 1)
+                else:
+                    # Show bottom/left only on primary layer.
+                    set_int("x.showAxes", 1)
+                    set_int("y.showAxes", 1)
+                    set_int("x.showlabel", 1)
+                    set_int("x2.showlabel", 0)
+                    set_int("y.showlabel", 1)
+                    set_int("y2.showlabel", 0)
+            except Exception:
+                pass
         lt_exec = getattr(layer, "lt_exec", None)
         if not callable(lt_exec):
             return
@@ -3866,74 +3866,52 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 # 2 = show opposite axes only (top/right)
                 "layer.x.showAxes=2;",
                 "layer.y.showAxes=2;",
-                "layer.x.showLabels=2;",
-                "layer.y.showLabels=2;",
                 "layer.x.showlabel=0;",
                 "layer.x2.showlabel=1;",
                 "layer.y.showlabel=0;",
                 "layer.y2.showlabel=1;",
-            )
-            compatibility_commands = (
-                "axis -ps X A 2;",
-                "axis -ps X L 2;",
-                "axis -ps Y A 2;",
-                "axis -ps Y L 2;",
             )
         else:
             commands = (
                 # 1 = show primary axes only (bottom/left)
                 "layer.x.showAxes=1;",
                 "layer.y.showAxes=1;",
-                "layer.x.showLabels=1;",
-                "layer.y.showLabels=1;",
                 "layer.x.showlabel=1;",
                 "layer.x2.showlabel=0;",
                 "layer.y.showlabel=1;",
                 "layer.y2.showlabel=0;",
             )
-            compatibility_commands = (
-                "axis -ps X A 1;",
-                "axis -ps X L 1;",
-                "axis -ps Y A 1;",
-                "axis -ps Y L 1;",
-            )
         for command in commands:
             self._origin_lt_exec(lt_exec, command)
-        for command in compatibility_commands:
-            self._origin_lt_exec(lt_exec, command)
+
+    def _origin_layer_axis_snapshot(self, layer: Any) -> dict[str, float | str]:
+        snapshot: dict[str, float | str] = {}
+        keys = (
+            "x.showAxes",
+            "y.showAxes",
+            "x.showLabels",
+            "y.showLabels",
+            "x.showlabel",
+            "x2.showlabel",
+            "y.showlabel",
+            "y2.showlabel",
+        )
+        get_float = getattr(layer, "get_float", None)
+        for key in keys:
+            value: float | str = "n/a"
+            if callable(get_float):
+                try:
+                    value = float(get_float(key))
+                except Exception:
+                    value = "err"
+            snapshot[key] = value
         lt_range_getter = getattr(layer, "lt_range", None)
         if callable(lt_range_getter):
             try:
-                layer_range = str(lt_range_getter() or "").strip()
+                snapshot["layer"] = str(lt_range_getter() or "")
             except Exception:
-                layer_range = ""
-            if layer_range:
-                if secondary_axes_only:
-                    range_commands = (
-                        f"range ll={layer_range};",
-                        "ll.x.showAxes=2;",
-                        "ll.y.showAxes=2;",
-                        "ll.x.showLabels=2;",
-                        "ll.y.showLabels=2;",
-                        "ll.x.showlabel=0;",
-                        "ll.x2.showlabel=1;",
-                        "ll.y.showlabel=0;",
-                        "ll.y2.showlabel=1;",
-                    )
-                else:
-                    range_commands = (
-                        f"range ll={layer_range};",
-                        "ll.x.showAxes=1;",
-                        "ll.y.showAxes=1;",
-                        "ll.x.showLabels=1;",
-                        "ll.y.showLabels=1;",
-                        "ll.x.showlabel=1;",
-                        "ll.x2.showlabel=0;",
-                        "ll.y.showlabel=1;",
-                        "ll.y2.showlabel=0;",
-                    )
-                for command in range_commands:
-                    self._origin_lt_exec(lt_exec, command)
+                snapshot["layer"] = "unknown"
+        return snapshot
 
     def _origin_plot_label(
         self,
@@ -3953,6 +3931,30 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         if not label:
             label = str(column_name)
         return label
+
+    def _origin_graph_templates(self, origin_any: Any) -> list[str]:
+        templates: list[str] = []
+        path_func = getattr(origin_any, "path", None)
+        if callable(path_func):
+            try:
+                exe_dir = str(path_func("e") or "").strip()
+            except Exception:
+                exe_dir = ""
+            if exe_dir:
+                templates.append(os.path.join(exe_dir, "ORIGIN.OTP"))
+        templates.extend(["ORIGIN", "origin", "line", "scatter"])
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for template in templates:
+            token = template.strip()
+            if not token:
+                continue
+            lowered = token.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            ordered.append(token)
+        return ordered
 
     def _apply_origin_plot_label(
         self,
@@ -3995,18 +3997,21 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return False
 
         graph_obj = None
-        for template in ("line", "scatter", ""):
+        graph_template_used = "<unresolved>"
+        for template in self._origin_graph_templates(origin_any):
             try:
-                if template:
-                    graph_obj = origin_any.new_graph(template=template)
-                else:
-                    graph_obj = origin_any.new_graph()
+                graph_obj = origin_any.new_graph(template=template)
             except Exception:
                 continue
             if graph_obj is not None:
+                graph_template_used = template
                 break
         if graph_obj is None:
-            return False
+            try:
+                graph_obj = origin_any.new_graph()
+                graph_template_used = "<default>"
+            except Exception:
+                return False
 
         graph = cast(Any, graph_obj)
         try:
@@ -4108,14 +4113,17 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         graph_title = str(workbook.name or worksheet.name or "Plot").strip() or "Plot"
         if worksheet.name and worksheet.name != "Plot data":
             graph_title = f"{graph_title} - {worksheet.name}"
+        self._append_log(
+            f"Origin graph template used for '{graph_title}': {graph_template_used}"
+        )
 
         self._set_origin_graph_title(origin_any, graph, graph_title)
-        self._configure_origin_layer_axes(layer, secondary_axes_only=False)
         self._set_origin_axis_title(layer, "x", x_title)
         self._set_origin_axis_title(layer, "y", y_title)
         # Explicitly clear hidden-side titles on primary layer.
         self._set_origin_axis_title(layer, "x2", "")
         self._set_origin_axis_title(layer, "y2", "")
+        self._configure_origin_layer_axes(layer, secondary_axes_only=False)
 
         for group_index, (target_layer, group_x_title, group_y_title, _group_pairs) in enumerate(
             layer_groups[1:],
@@ -4125,13 +4133,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 if group_index == 1:
                     self._set_origin_axis_title(layer, "x2", group_x_title)
                     self._set_origin_axis_title(layer, "y2", group_y_title)
+                    self._configure_origin_layer_axes(layer, secondary_axes_only=False)
                 continue
-            self._configure_origin_layer_axes(target_layer, secondary_axes_only=True)
             # Explicitly clear hidden-side titles on secondary layer.
             self._set_origin_axis_title(target_layer, "x", "")
             self._set_origin_axis_title(target_layer, "y", "")
             self._set_origin_axis_title(target_layer, "x2", group_x_title)
             self._set_origin_axis_title(target_layer, "y2", group_y_title)
+            self._configure_origin_layer_axes(target_layer, secondary_axes_only=True)
 
         for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups:
             set_int = getattr(target_layer, "set_int", None)
@@ -4140,12 +4149,9 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     set_int("antialias", 1)
                 except Exception:
                     pass
-            layer_lt_exec = getattr(target_layer, "lt_exec", None)
-            if callable(layer_lt_exec):
-                try:
-                    layer_lt_exec("layer -aa 1;")
-                except Exception:
-                    pass
+            # Do not call `layer -aa 1` here: on Origin 2026 this command can
+            # implicitly switch axis visibility/labels to both sides (showAxes=3),
+            # which causes duplicate/interleaved tick labels on dual-axis graphs.
 
         # Avoid LabTalk legend reconstruction here: some Origin builds emit
         # LEGEND.SMARTPOS errors for legend commands despite plotting correctly.
@@ -4155,6 +4161,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 target_layer.rescale()
             except Exception:
                 continue
+        if len(layer_groups) > 1:
+            self._append_log(
+                f"Origin dual-axis layer snapshot ({graph_title}) primary: "
+                f"{self._origin_layer_axis_snapshot(layer)}"
+            )
+            for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups[1:]:
+                self._append_log(
+                    f"Origin dual-axis layer snapshot ({graph_title}) secondary: "
+                    f"{self._origin_layer_axis_snapshot(target_layer)}"
+                )
         return True
 
     def _origin_axis_roles(self, frame: pd.DataFrame) -> str:
