@@ -88,6 +88,18 @@ UNIT_SUFFIX_BRACKET_RE = re.compile(r"^(?P<prefix>.*?)(?:\s*)\[(?P<unit>[^\[\]]{
 OUTLIER_IQR_FACTOR = 1.5
 OUTLIER_MIN_POINTS = 8
 OUTLIER_ZSCORE_THRESHOLD = 3.5
+ORIGIN_EXPORT_COLOR_CYCLE: tuple[str, ...] = (
+    "#1f77b4",
+    "#ff7f0e",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+)
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -3789,7 +3801,13 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 except Exception:
                     pass
 
-    def _set_origin_graph_title(self, origin_any: Any, graph: Any, title: str) -> None:
+    def _set_origin_graph_title(
+        self,
+        origin_any: Any,
+        graph: Any,
+        primary_layer: Any,
+        title: str,
+    ) -> None:
         safe_title = self._escape_origin_text(title)
         try:
             graph.lname = title
@@ -3799,21 +3817,67 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             graph.name = self._origin_safe_token(title, fallback="Graph")[:13]
         except Exception:
             pass
+        title_label = None
+        label_getter = getattr(primary_layer, "label", None)
+        if callable(label_getter):
+            try:
+                title_label = label_getter("title")
+            except Exception:
+                title_label = None
+        if title_label is None:
+            self._activate_origin_layer(primary_layer)
+            layer_lt_exec = getattr(primary_layer, "lt_exec", None)
+            if self._origin_lt_exec(
+                layer_lt_exec,
+                f'label -p 50 102 -j 1 -n title "{safe_title}";',
+            ):
+                if callable(label_getter):
+                    try:
+                        title_label = label_getter("title")
+                    except Exception:
+                        title_label = None
+        if title_label is not None:
+            for attr, value in (("text", title), ("lname", title), ("long_name", title)):
+                try:
+                    setattr(title_label, attr, value)
+                except Exception:
+                    continue
+            for key, value in (("show", 1), ("attach", 1), ("wrap", 0)):
+                setter = getattr(title_label, "set_int", None)
+                if callable(setter):
+                    try:
+                        setter(key, int(value))
+                    except Exception:
+                        continue
+            for key, value in (("x", 50.0), ("y", 102.0), ("fsize", 24.0)):
+                setter = getattr(title_label, "set_float", None)
+                if callable(setter):
+                    try:
+                        setter(key, float(value))
+                    except Exception:
+                        continue
+            return
+
         graph_lt_exec = getattr(graph, "lt_exec", None)
-        label_command = f'label -p 50 2 -j 1 -n title "{safe_title}";'
-        optional_commands = ("title.wrap=0;", "title.fsize=24;")
+        fallback_commands = (
+            f'label -p 50 102 -j 1 -n title "{safe_title}";',
+            "title.attach=1;",
+            "title.x=50;",
+            "title.y=102;",
+            "title.wrap=0;",
+            "title.fsize=24;",
+        )
         if callable(graph_lt_exec):
-            if self._origin_lt_exec(graph_lt_exec, label_command):
-                for command in optional_commands:
-                    self._origin_lt_exec(graph_lt_exec, command)
+            ran = False
+            for command in fallback_commands:
+                ran = self._origin_lt_exec(graph_lt_exec, command) or ran
+            if ran:
                 return
         try:
             graph.activate()
             root_lt_exec = getattr(origin_any, "lt_exec", None)
-            if self._origin_lt_exec(root_lt_exec, label_command):
-                for command in optional_commands:
-                    self._origin_lt_exec(root_lt_exec, command)
-                return
+            for command in fallback_commands:
+                self._origin_lt_exec(root_lt_exec, command)
         except Exception:
             pass
 
@@ -3933,7 +3997,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return label
 
     def _origin_graph_templates(self, origin_any: Any) -> list[str]:
-        templates: list[str] = []
+        templates: list[str] = ["line", "scatter", "ORIGIN", "origin"]
         path_func = getattr(origin_any, "path", None)
         if callable(path_func):
             try:
@@ -3942,7 +4006,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 exe_dir = ""
             if exe_dir:
                 templates.append(os.path.join(exe_dir, "ORIGIN.OTP"))
-        templates.extend(["ORIGIN", "origin", "line", "scatter"])
         seen: set[str] = set()
         ordered: list[str] = []
         for template in templates:
@@ -3977,6 +4040,35 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             ("long_name", label),
             ("name", self._origin_safe_token(label, fallback="Plot")[:13]),
         ):
+            try:
+                setattr(plot_obj, attr, value)
+            except Exception:
+                continue
+
+    @staticmethod
+    def _set_origin_plot_visible(plot_obj: Any, visible: bool) -> None:
+        for attr in ("show", "visible", "Visible", "Show"):
+            if hasattr(plot_obj, attr):
+                try:
+                    setattr(plot_obj, attr, bool(visible))
+                    return
+                except Exception:
+                    continue
+
+    @staticmethod
+    def _apply_origin_plot_style(plot_obj: Any, *, color: str | None = None) -> None:
+        if not color:
+            return
+        for attr, value in (
+            ("color", color),
+            ("symbol_edge_color", color),
+            ("symbol_fill_color", color),
+            ("line_width", 1.5),
+            ("symbol_kind", 2),
+            ("symbol_size", 4.0),
+        ):
+            if not hasattr(plot_obj, attr):
+                continue
             try:
                 setattr(plot_obj, attr, value)
             except Exception:
@@ -4080,6 +4172,10 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
         plotted_any = False
         seen_plot_labels: set[str] = set()
+        primary_group_labels: set[str] = set()
+        color_by_label: dict[str, str] = {}
+        next_color_index = 0
+        duplicate_overlay_plots: list[Any] = []
         for group_index, (target_layer, _x_title, _y_title, group_pairs) in enumerate(layer_groups):
             add_plot = getattr(target_layer, "add_plot", None)
             if not callable(add_plot):
@@ -4100,11 +4196,29 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 plotted_any = True
                 label = self._origin_plot_label(worksheet, y_index)
                 normalized = label.strip().casefold()
-                if group_index > 0 and normalized and normalized in seen_plot_labels:
+                duplicate_label = bool(group_index > 0 and normalized and normalized in seen_plot_labels)
+                if duplicate_label:
                     label = ""
                 elif normalized:
                     seen_plot_labels.add(normalized)
+                if group_index == 0 and normalized:
+                    primary_group_labels.add(normalized)
                 self._apply_origin_plot_label(plot_obj, worksheet, y_index, override_label=label)
+                color_key = normalized or f"group{group_index}:{x_index}:{y_index}"
+                color = color_by_label.get(color_key)
+                if color is None:
+                    color = ORIGIN_EXPORT_COLOR_CYCLE[
+                        next_color_index % len(ORIGIN_EXPORT_COLOR_CYCLE)
+                    ]
+                    color_by_label[color_key] = color
+                    next_color_index += 1
+                self._apply_origin_plot_style(plot_obj, color=color)
+                if (
+                    group_index > 0
+                    and normalized
+                    and normalized in primary_group_labels
+                ):
+                    duplicate_overlay_plots.append(plot_obj)
         if not plotted_any:
             return False
 
@@ -4117,7 +4231,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             f"Origin graph template used for '{graph_title}': {graph_template_used}"
         )
 
-        self._set_origin_graph_title(origin_any, graph, graph_title)
+        self._set_origin_graph_title(origin_any, graph, layer, graph_title)
         self._set_origin_axis_title(layer, "x", x_title)
         self._set_origin_axis_title(layer, "y", y_title)
         # Explicitly clear hidden-side titles on primary layer.
@@ -4161,6 +4275,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 target_layer.rescale()
             except Exception:
                 continue
+        for plot_obj in duplicate_overlay_plots:
+            self._set_origin_plot_visible(plot_obj, False)
         if len(layer_groups) > 1:
             self._append_log(
                 f"Origin dual-axis layer snapshot ({graph_title}) primary: "

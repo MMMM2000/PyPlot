@@ -47,6 +47,7 @@ PyPlot provides the common desktop workbench: file import, worksheet management,
 - Preserve sample labels on X and long name/units/comments rows in the Origin worksheets (baseline, deltas, relative values documented).
 - Match line/symbol styles, widths, sizes, and legend entries; ensure text follows line/marker colour in both light/dark graph modes.
 - For shared multi-axis exports (for example dual-axis overlays), group XY pairs by axis-title metadata and plot each group on its own linked Origin layer so displacement/load and strain/stress do not collapse onto one Y scale.
+- For shared dual-axis overlays with identical segment labels across groups (for example `Loading 1` in both load and stress groups), hide duplicate secondary-layer traces after axis scaling so the exported graph shows one visible curve set by default.
 - Use descriptive graph names/long names that match the Matplotlib title and include distinguishing metadata (field strength, temperature, or variant) when multiple graphs share a sample name.
 - Build worksheets with units and comments filled (including baselines/deltas/relative columns) and avoid terminal spam (disable tqdm/console progress); keep graph extents so nothing is cropped after export.
 
