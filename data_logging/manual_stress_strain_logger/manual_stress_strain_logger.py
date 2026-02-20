@@ -2358,38 +2358,140 @@ class MainWindow(QtWidgets.QMainWindow):
         ratio = (float(value) - src_min) / denom
         return dst_min + ratio * (dst_max - dst_min)
 
-    def _format_dual_axis_raw_coord(self, x: float | None, y: float | None) -> str:
-        if self.ax_raw is None:
+    def _format_dual_axis_pair_text(
+        self,
+        *,
+        raw_x: float | None,
+        raw_y: float | None,
+        strain_x: float | None,
+        stress_y: float | None,
+    ) -> str:
+        if (
+            self.ax_raw is None
+            or self.ax_overlay_top is None
+            or self.ax_overlay_right is None
+        ):
             return ""
-        return f"L/D {self._format_single_axis_coord(self.ax_raw, x, y)}"
+        raw_x_text = "???" if raw_x is None else self.ax_raw.format_xdata(raw_x)
+        raw_y_text = "???" if raw_y is None else self.ax_raw.format_ydata(raw_y)
+        strain_x_text = (
+            "???" if strain_x is None else self.ax_overlay_top.format_xdata(strain_x)
+        )
+        stress_y_text = (
+            "???" if stress_y is None else self.ax_overlay_right.format_ydata(stress_y)
+        )
+        return (
+            f"L/D (x, y) = ({raw_x_text}, {raw_y_text}) | "
+            f"S/S (x, y) = ({strain_x_text}, {stress_y_text})"
+        )
 
-    def _format_dual_axis_derived_coord_from_top(
+    def _format_dual_axis_coord_from_raw(
+        self,
+        raw_x: float | None,
+        raw_y: float | None,
+    ) -> str:
+        if (
+            self.ax_raw is None
+            or self.ax_overlay_top is None
+            or self.ax_overlay_right is None
+        ):
+            return ""
+        raw_x_min, raw_x_max = self.ax_raw.get_xlim()
+        strain_x_min, strain_x_max = self.ax_overlay_top.get_xlim()
+        raw_y_min, raw_y_max = self.ax_raw.get_ylim()
+        stress_y_min, stress_y_max = self.ax_overlay_right.get_ylim()
+        strain_x = self._map_linear_value(
+            raw_x,
+            src_min=raw_x_min,
+            src_max=raw_x_max,
+            dst_min=strain_x_min,
+            dst_max=strain_x_max,
+        )
+        stress_y = self._map_linear_value(
+            raw_y,
+            src_min=raw_y_min,
+            src_max=raw_y_max,
+            dst_min=stress_y_min,
+            dst_max=stress_y_max,
+        )
+        return self._format_dual_axis_pair_text(
+            raw_x=raw_x,
+            raw_y=raw_y,
+            strain_x=strain_x,
+            stress_y=stress_y,
+        )
+
+    def _format_dual_axis_coord_from_top(
         self,
         strain_x: float | None,
         load_y: float | None,
     ) -> str:
         if (
-            self.ax_overlay_top is None
-            or self.ax_raw is None
+            self.ax_raw is None
+            or self.ax_overlay_top is None
             or self.ax_overlay_right is None
         ):
             return ""
+        strain_x_min, strain_x_max = self.ax_overlay_top.get_xlim()
+        raw_x_min, raw_x_max = self.ax_raw.get_xlim()
         raw_y_min, raw_y_max = self.ax_raw.get_ylim()
         stress_y_min, stress_y_max = self.ax_overlay_right.get_ylim()
-        stress_value = self._map_linear_value(
+        raw_x = self._map_linear_value(
+            strain_x,
+            src_min=strain_x_min,
+            src_max=strain_x_max,
+            dst_min=raw_x_min,
+            dst_max=raw_x_max,
+        )
+        stress_y = self._map_linear_value(
             load_y,
             src_min=raw_y_min,
             src_max=raw_y_max,
             dst_min=stress_y_min,
             dst_max=stress_y_max,
         )
-        x_text = "???" if strain_x is None else self.ax_overlay_top.format_xdata(strain_x)
-        y_text = (
-            "???"
-            if stress_value is None
-            else self.ax_overlay_right.format_ydata(stress_value)
+        return self._format_dual_axis_pair_text(
+            raw_x=raw_x,
+            raw_y=load_y,
+            strain_x=strain_x,
+            stress_y=stress_y,
         )
-        return f"S/S (x, y) = ({x_text}, {y_text})"
+
+    def _format_dual_axis_coord_from_right(
+        self,
+        displacement_x: float | None,
+        stress_y: float | None,
+    ) -> str:
+        if (
+            self.ax_raw is None
+            or self.ax_overlay_top is None
+            or self.ax_overlay_right is None
+        ):
+            return ""
+        raw_x_min, raw_x_max = self.ax_raw.get_xlim()
+        strain_x_min, strain_x_max = self.ax_overlay_top.get_xlim()
+        stress_y_min, stress_y_max = self.ax_overlay_right.get_ylim()
+        raw_y_min, raw_y_max = self.ax_raw.get_ylim()
+        strain_x = self._map_linear_value(
+            displacement_x,
+            src_min=raw_x_min,
+            src_max=raw_x_max,
+            dst_min=strain_x_min,
+            dst_max=strain_x_max,
+        )
+        raw_y = self._map_linear_value(
+            stress_y,
+            src_min=stress_y_min,
+            src_max=stress_y_max,
+            dst_min=raw_y_min,
+            dst_max=raw_y_max,
+        )
+        return self._format_dual_axis_pair_text(
+            raw_x=displacement_x,
+            raw_y=raw_y,
+            strain_x=strain_x,
+            stress_y=stress_y,
+        )
 
     def _sync_dual_axis_limits(self) -> None:
         if (
@@ -2596,12 +2698,14 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ax_overlay_top.set_xlabel("Strain (%)", color=axis_fg, labelpad=10)
         self.ax_overlay_right.set_ylabel("Stress (MPa)", color=axis_fg, labelpad=10)
         self.ax_raw.format_coord = (
-            lambda x, y: self._format_dual_axis_raw_coord(x, y)
+            lambda x, y: self._format_dual_axis_coord_from_raw(x, y)
         )
         self.ax_overlay_top.format_coord = (
-            lambda x, y: self._format_dual_axis_derived_coord_from_top(x, y)
+            lambda x, y: self._format_dual_axis_coord_from_top(x, y)
         )
-        self.ax_overlay_right.format_coord = lambda _x, _y: ""
+        self.ax_overlay_right.format_coord = (
+            lambda x, y: self._format_dual_axis_coord_from_right(x, y)
+        )
 
         styles = self.build_segment_styles(self.strains)
 

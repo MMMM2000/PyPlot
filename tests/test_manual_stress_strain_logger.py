@@ -353,3 +353,33 @@ def test_countdown_seconds_left_counts_down_and_clamps_to_zero() -> None:
     )
     assert left_mid == 35
     assert left_zero == 0
+
+
+def test_dual_axis_coord_from_top_reports_both_ld_and_ss_pairs() -> None:
+    class _Axis:
+        def __init__(self, xlim: tuple[float, float], ylim: tuple[float, float]) -> None:
+            self._xlim = xlim
+            self._ylim = ylim
+
+        def get_xlim(self) -> tuple[float, float]:
+            return self._xlim
+
+        def get_ylim(self) -> tuple[float, float]:
+            return self._ylim
+
+        @staticmethod
+        def format_xdata(value: float) -> str:
+            return f"{value:.3f}"
+
+        @staticmethod
+        def format_ydata(value: float) -> str:
+            return f"{value:.3f}"
+
+    window = logger_mod.MainWindow.__new__(logger_mod.MainWindow)
+    window.ax_raw = _Axis((0.0, 100.0), (0.0, 20.0))
+    window.ax_overlay_top = _Axis((0.0, 10.0), (0.0, 20.0))
+    window.ax_overlay_right = _Axis((0.0, 100.0), (0.0, 2000.0))
+
+    text = window._format_dual_axis_coord_from_top(5.0, 10.0)
+
+    assert text == "L/D (x, y) = (50.000, 10.000) | S/S (x, y) = (5.000, 1000.000)"
