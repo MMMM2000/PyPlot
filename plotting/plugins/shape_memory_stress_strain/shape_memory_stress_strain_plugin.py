@@ -350,3 +350,9 @@ class ShapeMemoryStressStrainPlugin(PyPlotPlugin):
         save_sync = getattr(self.host, "_update_save_graph_enabled", None)
         if callable(save_sync):
             save_sync()
+
+    def graph_option_defaults(self) -> dict[str, float] | None:  # type: ignore[override]
+        layout_mode = self._plot_layout_mode()
+        if layout_mode == LAYOUT_DUAL_AXIS:
+            return {"figure_width": 8.5, "figure_height": 5.0}
+        return {"figure_width": 7.5, "figure_height": 5.0}

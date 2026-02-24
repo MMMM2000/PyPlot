@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import argparse
 import sys
 import os
 import time
 import logging
+from pathlib import Path
 from functools import lru_cache
 from importlib import import_module
 from typing import TYPE_CHECKING, Any, Callable, Dict, Tuple, cast, Protocol
@@ -168,6 +170,107 @@ def _create_launcher_icon() -> QtGui.QIcon:
     icon = QtGui.QIcon(pixmap)
     setattr(_create_launcher_icon, "_cache", icon)
     return icon
+
+
+def _parse_launcher_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument(
+        "--visual-check",
+        action="store_true",
+        help="Run automated visual verification flow instead of opening the launcher UI.",
+    )
+    parser.add_argument(
+        "--visual-plugin",
+        default="shape-memory",
+        help="Plugin visual-check target. Currently supported: shape-memory.",
+    )
+    parser.add_argument(
+        "--visual-input",
+        action="append",
+        default=[],
+        help="Input file path for visual-check mode. Can be provided multiple times.",
+    )
+    parser.add_argument(
+        "--visual-layout",
+        choices=("dual", "separate"),
+        default="dual",
+        help="Shape-memory graph layout for visual-check mode.",
+    )
+    parser.add_argument(
+        "--visual-output-dir",
+        default=str(Path("logs") / "visual_checks"),
+        help="Directory where visual-check artifacts will be saved.",
+    )
+    parser.add_argument(
+        "--visual-origin",
+        dest="visual_origin",
+        action="store_true",
+        help="Enable Origin graph export capture in visual-check mode (default).",
+    )
+    parser.add_argument(
+        "--no-visual-origin",
+        dest="visual_origin",
+        action="store_false",
+        help="Disable Origin capture during visual-check mode.",
+    )
+    parser.add_argument(
+        "--visual-show-window",
+        action="store_true",
+        help="Keep UI visible while visual-check runs.",
+    )
+    parser.set_defaults(visual_origin=True)
+    args, qt_args = parser.parse_known_args(argv)
+    return args, qt_args
+
+
+def _run_visual_check(args: argparse.Namespace) -> int:
+    plugin_token = str(getattr(args, "visual_plugin", "shape-memory")).strip().lower()
+    supported_tokens = {
+        "shape-memory",
+        "shape_memory",
+        "shape-memory-stress-strain",
+        "shape_memory_stress_strain",
+        "shape memory stress/strain",
+    }
+    if plugin_token not in supported_tokens:
+        print(
+            f"Unsupported --visual-plugin '{plugin_token}'. "
+            "Only shape-memory visual-check is currently implemented."
+        )
+        return 2
+
+    from plotting.pyplot.visual_check import run_shape_memory_visual_check
+
+    output_dir = Path(str(getattr(args, "visual_output_dir", "logs/visual_checks"))).expanduser()
+    raw_inputs = getattr(args, "visual_input", []) or []
+    input_paths = [Path(str(entry)).expanduser() for entry in raw_inputs]
+    include_origin = bool(getattr(args, "visual_origin", True))
+    layout_mode = str(getattr(args, "visual_layout", "dual")).strip().lower()
+    show_window = bool(getattr(args, "visual_show_window", False))
+
+    result = run_shape_memory_visual_check(
+        output_dir=output_dir,
+        input_paths=input_paths or None,
+        layout_mode=layout_mode,
+        include_origin=include_origin,
+        show_window=show_window,
+    )
+    print(f"[visual-check] output_dir={result.output_dir}")
+    if result.summary_json is not None:
+        print(f"[visual-check] summary={result.summary_json}")
+    if result.window_image is not None:
+        print(f"[visual-check] pyplot_window_png={result.window_image}")
+    if result.tab_widget_image is not None:
+        print(f"[visual-check] pyplot_tab_widget_png={result.tab_widget_image}")
+    print(f"[visual-check] matplotlib_images={len(result.matplotlib_images)}")
+    print(f"[visual-check] matplotlib_canvas_images={len(result.matplotlib_canvas_images)}")
+    print(f"[visual-check] subwindow_images={len(result.subwindow_images)}")
+    print(f"[visual-check] origin_images={len(result.origin_images)}")
+    for warning in result.warnings:
+        print(f"[visual-check][warn] {warning}")
+    for error in result.errors:
+        print(f"[visual-check][error] {error}")
+    return 1 if result.errors else 0
 
 LOGGERS: Dict[str, LauncherFactory] = {
     "Serial Data Logger": _lazy("data_logging.data_logger", "main"),
@@ -820,7 +923,12 @@ class MasterLauncher(QtWidgets.QWidget):
             QtCore.QTimer.singleShot(0, app.quit)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    argv_list = list(sys.argv if argv is None else argv)
+    args, qt_args = _parse_launcher_args(argv_list[1:])
+    if args.visual_check:
+        raise SystemExit(_run_visual_check(args))
+
     # Ensure a GUI platform plugin is used (not an offscreen one from tests)
     # Some test environments set QT_QPA_PLATFORM=offscreen. If that leaks into
     # an interactive run, Qt's style engine may try to paint using QPainter on
@@ -829,7 +937,7 @@ def main() -> None:
     if os.environ.get("QT_QPA_PLATFORM", "").lower() in {"offscreen", "minimal", "headless"}:
         os.environ.pop("QT_QPA_PLATFORM", None)
 
-    app = QtWidgets.QApplication(sys.argv)
+    app = QtWidgets.QApplication([argv_list[0], *qt_args])
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("PyPlot Launcher")
     _schedule_theme_application(app)

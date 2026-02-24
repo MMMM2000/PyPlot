@@ -100,6 +100,8 @@ ORIGIN_EXPORT_COLOR_CYCLE: tuple[str, ...] = (
     "#bcbd22",
     "#17becf",
 )
+ORIGIN_EXPORT_LAYER_TOP = 20.0
+ORIGIN_EXPORT_LAYER_BOTTOM = 20.0
 
 PointerType = QtCore.QObject | weakref.ReferenceType[QtCore.QObject] | object
 
@@ -3437,13 +3439,16 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         workbooks: Iterable[WorkbookData],
         *,
         create_graphs: bool = False,
+        graph_callback: Callable[[Any, WorkbookData, WorksheetData], None] | None = None,
+        keep_origin_open: bool = True,
     ) -> tuple[int, int, list[str]]:
         errors: list[str] = []
         exported = 0
         plotted = 0
 
-        with origin_session(keep_open=True) as origin_any:
-            schedule_origin_release()
+        with origin_session(keep_open=keep_origin_open) as origin_any:
+            if keep_origin_open:
+                schedule_origin_release()
             workbook_names: set[str] = set()
             for workbook in workbooks:
                 worksheets = [self._worksheets.get(key) for key in workbook.worksheets]
@@ -3543,6 +3548,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                                 workbook,
                                 worksheet,
                                 roles=roles,
+                                graph_callback=graph_callback,
                             ):
                                 plotted += 1
                         except Exception as exc:  # pragma: no cover - Origin runtime dependent
@@ -3750,7 +3756,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             return None
         safe_title = self._escape_origin_text(title)
         # Axis-title switches should be used directly (no string-substitution switch).
-        return f'label -{label_switch} "{safe_title}";'
+        return f'label -s -{label_switch} "{safe_title}";'
 
     @staticmethod
     def _origin_lt_exec(executor: Any, command: str) -> bool:
@@ -3881,9 +3887,11 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         y_span = y_to - y_from
         if x_span <= 0.0 or y_span <= 0.0:
             return None
-        # Place title at top center inside the layer bounds so it stays visible
-        # across Origin 2026 templates that clip out-of-bounds label positions.
-        return ((x_from + x_to) / 2.0, y_to - (y_span * 0.04))
+        # Keep attach=0 (data coordinates): on this Origin 2026 setup, page/layer
+        # attachment modes do not render title labels in exported PNGs reliably.
+        # Position the title above the plot box (not inside it), while staying
+        # close enough to avoid clipping at the page edge.
+        return ((x_from + x_to) / 2.0, y_to + (y_span * 0.24))
 
     def _position_origin_title_label(self, label_obj: Any, *, layer: Any | None = None) -> None:
         if label_obj is None:
@@ -3898,6 +3906,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             for key, value in (
                 ("show", 1),
                 ("attach", 0),
+                ("horzalign", 1),
+                ("vertalign", 2),
             ):
                 try:
                     set_int(key, int(value))
@@ -3914,7 +3924,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             for key, value in (
                 ("x", target_x),
                 ("y", target_y),
-                ("fsize", 24.0),
+                ("fsize", 22.0),
             ):
                 try:
                     set_float(key, float(value))
@@ -3964,6 +3974,25 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             except Exception:
                 pass
         return None
+
+    def _set_origin_layer_top_margin(self, layer: Any, top: float = ORIGIN_EXPORT_LAYER_TOP) -> None:
+        self._activate_origin_layer(layer)
+        set_float = getattr(layer, "set_float", None)
+        if callable(set_float):
+            try:
+                set_float("top", float(top))
+            except Exception:
+                pass
+            try:
+                set_float("bottom", float(ORIGIN_EXPORT_LAYER_BOTTOM))
+            except Exception:
+                pass
+        lt_exec = getattr(layer, "lt_exec", None)
+        if callable(lt_exec):
+            self._origin_lt_exec(
+                lt_exec,
+                f"layer.top={float(top):.3f}; layer.bottom={float(ORIGIN_EXPORT_LAYER_BOTTOM):.3f};",
+            )
 
     def _configure_origin_layer_axes(
         self,
@@ -4071,7 +4100,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
 
     def _origin_graph_templates(self, origin_any: Any) -> list[str]:
         _ = origin_any
-        templates: list[str] = ["line", "ORIGIN", "scatter"]
+        templates: list[str] = ["ORIGIN", "line", "scatter"]
         seen: set[str] = set()
         ordered: list[str] = []
         for template in templates:
@@ -4148,6 +4177,7 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         worksheet: WorksheetData,
         *,
         roles: str,
+        graph_callback: Callable[[Any, WorkbookData, WorksheetData], None] | None = None,
     ) -> bool:
         frame = worksheet.dataframe
         pairs = self._origin_plot_pairs(frame, roles)
@@ -4235,7 +4265,6 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     list(cast(list[tuple[int, int]], group.get("pairs") or [])),
                 )
             )
-
         plotted_any = False
         seen_plot_labels: set[str] = set()
         primary_group_labels: set[str] = set()
@@ -4347,6 +4376,29 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                     self._origin_lt_exec(lt_exec, "rescale;")
         for plot_obj in duplicate_overlay_plots:
             self._set_origin_plot_visible(plot_obj, False)
+        self._set_origin_layer_top_margin(layer)
+        # Re-apply axis titles after rescale/hide passes to keep axis captions
+        # deterministic across Origin templates and layer refreshes.
+        self._set_origin_axis_title(layer, "x", x_title)
+        self._set_origin_axis_title(layer, "y", y_title)
+        self._set_origin_axis_title(layer, "x2", "")
+        self._set_origin_axis_title(layer, "y2", "")
+        self._configure_origin_layer_axes(layer, secondary_axes_only=False)
+        for group_index, (target_layer, group_x_title, group_y_title, _group_pairs) in enumerate(
+            layer_groups[1:],
+            start=1,
+        ):
+            if target_layer is layer:
+                if group_index == 1:
+                    self._set_origin_axis_title(layer, "x2", group_x_title)
+                    self._set_origin_axis_title(layer, "y2", group_y_title)
+                    self._configure_origin_layer_axes(layer, secondary_axes_only=False)
+                continue
+            self._set_origin_axis_title(target_layer, "x", "")
+            self._set_origin_axis_title(target_layer, "y", "")
+            self._set_origin_axis_title(target_layer, "x2", group_x_title)
+            self._set_origin_axis_title(target_layer, "y2", group_y_title)
+            self._configure_origin_layer_axes(target_layer, secondary_axes_only=True)
         # Re-assert title after rescale/legend updates so template-side smart
         # positioning cannot leave it in data coordinates.
         self._set_origin_graph_title(origin_any, graph, layer, graph_title)
@@ -4359,6 +4411,14 @@ class PyPlotWindow(QtWidgets.QMainWindow):
                 self._append_log(
                     f"Origin dual-axis layer snapshot ({graph_title}) secondary: "
                     f"{self._origin_layer_axis_snapshot(target_layer)}"
+                )
+        if callable(graph_callback):
+            try:
+                graph_callback(graph, workbook, worksheet)
+            except Exception as exc:
+                self._append_log(
+                    f"Origin graph callback failed for {graph_title}: {exc}",
+                    level="error",
                 )
         return True
 

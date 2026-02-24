@@ -155,6 +155,15 @@ class PyPlotPlugin:
 
         return f"Plot {self.name}".strip()
 
+    def graph_option_defaults(self) -> Dict[str, Any] | None:
+        """Optional plugin-specific graph option defaults.
+
+        Returned values are merged on top of global defaults and can still be
+        overridden by explicit plugin overrides from the Graph options dialog.
+        """
+
+        return None
+
     def _log(self, message: str, *, level: str = "info") -> None:
         """Log helper that prefers the host console when available."""
 

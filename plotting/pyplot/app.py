@@ -492,6 +492,20 @@ class PyPlotWorkbench(PyPlotWindow):
     def _effective_graph_options(self, plugin_name: str | None) -> Dict[str, Any]:
         effective = self._clean_graph_option_payload(self._graph_option_defaults_global)
         if plugin_name:
+            plugin = self._plugin_instances.get(plugin_name)
+            if plugin is None and self._current_plotter_name == plugin_name:
+                plugin = self._current_plugin
+            if plugin is not None:
+                plugin_defaults_getter = getattr(plugin, "graph_option_defaults", None)
+                if callable(plugin_defaults_getter):
+                    try:
+                        plugin_defaults = plugin_defaults_getter()
+                    except Exception:
+                        plugin_defaults = None
+                    if isinstance(plugin_defaults, dict):
+                        merged = dict(effective)
+                        merged.update(plugin_defaults)
+                        effective = self._clean_graph_option_payload(merged)
             override = self._graph_option_defaults_by_plugin.get(plugin_name)
             if isinstance(override, dict):
                 merged = dict(effective)

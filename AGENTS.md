@@ -6,7 +6,7 @@
 
 ## Dependencies
 - Edit `pyproject.toml` first, then update `requirements.txt` from it.
-- Keep `pyproject.toml` and `requirements.txt` aligned; don’t submit mismatched pins.
+- Keep `pyproject.toml` and `requirements.txt` aligned; don't submit mismatched pins.
 - If Windows-only dependencies change, also sync `requirements-win.txt`.
 
 ## Changelog
@@ -17,10 +17,13 @@
 
 ## Testing
 - After dependency changes, sanity-check imports for key modules: PyQt6, matplotlib, numpy, pandas, plotly, opencv-python (if used).
-- Run the most relevant tests for the touched area; if you can’t, state what wasn’t run.
+- Run the most relevant tests for the touched area; if you can't, state what wasn't run.
 - Run `launcher.py` as a smoke check when practical, or note if skipped.
 - For graph-generation changes, always create real output graphs and visually verify results before finishing.
 - Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
+- When visual verification is requested, include the final validated screenshots in chat before cleanup.
+- Remove temporary PNG artifacts created only for test/debug verification after you finish validating the output.
+- Remove temporary visual-check artifacts (for example probe dumps, one-off summaries, and debug folders in `logs/`) once validation is complete.
 
 ## Diagnostics
 - When investigating crashes or errors, check `logs/message_log.txt` (and other files under `logs/`) first and summarize relevant traces.
