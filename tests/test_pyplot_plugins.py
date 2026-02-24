@@ -517,6 +517,8 @@ def test_push_workbooks_to_origin_creates_graphs(monkeypatch: pytest.MonkeyPatch
     assert len(fake_origin.graphs) == 1
     assert fake_origin.graphs[0].layer.plots
     assert fake_origin.graphs[0].layer.plots[0].lname == "Sample A"
+    assert any(cmd.startswith('label -s -n title "') for cmd in fake_origin.lt_commands)
+    assert not any("title.show" in cmd.lower() for cmd in fake_origin.lt_commands)
     assert any('label -s -xb "Time [s]";' in cmd for cmd in fake_origin.lt_commands)
     assert any('label -s -yl "Value [A]";' in cmd for cmd in fake_origin.lt_commands)
     assert not any("legend.smartpos" in cmd.lower() for cmd in fake_origin.lt_commands)

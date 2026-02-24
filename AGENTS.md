@@ -2,7 +2,7 @@
 
 ## Environment
 - Use a project virtual environment for all Python commands.
-- On WSL, prefer `.venv-wsl` if present; otherwise create/activate a local venv and state which interpreter was used.
+- Use whichever project virtual environment best matches the task/runtime (for example `.venv` for Windows/Origin integration, `.venv-wsl` for WSL-native work) and state which interpreter was used.
 
 ## Dependencies
 - Edit `pyproject.toml` first, then update `requirements.txt` from it.
@@ -19,6 +19,8 @@
 - After dependency changes, sanity-check imports for key modules: PyQt6, matplotlib, numpy, pandas, plotly, opencv-python (if used).
 - Run the most relevant tests for the touched area; if you can’t, state what wasn’t run.
 - Run `launcher.py` as a smoke check when practical, or note if skipped.
+- For graph-generation changes, always create real output graphs and visually verify results before finishing.
+- Apply that visual verification rule to both Matplotlib graphs and Origin-exported graphs, and continue iterating until output is correct.
 
 ## Diagnostics
 - When investigating crashes or errors, check `logs/message_log.txt` (and other files under `logs/`) first and summarize relevant traces.

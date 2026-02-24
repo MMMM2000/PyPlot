@@ -8,5 +8,7 @@
 - Shared Origin export: prefers built-in templates (`line`, `scatter`) first and only falls back to `ORIGIN`/`<Origin EXE>\\ORIGIN.OTP`, reducing template-script side effects (including recurring legend smart-position errors on some setups).
 - Shared Origin export: dual-axis overlays now apply explicit plot colour cycling and auto-hide duplicate secondary-layer traces (stress/strain duplicates of load/displacement labels) after rescale, so legends and visible curves stay uncluttered by default.
 - Shared Origin export: logs per-graph template and dual-axis layer-axis snapshots into PyPlot Message Log for runtime diagnosis.
+- Shared Origin session startup: now prefers `originpro.attach()` before `set_show()` and verifies automation health early, so `Open in Origin` fails with a clear runtime message instead of delayed OriginExt pointer crashes on stale COM handles.
+- Shared Origin export: template resolution now avoids querying `origin.path('e')` during graph creation, preventing side-effect popups on unstable automation sessions.
 - Shared Origin export: removed `layer -aa 1` in dual-axis export; on Origin 2026 this command can force both-side axes/labels (`showAxes=3`), producing duplicated/interleaved tick labels.
 - Shape Memory parser: drop leading zero-load rows until the first non-zero load point so pre-load baseline zeros are excluded from segmented plotting/export.

@@ -28,10 +28,46 @@ def origin_session(*, keep_open: bool = False) -> Iterator[Any]:
 
     _ensure_origin_sdk_on_path()
     import originpro as op  # lazy import
+    # OriginExt on some Windows setups can leave an invalid automation pointer
+    # after a prior crash. Prefer re-attaching before any LT/set_show calls.
+    attach = getattr(op, "attach", None)
+    if callable(attach):
+        try:
+            attach()
+        except Exception:
+            pass
     try:
         op.set_show()
     except Exception:
         pass
+    # Probe automation health early so callers get a deterministic error dialog
+    # instead of delayed low-level OriginExt crashes.
+    probe_ok = False
+    lt_int = getattr(op, "lt_int", None)
+    if callable(lt_int):
+        try:
+            _ = lt_int("@V")
+            probe_ok = True
+        except Exception:
+            probe_ok = False
+    if not probe_ok:
+        # One retry via attach can recover stale pointers.
+        if callable(attach):
+            try:
+                attach()
+            except Exception:
+                pass
+        if callable(lt_int):
+            try:
+                _ = lt_int("@V")
+                probe_ok = True
+            except Exception:
+                probe_ok = False
+    if not probe_ok:
+        raise RuntimeError(
+            "Origin automation is unavailable (failed to initialize COM session). "
+            "Please start Origin once, then retry Open in Origin."
+        )
     try:
         yield cast(Any, op)
     finally:

@@ -3817,79 +3817,152 @@ class PyPlotWindow(QtWidgets.QMainWindow):
             graph.name = self._origin_safe_token(title, fallback="Graph")[:13]
         except Exception:
             pass
-        title_label = None
+        # Always set graph title from the primary layer context. Running these
+        # commands from worksheet/root context can misparse text as math.
+        self._activate_origin_layer(primary_layer)
+        layer_lt_exec = getattr(primary_layer, "lt_exec", None)
+        if callable(layer_lt_exec):
+            self._origin_lt_exec(layer_lt_exec, f'label -s -n title "{safe_title}";')
+
+        # Prefer object API to finalize text/properties after LT creation.
         label_getter = getattr(primary_layer, "label", None)
         if callable(label_getter):
-            try:
-                title_label = label_getter("title")
-            except Exception:
-                title_label = None
-        if title_label is None:
-            self._activate_origin_layer(primary_layer)
-            layer_lt_exec = getattr(primary_layer, "lt_exec", None)
-            if self._origin_lt_exec(
-                layer_lt_exec,
-                f'label -p 50 102 -j 1 -n title "{safe_title}";',
-            ):
-                if callable(label_getter):
-                    try:
-                        title_label = label_getter("title")
-                    except Exception:
-                        title_label = None
-        if title_label is not None:
-            for attr, value in (("text", title), ("lname", title), ("long_name", title)):
+            for label_name in ("Title", "title", "py_title"):
                 try:
-                    setattr(title_label, attr, value)
+                    title_label = label_getter(label_name)
+                except Exception:
+                    title_label = None
+                if title_label is None:
+                    continue
+                try:
+                    title_label.text = title
+                    self._position_origin_title_label(title_label, layer=primary_layer)
+                    self._append_log(
+                        f"Origin title snapshot ({title}) via {label_name}: "
+                        f"{self._origin_title_label_snapshot(title_label)}"
+                    )
+                    return
                 except Exception:
                     continue
-            for key, value in (("show", 1), ("attach", 1), ("wrap", 0)):
-                setter = getattr(title_label, "set_int", None)
-                if callable(setter):
-                    try:
-                        setter(key, int(value))
-                    except Exception:
-                        continue
-            for key, value in (("x", 50.0), ("y", 102.0), ("fsize", 24.0)):
-                setter = getattr(title_label, "set_float", None)
-                if callable(setter):
-                    try:
-                        setter(key, float(value))
-                    except Exception:
-                        continue
-            return
 
-        graph_lt_exec = getattr(graph, "lt_exec", None)
-        fallback_commands = (
-            f'label -p 50 102 -j 1 -n title "{safe_title}";',
-            "title.attach=1;",
-            "title.x=50;",
-            "title.y=102;",
-            "title.wrap=0;",
-            "title.fsize=24;",
-        )
-        if callable(graph_lt_exec):
-            ran = False
-            for command in fallback_commands:
-                ran = self._origin_lt_exec(graph_lt_exec, command) or ran
-            if ran:
-                return
+        # Last resort: manual text object near the top center.
+        add_label = getattr(primary_layer, "add_label", None)
+        if callable(add_label):
+            try:
+                manual = add_label(title)
+            except Exception:
+                manual = None
+            if manual is not None:
+                self._position_origin_title_label(manual, layer=primary_layer)
+                try:
+                    manual.name = "py_title"
+                except Exception:
+                    pass
+                self._append_log(
+                    f"Origin title snapshot ({title}) via manual: "
+                    f"{self._origin_title_label_snapshot(manual)}"
+                )
+
+    @staticmethod
+    def _origin_title_xy(layer: Any) -> tuple[float, float] | None:
+        get_float = getattr(layer, "get_float", None)
+        if not callable(get_float):
+            return None
         try:
-            graph.activate()
-            root_lt_exec = getattr(origin_any, "lt_exec", None)
-            for command in fallback_commands:
-                self._origin_lt_exec(root_lt_exec, command)
+            x_from = float(get_float("x.from"))
+            x_to = float(get_float("x.to"))
+            y_from = float(get_float("y.from"))
+            y_to = float(get_float("y.to"))
         except Exception:
-            pass
+            return None
+        if not all(np.isfinite(value) for value in (x_from, x_to, y_from, y_to)):
+            return None
+        x_span = x_to - x_from
+        y_span = y_to - y_from
+        if x_span <= 0.0 or y_span <= 0.0:
+            return None
+        # Place title at top center inside the layer bounds so it stays visible
+        # across Origin 2026 templates that clip out-of-bounds label positions.
+        return ((x_from + x_to) / 2.0, y_to - (y_span * 0.04))
+
+    def _position_origin_title_label(self, label_obj: Any, *, layer: Any | None = None) -> None:
+        if label_obj is None:
+            return
+        if hasattr(label_obj, "show"):
+            try:
+                label_obj.show = True
+            except Exception:
+                pass
+        set_int = getattr(label_obj, "set_int", None)
+        if callable(set_int):
+            for key, value in (
+                ("show", 1),
+                ("attach", 0),
+            ):
+                try:
+                    set_int(key, int(value))
+                except Exception:
+                    continue
+        target_x = 50.0
+        target_y = 108.0
+        if layer is not None:
+            computed = self._origin_title_xy(layer)
+            if computed is not None:
+                target_x, target_y = computed
+        set_float = getattr(label_obj, "set_float", None)
+        if callable(set_float):
+            for key, value in (
+                ("x", target_x),
+                ("y", target_y),
+                ("fsize", 24.0),
+            ):
+                try:
+                    set_float(key, float(value))
+                except Exception:
+                    continue
+
+    @staticmethod
+    def _origin_title_label_snapshot(label_obj: Any) -> dict[str, Any]:
+        snapshot: dict[str, Any] = {}
+        if label_obj is None:
+            return snapshot
+        text = getattr(label_obj, "text", None)
+        if isinstance(text, str):
+            snapshot["text"] = text
+        get_int = getattr(label_obj, "get_int", None)
+        if callable(get_int):
+            for key in ("attach", "show"):
+                try:
+                    snapshot[key] = int(get_int(key))
+                except Exception:
+                    snapshot[key] = "err"
+        get_float = getattr(label_obj, "get_float", None)
+        if callable(get_float):
+            for key in ("x", "y", "fsize"):
+                try:
+                    snapshot[key] = float(get_float(key))
+                except Exception:
+                    snapshot[key] = "err"
+        return snapshot
 
     def _origin_add_topx_righty_layer(self, origin_any: Any, graph: Any) -> Any | None:
         add_layer = getattr(graph, "add_layer", None)
         if callable(add_layer):
+            # Prefer TopXRightY preset so secondary axes remain linked to
+            # primary scales for dual-axis overlays.
             try:
                 added = add_layer(4)
                 if added is not None:
                     return added
             except Exception:
                 logging.getLogger(__name__).exception("Origin add_layer(4) failed for dual-axis export.")
+            # Fallback to a plain layer if preset creation fails.
+            try:
+                added_plain = add_layer()
+                if added_plain is not None:
+                    return added_plain
+            except Exception:
+                pass
         return None
 
     def _configure_origin_layer_axes(
@@ -3997,15 +4070,8 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         return label
 
     def _origin_graph_templates(self, origin_any: Any) -> list[str]:
-        templates: list[str] = ["line", "scatter", "ORIGIN", "origin"]
-        path_func = getattr(origin_any, "path", None)
-        if callable(path_func):
-            try:
-                exe_dir = str(path_func("e") or "").strip()
-            except Exception:
-                exe_dir = ""
-            if exe_dir:
-                templates.append(os.path.join(exe_dir, "ORIGIN.OTP"))
+        _ = origin_any
+        templates: list[str] = ["line", "ORIGIN", "scatter"]
         seen: set[str] = set()
         ordered: list[str] = []
         for template in templates:
@@ -4270,13 +4336,20 @@ class PyPlotWindow(QtWidgets.QMainWindow):
         # Avoid LabTalk legend reconstruction here: some Origin builds emit
         # LEGEND.SMARTPOS errors for legend commands despite plotting correctly.
 
+        # Explicitly rescale layers after all curves are added so primary and
+        # secondary axes use proper data ranges on export.
         for target_layer, _group_x_title, _group_y_title, _group_pairs in layer_groups:
             try:
                 target_layer.rescale()
             except Exception:
-                continue
+                lt_exec = getattr(target_layer, "lt_exec", None)
+                if callable(lt_exec):
+                    self._origin_lt_exec(lt_exec, "rescale;")
         for plot_obj in duplicate_overlay_plots:
             self._set_origin_plot_visible(plot_obj, False)
+        # Re-assert title after rescale/legend updates so template-side smart
+        # positioning cannot leave it in data coordinates.
+        self._set_origin_graph_title(origin_any, graph, layer, graph_title)
         if len(layer_groups) > 1:
             self._append_log(
                 f"Origin dual-axis layer snapshot ({graph_title}) primary: "
