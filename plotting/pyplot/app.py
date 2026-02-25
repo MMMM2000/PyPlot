@@ -348,7 +348,7 @@ class PyPlotWorkbench(PyPlotWindow):
             stored = self._plugin_last_directories.get(self._current_plotter_name)
             if stored is not None and stored.exists():
                 return stored
-        return super()._dialog_start_directory()
+        return self._project_dialog_start_directory()
 
     def _sync_plugin_directory_settings(self) -> None:
         settings = getattr(self, "settings", None)
@@ -1536,16 +1536,15 @@ class PyPlotWorkbench(PyPlotWindow):
 
     def _choose_folder(self) -> None:
         start = self._dialog_start_directory()
-        directory = QtWidgets.QFileDialog.getExistingDirectory(
+        directories = self._select_directories(
             self,
-            "Select data folder",
-            str(start),
+            title="Select data folder(s)",
+            start_dir=start,
         )
-        if not directory:
+        if not directories:
             return
-        folder = Path(directory)
-        self._selected_path_entries = [folder]
-        self._last_directory = folder
+        self._selected_path_entries = [Path(directory) for directory in directories]
+        self._remember_directory_from_paths(self._selected_path_entries)
         self.path_edit.setText(self._format_paths(self._selected_path_entries))
         self._update_action_states()
 

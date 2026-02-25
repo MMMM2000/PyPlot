@@ -45,9 +45,8 @@ OriginC/OC??Tmp*/
 .venv/
 .venv-wsl/
 
-# Local runtime logs
-logs/*.txt
-logs/*.txt.*
+# Local runtime logs and visual/debug artifacts
+logs/**
 !logs/.gitkeep
 
 # Local per-worktree scratch notes

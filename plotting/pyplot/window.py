@@ -7437,15 +7437,14 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
 
     def _import_data_from_folder(self) -> None:
         start_dir = self._project_dialog_start_directory()
-        directory = QtWidgets.QFileDialog.getExistingDirectory(
+        directories = self._select_directories(
             self,
-            "Import Data Folder",
-            str(start_dir),
-            QtWidgets.QFileDialog.Option.ShowDirsOnly,
+            title="Import Data Folder(s)",
+            start_dir=start_dir,
         )
-        if not directory:
+        if not directories:
             return
-        self._import_paths([Path(directory)])
+        self._import_paths(Path(directory) for directory in directories)
 
     def _import_paths(self, paths: Iterable[Path]) -> None:
         provided_paths: List[Path] = []
@@ -7977,7 +7976,48 @@ QToolBar[mwPrimaryToolbar="true"] QToolButton:disabled {
         return f".../{tail}"
 
     @staticmethod
+    def _select_directories(
+        parent: QtWidgets.QWidget | None,
+        *,
+        title: str,
+        start_dir: Path | str,
+    ) -> list[str]:
+        dialog = QtWidgets.QFileDialog(parent, title, str(start_dir))
+        dialog.setFileMode(QtWidgets.QFileDialog.FileMode.Directory)
+        dialog.setOption(QtWidgets.QFileDialog.Option.ShowDirsOnly, True)
+        # Native dialogs only expose single-folder selection on most platforms.
+        dialog.setOption(QtWidgets.QFileDialog.Option.DontUseNativeDialog, True)
+
+        for view_type in (QtWidgets.QListView, QtWidgets.QTreeView):
+            for view in dialog.findChildren(view_type):
+                model = view.model()
+                if model is not None and isinstance(model, QtWidgets.QFileSystemModel):
+                    view.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.ExtendedSelection)
+
+        if dialog.exec() != int(QtWidgets.QDialog.DialogCode.Accepted):
+            return []
+
+        selected: list[str] = []
+        seen: set[str] = set()
+        for entry in dialog.selectedFiles():
+            if not entry:
+                continue
+            candidate = Path(entry)
+            try:
+                resolved = candidate.resolve()
+            except Exception:
+                resolved = candidate
+            if not resolved.is_dir():
+                continue
+            key = str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(key)
+        return selected
+
     def _set_tree_item_text(
+        self,
         item: QtWidgets.QTreeWidgetItem,
         *,
         name: str,
