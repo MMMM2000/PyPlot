@@ -965,6 +965,7 @@ def main(argv: list[str] | None = None) -> None:
     args, qt_args = _parse_launcher_args(argv_list[1:])
     if args.visual_check:
         raise SystemExit(_run_visual_check(args))
+    _install_crash_log_hook()
 
     # Ensure a GUI platform plugin is used (not an offscreen one from tests)
     # Some test environments set QT_QPA_PLATFORM=offscreen. If that leaks into

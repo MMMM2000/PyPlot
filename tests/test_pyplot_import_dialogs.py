@@ -30,6 +30,19 @@ def test_set_tree_item_text_updates_item() -> None:
         app.processEvents()
 
 
+def test_set_tree_item_text_accepts_positional_name() -> None:
+    app = _ensure_app()
+    window = PyPlotWorkbench()
+    try:
+        item = QtWidgets.QTreeWidgetItem()
+        window._set_tree_item_text(item, "Sample", details="Details")
+        assert item.text(0) == "Sample"
+        assert item.text(1) == "Details"
+    finally:
+        window.close()
+        app.processEvents()
+
+
 def test_choose_folder_accepts_multiple_directories(tmp_path: Path) -> None:
     app = _ensure_app()
     window = PyPlotWorkbench()
