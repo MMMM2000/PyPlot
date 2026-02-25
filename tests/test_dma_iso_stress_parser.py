@@ -31,6 +31,21 @@ def _ensure_app() -> QtWidgets.QApplication:
     return app
 
 
+def _close_workbench(window: PyPlotWorkbench, app: QtWidgets.QApplication) -> None:
+    # Avoid modal close prompts in headless runs:
+    # - unsaved-project prompt on dirty sessions
+    # - launcher child-window confirmation if plugin tabs tracked windows
+    if hasattr(window, "_project_dirty"):
+        setattr(window, "_project_dirty", False)
+    tracked = getattr(window, "_open_windows", None)
+    if isinstance(tracked, list):
+        tracked.clear()
+    if hasattr(window, "_closing"):
+        setattr(window, "_closing", True)
+    window.close()
+    app.processEvents()
+
+
 def _activate_dma_plugin(window: PyPlotWorkbench):
     combo = getattr(window, "_plotter_combo", None)
     assert isinstance(combo, QtWidgets.QComboBox)
@@ -86,8 +101,7 @@ def test_dma_graph_formatting_can_hide_title_and_axis_labels() -> None:
         assert not bool(axes.xaxis.label.get_visible())
         assert not bool(axes.yaxis.label.get_visible())
     finally:
-        window.close()
-        app.processEvents()
+        _close_workbench(window, app)
 
 
 def test_dma_selected_format_groups_apply_only_requested_changes() -> None:
@@ -130,8 +144,7 @@ def test_dma_selected_format_groups_apply_only_requested_changes() -> None:
         assert not bool(target_descriptor.axes.title.get_visible())
         assert float(line.get_linewidth()) == pytest.approx(before_width)
     finally:
-        window.close()
-        app.processEvents()
+        _close_workbench(window, app)
 
 
 def test_dma_can_rewrite_legend_entries_for_current_graph() -> None:
@@ -165,8 +178,7 @@ def test_dma_can_rewrite_legend_entries_for_current_graph() -> None:
         labels = [text.get_text() for text in legend.get_texts()]
         assert labels == ["Annealed 40 MPa"]
     finally:
-        window.close()
-        app.processEvents()
+        _close_workbench(window, app)
 
 
 def test_dma_selected_copy_can_propagate_legend_labels() -> None:
@@ -220,8 +232,7 @@ def test_dma_selected_copy_can_propagate_legend_labels() -> None:
         target_labels = [text.get_text() for text in target_legend.get_texts()]
         assert target_labels == ["Source Label"]
     finally:
-        window.close()
-        app.processEvents()
+        _close_workbench(window, app)
 
 
 def test_dma_tick_controls_apply_increment_and_count_modes() -> None:
@@ -253,8 +264,7 @@ def test_dma_tick_controls_apply_increment_and_count_modes() -> None:
         assert isinstance(axes.xaxis.get_major_locator(), mticker.MaxNLocator)
         assert isinstance(axes.yaxis.get_major_locator(), mticker.MultipleLocator)
     finally:
-        window.close()
-        app.processEvents()
+        _close_workbench(window, app)
 
 
 def test_dma_project_payload_restores_plotted_graph_and_formatting(tmp_path: Path) -> None:
@@ -331,9 +341,8 @@ def test_dma_project_payload_restores_plotted_graph_and_formatting(tmp_path: Pat
         assert restored_index >= 0
     finally:
         if restored_window is not None:
-            restored_window.close()
-        window.close()
-        app.processEvents()
+            _close_workbench(restored_window, app)
+        _close_workbench(window, app)
 
 
 def test_dma_uses_single_shared_graph_formatting_section() -> None:
@@ -346,5 +355,4 @@ def test_dma_uses_single_shared_graph_formatting_section() -> None:
         assert any(title == "Plot options" for title in titles)
         assert titles.count("Graph formatting") == 1
     finally:
-        window.close()
-        app.processEvents()
+        _close_workbench(window, app)
